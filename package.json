@@ -1,0 +1,74 @@
+{
+  "name": "sports-director-simulator",
+  "description": "Touchline: a local-first football sporting director simulation with a persistent SQLite world, transfers, scouting, youth development and match analytics.",
+  "private": true,
+  "version": "0.0.0",
+  "license": "MIT",
+  "author": "Carlos Sardo",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CarlosSardo/sports-director-simulator.git"
+  },
+  "homepage": "https://github.com/CarlosSardo/sports-director-simulator#readme",
+  "bugs": {
+    "url": "https://github.com/CarlosSardo/sports-director-simulator/issues"
+  },
+  "keywords": [
+    "football",
+    "sports-management",
+    "simulation-game",
+    "local-first",
+    "sqlite",
+    "react",
+    "typescript"
+  ],
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -k -n engine,ui -c green,cyan \"tsx watch server/index.ts\" \"vite --host 127.0.0.1\"",
+    "build": "tsc -b && tsc -p tsconfig.server.json && vite build",
+    "start": "tsx server/index.ts",
+    "test": "vitest run",
+    "test:e2e": "playwright test",
+    "world:check": "tsx server/check-world.ts",
+    "lint": "oxlint",
+    "format": "prettier --write src server shared e2e *.ts *.json *.md",
+    "preview": "vite preview"
+  },
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "dependencies": {
+    "@fontsource-variable/dm-sans": "^5.3.0",
+    "@fontsource-variable/manrope": "^5.3.0",
+    "clsx": "^2.1.1",
+    "countries-list": "^3.4.1",
+    "date-fns": "^4.4.0",
+    "express": "^5.2.1",
+    "lucide-react": "^1.47.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "recharts": "^3.10.1",
+    "roundrobin": "^2.0.0",
+    "seedrandom": "^3.0.5",
+    "simple-statistics": "^7.12.0",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.63.0",
+    "@types/express": "^5.0.6",
+    "@types/node": "^24.13.3",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.7",
+    "@types/seedrandom": "^3.0.8",
+    "@types/supertest": "^7.2.1",
+    "@vitejs/plugin-react": "^6.1.1",
+    "concurrently": "^10.0.5",
+    "oxlint": "^1.81.0",
+    "prettier": "^3.9.8",
+    "supertest": "^7.2.2",
+    "tsx": "^4.23.15",
+    "typescript": "~6.0.2",
+    "vite": "^8.3.0",
+    "vitest": "^5.0.1"
+  }
+}

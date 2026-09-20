@@ -1,0 +1,428 @@
+.table-select {
+  font-size: 0.73rem;
+  padding: 6px 8px;
+  min-height: 31px;
+  max-width: 165px;
+  background: var(--surface);
+}
+.cell-meter {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 75px;
+}
+.cell-meter .meter {
+  width: 48px;
+}
+.cell-meter small {
+  font-size: 0.66rem;
+  color: var(--muted);
+}
+.matrix-row {
+  display: contents;
+}
+.report-player {
+  background: transparent;
+  padding: 0;
+  text-align: left;
+}
+.report-player strong {
+  display: block;
+  font-size: 0.8rem;
+  font-weight: 620;
+}
+.report-player small {
+  display: block;
+  color: var(--muted);
+  font-size: 0.66rem;
+  margin-top: 4px;
+}
+.report-player:hover strong {
+  color: var(--accent);
+}
+.assignment-cost {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  font-size: 0.76rem;
+  color: var(--muted);
+}
+.assignment-cost strong {
+  color: var(--text);
+  font-size: 1.1rem;
+}
+.assignment-cost small {
+  font-size: 0.69rem;
+}
+.term-relationship {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.79rem;
+  color: var(--muted);
+  margin-top: 20px;
+  padding: 13px 0;
+  border-top: 1px solid var(--line);
+}
+.term-relationship strong {
+  color: var(--accent);
+}
+.promise-options {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.negotiation-sheet-top {
+  display: flex;
+  justify-content: space-between;
+  gap: 20px;
+  align-items: center;
+  margin-bottom: 21px;
+}
+.negotiation-sheet-top h3 {
+  font-size: 0.84rem;
+  margin-top: 12px;
+  line-height: 1.7;
+}
+.negotiation-sheet-top h3 svg {
+  vertical-align: middle;
+  color: var(--muted);
+}
+.negotiation-sheet-top p {
+  font-size: 0.7rem;
+  color: var(--muted);
+  margin-top: 6px;
+}
+.negotiation-agent {
+  text-align: right;
+  max-width: 155px;
+}
+.negotiation-agent strong {
+  display: block;
+  font-size: 0.77rem;
+}
+.negotiation-agent small {
+  display: block;
+  color: var(--muted);
+  font-size: 0.67rem;
+  line-height: 1.6;
+  margin-top: 5px;
+}
+.negotiation-sheet-top + .tension-bar {
+  margin-bottom: 22px;
+}
+.negotiation-budget {
+  display: flex;
+  justify-content: space-between;
+  gap: 15px;
+  padding-top: 20px;
+  margin-top: 23px;
+  border-top: 1px solid var(--line);
+}
+.negotiation-budget span {
+  font-size: 0.68rem;
+  color: var(--muted);
+}
+.negotiation-budget strong {
+  display: block;
+  margin-top: 5px;
+  font-size: 1rem;
+  color: var(--text);
+}
+.club-chooser-controls {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 13px;
+}
+.club-chooser-controls .search-field {
+  min-width: 100px;
+}
+.club-chooser-controls select {
+  width: 155px;
+  font-size: 0.75rem;
+}
+.club-chooser-list {
+  max-height: 260px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+.club-chooser-list > button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  text-align: left;
+}
+.club-chooser-list > button:last-child {
+  border: 0;
+}
+.club-chooser-list > button.selected {
+  background: var(--accent-soft);
+}
+.club-chooser-list > button > span:not(.badge) {
+  flex: 1;
+  min-width: 0;
+}
+.club-chooser-list strong {
+  font-size: 0.8rem;
+  display: block;
+}
+.club-chooser-list small {
+  font-size: 0.67rem;
+  display: block;
+  color: var(--muted);
+  margin-top: 4px;
+}
+.loan-report-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 22px;
+  gap: 15px;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 22px;
+}
+.loan-report-heading h3 {
+  margin: 12px 0 6px;
+  font-size: 1.2rem;
+}
+.loan-report-heading p {
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+.loan-score-large {
+  text-align: center;
+}
+.loan-score-large strong {
+  font-family: "Manrope Variable";
+  font-size: 2.8rem;
+  color: var(--accent);
+  display: block;
+}
+.loan-score-large small {
+  font-size: 0.65rem;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.subsection-title {
+  margin-bottom: 17px;
+  font-size: 0.86rem;
+}
+.potential-band {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+.potential-band small {
+  color: var(--muted);
+  font-size: 0.65rem;
+}
+.plan-footer {
+  margin-top: 24px;
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  align-items: center;
+}
+.set-piece-layout {
+  display: grid;
+  grid-template-columns: 1fr 270px;
+  gap: 25px;
+  align-items: center;
+}
+.set-piece-pitch {
+  width: 100%;
+  height: auto;
+  min-height: 190px;
+  max-height: 320px;
+  display: block;
+  background: #1d3c31;
+  padding: 13px;
+  border-radius: 6px;
+}
+.staff-monogram {
+  width: 38px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 0.86rem;
+  font-weight: 700;
+  border-radius: 7px;
+}
+.staff-personality {
+  margin-top: 11px;
+}
+.relationship-item {
+  display: flex;
+  align-items: center;
+  gap: 15px;
+  padding: 20px 22px;
+  border-top: 1px solid var(--line);
+}
+.relationship-item > div {
+  flex: 1;
+}
+.relationship-item strong {
+  font-size: 0.82rem;
+}
+.relationship-item p {
+  font-size: 0.74rem;
+  color: var(--muted);
+  margin-top: 6px;
+}
+.relationship-symbol {
+  width: 38px;
+  height: 38px;
+  border-radius: 7px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+}
+.panel .cards-list > .entity-card {
+  border: 0;
+  border-radius: 0;
+  border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  padding: 15px 19px 20px;
+  background: transparent;
+}
+.panel .cards-list {
+  gap: 15px 0;
+}
+.panel .cards-list > .entity-card:nth-child(3n) {
+  border-right: 0;
+}
+@media (max-width: 1240px) {
+  .panel .cards-list > .entity-card:nth-child(3n) {
+    border-right: 1px solid var(--line);
+  }
+  .panel .cards-list > .entity-card:nth-child(2n) {
+    border-right: 0;
+  }
+  .set-piece-layout {
+    grid-template-columns: 1fr 230px;
+  }
+}
+@media (max-width: 780px) {
+  .set-piece-layout {
+    grid-template-columns: 1fr 230px;
+  }
+  .negotiation-sheet-top {
+    gap: 14px;
+  }
+  .loan-score-large strong {
+    font-size: 2.4rem;
+  }
+  .loan-report-heading p {
+    font-size: 0.72rem;
+  }
+}
+@media (max-width: 520px) {
+  .panel .cards-list > .entity-card,
+  .panel .cards-list > .entity-card:nth-child(3n) {
+    border-right: 0;
+    padding: 10px 0 20px;
+  }
+  .table-select {
+    max-width: 135px;
+    font-size: 0.69rem;
+  }
+  .negotiation-sheet-top {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 12px;
+  }
+  .negotiation-agent {
+    text-align: left;
+    max-width: none;
+    display: flex;
+    align-items: center;
+    gap: 9px;
+  }
+  .negotiation-agent small {
+    margin: 0;
+    font-size: 0.64rem;
+  }
+  .negotiation-agent strong {
+    font-size: 0.73rem;
+  }
+  .promise-options {
+    gap: 10px;
+  }
+  .promise-options .checkbox-field {
+    font-size: 0.73rem;
+  }
+  .loan-report-heading {
+    align-items: flex-start;
+  }
+  .loan-report-heading h3 {
+    font-size: 1rem;
+  }
+  .loan-report-heading p {
+    font-size: 0.66rem;
+  }
+  .loan-score-large strong {
+    font-size: 2.1rem;
+  }
+  .loan-score-large small {
+    font-size: 0.55rem;
+  }
+  .club-chooser-controls select {
+    width: 126px;
+    font-size: 0.69rem;
+  }
+  .club-chooser-controls .search-field input {
+    font-size: 0.73rem;
+  }
+  .club-chooser-list > button {
+    padding: 11px;
+  }
+  .club-chooser-list strong {
+    font-size: 0.75rem;
+  }
+  .club-chooser-list small {
+    font-size: 0.62rem;
+  }
+  .set-piece-layout {
+    grid-template-columns: 1fr;
+    gap: 21px;
+  }
+  .set-piece-pitch {
+    max-height: 250px;
+    min-height: 0;
+  }
+  .plan-footer {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .relationship-item {
+    flex-wrap: wrap;
+    padding: 17px;
+    gap: 12px;
+  }
+  .relationship-item > div {
+    min-width: 180px;
+  }
+  .relationship-item > .badge {
+    margin-left: 49px;
+  }
+  .relationship-item strong {
+    font-size: 0.77rem;
+  }
+  .potential-band {
+    gap: 7px;
+  }
+  .negotiation-budget strong {
+    font-size: 0.94rem;
+  }
+  .negotiation-budget span {
+    font-size: 0.65rem;
+  }
+}
