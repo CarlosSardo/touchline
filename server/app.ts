@@ -849,7 +849,7 @@ export function createApp(store: Store) {
   app.set("trust proxy", false);
   app.use((request, response, next) => {
     response.setHeader("X-Content-Type-Options", "nosniff");
-    response.setHeader("Referrer-Policy", "no-referrer");
+    response.setHeader("Referrer-Policy", "same-origin");
     response.setHeader("X-Frame-Options", "DENY");
     response.setHeader(
       "Permissions-Policy",

@@ -74,6 +74,29 @@ describe("hosted invitation access (no database)", () => {
     expect(() => readApiConfiguration({ ...configuration, ALLOWED_USER_OBJECT_IDS: "not-an-id" }))
       .toThrow("Entra object UUIDs");
   });
+
+  it("preserves same-origin referrers for hosted cookie CSRF validation", async () => {
+    const response = await request(app()).get("/");
+    expect(response.headers["referrer-policy"]).toBe("same-origin");
+  });
+
+  it.each([owner, guest, secondGuest])("admits same-origin mutations for %s", async (objectId) => {
+    const response = await request(app()).post("/api/access-probe")
+      .set("x-ms-client-principal", principal(objectId))
+      .set("Origin", configuration.APP_ORIGIN)
+      .set("Referer", `${configuration.APP_ORIGIN}/`)
+      .send({ type: "read-news" });
+    expect(response.status).toBe(404);
+    expect(response.body.error).toBe("API route not found.");
+  });
+
+  it.each([undefined, "null", "https://other.example.com"])("rejects mutations with untrusted origin %s", async (origin) => {
+    const mutation = request(app()).post("/api/access-probe")
+      .set("x-ms-client-principal", principal(guest))
+      .set("Referer", `${configuration.APP_ORIGIN}/`);
+    if (origin) mutation.set("Origin", origin);
+    expect((await mutation.send({ type: "read-news" })).status).toBe(403);
+  });
 });
 
 async function expectSchemaIntegrity(store: Store) {
