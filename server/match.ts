@@ -1,6 +1,7 @@
 import seedrandom from "seedrandom";
 import { poissonDistribution } from "simple-statistics";
 import { clamp, round } from "../shared/rules.ts";
+import { simulateMatchV3 } from "./match-v3.ts";
 import type {
   MatchAction,
   MatchPlayer,
@@ -64,6 +65,8 @@ export function simulateMatch(
   seed: string,
   retainActions = true,
 ): MatchResult {
+  if ((snapshot.rulesVersion ?? 1) >= 3)
+    return simulateMatchV3(snapshot, seed, retainActions);
   const random = seedrandom(seed);
   const enhanced = (snapshot.rulesVersion ?? 1) >= 2;
   const result: MatchResult = {

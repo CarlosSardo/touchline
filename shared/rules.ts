@@ -1,6 +1,80 @@
-import type { Player, PlayerProfile, Settings, SettingValue } from "./types.ts";
+import type {
+  Player,
+  PlayerProfile,
+  Settings,
+  SettingValue,
+  TransferTerms,
+  Club,
+  AffiliateWillingness,
+} from "./types.ts";
+import type { SaveSlot } from "./api.ts";
+
+export function groupCareerSaves(slots: SaveSlot[], search = "") {
+  const groups = new Map<string, SaveSlot[]>();
+  for (const slot of slots) {
+    const key = slot.career?.id
+      ? `career:${slot.career.id}`
+      : `legacy:${slot.file}`;
+    const snapshots = groups.get(key) ?? [];
+    snapshots.push(slot);
+    groups.set(key, snapshots);
+  }
+  const query = search.trim().toLowerCase();
+  return [...groups]
+    .map(([key, snapshots]) => {
+      const sorted = snapshots.toSorted(
+        (left, right) =>
+          right.modified.localeCompare(left.modified) ||
+          right.file.localeCompare(left.file),
+      );
+      return {
+        key,
+        latest: sorted[0],
+        manual: sorted.filter((slot) => !slot.automatic),
+        autosaves: sorted.filter((slot) => slot.automatic),
+        count: sorted.length,
+        size: sorted.reduce((total, slot) => total + slot.size, 0),
+      };
+    })
+    .filter(
+      (group) =>
+        !query ||
+        [...group.manual, ...group.autosaves].some((slot) =>
+          `${slot.name} ${slot.career?.name ?? ""} ${slot.career?.director ?? ""} ${slot.career?.club ?? ""}`
+            .toLowerCase()
+            .includes(query),
+        ),
+    )
+    .sort(
+      (left, right) =>
+        right.latest.modified.localeCompare(left.latest.modified) ||
+        left.key.localeCompare(right.key),
+    );
+}
 
 export const START_DATE = "2026-07-01";
+export const DEFAULT_TRANSFER_TERMS: TransferTerms = {
+  upfrontPercent: 100,
+  installments: 0,
+  intervalMonths: 6,
+  buyBackFee: 0,
+  buyBackYears: 2,
+  sellOnPercent: 0,
+};
+export const TRANSFER_STAGES = [
+  "Enquiry",
+  "Club talks",
+  "Agent talks",
+  "Contract review",
+  "Medical",
+  "Registration",
+  "Completed",
+];
+export const ACTIVE_TRANSFER_STAGES = [
+  ...TRANSFER_STAGES.slice(0, -1),
+  "Offer received",
+  "Scheduled",
+];
 export const MAP_MODES = [
   "Pass map",
   "Carry map",
@@ -37,7 +111,54 @@ export const STAFF_ROLES = [
   "Analyst",
   "Set-piece coach",
   "Goalkeeper coach",
+  "Sporting director assistant",
 ];
+export const ASSISTANT_ROLE = "Sporting director assistant";
+export const ASSISTANT_DUTIES = [
+  {
+    id: "briefings",
+    label: "Weekly briefing",
+    description: "Summarize squad needs, expiring contracts and loan concerns.",
+  },
+  {
+    id: "shortlist",
+    label: "Recruitment shortlist",
+    description:
+      "Add a small selection of affordable targets to your shortlist.",
+  },
+  {
+    id: "scouting",
+    label: "Scouting assignments",
+    description:
+      "Send available scouts to assess targets within the weekly allowance.",
+  },
+  {
+    id: "contracts",
+    label: "Prepare renewals",
+    description:
+      "Negotiate draft renewals for expiring contracts; you still sign them.",
+  },
+  {
+    id: "training",
+    label: "Individual development",
+    description: "Set individual training plans for the squad.",
+  },
+  {
+    id: "loans",
+    label: "Loan monitoring",
+    description:
+      "Report playing-time and development concerns without recalling players.",
+  },
+] as const;
+export type AssistantDuty = (typeof ASSISTANT_DUTIES)[number]["id"];
+export const DEFAULT_ASSISTANT_DUTIES: Record<AssistantDuty, boolean> = {
+  briefings: true,
+  shortlist: false,
+  scouting: false,
+  contracts: false,
+  training: false,
+  loans: false,
+};
 export const TRAINING_TYPES = [
   "Balanced",
   "Technical",
@@ -67,6 +188,124 @@ export const PARTNERSHIP_TYPES = [
   "Scouting club",
   "Foreign adaptation club",
 ];
+export const AFFILIATION_BENEFITS: Record<string, string> = {
+  "Feeder club":
+    "A senior-to-feeder player pathway with easier loan negotiations and wage sharing.",
+  "Friendly club":
+    "A balanced club relationship with cooperation and preferential loan discussions.",
+  "Development club":
+    "A shared focus on young-player minutes, development and loan monitoring.",
+  "Scouting club":
+    "A relationship aimed at local knowledge and access to a different recruitment market.",
+  "Foreign adaptation club":
+    "An overseas pathway to support language, cultural adaptation and development loans.",
+};
+export function affiliationWillingness(
+  own: Club,
+  partner: Club,
+  purpose: string,
+  networkSize: number,
+): AffiliateWillingness {
+  const reasons: string[] = [];
+  const gap = own.reputation - partner.reputation;
+  const domestic = own.country_id === partner.country_id;
+  let score = 66;
+  let blocked = false;
+  if (
+    partner.id === own.id ||
+    partner.type !== "club" ||
+    !PARTNERSHIP_TYPES.includes(purpose)
+  ) {
+    blocked = true;
+    reasons.push(
+      "A valid agreement needs two different senior clubs and an available affiliation type.",
+    );
+  }
+  if (networkSize >= 8) {
+    blocked = true;
+    reasons.push(
+      `${partner.name} do not want to expand their current affiliate network.`,
+    );
+  }
+  if (purpose === "Feeder club") {
+    if (gap < 5) {
+      blocked = true;
+      reasons.push(
+        `${partner.name} will not act as a feeder to a club of similar or lower standing.`,
+      );
+    } else {
+      score += Math.min(18, gap * 0.6);
+      reasons.push(
+        `A link to the more established ${own.name} offers a credible player pathway.`,
+      );
+    }
+  } else if (purpose === "Friendly club") {
+    score += (domestic ? 8 : 0) - Math.abs(gap) * 0.45;
+    reasons.push(
+      Math.abs(gap) <= 20
+        ? "The clubs are close enough in standing for a balanced relationship."
+        : "The reputation gap makes a balanced friendly partnership less attractive.",
+    );
+  } else if (purpose === "Development club") {
+    score +=
+      8 - Math.abs(gap) * 0.3 + Math.max(0, own.academy - partner.academy) / 12;
+    reasons.push(
+      "Regular development loans and a suitable level of football are the main attraction.",
+    );
+  } else if (purpose === "Scouting club") {
+    score += domestic ? -8 : 12;
+    score -= Math.max(0, -gap - 15) * 0.4;
+    reasons.push(
+      domestic
+        ? "Both clubs already cover the same national market, reducing the scouting benefit."
+        : "The clubs offer access to different national recruitment markets.",
+    );
+  } else if (purpose === "Foreign adaptation club") {
+    if (domestic) {
+      blocked = true;
+      reasons.push(
+        "An overseas-adaptation agreement requires clubs in different countries.",
+      );
+    } else {
+      score += 12 - Math.max(0, -gap - 15) * 0.4;
+      reasons.push(
+        "The cross-border link offers a useful adaptation and loan pathway.",
+      );
+    }
+  }
+  if (own.league_id !== null && own.league_id === partner.league_id) {
+    score -= 24;
+    reasons.push(
+      "Direct league competition makes sharing sporting advantages less appealing.",
+    );
+  }
+  if (networkSize > 3) {
+    score -= (networkSize - 3) * 4;
+    reasons.push(
+      "Existing partnerships already use some of the club's development capacity.",
+    );
+  }
+  if (partner.balance < 0) {
+    score += 5;
+    reasons.push(
+      "The partnership funding is attractive to the other club's finances.",
+    );
+  }
+  const willingness = Math.round(
+    clamp(blocked ? Math.min(score, 20) : score, 0, 99),
+  );
+  return {
+    willing: !blocked && willingness >= 55,
+    score: willingness,
+    stance:
+      !blocked && willingness >= 55
+        ? "Open to this affiliation"
+        : "Would decline this affiliation",
+    annualFee: 100000 + Math.round(partner.reputation ** 2 * 60),
+    reasons,
+    benefits: AFFILIATION_BENEFITS[purpose] ?? "",
+  };
+}
 export const PERSONALITY_KEYS = [
   "professionalism",
   "ambition",
@@ -141,13 +380,39 @@ export const label = (value: string) =>
   value
     .replace(/([A-Z])/g, " $1")
     .replace(/^./, (character) => character.toUpperCase());
-export const money = (value: number, precise = false) =>
-  new Intl.NumberFormat("en-GB", {
+export const CURRENCIES = [
+  { code: "GBP", name: "British pound", rate: 1 },
+  { code: "EUR", name: "Euro", rate: 1 / 0.86 },
+  { code: "USD", name: "US dollar", rate: 1.3 },
+  { code: "BRL", name: "Brazilian real", rate: 7 },
+  { code: "JPY", name: "Japanese yen", rate: 190 },
+  { code: "CHF", name: "Swiss franc", rate: 1.1 },
+  { code: "CAD", name: "Canadian dollar", rate: 1.8 },
+  { code: "AUD", name: "Australian dollar", rate: 2 },
+] as const;
+export type CurrencyCode = (typeof CURRENCIES)[number]["code"];
+export const currencyCode = (value: unknown): CurrencyCode =>
+  CURRENCIES.find((currency) => currency.code === value)?.code ?? "GBP";
+export const displayAmount = (value: number, currency: CurrencyCode) =>
+  round(value * CURRENCIES.find((entry) => entry.code === currency)!.rate, 2);
+export const accountingAmount = (value: number, currency: CurrencyCode) =>
+  round(value / CURRENCIES.find((entry) => entry.code === currency)!.rate, 2);
+export const compactNumber = (value: number, decimals = 1) =>
+  new Intl.NumberFormat("en-US", {
+    notation: "compact",
+    maximumFractionDigits: decimals,
+  }).format(value);
+export const money = (
+  value: number,
+  precise = false,
+  currency: CurrencyCode = "GBP",
+) =>
+  new Intl.NumberFormat("en-US", {
     style: "currency",
-    currency: "GBP",
+    currency,
     notation: precise ? "standard" : "compact",
     maximumFractionDigits: precise ? 0 : 1,
-  }).format(value);
+  }).format(displayAmount(value, currency));
 export const dateLabel = (value: string) =>
   new Date(`${value.slice(0, 10)}T12:00:00Z`).toLocaleDateString("en-GB", {
     day: "numeric",
@@ -162,6 +427,38 @@ export const addDays = (date: string, days: number) => {
 };
 export const daysBetween = (start: string, end: string) =>
   Math.round((Date.parse(end) - Date.parse(start)) / 86_400_000);
+export const addMonths = (date: string, months: number) => {
+  const result = new Date(`${date}T12:00:00Z`);
+  const day = result.getUTCDate();
+  result.setUTCDate(1);
+  result.setUTCMonth(result.getUTCMonth() + months);
+  const monthEnd = new Date(
+    Date.UTC(result.getUTCFullYear(), result.getUTCMonth() + 1, 0),
+  ).getUTCDate();
+  result.setUTCDate(Math.min(day, monthEnd));
+  return result.toISOString().slice(0, 10);
+};
+export function transferPaymentPlan(
+  fee: number,
+  terms: TransferTerms,
+  date: string,
+) {
+  const totalPence = Math.round(fee * 100);
+  if (!terms.installments)
+    return totalPence > 0 ? [{ date, amount: totalPence / 100 }] : [];
+  const upfrontPence = Math.round((totalPence * terms.upfrontPercent) / 100);
+  const deferredPence = totalPence - upfrontPence;
+  return [
+    { date, amount: upfrontPence / 100 },
+    ...Array.from({ length: terms.installments }, (_, index) => ({
+      date: addMonths(date, (index + 1) * terms.intervalMonths),
+      amount:
+        (Math.floor(deferredPence / terms.installments) +
+          (index < deferredPence % terms.installments ? 1 : 0)) /
+        100,
+    })),
+  ].filter((payment) => payment.amount > 0);
+}
 export const ageOn = (birth: string, date: string) =>
   Number(date.slice(0, 4)) -
   Number(birth.slice(0, 4)) -
@@ -183,6 +480,14 @@ export const transferWindow = (date: string) => {
     (monthDay >= "01-01" && monthDay <= "01-31")
   );
 };
+export function adultTransferArrival(birthDate: string) {
+  const birthday = new Date(`${birthDate}T12:00:00Z`);
+  birthday.setUTCFullYear(birthday.getUTCFullYear() + 18);
+  const eligible = birthday.toISOString().slice(0, 10);
+  if (transferWindow(eligible)) return eligible;
+  const year = birthday.getUTCFullYear();
+  return eligible.slice(5) < "06-15" ? `${year}-06-15` : `${year + 1}-01-01`;
+}
 
 export interface SettingDefinition {
   id: string;
@@ -197,11 +502,94 @@ export interface SettingDefinition {
   disabled?: boolean;
 }
 
+export const NOTIFICATION_TOPICS = [
+  {
+    id: "notifyTransfers",
+    label: "Transfers and contracts",
+    categories: ["Transfers"],
+  },
+  {
+    id: "notifySquad",
+    label: "Squad and medical",
+    categories: ["Squad", "Medical"],
+  },
+  { id: "notifyScouting", label: "Scouting reports", categories: ["Scouting"] },
+  {
+    id: "notifyAcademy",
+    label: "Academy and development",
+    categories: ["Academy", "Training"],
+  },
+  { id: "notifyFinance", label: "Finances", categories: ["Finance"] },
+  {
+    id: "notifyClub",
+    label: "Board, staff and club",
+    categories: ["Club", "Board", "Staff", "Director", "Events"],
+  },
+  { id: "notifyMedia", label: "Media coverage", categories: ["Media"] },
+  { id: "notifyWorld", label: "World updates", categories: ["World"] },
+  {
+    id: "notifyMatches",
+    label: "Club match reports",
+    categories: ["Match", "Matches"],
+  },
+  {
+    id: "notifyCompetitions",
+    label: "Favorite competitions",
+    categories: ["Competitions"],
+  },
+] as const;
+
+export const COMPETITION_ALERTS = [
+  "fixtures",
+  "results",
+  "draws",
+  "tables",
+  "winners",
+] as const;
+export const DEFAULT_COMPETITION_ALERTS = {
+  fixtures: true,
+  results: true,
+  draws: true,
+  tables: false,
+  winners: true,
+};
+
 export const SETTING_DEFINITIONS: SettingDefinition[] = [
+  {
+    id: "notificationImportance",
+    label: "Notification priority",
+    group: "Notifications",
+    type: "select",
+    default: "all",
+    options: ["all", "important"],
+  },
+  ...NOTIFICATION_TOPICS.map((topic): SettingDefinition => ({
+    id: topic.id,
+    label: topic.label,
+    group: "Notifications",
+    type: "toggle",
+    default: true,
+  })),
+  {
+    id: "currency",
+    label: "Currency",
+    group: "Interface",
+    type: "select",
+    default: "GBP",
+    options: CURRENCIES.map((currency) => currency.code),
+  },
+  {
+    id: "uiTheme",
+    label: "UI theme",
+    group: "Appearance",
+    type: "select",
+    default: "minimal",
+    options: ["minimal", "classic"],
+  },
   {
     id: "theme",
     label: "Appearance",
-    group: "Interface",
+    group: "Appearance",
     type: "select",
     default: "light",
     options: ["light", "dark", "system"],
@@ -209,14 +597,14 @@ export const SETTING_DEFINITIONS: SettingDefinition[] = [
   {
     id: "accent",
     label: "Accent color",
-    group: "Interface",
+    group: "Appearance",
     type: "color",
     default: "#087f6d",
   },
   {
     id: "fontWeight",
     label: "Font weight",
-    group: "Interface",
+    group: "Appearance",
     type: "select",
     default: "regular",
     options: ["regular", "medium", "bold"],
@@ -224,7 +612,7 @@ export const SETTING_DEFINITIONS: SettingDefinition[] = [
   {
     id: "animationSpeed",
     label: "Animation speed",
-    group: "Interface",
+    group: "Appearance",
     type: "select",
     default: "normal",
     options: ["off", "slow", "normal", "fast"],
@@ -239,7 +627,7 @@ export const SETTING_DEFINITIONS: SettingDefinition[] = [
   {
     id: "blur",
     label: "Glass blur intensity",
-    group: "Interface",
+    group: "Appearance",
     type: "range",
     default: 14,
     min: 0,
@@ -253,6 +641,14 @@ export const SETTING_DEFINITIONS: SettingDefinition[] = [
     type: "select",
     default: "balanced",
     options: ["deliberate", "balanced", "fast"],
+  },
+  {
+    id: "unexpectedEvents",
+    label: "Unexpected events",
+    group: "Simulation",
+    type: "select",
+    default: "medium",
+    options: ["low", "medium", "high"],
   },
   {
     id: "matchDetail",
@@ -445,21 +841,6 @@ export const SETTING_DEFINITIONS: SettingDefinition[] = [
     options: ["off", "daily", "weekly", "monthly"],
   },
   {
-    id: "cloudSync",
-    label: "Cloud sync (local-only game)",
-    group: "Saves",
-    type: "toggle",
-    default: false,
-    disabled: true,
-  },
-  {
-    id: "saveCompression",
-    label: "Save compression",
-    group: "Saves",
-    type: "toggle",
-    default: true,
-  },
-  {
     id: "chaos",
     label: "Chaos mode",
     group: "Experimental",
@@ -488,9 +869,13 @@ export const SETTING_DEFINITIONS: SettingDefinition[] = [
     default: false,
   },
 ];
-export const DEFAULT_SETTINGS: Settings = Object.fromEntries(
-  SETTING_DEFINITIONS.map((setting) => [setting.id, setting.default]),
-);
+export const DEFAULT_SETTINGS: Settings = {
+  cloudSync: false,
+  saveCompression: true,
+  ...Object.fromEntries(
+    SETTING_DEFINITIONS.map((setting) => [setting.id, setting.default]),
+  ),
+};
 
 export function valuation(
   player: Pick<

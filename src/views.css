@@ -1,3 +1,1521 @@
+.affiliate-interest {
+  padding: 16px 0;
+  margin: 14px 0;
+  border-block: 1px solid var(--line);
+}
+.affiliate-interest .detail-list {
+  margin-top: 10px;
+}
+.affiliate-interest ul {
+  padding-left: 18px;
+  margin: 14px 0 0;
+}
+.affiliate-interest li {
+  font-size: 0.76rem;
+  line-height: 1.65;
+  color: var(--muted);
+  margin: 7px 0;
+}
+.interest-assessment {
+  max-width: 960px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--line);
+}
+.interest-assessment > summary {
+  cursor: pointer;
+  font-size: 0.79rem;
+  line-height: 1.8;
+}
+.interest-assessment > summary > span:nth-child(2) {
+  margin-left: 10px;
+}
+.interest-assessment > summary > small {
+  margin-left: 12px;
+  color: var(--muted);
+}
+.interest-assessment > div {
+  margin-top: 12px;
+}
+.interest-factor {
+  display: flex;
+  gap: 16px;
+  justify-content: space-between;
+  padding: 12px 0;
+  border-top: 1px solid var(--line);
+}
+.interest-factor strong {
+  font-size: 0.77rem;
+}
+.interest-factor p {
+  font-size: 0.74rem;
+  line-height: 1.65;
+  margin-top: 5px;
+  color: var(--muted);
+}
+.interest-factor > span {
+  flex: 0 0 30px;
+  text-align: right;
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+}
+.negotiation-latest {
+  padding: 15px 0;
+  font-size: 0.81rem;
+  line-height: 1.75;
+}
+.youth-eligibility {
+  padding: 14px 0;
+  border-bottom: 1px solid var(--line);
+  max-width: 960px;
+}
+.youth-eligibility > summary {
+  cursor: pointer;
+  font-size: 0.79rem;
+}
+.youth-eligibility > summary > span:last-child {
+  margin-left: 12px;
+}
+.youth-eligibility > div {
+  padding-top: 14px;
+}
+.youth-eligibility p {
+  font-size: 0.78rem;
+  line-height: 1.7;
+  margin: 10px 0;
+}
+.youth-eligibility small {
+  display: block;
+  color: var(--muted);
+  font-size: 0.67rem;
+  line-height: 1.6;
+  margin-top: 15px;
+}
+.minor-obligations {
+  display: grid;
+  gap: 12px;
+  margin: 18px 0;
+}
+.offer-stage-navigation {
+  display: flex;
+  gap: 10px;
+  padding: 16px 0;
+  border-bottom: 1px solid var(--line);
+  flex-wrap: wrap;
+}
+.negotiation-history {
+  margin: 14px 0;
+}
+.negotiation-history > summary,
+.transfer-payment-summary > summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 0.79rem;
+  padding: 7px 0;
+}
+.negotiation-history > summary > span {
+  margin-left: 10px;
+}
+.ui-layout-choices {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+:root[data-ui-theme="minimal"] .page-heading h1 {
+  font-size: 1.8rem;
+  line-height: 1.35;
+}
+:root[data-ui-theme="minimal"] .page-heading .eyebrow,
+:root[data-ui-theme="minimal"] .career-pitch-art {
+  display: none;
+}
+:root[data-ui-theme="minimal"] .panel,
+:root[data-ui-theme="minimal"] .entity-card,
+:root[data-ui-theme="minimal"] .stat-strip {
+  box-shadow: none;
+  border-radius: 4px;
+}
+:root[data-ui-theme="minimal"] .page-heading {
+  margin-bottom: 22px;
+}
+:root[data-ui-theme="minimal"] .stat-strip {
+  background: transparent;
+}
+:root[data-ui-theme="minimal"] .stat-value {
+  font-size: 1.6rem;
+}
+@media (max-width: 520px) {
+  :root[data-ui-theme="minimal"] .page-heading h1 {
+    font-size: 1.5rem;
+  }
+}
+.career-folder-list {
+  margin-top: 20px;
+}
+.career-save-item.career-folder {
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  padding: 18px 20px;
+  background: transparent;
+}
+.career-folder-heading {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.career-folder-heading > div {
+  flex: 1;
+  min-width: 170px;
+}
+.career-folder h3 {
+  font-size: 0.96rem;
+  margin: 0 0 5px;
+}
+.career-folder small {
+  color: var(--muted);
+  font-size: 0.69rem;
+  line-height: 1.7;
+}
+.career-save-item.career-folder .button {
+  width: auto;
+}
+.career-snapshot-folder {
+  padding-top: 14px;
+}
+.career-snapshot-folder summary {
+  cursor: pointer;
+  font-size: 0.77rem;
+  color: var(--muted);
+  padding: 8px 0;
+}
+.career-snapshot-folder summary > span {
+  margin-left: 10px;
+  font-variant-numeric: tabular-nums;
+}
+.career-snapshot-folder h4 {
+  font-size: 0.74rem;
+  margin: 12px 0 4px;
+}
+.career-snapshot {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  border-top: 1px solid var(--line);
+  padding: 10px 0;
+}
+.career-snapshot > div {
+  min-width: 0;
+}
+.career-snapshot strong {
+  font-size: 0.77rem;
+  display: block;
+  overflow-wrap: anywhere;
+}
+.career-snapshot small {
+  display: block;
+}
+.career-autosave-folder summary svg {
+  vertical-align: middle;
+  margin-right: 7px;
+}
+@media (max-width: 520px) {
+  .career-save-item.career-folder {
+    padding-inline: 0;
+  }
+  .career-folder-heading > div {
+    min-width: 160px;
+  }
+  .career-folder-list {
+    padding-inline: 12px;
+  }
+}
+.budget-allocation-field input[type="range"] {
+  min-height: 36px;
+}
+.budget-slider-labels {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  color: var(--muted);
+  font-size: 0.73rem;
+  line-height: 1.5;
+}
+.budget-slider-labels > span:last-child {
+  text-align: right;
+}
+.career-start {
+  min-height: 100svh;
+  position: relative;
+  overflow: hidden;
+  background: var(--bg);
+}
+.career-pitch-art {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  color: var(--accent);
+  opacity: 0.065;
+  pointer-events: none;
+}
+.career-start-header {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 15px;
+  padding: 27px 5%;
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--surface) 80%, transparent);
+}
+.career-start-header .brand {
+  padding: 0;
+  margin: 0;
+}
+.career-start-content {
+  position: relative;
+  max-width: 1150px;
+  margin: 0 auto;
+  padding: 58px 30px 65px;
+}
+.career-title {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 20px;
+  margin-bottom: 40px;
+}
+.career-title h1 {
+  font-size: 2.5rem;
+  max-width: 700px;
+}
+.career-title .button {
+  padding-left: 0;
+  margin-bottom: 22px;
+}
+.career-start-season {
+  font-family: "Manrope Variable", sans-serif;
+  font-size: 1.65rem;
+  font-weight: 750;
+  white-space: nowrap;
+  color: var(--accent);
+}
+.career-start-season > span {
+  font-size: 1rem;
+  color: var(--muted);
+  padding-left: 7px;
+}
+.career-home-grid {
+  display: grid;
+  grid-template-columns: 1.35fr 1fr;
+  gap: 50px;
+}
+.active-career {
+  padding: 27px 0;
+  border-block: 1px solid var(--line);
+}
+.active-career-club {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  margin: 19px 0 26px;
+}
+.active-career-club h2 {
+  font-size: 1.4rem;
+  margin-bottom: 7px;
+}
+.active-career-club p {
+  font-size: 0.88rem;
+  color: var(--muted);
+  margin-bottom: 7px;
+}
+.active-career-club span {
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+.active-career-details {
+  display: flex;
+  gap: 30px;
+  margin: 0 0 30px;
+  flex-wrap: wrap;
+}
+.active-career-details small {
+  display: block;
+  font-size: 0.67rem;
+  color: var(--muted);
+  margin-bottom: 7px;
+}
+.active-career-details strong {
+  font-size: 1.02rem;
+}
+.career-menu-actions {
+  display: flex;
+  flex-direction: column;
+}
+.career-menu-actions > button {
+  display: flex;
+  align-items: center;
+  gap: 17px;
+  background: transparent;
+  text-align: left;
+  border-bottom: 1px solid var(--line);
+  padding: 27px 12px;
+}
+.career-menu-actions > button:hover {
+  background: var(--accent-soft);
+}
+.career-menu-actions > button > svg {
+  color: var(--accent);
+}
+.career-menu-actions > button > span {
+  flex: 1;
+}
+.career-menu-actions strong {
+  font-family: "Manrope Variable";
+  font-size: 1.2rem;
+  display: block;
+}
+.career-menu-actions small {
+  font-size: 0.78rem;
+  color: var(--muted);
+  display: block;
+  margin-top: 6px;
+}
+.career-storage {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 25px 12px;
+  color: var(--muted);
+  font-size: 0.77rem;
+}
+.career-start-footer {
+  position: relative;
+  display: flex;
+  justify-content: center;
+  gap: 26px;
+  padding: 20px;
+  border-top: 1px solid var(--line);
+  font-size: 0.73rem;
+  color: var(--muted);
+  flex-wrap: wrap;
+}
+.new-career-form {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 50px;
+}
+.new-career-form h2 {
+  font-size: 1.05rem;
+  margin-bottom: 24px;
+}
+.new-career-form .club-chooser-list {
+  height: 365px;
+  max-height: 365px;
+  background: var(--surface);
+}
+.career-club-filters {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 14px;
+}
+.career-club-filters .search-field {
+  grid-column: 1 / -1;
+  min-width: 0;
+}
+.career-club-filters .field {
+  min-width: 0;
+}
+.career-club-filters select {
+  width: 100%;
+  min-width: 0;
+  font-size: 0.75rem;
+  text-overflow: ellipsis;
+}
+.career-division-heading {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 11px 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-2);
+}
+.career-division-heading strong {
+  min-width: 0;
+  font-size: 0.72rem;
+  overflow-wrap: anywhere;
+}
+.career-division-heading .badge {
+  flex-shrink: 0;
+}
+.career-club-list > button strong,
+.career-club-list > button small {
+  overflow-wrap: anywhere;
+}
+.career-picker-message {
+  min-height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 24px;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.career-club-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 46px;
+  font-size: 0.73rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.career-club-pagination .inline-controls > span {
+  min-width: 52px;
+  text-align: center;
+}
+.selected-club-note > span {
+  display: block;
+  margin-top: 6px;
+  line-height: 1.6;
+}
+.career-save-notice {
+  font-size: 0.75rem;
+  color: var(--muted);
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin: 22px 0;
+}
+.selected-club-note {
+  font-size: 0.76rem;
+  color: var(--muted);
+  margin-top: 15px;
+}
+.selected-club-note strong {
+  color: var(--text);
+}
+.career-save-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 18px;
+  margin-top: 24px;
+}
+.career-save-item {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 22px;
+  min-width: 0;
+}
+.career-save-item h3 {
+  font-size: 1rem;
+  margin: 17px 0 8px;
+  overflow-wrap: anywhere;
+}
+.career-save-item p {
+  font-size: 0.76rem;
+  color: var(--muted);
+  line-height: 1.7;
+}
+.career-save-item > div:not(.inline-controls) {
+  display: flex;
+  justify-content: space-between;
+  gap: 15px;
+  color: var(--muted);
+  font-size: 0.73rem;
+  margin: 20px 0;
+}
+.career-save-item .button {
+  width: 100%;
+}
+.career-save-toolbar {
+  flex-wrap: wrap;
+}
+.career-delete-button {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+.career-delete-button:not(:disabled) {
+  color: var(--red);
+}
+@media (max-width: 780px) {
+  .career-start-content {
+    padding: 35px 22px 45px;
+  }
+  .career-title h1 {
+    font-size: 2rem;
+  }
+  .career-start-season {
+    display: none;
+  }
+  .career-home-grid,
+  .new-career-form {
+    grid-template-columns: 1fr;
+    gap: 27px;
+  }
+  .career-menu-actions {
+    margin-top: 0;
+  }
+  .career-menu-actions > button {
+    padding: 22px 0;
+  }
+  .career-save-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .career-title {
+    margin-bottom: 26px;
+  }
+  .career-start-header > .inline-controls > .badge {
+    display: none;
+  }
+  .career-start-footer {
+    gap: 17px;
+    font-size: 0.69rem;
+  }
+}
+@media (max-width: 440px) {
+  .career-save-grid {
+    grid-template-columns: 1fr;
+  }
+  .active-career-club {
+    gap: 14px;
+  }
+  .active-career-club .crest {
+    width: 55px;
+    height: 62px;
+  }
+  .active-career-club h2 {
+    font-size: 1.2rem;
+  }
+  .active-career-details {
+    gap: 20px;
+  }
+  .career-title h1 {
+    font-size: 1.8rem;
+  }
+  .career-start-content {
+    padding-inline: 18px;
+  }
+  .career-start-footer {
+    gap: 12px;
+    font-size: 0.63rem;
+  }
+  .topbar-actions > button[aria-label="Search the player database"] {
+    display: none;
+  }
+}
+.profile-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  color: inherit;
+  font-weight: inherit;
+  line-height: inherit;
+  max-width: 100%;
+  font-size: inherit;
+}
+.profile-link:hover {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.profile-link.team-link {
+  display: flex;
+  gap: 9px;
+  font-weight: 600;
+}
+.profile-link.team-link > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.fixture-date {
+  background: transparent;
+  color: var(--text);
+}
+.fixture-row .icon-button {
+  width: 24px;
+  height: 28px;
+}
+.fixture-teams .team-link {
+  font-weight: 400;
+  font-size: 0.73rem;
+}
+.fixture-teams .crest {
+  width: 18px;
+  height: 20px;
+}
+.club-profile-header {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  padding: 28px;
+}
+.club-profile-header > div:not(.club-profile-reputation) {
+  flex: 1;
+  min-width: 0;
+}
+.club-profile-header h2 {
+  font-size: 1.8rem;
+  line-height: 1.35;
+  margin: 12px 0 7px;
+  overflow-wrap: anywhere;
+}
+.club-profile-header p {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.club-profile-reputation {
+  text-align: center;
+}
+.club-profile-reputation > .rating {
+  width: 45px;
+  height: 45px;
+  font-size: 1.4rem;
+}
+.club-profile-reputation > small {
+  display: block;
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 0.63rem;
+}
+.club-competition-link {
+  display: flex;
+  gap: 11px;
+  padding: 13px 0;
+  border-bottom: 1px solid var(--line);
+  align-items: center;
+}
+.club-competition-link > svg {
+  color: var(--accent);
+}
+.club-competition-link > span {
+  min-width: 0;
+}
+.club-competition-link .text-link {
+  white-space: normal;
+  text-align: left;
+  line-height: 1.6;
+}
+.club-competition-link small {
+  display: block;
+  color: var(--muted);
+  font-size: 0.67rem;
+  margin-top: 3px;
+}
+.world-table .team-link {
+  min-width: 190px;
+}
+.world-table .text-link {
+  font-size: 0.71rem;
+}
+.association-audit > summary {
+  padding: 16px 0;
+  font-size: 0.9rem;
+  font-weight: 700;
+  cursor: pointer;
+  border-block: 1px solid var(--line);
+}
+.association-audit > summary span {
+  margin-left: 10px;
+  font-size: 0.7rem;
+  font-weight: 400;
+}
+.association-audit-table {
+  min-width: 800px;
+}
+.association-audit-table td {
+  vertical-align: top;
+}
+.association-audit-table td:first-child {
+  min-width: 140px;
+}
+.association-audit-table td:nth-child(4) {
+  min-width: 330px;
+  max-width: 560px;
+  white-space: normal;
+}
+.association-audit-table small,
+.association-audit-table a {
+  display: block;
+  margin-top: 8px;
+}
+.association-audit-table p,
+.association-audit-table li {
+  font-size: 0.73rem;
+  line-height: 1.7;
+}
+.association-audit-table summary {
+  cursor: pointer;
+  font-size: 0.73rem;
+}
+@media (max-width: 520px) {
+  .club-profile-header {
+    padding: 20px 17px;
+    gap: 13px;
+    flex-wrap: wrap;
+  }
+  .club-profile-header > .crest {
+    width: 52px;
+    height: 60px;
+  }
+  .club-profile-header h2 {
+    font-size: 1.3rem;
+  }
+  .club-profile-header .badge {
+    font-size: 0.57rem;
+    white-space: normal;
+  }
+  .club-profile-reputation {
+    display: none;
+  }
+  .fixture-teams .team-link {
+    font-size: 0.69rem;
+  }
+  .profile-link.team-link > span {
+    white-space: normal;
+  }
+}
+.deal-stage-list {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 6px;
+  padding: 0;
+  margin: 22px 0 25px;
+  list-style: none;
+}
+.deal-stage-list > li {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 7px;
+  text-align: center;
+  position: relative;
+  color: var(--muted);
+}
+.deal-stage-list > li > span {
+  display: grid;
+  place-items: center;
+  width: 25px;
+  height: 25px;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  font-size: 0.7rem;
+  position: relative;
+  z-index: 1;
+  background: var(--surface);
+}
+.deal-stage-list > li:not(:last-child):after {
+  content: "";
+  height: 1px;
+  position: absolute;
+  top: 12px;
+  left: calc(50% + 14px);
+  width: calc(100% - 22px);
+  background: var(--line);
+}
+.deal-stage-list > li > small {
+  font-size: 0.6rem;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.deal-stage-list > li.complete > span {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+}
+.deal-stage-list > li.current {
+  color: var(--accent);
+  font-weight: 650;
+}
+.deal-stage-list > li.current > span {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.agreed-loan-terms {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  min-width: 0;
+}
+.agreed-loan-terms:disabled {
+  opacity: 0.7;
+}
+.club-support-section {
+  margin-top: 30px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+.event-workspace {
+  margin-bottom: 25px;
+}
+.event-case {
+  padding: 16px 0 22px;
+  border-bottom: 1px solid var(--line);
+}
+.event-case header {
+  display: flex;
+  align-items: center;
+  gap: 15px;
+  flex-wrap: wrap;
+}
+.event-case h3,
+.event-history > h3 {
+  font-size: 1rem;
+}
+.event-case > p {
+  max-width: 900px;
+  font-size: 0.82rem;
+  line-height: 1.75;
+  margin: 15px 0;
+  color: var(--muted);
+}
+.event-options {
+  margin-top: 20px;
+}
+.event-option {
+  padding: 16px 0;
+  border-top: 1px solid var(--line);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+}
+.event-option strong {
+  font-size: 0.8rem;
+}
+.event-effects {
+  display: flex;
+  gap: 8px 16px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1.6;
+}
+.event-history {
+  margin-top: 25px;
+}
+.event-history > h3 {
+  margin-bottom: 12px;
+}
+.event-outcome {
+  padding: 16px 0;
+  border-top: 1px solid var(--line);
+}
+.event-outcome summary {
+  cursor: pointer;
+  font-size: 0.82rem;
+  line-height: 1.6;
+  margin-bottom: 12px;
+}
+.event-outcome time {
+  color: var(--muted);
+  font-size: 0.7rem;
+  margin-left: 15px;
+}
+.event-outcome p {
+  font-size: 0.79rem;
+  line-height: 1.75;
+  color: var(--muted);
+  margin-top: 12px;
+}
+@media (max-width: 650px) {
+  .event-option {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .event-outcome time {
+    display: block;
+    margin-left: 0;
+  }
+}
+.club-support-section > .section-heading {
+  padding-inline: 0;
+  flex-wrap: wrap;
+  gap: 14px;
+}
+.support-status {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+  padding: 14px 0;
+  font-size: 0.79rem;
+  color: var(--muted);
+}
+.cell-subtitle {
+  display: block;
+  font-size: 0.67rem;
+  color: var(--muted);
+  margin-top: 6px;
+}
+.affiliate-table {
+  min-width: 760px;
+}
+.affiliate-table td:first-child {
+  min-width: 220px;
+}
+.affiliate-table .team-link {
+  min-width: 170px;
+}
+.affiliate-requests {
+  margin-top: 28px;
+}
+.affiliate-requests > h3 {
+  font-size: 0.98rem;
+  margin-bottom: 10px;
+}
+.affiliate-request {
+  padding: 16px 0;
+  border-top: 1px solid var(--line);
+  font-size: 0.8rem;
+}
+.affiliate-request header {
+  display: flex;
+  gap: 10px 16px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.affiliate-request time {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+.affiliate-request p {
+  margin: 12px 0;
+  color: var(--muted);
+  line-height: 1.7;
+}
+.club-affiliate-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px 20px;
+  padding: 20px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 0.8rem;
+}
+.club-affiliate-row > small {
+  flex: 1;
+  min-width: 150px;
+  color: var(--muted);
+}
+.assistant-workspace {
+  padding: 24px;
+}
+.assistant-heading {
+  display: flex;
+  align-items: center;
+  gap: 15px;
+  padding-bottom: 20px;
+  border-bottom: 1px solid var(--line);
+  flex-wrap: wrap;
+}
+.assistant-heading > div {
+  flex: 1;
+  min-width: 140px;
+}
+.assistant-heading h2 {
+  font-size: 1.1rem;
+  overflow-wrap: anywhere;
+}
+.assistant-heading p {
+  font-size: 0.76rem;
+  color: var(--muted);
+  margin-top: 6px;
+}
+.assistant-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 0.85fr);
+  gap: 35px;
+}
+.assistant-layout .section-heading {
+  padding-inline: 0;
+}
+.assistant-duty {
+  display: flex;
+  gap: 20px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 0;
+  border-bottom: 1px solid var(--line);
+}
+.assistant-duty strong {
+  font-size: 0.84rem;
+}
+.assistant-duty p {
+  font-size: 0.75rem;
+  color: var(--muted);
+  line-height: 1.65;
+  margin-top: 6px;
+}
+.assistant-duty .toggle {
+  flex-shrink: 0;
+}
+.assistant-allowance {
+  padding-top: 23px;
+}
+.assistant-allowance .field {
+  max-width: 260px;
+  margin-bottom: 14px;
+}
+.support-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 20px;
+}
+.assistant-report {
+  padding: 16px 0;
+  border-bottom: 1px solid var(--line);
+}
+.assistant-report summary {
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+.assistant-report summary .badge {
+  margin-left: 12px;
+}
+.assistant-report > p {
+  font-size: 0.72rem;
+  margin-top: 12px;
+}
+.assistant-report ul {
+  list-style: none;
+  padding: 0;
+}
+.assistant-report li {
+  padding: 12px 0;
+  font-size: 0.77rem;
+  line-height: 1.7;
+}
+.assistant-report .inline-controls {
+  font-size: 0.74rem;
+  margin-top: 8px;
+}
+@media (max-width: 850px) {
+  .assistant-layout {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 16px;
+  }
+}
+@media (max-width: 520px) {
+  .assistant-workspace {
+    padding: 16px;
+  }
+  .assistant-duty {
+    gap: 12px;
+  }
+}
+.offer-player-summary {
+  display: grid;
+  grid-template-columns: 1fr minmax(230px, 380px);
+  gap: 28px;
+  align-items: center;
+  padding: 24px 0;
+  border-block: 1px solid var(--line);
+}
+.offer-player-summary h2 {
+  font-size: 1.3rem;
+  margin-bottom: 10px;
+}
+.offer-player-summary p {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+.offer-choices {
+  max-width: 720px;
+  padding: 8px 0 24px;
+}
+.offer-choices .field {
+  max-width: 400px;
+}
+.offer-choices select {
+  width: 100%;
+}
+.offer-category {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.offer-category:has(> label:only-child) {
+  grid-template-columns: minmax(0, 1fr);
+}
+.offer-page-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  margin-top: 28px;
+  flex-wrap: wrap;
+}
+.offer-negotiation {
+  max-width: 960px;
+}
+.offer-negotiation > .sheet-body {
+  padding-inline: 0;
+}
+.offer-negotiation > .sheet-footer {
+  padding-inline: 0;
+  flex-wrap: wrap;
+}
+@media (max-width: 600px) {
+  .offer-player-summary {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 16px;
+  }
+}
+.media-feed {
+  max-width: 980px;
+}
+.media-article {
+  padding: 26px;
+  border-bottom: 1px solid var(--line);
+}
+.media-byline,
+.media-author,
+.media-comment header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.media-byline {
+  justify-content: space-between;
+  flex-wrap: wrap;
+  margin-bottom: 18px;
+}
+.media-byline > div:last-child {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.media-author > div {
+  min-width: 0;
+}
+.media-author .profile-link,
+.media-author strong {
+  font-size: 0.82rem;
+  font-weight: 650;
+}
+.media-author small,
+.media-byline time,
+.media-comment small,
+.media-comment time {
+  display: block;
+  font-size: 0.69rem;
+  color: var(--muted);
+  margin-top: 4px;
+}
+.media-article h2 {
+  font-size: 1.12rem;
+  line-height: 1.55;
+  margin: 14px 0 11px;
+}
+.media-article p,
+.media-comment p {
+  font-size: 0.84rem;
+  line-height: 1.8;
+  margin: 10px 0;
+  overflow-wrap: anywhere;
+}
+.media-story-subjects {
+  display: flex;
+  gap: 9px 18px;
+  align-items: center;
+  flex-wrap: wrap;
+  font-size: 0.74rem;
+  margin: 14px 0;
+}
+.media-story-subjects > span {
+  color: var(--muted);
+}
+.media-analysis summary,
+.media-discussion summary {
+  cursor: pointer;
+  color: var(--accent);
+  font-size: 0.78rem;
+  padding: 10px 0;
+}
+.media-discussion {
+  margin-top: 8px;
+  border-top: 1px solid var(--line);
+}
+.media-discussion summary svg {
+  vertical-align: middle;
+  margin-right: 7px;
+}
+.media-discussion summary > span {
+  margin-left: 8px;
+  color: var(--muted);
+}
+.media-comment {
+  padding: 18px 0;
+  border-top: 1px solid var(--line);
+}
+.media-comment header {
+  flex-wrap: wrap;
+}
+.media-comment strong {
+  font-size: 0.8rem;
+}
+.comment-likes {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 0.69rem;
+}
+.supporter-discussions {
+  padding: 0 26px;
+  max-width: 980px;
+}
+.discussion-story {
+  line-height: 1.7;
+  margin-top: 12px;
+}
+.journalist-directory {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 20px;
+  padding: 24px;
+}
+.journalist-profile {
+  padding: 20px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  min-width: 0;
+}
+.journalist-profile h3 {
+  font-size: 0.95rem;
+}
+.journalist-profile > p {
+  font-size: 0.77rem;
+  line-height: 1.7;
+  margin: 14px 0;
+}
+.journalist-profile .detail-list {
+  margin-top: 14px;
+}
+.media-filters {
+  flex-wrap: wrap;
+}
+@media (max-width: 650px) {
+  .media-article {
+    padding: 18px 15px;
+  }
+  .media-article h2 {
+    font-size: 1rem;
+  }
+  .media-article p,
+  .media-comment p {
+    font-size: 0.79rem;
+  }
+  .media-filters > select {
+    flex: 1;
+    min-width: 110px;
+    max-width: 100%;
+  }
+  .media-filters .search-field {
+    flex-basis: 100%;
+  }
+  .supporter-discussions {
+    padding-inline: 15px;
+  }
+  .journalist-directory {
+    grid-template-columns: minmax(0, 1fr);
+    padding: 15px;
+  }
+}
+.transfer-payment-summary {
+  padding: 18px 0;
+  margin: 16px 0;
+  border-block: 1px solid var(--line);
+}
+.career-history-controls {
+  display: flex;
+  align-items: end;
+  gap: 14px;
+  margin-bottom: 22px;
+  flex-wrap: wrap;
+}
+.career-history-controls .field {
+  min-width: 155px;
+  max-width: 360px;
+  flex: 1;
+}
+.career-season-summary {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  padding: 18px 0;
+  border-block: 1px solid var(--line);
+  margin-bottom: 18px;
+  gap: 15px;
+}
+.career-season-summary small {
+  display: block;
+  color: var(--muted);
+  font-size: 0.65rem;
+  margin-bottom: 7px;
+}
+.career-season-summary strong {
+  font-family: "Manrope Variable", sans-serif;
+  font-size: 1.35rem;
+}
+.career-team-links {
+  display: flex;
+  gap: 20px;
+  flex-wrap: wrap;
+  margin: 18px 0 22px;
+}
+.career-team-links > span {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 0.8rem;
+}
+.career-team-links small {
+  font-size: 0.68rem;
+  color: var(--muted);
+}
+.career-match-teams {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) 49px minmax(120px, 1fr);
+  gap: 10px;
+  align-items: center;
+  font-size: 0.76rem;
+}
+.career-match-teams > .profile-link:last-child {
+  text-align: right;
+  justify-content: flex-end;
+}
+.match-result-link {
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 750;
+  font-size: 0.8rem;
+  padding: 7px 5px;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+.appearance-status {
+  display: block;
+  font-size: 0.61rem;
+  color: var(--muted);
+  margin-top: 5px;
+}
+.individual-report-heading {
+  display: flex;
+  align-items: center;
+  gap: 17px;
+  padding-bottom: 23px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 25px;
+}
+.individual-report-heading > div {
+  flex: 1;
+}
+.individual-report-heading h3 {
+  font-size: 1.25rem;
+}
+.individual-report-heading p {
+  font-size: 0.8rem;
+  color: var(--muted);
+  margin-top: 8px;
+}
+.individual-match-rating {
+  font-size: 2rem;
+  color: var(--accent);
+  font-weight: 750;
+  text-align: center;
+  min-width: 74px;
+}
+.individual-match-rating small {
+  display: block;
+  font-size: 0.63rem;
+  font-weight: 400;
+  color: var(--muted);
+  margin-top: 6px;
+}
+.individual-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 28px 35px;
+}
+.individual-stat-grid h3 {
+  font-size: 0.88rem;
+  margin-bottom: 12px;
+}
+.red-card {
+  width: 11px;
+  height: 17px;
+  border-radius: 2px;
+  background: var(--red);
+  display: inline-block;
+}
+@media (max-width: 520px) {
+  .deal-stage-list {
+    gap: 3px;
+  }
+  .deal-stage-list > li > small {
+    font-size: 0.54rem;
+  }
+  .deal-stage-list > li > span {
+    width: 22px;
+    height: 22px;
+  }
+  .deal-stage-list > li:not(:last-child):after {
+    top: 11px;
+  }
+  .career-season-summary {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 17px;
+  }
+  .career-season-summary strong {
+    font-size: 1.14rem;
+  }
+  .career-history-controls {
+    gap: 10px;
+  }
+  .career-history-controls .field {
+    min-width: 110px;
+    max-width: 100%;
+  }
+  .career-history-controls select {
+    font-size: 0.73rem;
+  }
+  .individual-stat-grid {
+    grid-template-columns: 1fr;
+    gap: 23px;
+  }
+  .individual-report-heading {
+    gap: 12px;
+  }
+  .individual-report-heading h3 {
+    font-size: 1rem;
+  }
+  .individual-match-rating {
+    font-size: 1.65rem;
+  }
+  .career-team-links > span {
+    flex-wrap: wrap;
+  }
+  .career-match-teams {
+    font-size: 0.7rem;
+  }
+  .career-match-history > .pagination {
+    padding-inline: 0;
+  }
+}
 .table-select {
   font-size: 0.73rem;
   padding: 6px 8px;

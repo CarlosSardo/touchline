@@ -13,13 +13,16 @@ import {
   Target,
   Users,
 } from "lucide-react";
-import { useGame, useResource } from "../game-context.tsx";
+import { useCurrency, useGame, useResource } from "../game-context.tsx";
 import {
   Badge,
   Button,
+  ClubLink,
+  PlayerLink,
   Empty,
   ErrorState,
   Field,
+  MoneyInput,
   IconButton,
   Loading,
   Meter,
@@ -34,7 +37,7 @@ import {
   Tabs,
   TextLink,
 } from "../ui.tsx";
-import { dateLabel, label, money, POSITIONS } from "../../shared/rules.ts";
+import { dateLabel, label, POSITIONS } from "../../shared/rules.ts";
 import type { ScoutingData, SquadData } from "../../shared/api.ts";
 import type { Staff } from "../../shared/types.ts";
 
@@ -49,7 +52,12 @@ const roles = [
 
 export function Squad() {
   const { bootstrap, act, setPlayer, navigate } = useGame();
-  const { data, error } = useResource<SquadData>("squad");
+  const { money } = useCurrency();
+  const [squadClub, setSquadClub] = useState("");
+  const [ageGroup, setAgeGroup] = useState("Senior");
+  const { data, error } = useResource<SquadData>(
+    `squad?ageGroup=${ageGroup}${squadClub ? `&club=${squadClub}` : ""}`,
+  );
   const [tab, setTab] = useState("players");
   const [filter, setFilter] = useState("");
   if (error) return <ErrorState message={error} />;
@@ -76,7 +84,7 @@ export function Squad() {
       </PageHeading>
       <div className="stat-strip">
         <Stat
-          label="Senior players"
+          label={`${ageGroup === "Senior" ? "Senior" : ageGroup} players`}
           value={data.players.length}
           icon={Users}
           detail="Registered first-team group"
@@ -130,6 +138,30 @@ export function Squad() {
         {tab === "players" && (
           <>
             <div className="filter-bar">
+              <Field label="Club squad">
+                <select
+                  aria-label="Club squad"
+                  value={squadClub || data.selectedClubId}
+                  onChange={(event) => setSquadClub(event.target.value)}
+                >
+                  {data.clubs.map((club) => (
+                    <option key={club.id} value={club.id}>
+                      {club.name}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              <Field label="Age group">
+                <select
+                  aria-label="Squad age group"
+                  value={ageGroup}
+                  onChange={(event) => setAgeGroup(event.target.value)}
+                >
+                  <option value="Senior">First / reserve team</option>
+                  <option value="U19">U19</option>
+                  <option value="U17">U17</option>
+                </select>
+              </Field>
               <div className="inline-controls">
                 <span className="muted" style={{ fontSize: ".77rem" }}>
                   Position
@@ -383,7 +415,16 @@ export function Squad() {
                       <td>
                         <span className="position-tag">{item.position}</span>
                       </td>
-                      <td>{item.current ?? "No player"}</td>
+                      <td>
+                        {item.currentId ? (
+                          <PlayerLink
+                            id={item.currentId}
+                            name={item.current ?? "Player"}
+                          />
+                        ) : (
+                          "No player"
+                        )}
+                      </td>
                       <td>{item.age ?? "-"}</td>
                       <td>
                         {item.prospect ? (
@@ -424,7 +465,16 @@ export function Squad() {
             data.promises.map((promise) => (
               <div className="promise-item" key={promise.id}>
                 <div>
-                  <strong>{promise.player_name}</strong>
+                  <strong>
+                    {promise.player_id ? (
+                      <PlayerLink
+                        id={promise.player_id}
+                        name={promise.player_name}
+                      />
+                    ) : (
+                      promise.player_name
+                    )}
+                  </strong>
                   <p>
                     {promise.type} / Review {dateLabel(promise.due_date)}
                   </p>
@@ -462,6 +512,7 @@ function AssignmentSheet({
   close: () => void;
 }) {
   const { bootstrap, act } = useGame();
+  const { money } = useCurrency();
   const [staffId, setStaffId] = useState(String(scouts[0]?.id ?? ""));
   const [countryId, setCountryId] = useState("");
   const [position, setPosition] = useState("");
@@ -530,18 +581,12 @@ function AssignmentSheet({
               onChange={(event) => setMaxAge(Number(event.target.value))}
             />
           </Field>
-          <Field label="Maximum player value (GBP)">
-            <input
-              type="number"
-              min="0"
-              step="1000000"
-              value={budget}
-              onChange={(event) => setBudget(Number(event.target.value))}
-            />
+          <Field label="Maximum player value">
+            <MoneyInput min={0} value={budget} onChange={setBudget} />
           </Field>
           <div className="assignment-cost">
             <span>Assignment fee</span>
-            <strong>{money(2500, true)}</strong>
+            <strong>{money(2500)}</strong>
             <small>7-day assignment</small>
           </div>
         </div>
@@ -564,6 +609,7 @@ function AssignmentSheet({
 
 export function Scouting() {
   const { bootstrap, setPlayer, navigate } = useGame();
+  const { money } = useCurrency();
   const { data, error } = useResource<ScoutingData>("scouting");
   const [tab, setTab] = useState("reports");
   const [assign, setAssign] = useState(false);
@@ -653,13 +699,20 @@ export function Scouting() {
                   {data.reports.map((report) => (
                     <tr key={report.id}>
                       <td>
-                        <button
-                          className="report-player"
-                          onClick={() => setPlayer(report.player_id)}
-                        >
-                          <strong>{report.player_name}</strong>
-                          <small>{report.club_name}</small>
-                        </button>
+                        <div className="report-player">
+                          <strong>
+                            <PlayerLink
+                              id={report.player_id}
+                              name={report.player_name ?? "Player"}
+                            />
+                          </strong>
+                          <small>
+                            <ClubLink
+                              id={report.club_id}
+                              name={report.club_name ?? "Free agent"}
+                            />
+                          </small>
+                        </div>
                       </td>
                       <td>
                         <span className="position-tag">{report.position}</span>
@@ -750,9 +803,14 @@ export function Scouting() {
                         <strong>{assignment.scout_name}</strong>
                       </td>
                       <td>
-                        {assignment.player_name ??
-                          assignment.country_name ??
-                          "Worldwide search"}
+                        {assignment.player_id && assignment.player_name ? (
+                          <PlayerLink
+                            id={assignment.player_id}
+                            name={assignment.player_name}
+                          />
+                        ) : (
+                          (assignment.country_name ?? "Worldwide search")
+                        )}
                       </td>
                       <td>{assignment.position ?? "All"}</td>
                       <td>{assignment.max_age}</td>

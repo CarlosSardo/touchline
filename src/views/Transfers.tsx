@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useDeferredValue, useState } from "react";
 import {
   ArrowLeftRight,
+  ArrowLeft,
   ArrowUpRight,
   Check,
   Clock3,
@@ -11,14 +12,18 @@ import {
   Search,
   X,
 } from "lucide-react";
-import { useGame, useResource } from "../game-context.tsx";
+import { useCurrency, useGame, useResource } from "../game-context.tsx";
+import InterestSummary from "../InterestSummary.tsx";
 import {
   Badge,
   Button,
+  ClubLink,
+  PlayerLink,
   DetailList,
   Empty,
   ErrorState,
   Field,
+  MoneyInput,
   Loading,
   Meter,
   Modal,
@@ -33,19 +38,641 @@ import {
 } from "../ui.tsx";
 import {
   dateLabel,
+  adultTransferArrival,
+  ageOn,
+  DEFAULT_TRANSFER_TERMS,
   LOAN_TYPES,
-  money,
   POSITIONS,
   TRAINING_TYPES,
   transferWindow,
+  TRANSFER_STAGES,
+  ACTIVE_TRANSFER_STAGES,
 } from "../../shared/rules.ts";
-import type { TransferDesk } from "../../shared/api.ts";
+import type { PlayerDetail, TransferDesk } from "../../shared/api.ts";
 import type {
   LoanTerms,
   Negotiation,
   NegotiationData,
   Position,
+  TransferTerms,
+  TransferPayment,
+  PlayerInterest,
 } from "../../shared/types.ts";
+
+export function OfferBuilder() {
+  const { offerPlayerId } = useGame();
+  return <OfferPage key={offerPlayerId ?? "new"} />;
+}
+
+function OfferPage() {
+  const {
+    bootstrap,
+    offerPlayerId,
+    navigate,
+    act,
+    page,
+    openOffer,
+    openContract,
+  } = useGame();
+  const { money } = useCurrency();
+  const { data, error } = useResource<PlayerDetail>(
+    offerPlayerId ? `players/${offerPlayerId}` : null,
+  );
+  const { data: desk } = useResource<TransferDesk>(
+    offerPlayerId ? "transfers" : null,
+  );
+  const [category, setCategory] = useState("transfer");
+  const [loanType, setLoanType] = useState(LOAN_TYPES[0]);
+  const [transferType, setTransferType] = useState("cash");
+  const [guardianConsent, setGuardianConsent] = useState(false);
+  const [selected, setSelected] = useState<number | null>(null);
+  const [pending, setPending] = useState(false);
+  if (!offerPlayerId)
+    return (
+      <div className="page">
+        <PageHeading title="Make an offer" eyebrow="RECRUITMENT" />
+        <Empty icon={Search} title="Choose a player">
+          <Button icon={Search} onClick={() => navigate("database")}>
+            Find a player
+          </Button>
+        </Empty>
+      </div>
+    );
+  if (error) return <ErrorState message={error} />;
+  if (!data || !bootstrap) return <Loading />;
+  const player = data.player;
+  const own = player.club_id === bootstrap.club.id;
+  const canLoan = !own && player.club_id !== null && !player.parent_club_id;
+  const age = ageOn(player.birth_date, bootstrap.state.date);
+  const futureAvailable = !own && age >= 14 && age < 18;
+  const future =
+    category === "transfer" && transferType === "future" && futureAvailable;
+  const dealType = own
+    ? "Contract renewal"
+    : category === "loan" && canLoan
+      ? loanType
+      : future
+        ? "Future transfer"
+        : transferType === "youth" && data.youthTransfer.canApproachWithoutFee
+          ? "Youth approach"
+          : "Permanent transfer";
+  const negotiation =
+    desk?.negotiations.find((entry) => entry.id === selected) ??
+    desk?.negotiations.find(
+      (entry) =>
+        entry.player_id === player.id &&
+        ACTIVE_TRANSFER_STAGES.includes(entry.stage),
+    );
+  const contractPage = page === "contract";
+  const clubAgreed =
+    negotiation &&
+    [
+      "Agent talks",
+      "Contract review",
+      "Scheduled",
+      "Medical",
+      "Registration",
+      "Completed",
+    ].includes(negotiation.stage);
+  const futureArrival = negotiation
+    ? (JSON.parse(negotiation.data) as NegotiationData).futureArrivalDate
+    : future
+      ? adultTransferArrival(player.birth_date)
+      : undefined;
+  async function begin() {
+    setPending(true);
+    const result = await act({
+      type: "enquiry",
+      playerId: offerPlayerId,
+      dealType,
+      ...(future ? { guardianConsent } : {}),
+    });
+    if (result?.id) {
+      const next =
+        result.stage === "Enquiry"
+          ? await act({
+              type: "negotiation",
+              id: result.id,
+              action: "formalize",
+            })
+          : result;
+      setSelected(Number(result.id));
+      if (next?.stage === "Agent talks") openContract(offerPlayerId!);
+    }
+    setPending(false);
+  }
+  return (
+    <div className="page offer-page">
+      <PageHeading
+        title={
+          contractPage
+            ? "Player contract"
+            : negotiation
+              ? "Club offer"
+              : "Make an offer"
+        }
+        eyebrow="RECRUITMENT"
+      >
+        <Button
+          variant="secondary"
+          icon={ArrowLeft}
+          onClick={() => navigate("transfers")}
+        >
+          Transfer desk
+        </Button>
+      </PageHeading>
+      <section className="offer-player-summary">
+        <div>
+          <h2>
+            <PlayerLink id={player.id} name={player.name} />
+          </h2>
+          <p>
+            {player.position} / {player.age} years /{" "}
+            <ClubLink
+              id={player.club_id}
+              name={player.club_name ?? "Free agent"}
+            />
+          </p>
+        </div>
+        <DetailList
+          items={[
+            ["Value", money(player.value)],
+            ["Weekly wage", money(player.wage)],
+            ["Transfer budget", money(bootstrap.club.transfer_budget)],
+          ]}
+        />
+      </section>
+      {negotiation && (
+        <nav className="offer-stage-navigation" aria-label="Negotiation pages">
+          <Button
+            variant={contractPage ? "ghost" : "secondary"}
+            icon={Handshake}
+            aria-current={!contractPage ? "page" : undefined}
+            onClick={() => openOffer(player.id)}
+          >
+            Club offer
+          </Button>
+          <Button
+            variant={contractPage ? "secondary" : "ghost"}
+            icon={FileSignature}
+            disabled={!clubAgreed}
+            aria-current={contractPage ? "page" : undefined}
+            onClick={() => openContract(player.id)}
+          >
+            Player contract
+          </Button>
+        </nav>
+      )}
+      {futureArrival ? (
+        <div className="information-note section-space">
+          <Clock3 size={16} />
+          <span>
+            Future arrival: {dateLabel(futureArrival)}. The player cannot join
+            before turning 18. Medical, registration and work-permission checks
+            still apply on arrival.
+          </span>
+        </div>
+      ) : (
+        data.youthTransfer.minor && <YouthEligibility data={data} />
+      )}
+      {!negotiation && <InterestSummary assessment={data.interest} />}
+      {!negotiation && (
+        <section className="offer-choices">
+          <SectionHeading title="1. Offer category" />
+          <div
+            className="theme-choices offer-category"
+            role="radiogroup"
+            aria-label="Offer category"
+          >
+            {[
+              {
+                id: "transfer",
+                name: own ? "Contract offer" : "Transfer offer",
+                icon: FileSignature,
+              },
+              { id: "loan", name: "Loan offer", icon: Handshake },
+            ]
+              .filter((option) => option.id !== "loan" || canLoan)
+              .map((option) => (
+                <label className="theme-choice" key={option.id}>
+                  <input
+                    type="radio"
+                    name="offer-category"
+                    value={option.id}
+                    checked={
+                      category === option.id ||
+                      (!canLoan && option.id === "transfer")
+                    }
+                    onChange={() => setCategory(option.id)}
+                  />
+                  <span>
+                    <option.icon size={17} />
+                    {option.name}
+                  </span>
+                </label>
+              ))}
+          </div>
+          <SectionHeading title="2. Offer type" />
+          <Field label="Offer type">
+            <select
+              value={category === "loan" && canLoan ? loanType : transferType}
+              onChange={(event) =>
+                category === "loan" && canLoan
+                  ? setLoanType(event.target.value)
+                  : setTransferType(event.target.value)
+              }
+            >
+              {category === "loan" && canLoan ? (
+                LOAN_TYPES.map((type) => <option key={type}>{type}</option>)
+              ) : (
+                <>
+                  <option value="cash">
+                    {own
+                      ? "Contract renewal"
+                      : player.club_id
+                        ? "Permanent transfer"
+                        : "Free-agent contract"}
+                  </option>
+                  {!own && player.club_id && (
+                    <option value="instalments">
+                      Transfer with instalments
+                    </option>
+                  )}
+                  {data.youthTransfer.canApproachWithoutFee && (
+                    <option value="youth">Approach to sign (youth)</option>
+                  )}
+                  {futureAvailable && (
+                    <option value="future">Future transfer at 18</option>
+                  )}
+                </>
+              )}
+            </select>
+          </Field>
+          {future && (
+            <label className="checkbox-field section-space">
+              <input
+                type="checkbox"
+                checked={guardianConsent}
+                onChange={(event) => setGuardianConsent(event.target.checked)}
+              />
+              Guardian consent for the conditional future agreement
+            </label>
+          )}
+          <div className="offer-page-actions">
+            <Button variant="secondary" onClick={() => navigate("transfers")}>
+              Cancel
+            </Button>
+            <Button
+              icon={ArrowUpRight}
+              disabled={
+                pending ||
+                !!player.parent_club_id ||
+                player.role === "Retired" ||
+                (future
+                  ? !guardianConsent
+                  : !data.youthTransfer.eligibleToApply)
+              }
+              onClick={() => void begin()}
+            >
+              {pending ? "Opening talks..." : "Continue to negotiation"}
+            </Button>
+          </div>
+        </section>
+      )}
+      {negotiation && (
+        <NegotiationSheet
+          key={`${negotiation.id}:${page}`}
+          negotiation={negotiation}
+          fullPage
+          initialTransferTerms={
+            transferType === "instalments"
+              ? {
+                  ...DEFAULT_TRANSFER_TERMS,
+                  upfrontPercent: 50,
+                  installments: 3,
+                }
+              : undefined
+          }
+          close={() => navigate("transfers")}
+        />
+      )}
+    </div>
+  );
+}
+
+function YouthEligibility({ data }: { data: PlayerDetail }) {
+  const { act } = useGame();
+  const { money } = useCurrency();
+  const assessment = data.youthTransfer;
+  const [safeguards, setSafeguards] = useState({
+    football: false,
+    education: false,
+    care: false,
+    mentor: false,
+    parentalConsent: false,
+  });
+  const [pending, setPending] = useState(false);
+  const obligations = [
+    ["football", "Football education and training programme"],
+    ["education", "Academic or vocational education"],
+    ["care", "Suitable accommodation and welfare support"],
+    ["mentor", "Club mentor appointed"],
+    ["parentalConsent", "Parent or guardian consent"],
+  ] as const;
+  async function submit() {
+    setPending(true);
+    await act({
+      type: "minor-application",
+      playerId: data.player.id,
+      safeguards,
+    });
+    setPending(false);
+  }
+  return (
+    <details className="youth-eligibility" open={!assessment.approved}>
+      <summary>
+        <Badge
+          tone={
+            assessment.approved
+              ? "green"
+              : assessment.eligibleToApply
+                ? "amber"
+                : "red"
+          }
+        >
+          {assessment.status}
+        </Badge>
+        <span>Youth eligibility</span>
+      </summary>
+      <div>
+        <DetailList
+          items={[
+            [
+              "Registration status",
+              assessment.contractStatus === "amateur"
+                ? "Non-professional youth registration"
+                : "Protected contract",
+            ],
+            [
+              "No-fee approach",
+              assessment.canApproachWithoutFee
+                ? "Available; compensation may still apply"
+                : "Not available",
+            ],
+            ...(assessment.canApproachWithoutFee
+              ? [
+                  [
+                    "Training compensation estimate",
+                    money(assessment.trainingCompensation),
+                  ] as [string, string],
+                ]
+              : []),
+          ]}
+        />
+        {assessment.reasons.map((reason) => (
+          <p key={reason}>{reason}</p>
+        ))}
+        {assessment.application && (
+          <p>
+            {assessment.application.status === "pending"
+              ? `Review due ${dateLabel(assessment.application.dueDate)}.`
+              : assessment.application.reason}
+          </p>
+        )}
+        {!assessment.approved &&
+          assessment.eligibleToApply &&
+          assessment.application?.status !== "pending" && (
+            <div className="minor-application">
+              <div className="minor-obligations">
+                {obligations.map(([id, name]) => (
+                  <label className="checkbox-field" key={id}>
+                    <input
+                      type="checkbox"
+                      checked={safeguards[id]}
+                      onChange={(event) =>
+                        setSafeguards({
+                          ...safeguards,
+                          [id]: event.target.checked,
+                        })
+                      }
+                    />
+                    {name}
+                  </label>
+                ))}
+              </div>
+              <Button
+                icon={FileSignature}
+                disabled={pending || !Object.values(safeguards).every(Boolean)}
+                onClick={() => void submit()}
+              >
+                Submit minor application
+              </Button>
+            </div>
+          )}
+        <small>{assessment.source}</small>
+      </div>
+    </details>
+  );
+}
+
+function TransferTermsForm({
+  terms,
+  setTerms,
+  fee,
+}: {
+  terms: TransferTerms;
+  setTerms: (terms: TransferTerms) => void;
+  fee: number;
+}) {
+  return (
+    <>
+      <h3 className="form-heading">Payment schedule & clauses</h3>
+      <div className="term-grid">
+        <Field label="Deferred instalments">
+          <select
+            value={terms.installments}
+            onChange={(event) => {
+              const installments = Number(event.target.value);
+              setTerms({
+                ...terms,
+                installments,
+                intervalMonths:
+                  installments * terms.intervalMonths > 60
+                    ? 6
+                    : terms.intervalMonths,
+                upfrontPercent: installments
+                  ? Math.min(terms.upfrontPercent, 50)
+                  : 100,
+              });
+            }}
+          >
+            {[0, 1, 2, 3, 4, 6, 8].map((count) => (
+              <option key={count} value={count}>
+                {count ? `${count} instalments` : "Pay in full"}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label="Payment interval">
+          <select
+            value={terms.intervalMonths}
+            disabled={!terms.installments}
+            onChange={(event) =>
+              setTerms({ ...terms, intervalMonths: Number(event.target.value) })
+            }
+          >
+            {[1, 3, 6, 12].map((months) => (
+              <option
+                key={months}
+                value={months}
+                disabled={months * terms.installments > 60}
+              >
+                Every {months} {months === 1 ? "month" : "months"}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label={`Upfront payment / ${terms.upfrontPercent}%`}>
+          <input
+            aria-label="Upfront payment percentage"
+            type="range"
+            min="0"
+            max={terms.installments ? 95 : 100}
+            step="5"
+            disabled={!terms.installments}
+            value={terms.upfrontPercent}
+            onChange={(event) =>
+              setTerms({ ...terms, upfrontPercent: Number(event.target.value) })
+            }
+          />
+        </Field>
+        <Field label={`Percentage of next sale / ${terms.sellOnPercent}%`}>
+          <input
+            aria-label="Percentage of next sale"
+            type="range"
+            min="0"
+            max="50"
+            value={terms.sellOnPercent}
+            onChange={(event) =>
+              setTerms({ ...terms, sellOnPercent: Number(event.target.value) })
+            }
+          />
+        </Field>
+        <label className="checkbox-field">
+          <input
+            type="checkbox"
+            checked={terms.buyBackFee > 0}
+            onChange={(event) =>
+              setTerms({
+                ...terms,
+                buyBackFee: event.target.checked
+                  ? Math.max(100000, Math.round(fee * 1.5))
+                  : 0,
+              })
+            }
+          />
+          Selling club buy-back right
+        </label>
+        {terms.buyBackFee > 0 && (
+          <>
+            <Field label="Buy-back fee">
+              <MoneyInput
+                min={fee}
+                value={terms.buyBackFee}
+                onChange={(buyBackFee) => setTerms({ ...terms, buyBackFee })}
+              />
+            </Field>
+            <Field label="Buy-back validity">
+              <select
+                value={terms.buyBackYears}
+                onChange={(event) =>
+                  setTerms({
+                    ...terms,
+                    buyBackYears: Number(event.target.value),
+                  })
+                }
+              >
+                {[1, 2, 3, 4, 5].map((years) => (
+                  <option key={years} value={years}>
+                    {years} {years === 1 ? "year" : "years"}
+                  </option>
+                ))}
+              </select>
+            </Field>
+          </>
+        )}
+      </div>
+    </>
+  );
+}
+
+export function TransferPaymentTable({
+  payments,
+  clubId,
+}: {
+  payments: TransferPayment[];
+  clubId: number;
+}) {
+  const { money } = useCurrency();
+  return payments.length ? (
+    <div className="table-scroll">
+      <table className="data-table">
+        <thead>
+          <tr>
+            <th>Due</th>
+            <th>Player</th>
+            <th>From</th>
+            <th>To</th>
+            <th>Amount</th>
+            <th>Agreement</th>
+          </tr>
+        </thead>
+        <tbody>
+          {payments.map((payment) => (
+            <tr key={payment.id}>
+              <td>{dateLabel(payment.due_date)}</td>
+              <td>
+                <PlayerLink
+                  id={payment.player_id}
+                  name={payment.player_name ?? "Player"}
+                />
+              </td>
+              <td>
+                <ClubLink
+                  id={payment.payer_id}
+                  name={payment.payer_name ?? "Club"}
+                />
+              </td>
+              <td>
+                <ClubLink
+                  id={payment.payee_id}
+                  name={payment.payee_name ?? "Club"}
+                />
+              </td>
+              <td
+                className={
+                  payment.payer_id === clubId ? "negative" : "positive"
+                }
+              >
+                {payment.payer_id === clubId ? "-" : "+"}
+                {money(payment.amount)}
+              </td>
+              <td>
+                <Badge>
+                  {payment.kind === "sell-on"
+                    ? "Sell-on payment"
+                    : "Transfer instalment"}
+                </Badge>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  ) : (
+    <Empty icon={Clock3} title="No outstanding transfer payments" />
+  );
+}
 
 export function LoanTermsForm({
   terms,
@@ -132,13 +759,11 @@ export function LoanTermsForm({
             }
           />
         </Field>
-        <Field label="Development bonus (GBP)">
-          <input
-            type="number"
-            min="0"
-            step="10000"
+        <Field label="Development bonus">
+          <MoneyInput
+            min={0}
             value={terms.bonus}
-            onChange={(event) => update("bonus", Number(event.target.value))}
+            onChange={(value) => update("bonus", value)}
           />
         </Field>
         <Field label="Duration (days)">
@@ -202,15 +827,11 @@ export function LoanTermsForm({
           Injury recall clause
         </label>
         {["Loan with option", "Loan with obligation"].includes(type) && (
-          <Field label="Agreed purchase fee (GBP)">
-            <input
-              type="number"
-              min="0"
-              step="100000"
+          <Field label="Agreed purchase fee">
+            <MoneyInput
+              min={0}
               value={terms.optionFee}
-              onChange={(event) =>
-                update("optionFee", Number(event.target.value))
-              }
+              onChange={(value) => update("optionFee", value)}
             />
           </Field>
         )}
@@ -250,14 +871,54 @@ export function LoanTermsForm({
   );
 }
 
+function DealProgress({
+  stage,
+  future = false,
+}: {
+  stage: string;
+  future?: boolean;
+}) {
+  const stages = future
+    ? [...TRANSFER_STAGES.slice(0, 4), "Scheduled", ...TRANSFER_STAGES.slice(4)]
+    : TRANSFER_STAGES;
+  const current = stages.indexOf(stage);
+  return (
+    <ol
+      className="deal-stage-list"
+      aria-label="Transfer progress"
+      style={{
+        gridTemplateColumns: `repeat(${stages.length}, minmax(0, 1fr))`,
+      }}
+    >
+      {stages.map((name, index) => (
+        <li
+          key={name}
+          className={
+            index < current ? "complete" : index === current ? "current" : ""
+          }
+          aria-current={index === current ? "step" : undefined}
+        >
+          <span>{index < current ? <Check size={11} /> : index + 1}</span>
+          <small>{name}</small>
+        </li>
+      ))}
+    </ol>
+  );
+}
+
 function NegotiationSheet({
   negotiation,
   close,
+  fullPage = false,
+  initialTransferTerms,
 }: {
   negotiation: Negotiation;
   close: () => void;
+  fullPage?: boolean;
+  initialTransferTerms?: TransferTerms;
 }) {
-  const { act, bootstrap, confirm } = useGame();
+  const { act, bootstrap, confirm, page, openContract, openOffer } = useGame();
+  const { money } = useCurrency();
   const details = JSON.parse(negotiation.data) as NegotiationData;
   const [fee, setFee] = useState(
     Math.round(negotiation.offer || negotiation.asking_price),
@@ -272,11 +933,78 @@ function NegotiationSheet({
   const [role, setRole] = useState(details.role || "Regular starter");
   const [promises, setPromises] = useState(details.promises);
   const [terms, setTerms] = useState<LoanTerms>(details.terms);
+  const [transferTerms, setTransferTerms] = useState<TransferTerms>({
+    ...DEFAULT_TRANSFER_TERMS,
+    ...initialTransferTerms,
+    ...details.transferTerms,
+  });
   const [bonus, setBonus] = useState(details.signingBonus ?? 0);
   const [pending, setPending] = useState(false);
   const loan = LOAN_TYPES.includes(negotiation.type);
-  const active = ["Club talks", "Agent talks"].includes(negotiation.stage);
+  const buyerManaged =
+    !!details.buyerManaged && negotiation.buying_club_id !== bootstrap?.club.id;
+  const playerPhase = [
+    "Agent talks",
+    "Contract review",
+    "Scheduled",
+    "Medical",
+    "Registration",
+    "Completed",
+  ].includes(negotiation.stage);
+  const contractPage = fullPage ? page === "contract" : playerPhase;
+  const active =
+    !buyerManaged &&
+    (contractPage
+      ? negotiation.stage === "Agent talks"
+      : negotiation.stage === "Club talks");
   const incoming = negotiation.stage === "Offer received";
+  const permanent =
+    ["Permanent transfer", "Future transfer"].includes(negotiation.type) &&
+    negotiation.selling_club_id !== null;
+  const enquiry = !contractPage && negotiation.stage === "Enquiry";
+  const review = contractPage && negotiation.stage === "Contract review";
+  const agentFee = Math.round(
+    ((loan ? negotiation.offer : negotiation.wage * 52) *
+      details.agent.commission) /
+      100,
+  );
+  const personalStage = negotiation.stage === "Agent talks";
+  const interestParams = new URLSearchParams({
+    negotiationId: String(negotiation.id),
+    wage: String(wage),
+    role,
+    years: String(years),
+    promises: JSON.stringify(promises),
+  });
+  const interestPath = useDeferredValue(
+    personalStage && active
+      ? `players/${negotiation.player_id}/interest?${interestParams}`
+      : null,
+  );
+  const { data: interestPreview } = useResource<PlayerInterest>(interestPath, {
+    keepPreviousData: true,
+  });
+  const previewFee = active || incoming ? fee : negotiation.offer;
+  const shownTerms =
+    active || incoming
+      ? transferTerms
+      : { ...DEFAULT_TRANSFER_TERMS, ...details.transferTerms };
+  const cashFee =
+    permanent && shownTerms.installments
+      ? Math.round(previewFee * shownTerms.upfrontPercent) / 100
+      : previewFee;
+  async function step(action: "formalize" | "sign" | "revise") {
+    setPending(true);
+    const result = await act({
+      type: "negotiation",
+      id: negotiation.id,
+      action,
+    });
+    setPending(false);
+    if (fullPage && result?.stage === "Agent talks")
+      openContract(negotiation.player_id);
+    if (result?.stage === "Medical" && !fullPage) close();
+  }
   async function submit() {
     setPending(true);
     const result = await act({
@@ -288,17 +1016,35 @@ function NegotiationSheet({
       role,
       promises,
       signingBonus: bonus,
+      ...(permanent ? { transferTerms } : {}),
       ...(loan ? { terms: { ...terms, fee } } : {}),
     });
     setPending(false);
-    if (result?.stage === "Medical" || result?.stage === "Rejected") close();
+    if (
+      fullPage &&
+      negotiation.stage === "Club talks" &&
+      result?.stage === "Agent talks"
+    )
+      openContract(negotiation.player_id);
+    if (
+      !fullPage &&
+      (result?.stage === "Medical" || result?.stage === "Rejected")
+    )
+      close();
   }
-  return (
-    <Modal
-      title={`${negotiation.player_name} / ${negotiation.type}`}
-      onClose={close}
-      wide={loan}
-    >
+  async function counterOffer() {
+    setPending(true);
+    const result = await act({
+      type: "counter-transfer",
+      id: negotiation.id,
+      fee,
+      transferTerms,
+    });
+    setPending(false);
+    if (result?.stage === "Agent talks") close();
+  }
+  const content = (
+    <>
       <div className="sheet-body">
         <div className="negotiation-sheet-top">
           <div>
@@ -306,13 +1052,17 @@ function NegotiationSheet({
               {negotiation.stage}
             </Badge>
             <h3>
-              {negotiation.seller_name ?? "Free agent"}{" "}
-              <ArrowUpRight size={15} /> {negotiation.buyer_name}
+              <ClubLink
+                id={negotiation.selling_club_id}
+                name={negotiation.seller_name ?? "Free agent"}
+              />{" "}
+              <ArrowUpRight size={15} />{" "}
+              <ClubLink
+                id={negotiation.buying_club_id}
+                name={negotiation.buyer_name ?? "Buying club"}
+              />
             </h3>
-            <p>
-              Deadline {dateLabel(negotiation.deadline)} / Interest{" "}
-              {Math.round(negotiation.interest)}%
-            </p>
+            <p>Deadline {dateLabel(negotiation.deadline)}</p>
           </div>
           <div className="negotiation-agent">
             <strong>{details.agent.name}</strong>
@@ -322,6 +1072,54 @@ function NegotiationSheet({
             </small>
           </div>
         </div>
+        <DealProgress
+          stage={negotiation.stage}
+          future={!!details.futureArrivalDate}
+        />
+        {details.futureArrivalDate && (
+          <div className="future-transfer-details">
+            <DetailList
+              items={[
+                ["Earliest arrival", dateLabel(details.futureArrivalDate)],
+                [
+                  "Transfer allocation reserved",
+                  money(details.reservedBudget ?? 0),
+                ],
+                ["Contract starts", "On registration, not today"],
+              ]}
+            />
+          </div>
+        )}
+        {(interestPreview ?? details.interestDetails) && (
+          <InterestSummary
+            assessment={(interestPreview ?? details.interestDetails)!}
+          />
+        )}
+        {details.log.length > 0 && (
+          <p className="negotiation-latest" role="status">
+            {details.log.at(-1)!.message}
+          </p>
+        )}
+        {details.preparedBy && (
+          <div className="information-note section-space">
+            <FileSignature size={16} />
+            <span>
+              Draft prepared by {details.preparedBy.name} on{" "}
+              {dateLabel(details.preparedBy.date)}.
+              {review ? " Your signature is still required." : ""}
+            </span>
+          </div>
+        )}
+        {negotiation.type === "Youth approach" && (
+          <div className="information-note section-space">
+            <FileSignature size={16} />
+            <span>
+              No club transfer fee. Modeled training compensation:{" "}
+              {money(details.trainingCompensation ?? 0)}. Youth clearance and
+              contract approval are separate requirements.
+            </span>
+          </div>
+        )}
         <div className="tension-bar">
           <span>Negotiation tension</span>
           <Meter
@@ -330,45 +1128,96 @@ function NegotiationSheet({
           />
           <strong>{Math.round(negotiation.tension)}%</strong>
         </div>
-        <div className="negotiation-log">
-          {details.log.map((entry, index) => (
-            <div className="log-item" key={index}>
-              <small>
-                {dateLabel(entry.date)} / {entry.type}
-              </small>
-              <p>{entry.message}</p>
-            </div>
-          ))}
-        </div>
+        <details className="negotiation-history">
+          <summary>
+            Negotiation history <span>{details.log.length}</span>
+          </summary>
+          <div className="negotiation-log">
+            {details.log.map((entry, index) => (
+              <div className="log-item" key={index}>
+                <small>
+                  {dateLabel(entry.date)} / {entry.type}
+                </small>
+                <p>{entry.message}</p>
+              </div>
+            ))}
+          </div>
+        </details>
+        {permanent && !contractPage && (active || incoming) && (
+          <fieldset
+            className="agreed-loan-terms"
+            disabled={
+              pending || (!incoming && negotiation.stage !== "Club talks")
+            }
+          >
+            {incoming && (
+              <Field label="Counteroffer fee">
+                <MoneyInput min={0} value={fee} onChange={setFee} />
+              </Field>
+            )}
+            <TransferTermsForm
+              terms={transferTerms}
+              setTerms={setTransferTerms}
+              fee={fee}
+            />
+          </fieldset>
+        )}
+        {permanent && (
+          <details className="transfer-payment-summary" open={!contractPage}>
+            <summary>Club agreement</summary>
+            <DetailList
+              items={[
+                ["Transfer fee committed", money(previewFee)],
+                ["Fee at registration", money(cashFee)],
+                ["Deferred transfer fee", money(previewFee - cashFee)],
+                [
+                  "Payment schedule",
+                  shownTerms.installments
+                    ? `${shownTerms.installments} instalments / every ${shownTerms.intervalMonths} months`
+                    : "Paid at registration",
+                ],
+                [
+                  "Selling club buy-back",
+                  shownTerms.buyBackFee
+                    ? `${money(shownTerms.buyBackFee)} / ${shownTerms.buyBackYears} years`
+                    : "None",
+                ],
+                ["Next-sale percentage", `${shownTerms.sellOnPercent}%`],
+              ]}
+            />
+          </details>
+        )}
         {active && (
           <>
             <div className="form-grid">
-              <Field label={loan ? "Loan fee (GBP)" : "Transfer fee (GBP)"}>
-                <input
-                  aria-label="Proposed transfer fee"
-                  type="number"
-                  min="0"
-                  step="100000"
-                  value={fee}
-                  disabled={negotiation.stage === "Agent talks"}
-                  onChange={(event) => setFee(Number(event.target.value))}
-                />
-              </Field>
-              <Field label="Weekly wage (GBP)">
-                <input
-                  aria-label="Proposed weekly wage"
-                  type="number"
-                  min="0"
-                  step="500"
-                  value={wage}
-                  onChange={(event) => setWage(Number(event.target.value))}
-                />
-              </Field>
-              {!loan && (
+              {!contractPage && (
+                <Field label={loan ? "Loan fee" : "Transfer fee"}>
+                  <MoneyInput
+                    aria-label="Proposed transfer fee"
+                    min={0}
+                    value={fee}
+                    disabled={personalStage}
+                    onChange={setFee}
+                  />
+                </Field>
+              )}
+              {contractPage && (
+                <Field label="Weekly wage">
+                  <MoneyInput
+                    aria-label="Proposed weekly wage"
+                    min={0}
+                    value={wage}
+                    disabled={!personalStage}
+                    onChange={setWage}
+                  />
+                </Field>
+              )}
+              {contractPage && !loan && (
                 <>
                   <Field label="Contract length">
                     <select
                       value={years}
+                      disabled={!personalStage}
                       onChange={(event) => setYears(Number(event.target.value))}
                     >
                       {[1, 2, 3, 4, 5]
@@ -385,6 +1234,7 @@ function NegotiationSheet({
                   <Field label="Squad role">
                     <select
                       value={role}
+                      disabled={!personalStage}
                       onChange={(event) => setRole(event.target.value)}
                     >
                       {[
@@ -399,50 +1249,56 @@ function NegotiationSheet({
                       ))}
                     </select>
                   </Field>
-                  <Field label="Signing bonus (GBP)">
-                    <input
-                      type="number"
-                      min="0"
-                      step="10000"
+                  <Field label="Signing bonus">
+                    <MoneyInput
+                      min={0}
                       value={bonus}
-                      onChange={(event) => setBonus(Number(event.target.value))}
+                      disabled={!personalStage}
+                      onChange={setBonus}
                     />
                   </Field>
                 </>
               )}
             </div>
-            {loan && (
-              <LoanTermsForm
-                terms={terms}
-                setTerms={setTerms}
-                type={negotiation.type}
-              />
+            {loan && !contractPage && (
+              <fieldset className="agreed-loan-terms" disabled={personalStage}>
+                <LoanTermsForm
+                  terms={terms}
+                  setTerms={setTerms}
+                  type={negotiation.type}
+                />
+              </fieldset>
             )}
-            <div className="form-heading">Contract promises</div>
-            <div className="promise-options">
-              {[
-                "First-team minutes",
-                "Captaincy",
-                "Youth pathway",
-                "European football",
-                "Facilities investment",
-              ].map((promise) => (
-                <label key={promise} className="checkbox-field">
-                  <input
-                    type="checkbox"
-                    checked={promises.includes(promise)}
-                    onChange={(event) =>
-                      setPromises(
-                        event.target.checked
-                          ? [...promises, promise]
-                          : promises.filter((value) => value !== promise),
-                      )
-                    }
-                  />
-                  {promise}
-                </label>
-              ))}
-            </div>
+            {contractPage && (
+              <>
+                <div className="form-heading">Contract promises</div>
+                <div className="promise-options">
+                  {[
+                    "First-team minutes",
+                    "Captaincy",
+                    "Youth pathway",
+                    "European football",
+                    "Facilities investment",
+                  ].map((promise) => (
+                    <label key={promise} className="checkbox-field">
+                      <input
+                        type="checkbox"
+                        checked={promises.includes(promise)}
+                        disabled={!personalStage}
+                        onChange={(event) =>
+                          setPromises(
+                            event.target.checked
+                              ? [...promises, promise]
+                              : promises.filter((value) => value !== promise),
+                          )
+                        }
+                      />
+                      {promise}
+                    </label>
+                  ))}
+                </div>
+              </>
+            )}
             <div className="negotiation-budget">
               <span>
                 Asking price <strong>{money(negotiation.asking_price)}</strong>
@@ -454,12 +1310,47 @@ function NegotiationSheet({
             </div>
           </>
         )}
-        {!active && (
+        {!active && (contractPage || incoming) && (
           <DetailList
             items={[
               ["Fee", money(negotiation.offer)],
               ["Wage", `${money(negotiation.wage)} / week`],
               ["Status", negotiation.stage],
+              ...(review ||
+              ["Scheduled", "Medical", "Registration", "Completed"].includes(
+                negotiation.stage,
+              )
+                ? [
+                    ["Contract length", `${details.years} years`] as [
+                      string,
+                      string,
+                    ],
+                    ["Squad role", details.role] as [string, string],
+                    ["Signing bonus", money(details.signingBonus ?? 0)] as [
+                      string,
+                      string,
+                    ],
+                    [
+                      "Agent commission",
+                      `${money(agentFee)} (${details.agent.commission}%)`,
+                    ] as [string, string],
+                    [
+                      "Upfront commitment",
+                      money(
+                        cashFee +
+                          agentFee +
+                          (details.signingBonus ?? 0) +
+                          (details.trainingCompensation ?? 0),
+                      ),
+                    ] as [string, string],
+                    [
+                      "Promises",
+                      details.promises.length
+                        ? details.promises.join(", ")
+                        : "None",
+                    ] as [string, string],
+                  ]
+                : []),
               ...(details.medicalDate
                 ? [
                     ["Medical date", dateLabel(details.medicalDate)] as [
@@ -471,15 +1362,119 @@ function NegotiationSheet({
             ]}
           />
         )}
+        {review && loan && (
+          <>
+            <h3 className="form-heading">Agreed loan terms</h3>
+            <DetailList
+              items={[
+                ["Playing time", `${details.terms.playingTime}%`],
+                [
+                  "Role / position",
+                  `${details.terms.role} / ${details.terms.position}`,
+                ],
+                ["Borrowing wage share", `${details.terms.salarySplit}%`],
+                ["Training plan", details.terms.developmentPlan],
+                ["Mandatory minutes", details.terms.mandatoryMinutes],
+                [
+                  "Recall / injury recall",
+                  `${details.terms.recall ? "Yes" : "No"} / ${details.terms.injuryRecall ? "Yes" : "No"}`,
+                ],
+              ]}
+            />
+          </>
+        )}
+        {enquiry && (
+          <div className="information-note section-space">
+            <MessageSquare size={16} />
+            <span>
+              {Math.round(negotiation.interest)}% player interest. Indicative
+              club valuation: {money(negotiation.asking_price)}. Formal
+              permission and terms have not yet been agreed.
+            </span>
+          </div>
+        )}
+        {buyerManaged &&
+          ["Agent talks", "Contract review"].includes(negotiation.stage) && (
+            <div className="information-note section-space">
+              <Clock3 size={16} />
+              <span>
+                The buying club is{" "}
+                {review
+                  ? "reviewing and signing the player contract"
+                  : "negotiating personal terms with the agent"}
+                {details.nextStageDate
+                  ? `. Next update: ${dateLabel(details.nextStageDate)}`
+                  : ""}
+                .
+              </span>
+            </div>
+          )}
+        {negotiation.stage === "Registration" && (
+          <div className="information-note section-space">
+            <Clock3 size={16} />
+            <span>
+              Medical passed. Registration, work permission and funds are being
+              checked
+              {details.registrationDate
+                ? ` from ${dateLabel(details.registrationDate)}`
+                : ""}
+              .
+            </span>
+          </div>
+        )}
       </div>
       <footer className="sheet-footer">
+        {fullPage && !contractPage && playerPhase && (
+          <Button
+            icon={ArrowUpRight}
+            onClick={() => openContract(negotiation.player_id)}
+          >
+            Continue to player contract
+          </Button>
+        )}
+        {fullPage && contractPage && !playerPhase && (
+          <Button
+            variant="secondary"
+            icon={ArrowLeft}
+            onClick={() => openOffer(negotiation.player_id)}
+          >
+            Return to club offer
+          </Button>
+        )}
         <div className="footer-left">
-          {active && (
+          {details.futureArrivalDate &&
+            ["Scheduled", "Medical", "Registration"].includes(
+              negotiation.stage,
+            ) && (
+              <Button
+                variant="ghost"
+                icon={X}
+                disabled={pending}
+                onClick={() =>
+                  confirm(
+                    "Cancel future agreement?",
+                    `${money(details.reservedBudget ?? 0)} of reserved transfer allocation will be returned. No player registration or cash payment will change.`,
+                    () => {
+                      void act({
+                        type: "negotiation",
+                        id: negotiation.id,
+                        action: "withdraw",
+                      }).then((result) => {
+                        if (result) close();
+                      });
+                    },
+                  )
+                }
+              >
+                Cancel future agreement
+              </Button>
+            )}
+          {(active || enquiry || (review && !buyerManaged)) && (
             <>
               <Button
                 variant="secondary"
                 icon={Megaphone}
-                disabled={!!negotiation.public || pending}
+                disabled={!!negotiation.public || pending || review}
                 onClick={() =>
                   void act({
                     type: "negotiation",
@@ -512,6 +1507,34 @@ function NegotiationSheet({
             </>
           )}
         </div>
+        {enquiry && (
+          <Button
+            icon={MessageSquare}
+            disabled={pending}
+            onClick={() => void step("formalize")}
+          >
+            Request formal talks
+          </Button>
+        )}
+        {review && !buyerManaged && (
+          <>
+            <Button
+              variant="secondary"
+              icon={MessageSquare}
+              disabled={pending}
+              onClick={() => void step("revise")}
+            >
+              Revise personal terms
+            </Button>
+            <Button
+              icon={FileSignature}
+              disabled={pending}
+              onClick={() => void step("sign")}
+            >
+              Sign conditional agreement
+            </Button>
+          </>
+        )}
         {active && (
           <Button
             icon={FileSignature}
@@ -540,6 +1563,16 @@ function NegotiationSheet({
             </Button>
             <Button
               icon={Check}
+              disabled={
+                pending ||
+                (permanent &&
+                  (fee !== negotiation.offer ||
+                    JSON.stringify(transferTerms) !==
+                      JSON.stringify({
+                        ...DEFAULT_TRANSFER_TERMS,
+                        ...details.transferTerms,
+                      })))
+              }
               onClick={() =>
                 void act({
                   type: "negotiation",
@@ -550,31 +1583,56 @@ function NegotiationSheet({
             >
               Accept offer
             </Button>
+            {permanent && (
+              <Button
+                icon={MessageSquare}
+                variant="secondary"
+                disabled={pending}
+                onClick={() => void counterOffer()}
+              >
+                Submit counteroffer
+              </Button>
+            )}
           </>
         )}
-        {!active && !incoming && (
+        {!active && !incoming && (!review || buyerManaged) && !enquiry && (
           <Button variant="secondary" onClick={close}>
             Close
           </Button>
         )}
       </footer>
+    </>
+  );
+  return fullPage ? (
+    <section
+      className="offer-negotiation"
+      aria-label={
+        contractPage ? "Player contract negotiation" : "Offer negotiation"
+      }
+    >
+      {content}
+    </section>
+  ) : (
+    <Modal
+      title={`${negotiation.player_name} / ${negotiation.type}`}
+      onClose={close}
+      wide={loan}
+    >
+      {content}
     </Modal>
   );
 }
 
 export default function Transfers() {
-  const { bootstrap, navigate, act } = useGame();
+  const { bootstrap, navigate, act, confirm, openOffer, openContract } =
+    useGame();
+  const { money } = useCurrency();
   const { data, error } = useResource<TransferDesk>("transfers");
   const [tab, setTab] = useState("active");
   const [selected, setSelected] = useState<number | null>(null);
   if (error) return <ErrorState message={error} />;
   if (!data || !bootstrap) return <Loading />;
-  const activeStages = [
-    "Club talks",
-    "Agent talks",
-    "Medical",
-    "Offer received",
-  ];
+  const activeStages = ACTIVE_TRANSFER_STAGES;
   const active = data.negotiations.filter((item) =>
     activeStages.includes(item.stage),
   );
@@ -582,10 +1640,17 @@ export default function Transfers() {
     (item) => item.stage === "Completed",
   );
   const current = data.negotiations.find((item) => item.id === selected);
+  const futureDeals = data.negotiations.filter(
+    (item) =>
+      ACTIVE_TRANSFER_STAGES.includes(item.stage) &&
+      !!(JSON.parse(item.data) as NegotiationData).futureArrivalDate,
+  );
   const displayed =
-    tab === "history"
-      ? data.negotiations.filter((item) => !activeStages.includes(item.stage))
-      : active;
+    tab === "future"
+      ? futureDeals
+      : tab === "history"
+        ? data.negotiations.filter((item) => !activeStages.includes(item.stage))
+        : active;
   return (
     <div className="page">
       <PageHeading
@@ -637,22 +1702,37 @@ export default function Transfers() {
               count: data.targets.length,
             },
             { id: "history", label: "Deal history" },
+            {
+              id: "future",
+              label: "Future arrivals",
+              count: futureDeals.length,
+            },
+            {
+              id: "clauses",
+              label: "Clauses & payments",
+              count: data.buyBackClauses.length + data.sellOnClauses.length,
+            },
             { id: "market", label: "World market" },
           ]}
           value={tab}
           onChange={setTab}
         />
-        {(tab === "active" || tab === "history") &&
+        {(tab === "active" || tab === "history" || tab === "future") &&
           (displayed.length ? (
             <div className="padded">
               <div className="cards-list">
                 {displayed.map((negotiation) => {
-                  const stageIndex = [
-                    "Club talks",
-                    "Agent talks",
-                    "Medical",
-                    "Completed",
-                  ].indexOf(negotiation.stage);
+                  const details = JSON.parse(
+                    negotiation.data,
+                  ) as NegotiationData;
+                  const stages = details.futureArrivalDate
+                    ? [
+                        ...TRANSFER_STAGES.slice(0, 4),
+                        "Scheduled",
+                        ...TRANSFER_STAGES.slice(4),
+                      ]
+                    : TRANSFER_STAGES;
+                  const stageIndex = stages.indexOf(negotiation.stage);
                   return (
                     <article className="entity-card" key={negotiation.id}>
                       <div className="entity-card-top">
@@ -670,16 +1750,22 @@ export default function Transfers() {
                         </Badge>
                         <Rating value={negotiation.ability ?? 0} />
                       </div>
-                      <h3>{negotiation.player_name}</h3>
+                      <h3>
+                        <PlayerLink
+                          id={negotiation.player_id}
+                          name={negotiation.player_name ?? "Player"}
+                        />
+                      </h3>
                       <p>
                         {negotiation.position} / {negotiation.age} yrs /{" "}
                         {negotiation.type}
                       </p>
                       <div className="negotiation-progress">
-                        {[0, 1, 2, 3].map((step) => (
+                        {stages.map((name, step) => (
                           <span
                             className={step <= stageIndex ? "done" : ""}
-                            key={step}
+                            key={name}
+                            title={name}
                           />
                         ))}
                       </div>
@@ -687,13 +1773,35 @@ export default function Transfers() {
                         items={[
                           [
                             "Club",
-                            negotiation.buying_club_id === bootstrap.club.id
-                              ? (negotiation.seller_name ?? "Free agent")
-                              : negotiation.buyer_name,
+                            <ClubLink
+                              key="deal-club"
+                              id={
+                                negotiation.buying_club_id === bootstrap.club.id
+                                  ? negotiation.selling_club_id
+                                  : negotiation.buying_club_id
+                              }
+                              name={
+                                negotiation.buying_club_id === bootstrap.club.id
+                                  ? (negotiation.seller_name ?? "Free agent")
+                                  : (negotiation.buyer_name ?? "Club")
+                              }
+                            />,
                           ],
                           ["Asking price", money(negotiation.asking_price)],
                           ["Your offer", money(negotiation.offer)],
                           ["Interest", `${Math.round(negotiation.interest)}%`],
+                          ...(details.futureArrivalDate
+                            ? ([
+                                [
+                                  "Arrival",
+                                  dateLabel(details.futureArrivalDate),
+                                ],
+                                [
+                                  "Reserved allocation",
+                                  money(details.reservedBudget ?? 0),
+                                ],
+                              ] as [string, string][])
+                            : []),
                         ]}
                       />
                       <div className="tension-bar">
@@ -708,7 +1816,21 @@ export default function Transfers() {
                         <Button
                           icon={MessageSquare}
                           variant="secondary"
-                          onClick={() => setSelected(negotiation.id)}
+                          onClick={() => {
+                            if (!activeStages.includes(negotiation.stage))
+                              setSelected(negotiation.id);
+                            else if (
+                              [
+                                "Agent talks",
+                                "Contract review",
+                                "Scheduled",
+                                "Medical",
+                                "Registration",
+                              ].includes(negotiation.stage)
+                            )
+                              openContract(negotiation.player_id);
+                            else openOffer(negotiation.player_id);
+                          }}
                         >
                           {activeStages.includes(negotiation.stage)
                             ? "Open negotiations"
@@ -743,6 +1865,141 @@ export default function Transfers() {
               </Button>
             </Empty>
           ))}
+        {tab === "clauses" && (
+          <>
+            <SectionHeading title="Outstanding transfer payments" />
+            <TransferPaymentTable
+              payments={data.payments}
+              clubId={bootstrap.club.id}
+            />
+            <SectionHeading title="Buy-back clauses" />
+            {data.buyBackClauses.length ? (
+              <div className="table-scroll">
+                <table className="data-table">
+                  <thead>
+                    <tr>
+                      <th>Player</th>
+                      <th>Current owner</th>
+                      <th>Right held by</th>
+                      <th>Fixed fee</th>
+                      <th>Expires</th>
+                      <th>Action</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data.buyBackClauses.map((clause) => (
+                      <tr key={clause.id}>
+                        <td>
+                          <PlayerLink
+                            id={clause.player_id}
+                            name={clause.player_name ?? "Player"}
+                          />
+                        </td>
+                        <td>
+                          <ClubLink
+                            id={clause.owner_id}
+                            name={clause.owner_name ?? "Club"}
+                          />
+                        </td>
+                        <td>
+                          <ClubLink
+                            id={clause.beneficiary_id}
+                            name={clause.beneficiary_name ?? "Club"}
+                          />
+                        </td>
+                        <td>{money(clause.fee)}</td>
+                        <td>{dateLabel(clause.expires)}</td>
+                        <td>
+                          {clause.beneficiary_id === bootstrap.club.id ? (
+                            <Button
+                              icon={ArrowLeftRight}
+                              variant="secondary"
+                              disabled={!transferWindow(bootstrap.state.date)}
+                              onClick={() =>
+                                confirm(
+                                  "Exercise buy-back clause?",
+                                  `Open personal talks at the fixed fee of ${money(clause.fee)}. No payment is made until registration.`,
+                                  () => {
+                                    void act({
+                                      type: "buy-back",
+                                      id: clause.id,
+                                    }).then((result) => {
+                                      if (result?.id) {
+                                        openContract(clause.player_id);
+                                      }
+                                    });
+                                  },
+                                )
+                              }
+                            >
+                              Exercise buy-back
+                            </Button>
+                          ) : (
+                            <Badge>Other club's right</Badge>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <Empty icon={FileSignature} title="No active buy-back clauses" />
+            )}
+            <SectionHeading title="Sell-on clauses" />
+            {data.sellOnClauses.length ? (
+              <div className="table-scroll">
+                <table className="data-table">
+                  <thead>
+                    <tr>
+                      <th>Player</th>
+                      <th>Club owing</th>
+                      <th>Beneficiary</th>
+                      <th>Next sale</th>
+                      <th>Paid</th>
+                      <th>Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data.sellOnClauses.map((clause) => (
+                      <tr key={clause.id}>
+                        <td>
+                          <PlayerLink
+                            id={clause.player_id}
+                            name={clause.player_name}
+                          />
+                        </td>
+                        <td>
+                          <ClubLink
+                            id={clause.owner_id}
+                            name={clause.owner_name}
+                          />
+                        </td>
+                        <td>
+                          <ClubLink
+                            id={clause.beneficiary_id}
+                            name={clause.beneficiary_name}
+                          />
+                        </td>
+                        <td>{clause.percentage}%</td>
+                        <td>{money(clause.paid)}</td>
+                        <td>
+                          <Badge>
+                            {clause.status === "triggered"
+                              ? "Awaiting payments"
+                              : "Active"}
+                          </Badge>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <Empty icon={FileSignature} title="No active sell-on clauses" />
+            )}
+          </>
+        )}
         {tab === "targets" && (
           <>
             <SectionHeading title="Your recruitment shortlist">
@@ -755,20 +2012,9 @@ export default function Transfers() {
                 <Button
                   icon={MessageSquare}
                   variant="secondary"
-                  onClick={() =>
-                    void act({
-                      type: "enquiry",
-                      playerId: player.id,
-                      dealType: "Permanent transfer",
-                    }).then((result) => {
-                      if (result?.id) {
-                        setSelected(Number(result.id));
-                        setTab("active");
-                      }
-                    })
-                  }
+                  onClick={() => openOffer(player.id)}
                 >
-                  Enquire
+                  Make an offer
                 </Button>
               )}
             </PlayerTable>
@@ -792,9 +2038,16 @@ export default function Transfers() {
                     return (
                       <tr key={event.id}>
                         <td>
-                          <strong>{move.name}</strong>
+                          <strong>
+                            <PlayerLink
+                              id={event.entity_id ?? move.playerId}
+                              name={move.name}
+                            />
+                          </strong>
                         </td>
-                        <td>{move.club}</td>
+                        <td>
+                          <ClubLink id={move.to} name={move.club} />
+                        </td>
                         <td className="money">{money(move.fee)}</td>
                         <td>{dateLabel(event.date)}</td>
                       </tr>

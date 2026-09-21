@@ -1,8 +1,24 @@
 import { countries as countryData } from "countries-list";
 import seedrandom from "seedrandom";
 import { Store } from "./db.ts";
+import { ensureClubSupport } from "./club-support.ts";
+import {
+  clubIdentity,
+  culturalPersonName,
+  playerBackground,
+} from "./world-names.ts";
+import {
+  domesticPyramid,
+  footballConfederation,
+  reservePolicy,
+  reserveTeamName,
+  SQUAD_MINIMUMS,
+  WORLD_VERSION,
+  youthGroups,
+} from "../shared/world-rules.ts";
 import {
   ATTRIBUTE_GROUPS,
+  ASSISTANT_ROLE,
   DEFAULT_SETTINGS,
   PERSONALITY_KEYS,
   STAFF_ROLES,
@@ -25,6 +41,8 @@ export interface WorldOptions {
   youth?: number;
   countryLimit?: number;
   seed?: string;
+  expanded?: boolean;
+  structureOnly?: boolean;
 }
 const excluded = new Set([
   "AQ",
@@ -699,18 +717,7 @@ export function countryDefinitions(limit?: number): Omit<Country, "id">[] {
       code,
       name: country.name,
       continent: country.continent,
-      confederation:
-        country.continent === "EU"
-          ? "UEFA"
-          : country.continent === "SA"
-            ? "CONMEBOL"
-            : country.continent === "AF"
-              ? "CAF"
-              : country.continent === "NA"
-                ? "CONCACAF"
-                : country.continent === "OC" && code !== "AU"
-                  ? "OFC"
-                  : "AFC",
+      confederation: footballConfederation(code, country.continent),
       reputation:
         reputations[code] ??
         24 + ((code.charCodeAt(0) + code.charCodeAt(1)) % 30),
@@ -868,14 +875,24 @@ export function makeProfile(
   };
 }
 
-export function personName(random: seedrandom.PRNG, language: string) {
+export function personName(
+  random: seedrandom.PRNG,
+  language: string | Country,
+) {
+  if (typeof language !== "string") return culturalPersonName(random, language);
   const pool = names[language] ?? names.en;
   return `${pool[0][Math.floor(random() * pool[0].length)]} ${pool[1][Math.floor(random() * pool[1].length)]}`;
 }
 
-export function generateWorld(store: Store, options: WorldOptions = {}) {
-  if (store.get("SELECT key FROM meta WHERE key = ?", "state")) return;
+export async function generateWorld(store: Store, options: WorldOptions = {}) {
+  if (await store.get("SELECT [key] FROM meta WHERE [key] = ?", "state"))
+    return;
   const seed = options.seed ?? "touchline-2026";
+  const expanded =
+    options.expanded ??
+    (options.seniors === undefined && options.youth === undefined);
+  let seniorCount = options.seniors ?? WORLD_COUNTS.seniors;
+  let youthCount = options.youth ?? WORLD_COUNTS.youth;
   const random = seedrandom(seed);
   const integer = (min: number, max: number) =>
     Math.floor(random() * (max - min + 1)) + min;
@@ -884,37 +901,80 @@ export function generateWorld(store: Store, options: WorldOptions = {}) {
   const countryRows: Country[] = [];
   const clubRows: Club[] = [];
   const academyClubs: Club[] = [];
-  const addClub = store.db.prepare(
-    `INSERT INTO clubs (name, short_name, city, country_id, league_id, type, parent_id, age_group, color, reputation, academy, facilities, balance, transfer_budget, wage_budget, philosophy, culture, formation, tactical_style, chemistry, manager, manager_trust, board_confidence, board_pressure, fan_mood, fan_loyalty, fan_patience, expectations, stadium, capacity, data) VALUES (${Array(31).fill("?").join(",")})`,
-  );
-  const addLeague = store.db.prepare(
-    "INSERT INTO leagues(name, country_id, confederation, tier, age_group, kind, reputation, format, data) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-  );
-  const addStanding = store.db.prepare(
-    "INSERT INTO standings(league_id, club_id) VALUES (?, ?)",
-  );
-  const addStaff = store.db.prepare(
-    "INSERT INTO staff(club_id, name, role, ability, influence, communication, tactical_knowledge, personality, ambition, morale, wage, data) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-  );
-  store.transaction(() => {
+  type Row = Record<string, string | number | null>;
+  const rows = {
+    countries: [] as Row[],
+    leagues: [] as Row[],
+    clubs: [] as Row[],
+    standings: [] as Row[],
+    staff: [] as Row[],
+    relationships: [] as Row[],
+    training_plans: [] as Row[],
+    set_pieces: [] as Row[],
+  };
+  const addClub = (...values: (string | number | null)[]) => {
+    const row: Row = {
+      id: rows.clubs.length + 1,
+      ...Object.fromEntries(
+        "name short_name city country_id league_id type parent_id age_group color reputation academy facilities balance transfer_budget wage_budget philosophy culture formation tactical_style chemistry manager manager_trust board_confidence board_pressure fan_mood fan_loyalty fan_patience expectations stadium capacity data"
+          .split(" ")
+          .map((column, index) => [column, values[index]]),
+      ),
+      momentum: 0,
+      crisis: 0,
+      hype: 0,
+      income: 0,
+      spending: 0,
+      season_spend: 0,
+      ffp: 0,
+    };
+    rows.clubs.push(row);
+    return { ...row } as unknown as Club;
+  };
+  const addLeague = (...values: (string | number | null)[]) => {
+    const id = rows.leagues.length + 1;
+    rows.leagues.push({
+      id,
+      ...Object.fromEntries(
+        "name country_id confederation tier age_group kind reputation format data"
+          .split(" ")
+          .map((column, index) => [column, values[index]]),
+      ),
+    });
+    return id;
+  };
+  const addStanding = (leagueId: number, clubId: number) =>
+    rows.standings.push({ league_id: leagueId, club_id: clubId });
+  const addStaff = (...values: (string | number | null)[]) => {
+    const id = rows.staff.length + 1;
+    rows.staff.push({
+      id,
+      ...Object.fromEntries(
+        "club_id name role ability influence communication tactical_knowledge personality ambition morale wage data"
+          .split(" ")
+          .map((column, index) => [column, values[index]]),
+      ),
+    });
+    return id;
+  };
+  const insertRows = async (table: keyof typeof rows) => {
+    for (let offset = 0; offset < rows[table].length; offset += 1000)
+      await store.bulkInsert(table, rows[table].slice(offset, offset + 1000));
+  };
+  await store.transaction(async () => {
     for (const definition of countryDefinitions(options.countryLimit)) {
-      const result = store.run(
-        "INSERT INTO countries(code, name, continent, confederation, reputation, language, region) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        definition.code,
-        definition.name,
-        definition.continent,
-        definition.confederation,
-        definition.reputation,
-        definition.language,
-        definition.region,
-      );
       const country: Country = {
         ...definition,
-        id: Number(result.lastInsertRowid),
+        id: countryRows.length + 1,
       };
       countryRows.push(country);
+      rows.countries.push({ ...country });
       const localClubs: Club[] = [];
-      for (const tier of [1, 2, 3]) {
+      let countryClubIndex = 0;
+      const pyramid = expanded ? domesticPyramid(country) : undefined;
+      for (const tier of pyramid?.map((division) => division.tier) ?? [
+        1, 2, 3,
+      ]) {
         const title =
           tier === 1
             ? country.code === "EN"
@@ -923,10 +983,13 @@ export function generateWorld(store: Store, options: WorldOptions = {}) {
             : tier === 2
               ? "Championship"
               : "National League";
-        const reputation = clamp(country.reputation - (tier - 1) * 17);
+        const division = pyramid?.find((entry) => entry.tier === tier);
+        const reputation = clamp(
+          country.reputation - (tier - 1) * (expanded ? 10 : 17),
+        );
         const leagueId = Number(
-          addLeague.run(
-            `${country.name} ${title}`,
+          addLeague(
+            division?.name ?? `${country.name} ${title}`,
             country.id,
             country.confederation,
             tier,
@@ -935,8 +998,9 @@ export function generateWorld(store: Store, options: WorldOptions = {}) {
             reputation,
             "Double round-robin",
             JSON.stringify({
-              promotion: tier > 1 ? 2 : 0,
-              relegation: tier < 3 ? 2 : 0,
+              promotion: division?.promotion ?? (tier > 1 ? 2 : 0),
+              relegation: division?.relegation ?? (tier < 3 ? 2 : 0),
+              worldVersion: expanded ? WORLD_VERSION : 1,
               continental: tier === 1 ? 4 : 0,
               tiebreakers: [
                 "points",
@@ -945,17 +1009,18 @@ export function generateWorld(store: Store, options: WorldOptions = {}) {
                 "head-to-head",
               ],
             }),
-          ).lastInsertRowid,
+          ),
         );
         const count =
-          country.code === "EN" && tier <= 2
+          division?.clubs ??
+          (country.code === "EN" && tier <= 2
             ? 20
             : cityLists[country.code] && tier <= 2
               ? 16
-              : 8;
+              : 8);
         for (let index = 0; index < count; index++) {
           const cities = cityLists[country.code];
-          const city = cities
+          const legacyCity = cities
             ? cities[index % cities.length]
             : `${country.region}${index > 0 ? ` ${["North", "South", "East", "West", "Central", "Coastal", "Valley"][index - 1] ?? index}` : ""}`;
           const suffix =
@@ -970,11 +1035,14 @@ export function generateWorld(store: Store, options: WorldOptions = {}) {
                 : tier === 2
                   ? "SC"
                   : "Olympic";
-          const name = `${city} ${suffix}`;
+          const identity = expanded
+            ? clubIdentity(country, countryClubIndex++, cities)
+            : { city: legacyCity, name: `${legacyCity} ${suffix}` };
+          const { city, name } = identity;
           const rep = clamp(reputation - index * (16 / count) + integer(-5, 3));
           const balance = Math.round((rep / 100) ** 5 * 190_000_000);
           const youth = integer(30, 90);
-          const clubResult = addClub.run(
+          const club = addClub(
             name,
             city.slice(0, 3).toUpperCase(),
             city,
@@ -1000,7 +1068,7 @@ export function generateWorld(store: Store, options: WorldOptions = {}) {
             pick(["4-3-3", "4-2-3-1", "3-5-2", "4-4-2"]),
             pick(styles),
             integer(55, 85),
-            personName(random, country.language),
+            personName(random, expanded ? country : country.language),
             72,
             72,
             28,
@@ -1034,23 +1102,27 @@ export function generateWorld(store: Store, options: WorldOptions = {}) {
               financialHistory: [],
               managerCareer: [{ season: 2026, club: name }],
               relationship: 50,
+              ...(expanded
+                ? {
+                    worldKey: `${country.code}:club:${countryClubIndex - 1}`,
+                    worldVersion: WORLD_VERSION,
+                  }
+                : {}),
             }),
           );
-          const club = store.get<Club>(
-            "SELECT * FROM clubs WHERE id = ?",
-            Number(clubResult.lastInsertRowid),
-          )!;
-          addStanding.run(leagueId, club.id);
+          addStanding(leagueId, club.id);
           clubRows.push(club);
           localClubs.push(club);
           const staffIds: number[] = [];
-          for (const role of STAFF_ROLES) {
+          for (const role of STAFF_ROLES.filter(
+            (role) => role !== ASSISTANT_ROLE,
+          )) {
             const staffAbility = clamp(rep + integer(-20, 12));
             staffIds.push(
               Number(
-                addStaff.run(
+                addStaff(
                   club.id,
-                  personName(random, country.language),
+                  personName(random, expanded ? country : country.language),
                   role,
                   staffAbility,
                   integer(30, 90),
@@ -1081,58 +1153,87 @@ export function generateWorld(store: Store, options: WorldOptions = {}) {
                     development: 0,
                     contractEnd: "2029-06-30",
                   }),
-                ).lastInsertRowid,
+                ),
               ),
             );
           }
-          store.run(
-            "INSERT INTO relationships(club_id, source_type, source_id, target_type, target_id, strength, kind) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            club.id,
-            "staff",
-            staffIds[0],
-            "staff",
-            staffIds[1],
-            integer(-40, 75),
-            pick(["Alliance", "Professional", "Rivalry"]),
-          );
-          store.run("INSERT INTO training_plans(club_id) VALUES (?)", club.id);
-          store.run("INSERT INTO set_pieces(club_id) VALUES (?)", club.id);
+          rows.relationships.push({
+            club_id: club.id,
+            source_type: "staff",
+            source_id: staffIds[0],
+            target_type: "staff",
+            target_id: staffIds[1],
+            strength: integer(-40, 75),
+            kind: pick(["Alliance", "Professional", "Rivalry"]),
+          });
+          rows.training_plans.push({ club_id: club.id });
+          rows.set_pieces.push({ club_id: club.id });
         }
       }
       const academyCount = cityLists[country.code] ? 8 : 6;
-      const localAcademies = localClubs.slice(0, academyCount);
+      const localAcademies = expanded
+        ? localClubs
+        : localClubs.slice(0, academyCount);
       academyClubs.push(...localAcademies);
-      for (const ageGroup of ["U19", "U17"] as AgeGroup[]) {
-        const leagueId = Number(
-          addLeague.run(
-            `${country.name} ${ageGroup} League`,
-            country.id,
-            country.confederation,
-            0,
-            ageGroup,
-            "league",
-            country.reputation * 0.7,
-            "Double round-robin",
-            JSON.stringify({
-              youth: true,
-              continental: 2,
-              promotion: 0,
-              relegation: 0,
-            }),
-          ).lastInsertRowid,
-        );
-        for (const club of localAcademies) addStanding.run(leagueId, club.id);
-      }
-      if (["ES", "PT", "DE", "NL"].includes(country.code)) {
-        for (const parent of localClubs.slice(0, 2)) {
-          const thirdTier =
-            localClubs.find(
-              (club) =>
-                club.league_id !== localClubs[0].league_id &&
-                club.league_id !== localClubs[16]?.league_id,
-            )?.league_id ?? localClubs.at(-1)!.league_id;
-          const result = addClub.run(
-            `${parent.name} B`,
+      const reserves = reservePolicy(country.code);
+      if (
+        expanded
+          ? reserves.mode !== "unverified"
+          : ["ES", "PT", "DE", "NL"].includes(country.code)
+      ) {
+        const reserveParents = expanded
+          ? [...localClubs]
+              .filter((club) => club.league_id === localClubs[0].league_id)
+              .sort((left, right) => right.reputation - left.reputation)
+              .slice(0, 4)
+          : localClubs.slice(0, 2);
+        const separateLeague =
+          expanded && reserves.mode === "separate"
+            ? Number(
+                addLeague(
+                  `${country.name} Development League`,
+                  country.id,
+                  country.confederation,
+                  reserves.entryTier ?? 0,
+                  "Senior",
+                  "league",
+                  country.reputation * 0.6,
+                  "Double round-robin",
+                  JSON.stringify({
+                    reserveOnly: true,
+                    promotion: 0,
+                    relegation: 0,
+                    worldVersion: WORLD_VERSION,
+                    reservePolicy: reserves,
+                  }),
+                ),
+              )
+            : undefined;
+        for (const [reserveIndex, parent] of reserveParents.entries()) {
+          const thirdTier = expanded
+            ? (separateLeague ??
+              Number(
+                rows.leagues.find(
+                  (league) =>
+                    league.country_id === country.id &&
+                    league.kind === "league" &&
+                    league.age_group === "Senior" &&
+                    league.tier ===
+                      (reserves.entryTier ?? 3) +
+                        (country.code === "NL"
+                          ? 0
+                          : Math.floor(reserveIndex / 2)),
+                )!.id,
+              ))
+            : (localClubs.find(
+                (club) =>
+                  club.league_id !== localClubs[0].league_id &&
+                  club.league_id !== localClubs[16]?.league_id,
+              )?.league_id ?? localClubs.at(-1)!.league_id);
+          const club = addClub(
+            expanded
+              ? reserveTeamName(parent.name, country.code)
+              : `${parent.name} B`,
             `${parent.short_name}B`,
             parent.city,
             country.id,
@@ -1152,7 +1253,7 @@ export function generateWorld(store: Store, options: WorldOptions = {}) {
             parent.formation,
             parent.tactical_style,
             65,
-            personName(random, country.language),
+            personName(random, expanded ? country : country.language),
             65,
             70,
             20,
@@ -1165,18 +1266,54 @@ export function generateWorld(store: Store, options: WorldOptions = {}) {
             JSON.stringify({
               noSameDivision: true,
               youthDNA: "Pathway to first team",
+              ...(expanded
+                ? {
+                    reservePolicy: reserves,
+                    worldVersion: WORLD_VERSION,
+                    worldKey: `${JSON.parse(parent.data).worldKey}:reserves`,
+                  }
+                : {}),
             }),
           );
-          const club = store.get<Club>(
-            "SELECT * FROM clubs WHERE id = ?",
-            Number(result.lastInsertRowid),
-          )!;
-          addStanding.run(thirdTier, club.id);
+          addStanding(thirdTier!, club.id);
           clubRows.push(club);
+          if (expanded) {
+            academyClubs.push(club);
+            localAcademies.push(club);
+            rows.training_plans.push({ club_id: club.id });
+            rows.set_pieces.push({ club_id: club.id });
+          }
+        }
+      }
+      for (const ageGroup of ["U19", "U17"] as AgeGroup[]) {
+        const groups = expanded
+          ? youthGroups(localAcademies)
+          : [localAcademies];
+        for (const [groupIndex, members] of groups.entries()) {
+          const leagueId = Number(
+            addLeague(
+              `${country.name} ${ageGroup} League${groups.length > 1 ? ` - Group ${groupIndex + 1}` : ""}`,
+              country.id,
+              country.confederation,
+              0,
+              ageGroup,
+              "league",
+              country.reputation * 0.7,
+              "Double round-robin",
+              JSON.stringify({
+                youth: true,
+                continental: 2,
+                promotion: 0,
+                relegation: 0,
+                worldVersion: expanded ? WORLD_VERSION : 1,
+              }),
+            ),
+          );
+          for (const club of members) addStanding(leagueId, club.id);
         }
       }
       for (const ageGroup of ["Senior", "U17", "U19", "U20"] as AgeGroup[]) {
-        addClub.run(
+        addClub(
           `${country.name}${ageGroup === "Senior" ? "" : ` ${ageGroup}`}`,
           country.code,
           country.region,
@@ -1197,7 +1334,7 @@ export function generateWorld(store: Store, options: WorldOptions = {}) {
           "4-3-3",
           "Balanced",
           65,
-          personName(random, country.language),
+          personName(random, expanded ? country : country.language),
           75,
           75,
           35,
@@ -1211,30 +1348,66 @@ export function generateWorld(store: Store, options: WorldOptions = {}) {
         );
       }
     }
-    store.run(
-      "UPDATE clubs SET reputation = 78, balance = 82500000, transfer_budget = 48500000, wage_budget = 1650000, academy = 84, facilities = 81, manager = 'Julian Mercer', philosophy = 'Sustainable growth', culture = 'Development', formation = '4-3-3', tactical_style = 'High press', board_confidence = 72, fan_mood = 76, expectations = 6 WHERE id = 1",
-    );
-    clubRows[0] = store.get<Club>("SELECT * FROM clubs WHERE id = 1")!;
-    generatePlayers(store, {
-      count: options.seniors ?? WORLD_COUNTS.seniors,
-      youth: false,
-      random,
-      countries: countryRows,
-      clubs: clubRows,
-      startDate: START_DATE,
+    Object.assign(rows.clubs[0], {
+      reputation: 78,
+      balance: 82500000,
+      transfer_budget: 48500000,
+      wage_budget: 1650000,
+      academy: 84,
+      facilities: 81,
+      manager: "Julian Mercer",
+      philosophy: "Sustainable growth",
+      culture: "Development",
+      formation: "4-3-3",
+      tactical_style: "High press",
+      board_confidence: 72,
+      fan_mood: 76,
+      expectations: 6,
     });
-    generatePlayers(store, {
-      count: options.youth ?? WORLD_COUNTS.youth,
-      youth: true,
-      random,
-      countries: countryRows,
-      clubs: academyClubs,
-      startDate: START_DATE,
-    });
+    clubRows[0] = { ...rows.clubs[0] } as unknown as Club;
+    for (const table of [
+      "countries",
+      "leagues",
+      "clubs",
+      "standings",
+      "training_plans",
+      "set_pieces",
+    ] as const)
+      await insertRows(table);
+    if (expanded) {
+      seniorCount = Math.max(
+        seniorCount,
+        clubRows.length * SQUAD_MINIMUMS.Senior,
+      );
+      youthCount = Math.max(
+        youthCount,
+        academyClubs.length * (SQUAD_MINIMUMS.U19 + SQUAD_MINIMUMS.U17),
+      );
+    }
+    if (!options.structureOnly)
+      await generatePlayers(store, {
+        count: seniorCount,
+        youth: false,
+        random,
+        countries: countryRows,
+        clubs: clubRows,
+        startDate: START_DATE,
+        modernNames: expanded,
+      });
+    if (!options.structureOnly)
+      await generatePlayers(store, {
+        count: youthCount,
+        youth: true,
+        random,
+        countries: countryRows,
+        clubs: academyClubs,
+        startDate: START_DATE,
+        modernNames: expanded,
+      });
     for (let index = 0; index < 120; index++) {
       const role = STAFF_ROLES[index % STAFF_ROLES.length];
       const ability = integer(45, 95);
-      addStaff.run(
+      addStaff(
         null,
         personName(random, "en"),
         role,
@@ -1280,39 +1453,44 @@ export function generateWorld(store: Store, options: WorldOptions = {}) {
       lastAutosave: START_DATE,
       gameOver: false,
     };
-    store.setMeta("state", state);
-    store.setMeta("settings", DEFAULT_SETTINGS);
-    store.setMeta("schemaVersion", 1);
-    store.setMeta("world", {
+    await insertRows("staff");
+    await insertRows("relationships");
+    await store.setMeta("state", state);
+    await store.setMeta("settings", DEFAULT_SETTINGS);
+    await store.setMeta("schemaVersion", 1);
+    await store.setMeta("world", {
       seed,
       generated: START_DATE,
       countries: countryRows.length,
       clubs: clubRows.length,
-      seniors: options.seniors ?? WORLD_COUNTS.seniors,
-      youth: options.youth ?? WORLD_COUNTS.youth,
+      seniors: options.structureOnly ? 0 : seniorCount,
+      youth: options.structureOnly ? 0 : youthCount,
+      expanded,
+      version: expanded ? WORLD_VERSION : 1,
     });
   });
+  await ensureClubSupport(store);
 }
 
-export function generatePlayers(
-  store: Store,
-  options: {
-    count: number;
-    youth: boolean;
-    random: seedrandom.PRNG;
-    countries: Country[];
-    clubs: Club[];
-    startDate: string;
-    regenStyle?: string;
-  },
-) {
+interface PlayerGenerationOptions {
+  count: number;
+  youth: boolean;
+  random: seedrandom.PRNG;
+  countries: Country[];
+  clubs: Club[];
+  startDate: string;
+  regenStyle?: string;
+  modernNames?: boolean;
+  ageGroup?: "U17" | "U19";
+  positions?: Position[];
+  amateurOnly?: boolean;
+}
+
+function* playerRows(options: PlayerGenerationOptions) {
   const { random, countries, clubs } = options;
   const countryMap = new Map(countries.map((country) => [country.id, country]));
   const integer = (min: number, max: number) =>
     Math.floor(random() * (max - min + 1)) + min;
-  const statement = store.db.prepare(
-    `INSERT INTO players(name, nationality, country_id, club_id, position, secondary_position, birth_date, age, age_group, foot, ability, base_potential, potential, volatility, value, wage, contract_end, morale, fitness, form, role, profile, knowledge, available_loan) VALUES (${Array(24).fill("?").join(",")})`,
-  );
   for (let index = 0; index < options.count; index++) {
     const club = clubs[index % clubs.length];
     const ownCountry = countryMap.get(club.country_id)!;
@@ -1329,17 +1507,18 @@ export function generatePlayers(
         ? countries[integer(0, Math.min(45, countries.length - 1))]
         : ownCountry;
     const serial = Math.floor(index / clubs.length);
-    const youthBand = serial % 2 === 0 ? "U17" : "U19";
+    const youthBand = options.ageGroup ?? (serial % 2 === 0 ? "U17" : "U19");
     const birthYear =
       Number(options.startDate.slice(0, 4)) -
       (options.youth
         ? youthBand === "U17"
           ? integer(14, 16)
           : integer(17, 18)
-        : integer(19, 34));
+        : integer(19, options.modernNames && club.type === "bteam" ? 22 : 34));
     const birthDate = `${birthYear}-${String(integer(1, 6)).padStart(2, "0")}-${String(integer(1, 28)).padStart(2, "0")}`;
     const age = Number(options.startDate.slice(0, 4)) - birthYear;
     const position =
+      options.positions?.[index] ??
       rosterPositions[
         (options.youth ? Math.floor(serial / 2) : serial) %
           rosterPositions.length
@@ -1363,13 +1542,27 @@ export function generatePlayers(
       ),
     );
     const profile = makeProfile(random, country, club, ability, position, age);
+    if (options.modernNames)
+      profile.identity = {
+        ...profile.identity,
+        ...playerBackground(
+          seedrandom(`background:${club.id}:${index}:${options.startDate}`),
+          country,
+          countries,
+        ),
+      };
     if (country.id !== ownCountry.id) {
       const percentage = integer(55, 90);
-      profile.identity.heritage = [
-        { country: country.name, percentage },
-        { country: ownCountry.name, percentage: 100 - percentage },
-      ];
-      if (country.language !== ownCountry.language)
+      if (!options.modernNames)
+        profile.identity.heritage = [
+          { country: country.name, percentage },
+          { country: ownCountry.name, percentage: 100 - percentage },
+        ];
+      if (
+        !profile.identity.languages.some(
+          (entry) => entry.language === ownCountry.language,
+        )
+      )
         profile.identity.languages.push({
           language: ownCountry.language,
           fluency: integer(1, 4),
@@ -1380,13 +1573,42 @@ export function generatePlayers(
       ability,
       potential,
     };
-    const wage =
-      Math.round(
-        ((ability / 100) ** 7 * 190_000 * (options.youth ? 0.08 : 1)) / 10,
-      ) *
-        10 +
-      50;
+    const wage = options.amateurOnly
+      ? Math.round(10 + club.academy * 0.35)
+      : Math.round(
+          ((ability / 100) ** 7 * 190_000 * (options.youth ? 0.08 : 1)) / 10,
+        ) *
+          10 +
+        50;
     const contractEnd = `${Number(options.startDate.slice(0, 4)) + (options.youth ? Math.min(3, integer(1, 3)) : integer(1, 5))}-06-30`;
+    const contractRandom = seedrandom(
+      `contract:${club.id}:${index}:${options.startDate}`,
+    );
+    const amateur =
+      options.youth &&
+      (options.amateurOnly || age < 16 || contractRandom() < 0.45);
+    profile.contract = {
+      status: amateur ? "amateur" : "professional",
+      trainingClubId: club.id,
+      trainingStartAge: 12,
+      ...(amateur
+        ? {
+            expenseAllowance: wage,
+            futureProfessionalContract: age >= 16 && contractRandom() < 0.15,
+          }
+        : {}),
+    };
+    if (options.youth && contractRandom() < 0.035) {
+      const destination =
+        countries[Math.floor(contractRandom() * countries.length)];
+      if (destination.id !== ownCountry.id)
+        profile.familyMove = {
+          countryId: destination.id,
+          reason: "employment",
+          verified: true,
+          date: options.startDate,
+        };
+    }
     const form = Math.round((6.2 + random() * 1.3) * 10) / 10;
     const value = valuation(
       {
@@ -1408,35 +1630,134 @@ export function generatePlayers(
         hype: 0,
       },
     ).value;
-    statement.run(
-      personName(random, country.language),
-      country.name,
-      country.id,
-      club.id,
+    yield {
+      name: personName(
+        random,
+        options.modernNames
+          ? countryMap.get(profile.identity.nameOriginCountryId ?? country.id)!
+          : country.language,
+      ),
+      nationality: country.name,
+      country_id: country.id,
+      club_id: club.id,
       position,
-      position === "GK" ? "GK" : rosterPositions[integer(1, 10)],
-      birthDate,
+      secondary_position:
+        position === "GK" ? "GK" : rosterPositions[integer(1, 10)],
+      birth_date: birthDate,
       age,
-      options.youth ? youthBand : "Senior",
-      random() > 0.25 ? "Right" : random() > 0.15 ? "Left" : "Both",
+      age_group: options.youth ? youthBand : "Senior",
+      foot: random() > 0.25 ? "Right" : random() > 0.15 ? "Left" : "Both",
       ability,
+      base_potential: potential,
       potential,
-      potential,
-      options.youth ? integer(5, 20) : integer(0, 12),
+      volatility: options.youth ? integer(5, 20) : integer(0, 12),
       value,
       wage,
-      contractEnd,
-      integer(60, 87),
-      integer(86, 99),
+      contract_end: contractEnd,
+      morale: integer(60, 87),
+      fitness: integer(86, 99),
       form,
-      options.youth
+      role: options.youth
         ? "Prospect"
         : serial < 11
           ? "Regular starter"
           : "Squad player",
-      JSON.stringify(profile),
-      club.id === 1 ? 100 : integer(0, 25),
-      !options.youth && age <= 23 && serial >= 11 ? 1 : 0,
-    );
+      profile: JSON.stringify(profile),
+      knowledge: club.id === 1 ? 100 : integer(0, 25),
+      available_loan: !options.youth && age <= 23 && serial >= 11 ? 1 : 0,
+    };
   }
+}
+
+async function insertPlayerRows(
+  store: Store,
+  rows: Iterable<Record<string, string | number>>,
+) {
+  await store.transaction(async () => {
+    let nextId = (await store.get<{ id: number }>(
+      "SELECT coalesce(max(id),0) AS id FROM players WITH (UPDLOCK,HOLDLOCK)",
+    ))!.id;
+    let batch: Record<string, string | number>[] = [];
+    for (const row of rows) {
+      batch.push({ id: ++nextId, ...row });
+      if (batch.length === 1000) {
+        await store.bulkInsert("players", batch);
+        batch = [];
+      }
+    }
+    if (batch.length) await store.bulkInsert("players", batch);
+  });
+}
+
+export async function generatePlayers(
+  store: Store,
+  options: PlayerGenerationOptions,
+) {
+  await insertPlayerRows(store, playerRows(options));
+}
+
+export async function ensureClubRosters(
+  store: Store,
+  options: { clubs?: Club[]; youthOnly?: boolean; date?: string } = {},
+) {
+  const state = await store.meta<GameState>("state");
+  const date = options.date ?? state.date;
+  const clubs =
+    options.clubs ??
+    (await store.all<Club>(
+      "SELECT * FROM clubs WHERE type != 'national' ORDER BY id",
+    ));
+  const countries = await store.all<Country>(
+    "SELECT * FROM countries ORDER BY id",
+  );
+  const counts = new Map<string, Map<Position, number>>();
+  for (const row of await store.all<{
+    club_id: number;
+    age_group: AgeGroup;
+    position: Position;
+    count: number;
+  }>(
+    "SELECT club_id,age_group,position,count(*) AS count FROM players WHERE club_id IS NOT NULL AND role != 'Retired' GROUP BY club_id,age_group,position",
+  )) {
+    const key = `${row.club_id}:${row.age_group}`;
+    const positions = counts.get(key) ?? new Map<Position, number>();
+    positions.set(row.position, row.count);
+    counts.set(key, positions);
+  }
+  let added = 0;
+  function* additions() {
+    for (const club of clubs) {
+      for (const ageGroup of options.youthOnly
+        ? (["U19", "U17"] as const)
+        : (["Senior", "U19", "U17"] as const)) {
+        const present = new Map(counts.get(`${club.id}:${ageGroup}`));
+        const missing: Position[] = [];
+        for (const position of rosterPositions.slice(
+          0,
+          SQUAD_MINIMUMS[ageGroup],
+        )) {
+          const available = present.get(position) ?? 0;
+          if (available > 0) present.set(position, available - 1);
+          else missing.push(position);
+        }
+        if (!missing.length) continue;
+        yield* playerRows({
+          count: missing.length,
+          youth: ageGroup !== "Senior",
+          clubs: [club],
+          countries,
+          random: seedrandom(
+            `${state.seed}:roster:${club.id}:${ageGroup}:${date}:${WORLD_VERSION}`,
+          ),
+          startDate: date,
+          modernNames: true,
+          positions: missing,
+          ...(ageGroup === "Senior" ? {} : { ageGroup, amateurOnly: true }),
+        });
+        added += missing.length;
+      }
+    }
+  }
+  await insertPlayerRows(store, additions());
+  return added;
 }

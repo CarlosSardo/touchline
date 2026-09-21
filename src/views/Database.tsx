@@ -11,7 +11,7 @@ import {
   SlidersHorizontal,
   X,
 } from "lucide-react";
-import { useGame, useResource } from "../game-context.tsx";
+import { useCurrency, useGame, useResource } from "../game-context.tsx";
 import {
   Badge,
   Button,
@@ -26,6 +26,7 @@ import {
 } from "../ui.tsx";
 import {
   ATTRIBUTE_GROUPS,
+  compactNumber,
   label,
   PERSONALITY_KEYS,
   POSITIONS,
@@ -44,6 +45,7 @@ const defaultFilters: Filters = {
   wageMax: "",
   foot: "",
   ageGroup: "",
+  contractStatus: "",
   attribute: "",
   attributeMin: "",
   personality: "",
@@ -64,6 +66,7 @@ const defaultFilters: Filters = {
 
 export default function Database() {
   const { bootstrap, search, setSearch, notify } = useGame();
+  const { currency, displayAmount, accountingAmount } = useCurrency();
   const [filters, setFilters] = useState<Filters>(defaultFilters);
   const [advanced, setAdvanced] = useState(false);
   const [shortlisted, setShortlisted] = useState(false);
@@ -138,7 +141,7 @@ export default function Database() {
       <PageHeading
         eyebrow="GLOBAL INTELLIGENCE"
         title="Player database"
-        subtitle={`${bootstrap?.world.players.toLocaleString() ?? "160,000"} players. Every career has a story.`}
+        subtitle={`${compactNumber(bootstrap?.world.players ?? 160000)} players. Every career has a story.`}
       >
         <Button variant="secondary" icon={Download} onClick={download}>
           Export page
@@ -238,24 +241,46 @@ export default function Database() {
                 onChange={(event) => update("potentialMin", event.target.value)}
               />
             </Field>
-            <Field label="Maximum value (GBP)">
+            <Field label={`Maximum value (${currency})`}>
               <input
                 type="number"
                 min="0"
                 step="1000000"
                 placeholder="No limit"
-                value={filters.valueMax}
-                onChange={(event) => update("valueMax", event.target.value)}
+                value={
+                  filters.valueMax === ""
+                    ? ""
+                    : displayAmount(Number(filters.valueMax))
+                }
+                onChange={(event) =>
+                  update(
+                    "valueMax",
+                    event.target.value === ""
+                      ? ""
+                      : String(accountingAmount(Number(event.target.value))),
+                  )
+                }
               />
             </Field>
-            <Field label="Maximum wage / week">
+            <Field label={`Maximum wage / week (${currency})`}>
               <input
                 type="number"
                 min="0"
                 step="1000"
                 placeholder="No limit"
-                value={filters.wageMax}
-                onChange={(event) => update("wageMax", event.target.value)}
+                value={
+                  filters.wageMax === ""
+                    ? ""
+                    : displayAmount(Number(filters.wageMax))
+                }
+                onChange={(event) =>
+                  update(
+                    "wageMax",
+                    event.target.value === ""
+                      ? ""
+                      : String(accountingAmount(Number(event.target.value))),
+                  )
+                }
               />
             </Field>
             <Field label="Preferred foot">
@@ -267,6 +292,18 @@ export default function Database() {
                 <option>Right</option>
                 <option>Left</option>
                 <option>Both</option>
+              </select>
+            </Field>
+            <Field label="Contract status">
+              <select
+                value={filters.contractStatus}
+                onChange={(event) =>
+                  update("contractStatus", event.target.value)
+                }
+              >
+                <option value="">All registrations</option>
+                <option value="professional">Protected contract</option>
+                <option value="amateur">Non-professional registration</option>
               </select>
             </Field>
             <Field label="Expiring within">
@@ -464,7 +501,7 @@ export default function Database() {
         <div className="filter-summary">
           <DatabaseIcon size={13} />
           <span className="filter-total">
-            {data?.total.toLocaleString() ?? "..."} players
+            {data ? compactNumber(data.total) : "..."} players
           </span>
           <span>{loading ? "Updating results" : "in your selection"}</span>
           {shortlisted && <Badge tone="green">Shortlist</Badge>}
@@ -530,7 +567,7 @@ export default function Database() {
           <div className="pagination">
             <span>
               {data.total
-                ? `${((data.page - 1) * data.pageSize + 1).toLocaleString()}-${Math.min(data.page * data.pageSize, data.total).toLocaleString()} of ${data.total.toLocaleString()}`
+                ? `${((data.page - 1) * data.pageSize + 1).toLocaleString()}-${Math.min(data.page * data.pageSize, data.total).toLocaleString()} of ${compactNumber(data.total)}`
                 : "0 results"}
             </span>
             <div className="pagination-actions">

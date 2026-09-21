@@ -3,8 +3,10 @@ import {
   useEffectEvent,
   useId,
   useRef,
+  useState,
   type ButtonHTMLAttributes,
   type CSSProperties,
+  type InputHTMLAttributes,
   type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
@@ -21,9 +23,58 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import clsx from "clsx";
-import { useGame } from "./game-context.tsx";
-import { dateLabel, money } from "../shared/rules.ts";
+import { useCurrency, useGame } from "./game-context.tsx";
+import { compactNumber, dateLabel } from "../shared/rules.ts";
 import type { Fixture, Player, Standing } from "../shared/types.ts";
+
+export function MoneyInput({
+  value,
+  onChange,
+  min,
+  max,
+  ...props
+}: Omit<
+  InputHTMLAttributes<HTMLInputElement>,
+  "value" | "onChange" | "min" | "max"
+> & {
+  value: number;
+  onChange: (value: number) => void;
+  min?: number;
+  max?: number;
+}) {
+  const { currency, displayAmount, accountingAmount, money } = useCurrency();
+  const [draft, setDraft] = useState<{
+    base: number;
+    currency: string;
+    text: string;
+  } | null>(null);
+  const currentDraft =
+    draft?.base === value && draft.currency === currency ? draft.text : null;
+  return (
+    <span className="money-input" title={money(value, true)}>
+      <input
+        {...props}
+        type="number"
+        step={props.step ?? "any"}
+        value={currentDraft ?? displayAmount(value)}
+        min={min === undefined ? undefined : displayAmount(min)}
+        max={max === undefined ? undefined : displayAmount(max)}
+        onChange={(event) => {
+          const text = event.target.value;
+          const amount = text === "" ? value : accountingAmount(Number(text));
+          setDraft({ base: amount, currency, text });
+          if (text !== "" && Number.isFinite(amount)) onChange(amount);
+        }}
+        onBlur={(event) => {
+          if (currentDraft === "") onChange(0);
+          setDraft(null);
+          props.onBlur?.(event);
+        }}
+      />
+      <span aria-hidden="true">{currency}</span>
+    </span>
+  );
+}
 
 export function IconButton({
   icon: Icon,
@@ -255,7 +306,14 @@ export function Stat({
         {label}
         {Icon && <Icon size={17} strokeWidth={1.5} />}
       </div>
-      <div className="stat-value">{value}</div>
+      <div
+        className="stat-value"
+        title={typeof value === "number" ? String(value) : undefined}
+      >
+        {typeof value === "number" && Math.abs(value) >= 1000
+          ? compactNumber(value)
+          : value}
+      </div>
       {detail && <div className="stat-detail">{detail}</div>}
     </div>
   );
@@ -399,6 +457,46 @@ export function PlayerName({
   );
 }
 
+export function PlayerLink({ id, name }: { id: number; name: string }) {
+  const { setPlayer } = useGame();
+  return (
+    <button
+      type="button"
+      className="profile-link"
+      title={`View ${name}'s profile`}
+      onClick={() => setPlayer(id)}
+    >
+      {name}
+    </button>
+  );
+}
+
+export function ClubLink({
+  id,
+  name,
+  color,
+  crest = false,
+}: {
+  id: number | null | undefined;
+  name: string;
+  color?: string;
+  crest?: boolean;
+}) {
+  const { setClub } = useGame();
+  if (!id) return <span>{name}</span>;
+  return (
+    <button
+      type="button"
+      className={`profile-link${crest ? " team-link" : ""}`}
+      title={`View ${name}'s profile`}
+      onClick={() => setClub(id)}
+    >
+      {crest && <Crest name={name} color={color} size={22} />}
+      <span>{name}</span>
+    </button>
+  );
+}
+
 export function ShortlistButton({ player }: { player: Player }) {
   const { act } = useGame();
   return (
@@ -428,6 +526,7 @@ export function PlayerTable({
   wages?: boolean;
   children?: (player: Player) => ReactNode;
 }) {
+  const { money } = useCurrency();
   return (
     <div className="table-scroll" data-no-swipe>
       <table className="data-table player-table">
@@ -469,7 +568,10 @@ export function PlayerTable({
                     className="club-dot"
                     style={{ background: player.club_color }}
                   />
-                  {player.club_name ?? "Free agent"}
+                  <ClubLink
+                    id={player.club_id}
+                    name={player.club_name ?? "Free agent"}
+                  />
                 </td>
               )}
               <td className="number money">{money(player.value)}</td>
@@ -582,14 +684,12 @@ export function StandingsTable({
                 </span>
               </td>
               <td>
-                <span className="table-club">
-                  <Crest
-                    name={entry.club_name ?? ""}
-                    color={entry.club_color}
-                    size={22}
-                  />
-                  <strong>{entry.club_name}</strong>
-                </span>
+                <ClubLink
+                  id={entry.club_id}
+                  name={entry.club_name ?? "Club"}
+                  color={entry.club_color}
+                  crest
+                />
               </td>
               <td>{entry.played}</td>
               {!compact && (
@@ -629,8 +729,12 @@ export function StandingsTable({
 export function FixtureRow({ fixture }: { fixture: Fixture }) {
   const { openMatch } = useGame();
   return (
-    <button className="fixture-row" onClick={() => openMatch(fixture.id)}>
-      <span className="fixture-date">
+    <div className="fixture-row">
+      <button
+        className="fixture-date"
+        title="Open match report"
+        onClick={() => openMatch(fixture.id)}
+      >
         <strong>{new Date(`${fixture.date}T12:00:00Z`).getUTCDate()}</strong>
         <small>
           {new Date(`${fixture.date}T12:00:00Z`).toLocaleDateString("en-GB", {
@@ -638,23 +742,23 @@ export function FixtureRow({ fixture }: { fixture: Fixture }) {
             timeZone: "UTC",
           })}
         </small>
-      </span>
+      </button>
       <span className="fixture-teams">
         <span>
-          <Crest
-            name={fixture.home_name ?? ""}
+          <ClubLink
+            id={fixture.home_id}
+            name={fixture.home_name ?? "Home team"}
             color={fixture.home_color}
-            size={18}
+            crest
           />
-          {fixture.home_name}
         </span>
         <span>
-          <Crest
-            name={fixture.away_name ?? ""}
+          <ClubLink
+            id={fixture.away_id}
+            name={fixture.away_name ?? "Away team"}
             color={fixture.away_color}
-            size={18}
+            crest
           />
-          {fixture.away_name}
         </span>
       </span>
       {fixture.status === "played" ? (
@@ -675,8 +779,12 @@ export function FixtureRow({ fixture }: { fixture: Fixture }) {
           <span>15:00</span>
         </span>
       )}
-      <ChevronRight size={15} className="muted" />
-    </button>
+      <IconButton
+        icon={ChevronRight}
+        label={`Open match ${fixture.home_name} vs ${fixture.away_name}`}
+        onClick={() => openMatch(fixture.id)}
+      />
+    </div>
   );
 }
 
@@ -753,7 +861,7 @@ export function Tabs({
           onClick={() => onChange(item.id)}
         >
           {item.label}
-          {item.count !== undefined && <span>{item.count}</span>}
+          {item.count !== undefined && <span>{compactNumber(item.count)}</span>}
         </button>
       ))}
     </div>
@@ -820,7 +928,11 @@ export function DetailList({ items }: { items: [string, ReactNode][] }) {
       {items.map(([name, value]) => (
         <div key={name}>
           <dt>{name}</dt>
-          <dd>{value}</dd>
+          <dd title={typeof value === "number" ? String(value) : undefined}>
+            {typeof value === "number" && Math.abs(value) >= 1000
+              ? compactNumber(value)
+              : value}
+          </dd>
         </div>
       ))}
     </dl>

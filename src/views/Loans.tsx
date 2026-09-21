@@ -20,10 +20,12 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { useGame, useResource } from "../game-context.tsx";
+import { useCurrency, useGame, useResource } from "../game-context.tsx";
 import {
   Badge,
   Button,
+  ClubLink,
+  PlayerLink,
   Crest,
   DetailList,
   Empty,
@@ -44,9 +46,10 @@ import {
   dateLabel,
   label,
   LOAN_TYPES,
-  money,
   PARTNERSHIP_TYPES,
+  AFFILIATION_BENEFITS,
 } from "../../shared/rules.ts";
+import { AffiliateInterest } from "./ClubSupport.tsx";
 import type { LoanDesk } from "../../shared/api.ts";
 import type { Club, Loan, LoanTerms, Player } from "../../shared/types.ts";
 
@@ -123,6 +126,7 @@ export function ClubNetworkSheet({
   close: () => void;
 }) {
   const { act, navigate } = useGame();
+  const { money } = useCurrency();
   const [club, setClub] = useState<Club | null>(null);
   const [type, setType] = useState(
     player ? "Development loan" : "Development club",
@@ -158,7 +162,7 @@ export function ClubNetworkSheet({
     >
       <div className="sheet-body">
         <div className="form-section">
-          <Field label={player ? "Loan type" : "Partnership type"}>
+          <Field label={player ? "Loan type" : "Affiliation type"}>
             <select
               value={type}
               onChange={(event) => setType(event.target.value)}
@@ -168,13 +172,22 @@ export function ClubNetworkSheet({
               ))}
             </select>
           </Field>
+          {!player && (
+            <p className="sheet-description">{AFFILIATION_BENEFITS[type]}</p>
+          )}
         </div>
         <ClubChooser selected={club} onChoose={setClub} />
+        {club && !player && (
+          <AffiliateInterest partnerId={club.id} purpose={type} />
+        )}
         {club && (
           <div className="section-space">
             <DetailList
               items={[
-                ["Receiving club", club.name],
+                [
+                  "Receiving club",
+                  <ClubLink key="receiving" id={club.id} name={club.name} />,
+                ],
                 ["Academy", `${club.academy}/100`],
                 ["Facilities", `${club.facilities}/100`],
                 ["Manager trust", `${Math.round(club.manager_trust)}/100`],
@@ -202,7 +215,7 @@ export function ClubNetworkSheet({
           onClick={() => void submit()}
           disabled={!club || pending}
         >
-          {player ? "Send loan enquiry" : "Agree partnership"}
+          {player ? "Send loan enquiry" : "Propose affiliation"}
         </Button>
       </footer>
     </Modal>
@@ -211,6 +224,7 @@ export function ClubNetworkSheet({
 
 function LoanReport({ loan, close }: { loan: Loan; close: () => void }) {
   const { bootstrap, act, confirm, setPlayer } = useGame();
+  const { money } = useCurrency();
   const terms = JSON.parse(loan.terms) as LoanTerms;
   const details = JSON.parse(loan.data) as {
     factors: Record<string, number>;
@@ -251,7 +265,12 @@ function LoanReport({ loan, close }: { loan: Loan; close: () => void }) {
             >
               {loan.status === "active" ? "Active loan" : label(loan.status)}
             </Badge>
-            <h3>{loan.destination_name}</h3>
+            <h3>
+              <ClubLink
+                id={loan.destination_id}
+                name={loan.destination_name ?? "Loan club"}
+              />
+            </h3>
             <p>
               {loan.type} / {dateLabel(loan.start_date)} to{" "}
               {dateLabel(loan.end_date)}
@@ -426,6 +445,7 @@ function LoanReport({ loan, close }: { loan: Loan; close: () => void }) {
 export default function Loans() {
   const { data, error } = useResource<LoanDesk>("loans");
   const { navigate, bootstrap } = useGame();
+  const { money } = useCurrency();
   const [tab, setTab] = useState("active");
   const [network, setNetwork] = useState(false);
   const [offer, setOffer] = useState<Player | null>(null);
@@ -525,25 +545,25 @@ export default function Loans() {
                   ).map((loan) => (
                     <tr key={loan.id}>
                       <td>
-                        <button
-                          className="report-player"
-                          onClick={() => setSelected(loan.id)}
-                        >
-                          <strong>{loan.player_name}</strong>
+                        <div className="report-player">
+                          <strong>
+                            <PlayerLink
+                              id={loan.player_id}
+                              name={loan.player_name ?? "Player"}
+                            />
+                          </strong>
                           <small>
                             {loan.position} / {loan.age}
                           </small>
-                        </button>
+                        </div>
                       </td>
                       <td>
-                        <span className="table-club">
-                          <Crest
-                            name={loan.destination_name ?? ""}
-                            color={loan.destination_color}
-                            size={24}
-                          />
-                          {loan.destination_name}
-                        </span>
+                        <ClubLink
+                          id={loan.destination_id}
+                          name={loan.destination_name ?? "Loan club"}
+                          color={loan.destination_color}
+                          crest
+                        />
                       </td>
                       <td>
                         <Badge>{loan.type}</Badge>
@@ -643,7 +663,9 @@ export default function Loans() {
                       />
                       <Badge tone="green">{partner.type}</Badge>
                     </div>
-                    <h3>{partner.name}</h3>
+                    <h3>
+                      <ClubLink id={partner.partner_id} name={partner.name} />
+                    </h3>
                     <div className="attribute-row">
                       <span className="attribute-label">Relationship</span>
                       <Meter value={partner.strength} />

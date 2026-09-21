@@ -1,10 +1,12 @@
 import { useState } from "react";
 import {
   Activity,
+  ArrowLeftRight,
   ArrowUpRight,
   Clock,
   Flag,
   Goal,
+  HeartPulse,
   Trophy,
 } from "lucide-react";
 import {
@@ -22,6 +24,10 @@ import {
   Badge,
   Button,
   Crest,
+  ClubLink,
+  PlayerLink,
+  DetailList,
+  Silhouette,
   Empty,
   ErrorState,
   FixtureRow,
@@ -62,7 +68,14 @@ const stats: [string, string][] = [
 ];
 
 export default function Analytics() {
-  const { bootstrap, fixtureId, openMatch, setPlayer, navigate } = useGame();
+  const {
+    bootstrap,
+    fixtureId,
+    matchPlayerId,
+    openMatch,
+    setPlayer,
+    navigate,
+  } = useGame();
   const [age, setAge] = useState("Senior");
   const { data: fixtures } = useResource<Fixture[]>(`matches?age=${age}`);
   const selectedId =
@@ -74,44 +87,112 @@ export default function Analytics() {
   const { data, error } = useResource<MatchDetail>(
     selectedId ? `matches/${selectedId}` : null,
   );
-  const [tab, setTab] = useState("analysis");
+  const [tabSelection, setTabSelection] = useState<{
+    match: number | undefined;
+    player: number | null;
+    tab: string;
+  } | null>(null);
+  const tab =
+    tabSelection?.match === selectedId && tabSelection?.player === matchPlayerId
+      ? tabSelection.tab
+      : matchPlayerId
+        ? "individual"
+        : "analysis";
+  const setTab = (value: string) =>
+    setTabSelection({ match: selectedId, player: matchPlayerId, tab: value });
   const [mode, setMode] = useState("Pass map");
   const [selection, setSelection] = useState<{
     fixtureId: number | undefined;
     teamId: number;
     playerId: number;
+    focusId: number | null;
   } | null>(null);
+  const focusTeam = data?.snapshot
+    ? [data.snapshot.home, data.snapshot.away].find((team) =>
+        [...team.lineup, ...(team.bench ?? [])].some(
+          (player) => player.id === matchPlayerId,
+        ),
+      )
+    : undefined;
   const teamId =
-    selection && selection.fixtureId === selectedId
+    selection &&
+    selection.fixtureId === selectedId &&
+    selection.focusId === matchPlayerId
       ? selection.teamId
-      : (data?.snapshot?.home.id ?? 0);
+      : (focusTeam?.id ?? data?.snapshot?.home.id ?? 0);
   const playerId =
-    selection && selection.fixtureId === selectedId ? selection.playerId : 0;
+    selection &&
+    selection.fixtureId === selectedId &&
+    selection.focusId === matchPlayerId
+      ? selection.playerId
+      : (matchPlayerId ?? 0);
   const setTeamId = (id: number) =>
-    setSelection({ fixtureId: selectedId, teamId: id, playerId: 0 });
+    setSelection({
+      fixtureId: selectedId,
+      teamId: id,
+      playerId: 0,
+      focusId: matchPlayerId,
+    });
   const setPlayerId = (id: number) =>
     setSelection((current) => ({
       fixtureId: selectedId,
       teamId:
         current && current.fixtureId === selectedId ? current.teamId : teamId,
       playerId: id,
+      focusId: matchPlayerId,
     }));
-  const [minute, setMinute] = useState(90);
+  const [timeFilter, setTimeFilter] = useState<{
+    match: number | undefined;
+    minute: number;
+  } | null>(null);
+  const duration = data?.result?.duration ?? 90;
+  const minute =
+    timeFilter && timeFilter.match === selectedId
+      ? timeFilter.minute
+      : duration;
+  const setMinute = (value: number) =>
+    setTimeFilter({ match: selectedId, minute: value });
   const [progressive, setProgressive] = useState(false);
   if (!bootstrap) return <Loading />;
   const lineup = data?.snapshot
     ? [data.snapshot.home, data.snapshot.away]
         .filter((team) => !teamId || team.id === teamId)
-        .flatMap((team) => team.lineup)
+        .flatMap((team) =>
+          [...team.lineup, ...(team.bench ?? [])].filter(
+            (player) => (data.result?.players[player.id]?.minutes ?? 0) > 0,
+          ),
+        )
     : [];
   const result = data?.result;
   const snapshot = data?.snapshot;
+  const allPlayers = snapshot
+    ? [
+        ...snapshot.home.lineup,
+        ...(snapshot.home.bench ?? []),
+        ...snapshot.away.lineup,
+        ...(snapshot.away.bench ?? []),
+      ]
+    : [];
+  const featured =
+    allPlayers.find((player) => player.id === playerId) ??
+    allPlayers.find((player) => (result?.players[player.id]?.minutes ?? 0) > 0);
+  const featuredStats =
+    featured && result ? result.players[featured.id] : undefined;
+  const featuredOn =
+    result?.substitutions?.find((change) => change.onId === featured?.id)
+      ?.minute ?? 0;
+  const featuredOff =
+    result?.substitutions?.find((change) => change.offId === featured?.id)
+      ?.minute ??
+    (featuredStats && featuredOn + featuredStats.minutes < duration
+      ? featuredOn + featuredStats.minutes
+      : null);
   const visibleActions =
     result?.actions.filter(
       (action) =>
         (!teamId || action.teamId === teamId) &&
         (!playerId || action.playerId === playerId) &&
-        action.minute <= minute &&
+        (action.elapsed ?? action.minute) <= minute &&
         (bootstrap.settings.matchDetail === "full" ||
           (bootstrap.settings.matchDetail === "standard" &&
             (action.type !== "pass" || action.progressive || action.key)) ||
@@ -148,6 +229,16 @@ export default function Analytics() {
           value={selectedId ?? ""}
           onChange={(event) => openMatch(Number(event.target.value))}
         >
+          {data &&
+            !(fixtures ?? []).some(
+              (fixture) => fixture.id === data.fixture.id,
+            ) && (
+              <option value={data.fixture.id}>
+                {dateLabel(data.fixture.date)} / {data.fixture.home_name}{" "}
+                {data.fixture.home_goals} - {data.fixture.away_goals}{" "}
+                {data.fixture.away_name}
+              </option>
+            )}
           {[...(fixtures ?? [])]
             .sort((left, right) =>
               left.status === right.status
@@ -187,7 +278,12 @@ export default function Analytics() {
                   color={data.fixture.home_color}
                   size={58}
                 />
-                <h3>{data.fixture.home_name}</h3>
+                <h3>
+                  <ClubLink
+                    id={data.fixture.home_id}
+                    name={data.fixture.home_name ?? "Home"}
+                  />
+                </h3>
               </div>
               <div className="scoreboard-score">
                 <strong>
@@ -197,13 +293,24 @@ export default function Analytics() {
                 </strong>
                 <small>
                   {data.fixture.status === "played"
-                    ? "FULL TIME"
+                    ? result?.wentToExtraTime
+                      ? "AFTER EXTRA TIME"
+                      : "FULL TIME"
                     : "15:00 / SCHEDULED"}
                 </small>
                 {data.penalties && (
                   <small>
                     Penalties {data.penalties.home} - {data.penalties.away}
                   </small>
+                )}
+                {data.tie && data.aggregate && (
+                  <small>
+                    Leg {data.tie.leg}/{data.tie.legs} / Aggregate{" "}
+                    {data.aggregate.home} - {data.aggregate.away}
+                  </small>
+                )}
+                {data.awarded && (
+                  <small>Awarded result / {data.awarded.reason}</small>
                 )}
               </div>
               <div className="scoreboard-team">
@@ -212,7 +319,12 @@ export default function Analytics() {
                   color={data.fixture.away_color}
                   size={58}
                 />
-                <h3>{data.fixture.away_name}</h3>
+                <h3>
+                  <ClubLink
+                    id={data.fixture.away_id}
+                    name={data.fixture.away_name ?? "Away"}
+                  />
+                </h3>
               </div>
             </div>
             <div className="scoreboard-footer">
@@ -244,6 +356,7 @@ export default function Analytics() {
                     { id: "analysis", label: "Pitch analysis" },
                     { id: "stats", label: "Match statistics" },
                     { id: "players", label: "Player performance" },
+                    { id: "individual", label: "Player report" },
                     {
                       id: "events",
                       label: "Action log",
@@ -344,7 +457,7 @@ export default function Analytics() {
                         aria-label="Analysis up to minute"
                         type="range"
                         min="1"
-                        max="90"
+                        max={duration}
                         value={minute}
                         onChange={(event) =>
                           setMinute(Number(event.target.value))
@@ -388,6 +501,7 @@ export default function Analytics() {
                                 <th>Player</th>
                                 <th>Pos</th>
                                 <th>Rating</th>
+                                <th>Minutes</th>
                                 <th>Goals</th>
                                 <th>Assists</th>
                                 <th>Passes</th>
@@ -397,65 +511,258 @@ export default function Analytics() {
                                 <th>Duels won</th>
                                 <th>Tackles</th>
                                 <th>Saves</th>
+                                <th>Report</th>
                               </tr>
                             </thead>
                             <tbody>
-                              {team.lineup.map((player) => {
-                                const performance = result.players[player.id];
-                                return (
-                                  <tr key={player.id}>
-                                    <td>
-                                      <button
-                                        className="text-link"
-                                        onClick={() => setPlayer(player.id)}
-                                      >
-                                        {player.name}
-                                        <ArrowUpRight size={12} />
-                                      </button>
-                                    </td>
-                                    <td>
-                                      <span className="position-tag">
-                                        {player.position}
-                                      </span>
-                                    </td>
-                                    <td>
-                                      <Badge
-                                        tone={
-                                          performance.rating >= 7
-                                            ? "green"
-                                            : performance.rating < 6
-                                              ? "red"
-                                              : "amber"
-                                        }
-                                      >
-                                        {performance.rating.toFixed(1)}
-                                      </Badge>
-                                    </td>
-                                    {[
-                                      "goals",
-                                      "assists",
-                                      "passes",
-                                      "keyPasses",
-                                      "xG",
-                                      "xA",
-                                      "duelsWon",
-                                      "tackles",
-                                      "saves",
-                                    ].map((key) => (
-                                      <td key={key}>
-                                        {performance[key].toFixed(
-                                          ["xG", "xA"].includes(key) ? 2 : 0,
-                                        )}
+                              {[...team.lineup, ...(team.bench ?? [])]
+                                .filter(
+                                  (player) =>
+                                    (result.players[player.id]?.minutes ?? 0) >
+                                    0,
+                                )
+                                .map((player) => {
+                                  const performance = result.players[player.id];
+                                  return (
+                                    <tr key={player.id}>
+                                      <td>
+                                        <button
+                                          className="text-link"
+                                          onClick={() => setPlayer(player.id)}
+                                        >
+                                          {player.name}
+                                          <ArrowUpRight size={12} />
+                                        </button>
                                       </td>
-                                    ))}
-                                  </tr>
-                                );
-                              })}
+                                      <td>
+                                        <span className="position-tag">
+                                          {player.position}
+                                        </span>
+                                      </td>
+                                      <td>
+                                        <Badge
+                                          tone={
+                                            performance.rating >= 7
+                                              ? "green"
+                                              : performance.rating < 6
+                                                ? "red"
+                                                : "amber"
+                                          }
+                                        >
+                                          {performance.rating.toFixed(1)}
+                                        </Badge>
+                                      </td>
+                                      <td>{performance.minutes}'</td>
+                                      {[
+                                        "goals",
+                                        "assists",
+                                        "passes",
+                                        "keyPasses",
+                                        "xG",
+                                        "xA",
+                                        "duelsWon",
+                                        "tackles",
+                                        "saves",
+                                      ].map((key) => (
+                                        <td key={key}>
+                                          {performance[key].toFixed(
+                                            ["xG", "xA"].includes(key) ? 2 : 0,
+                                          )}
+                                        </td>
+                                      ))}
+                                      <td>
+                                        <Button
+                                          variant="secondary"
+                                          icon={ArrowUpRight}
+                                          onClick={() => {
+                                            setTeamId(team.id);
+                                            setPlayerId(player.id);
+                                            setTab("individual");
+                                          }}
+                                        >
+                                          Player report
+                                        </Button>
+                                      </td>
+                                    </tr>
+                                  );
+                                })}
                             </tbody>
                           </table>
                         </div>
                       </section>
                     ))}
+                  </>
+                )}
+                {tab === "individual" && (
+                  <>
+                    <div className="analytics-controls">
+                      <select
+                        aria-label="Player match report"
+                        value={featured?.id ?? ""}
+                        onChange={(event) => {
+                          const id = Number(event.target.value);
+                          const team = [snapshot.home, snapshot.away].find(
+                            (entry) =>
+                              [...entry.lineup, ...(entry.bench ?? [])].some(
+                                (player) => player.id === id,
+                              ),
+                          )!;
+                          setTeamId(team.id);
+                          setPlayerId(id);
+                        }}
+                      >
+                        {[snapshot.home, snapshot.away].map((team) => (
+                          <optgroup key={team.id} label={team.name}>
+                            {[...team.lineup, ...(team.bench ?? [])]
+                              .filter(
+                                (player) =>
+                                  result.players[player.id]?.minutes > 0,
+                              )
+                              .map((player) => (
+                                <option key={player.id} value={player.id}>
+                                  {player.name}
+                                </option>
+                              ))}
+                          </optgroup>
+                        ))}
+                      </select>
+                      <Badge tone="blue">
+                        {data.fixture.season}/
+                        {String(data.fixture.season + 1).slice(-2)}
+                      </Badge>
+                    </div>
+                    {featured && featuredStats && (
+                      <div className="padded">
+                        <div className="individual-report-heading">
+                          <Silhouette size={60} hologram />
+                          <div>
+                            <h3>
+                              <PlayerLink
+                                id={featured.id}
+                                name={featured.name}
+                              />
+                            </h3>
+                            <p>
+                              {featured.position} / {featuredStats.minutes}'
+                              played
+                            </p>
+                          </div>
+                          <span className="individual-match-rating">
+                            {featuredStats.rating.toFixed(1)}
+                            <small>Match rating</small>
+                          </span>
+                        </div>
+                        <div className="individual-stat-grid">
+                          {[
+                            {
+                              title: "Contribution",
+                              fields: [
+                                "minutes",
+                                "goals",
+                                "assists",
+                                "shots",
+                                "shotsOnTarget",
+                                "xG",
+                                "xA",
+                              ],
+                            },
+                            {
+                              title: "Passing & creation",
+                              fields: [
+                                "passes",
+                                "completedPasses",
+                                "progressivePasses",
+                                "keyPasses",
+                                "carries",
+                                "dribbles",
+                                "successfulDribbles",
+                              ],
+                            },
+                            {
+                              title: "Defending & discipline",
+                              fields: [
+                                "duels",
+                                "duelsWon",
+                                "tackles",
+                                "interceptions",
+                                "recoveries",
+                                "presses",
+                                "fouls",
+                                "yellowCards",
+                                "redCards",
+                              ],
+                            },
+                            {
+                              title: "Goalkeeping & context",
+                              fields: ["saves", "xGPrevented", "corners"],
+                            },
+                          ].map((section) => (
+                            <section key={section.title}>
+                              <h3>{section.title}</h3>
+                              <DetailList
+                                items={section.fields.map((key) => [
+                                  stats.find(([field]) => field === key)?.[1] ??
+                                    label(key),
+                                  (featuredStats[key] ?? 0).toFixed(
+                                    ["xG", "xA", "xGPrevented"].includes(key)
+                                      ? 2
+                                      : 0,
+                                  ),
+                                ])}
+                              />
+                              {section.title === "Goalkeeping & context" && (
+                                <DetailList
+                                  items={[
+                                    [
+                                      "Started",
+                                      snapshot.home.lineup.some(
+                                        (player) => player.id === featured.id,
+                                      ) ||
+                                      snapshot.away.lineup.some(
+                                        (player) => player.id === featured.id,
+                                      )
+                                        ? "Yes"
+                                        : "Substitute",
+                                    ],
+                                    [
+                                      "On",
+                                      featuredOn
+                                        ? `${featuredOn}'`
+                                        : "Kick-off",
+                                    ],
+                                    [
+                                      "Off",
+                                      featuredOff === null
+                                        ? "Final whistle"
+                                        : `${featuredOff}'`,
+                                    ],
+                                  ]}
+                                />
+                              )}
+                            </section>
+                          ))}
+                        </div>
+                        <SectionHeading title="Player activity" />
+                        <div className="analytics-controls">
+                          <select
+                            aria-label="Individual pitch map type"
+                            value={mode}
+                            onChange={(event) => setMode(event.target.value)}
+                          >
+                            {MAP_MODES.map((value) => (
+                              <option key={value}>{value}</option>
+                            ))}
+                          </select>
+                        </div>
+                        <PitchMap
+                          actions={result.actions}
+                          mode={mode}
+                          teamId={0}
+                          playerId={featured.id}
+                          minute={duration}
+                        />
+                      </div>
+                    )}
                   </>
                 )}
                 {tab === "events" && (
@@ -499,18 +806,19 @@ export default function Analytics() {
                           {visibleActions.map((action, index) => (
                             <tr key={index}>
                               <td>
-                                {action.minute}:
-                                {String(action.second).padStart(2, "0")}
+                                {action.minute}
+                                {action.addedTime ? `+${action.addedTime}` : ""}
+                                :{String(action.second).padStart(2, "0")}
                               </td>
                               <td>
-                                {
-                                  [
-                                    ...snapshot.home.lineup,
-                                    ...snapshot.away.lineup,
-                                  ].find(
-                                    (player) => player.id === action.playerId,
-                                  )?.name
-                                }
+                                <PlayerLink
+                                  id={action.playerId}
+                                  name={
+                                    allPlayers.find(
+                                      (player) => player.id === action.playerId,
+                                    )?.name ?? `Player ${action.playerId}`
+                                  }
+                                />
                               </td>
                               <td>{label(action.type)}</td>
                               <td>
@@ -551,18 +859,32 @@ export default function Analytics() {
                   <div className="timeline">
                     {result.events.map((event, index) => (
                       <div key={index}>
-                        <time>{event.minute}'</time>
+                        <time>
+                          {event.minute}
+                          {event.addedTime ? `+${event.addedTime}` : ""}'
+                        </time>
                         {event.type === "goal" ? (
                           <Goal size={18} className="positive" />
+                        ) : event.type === "substitution" ? (
+                          <ArrowLeftRight size={16} className="positive" />
+                        ) : event.type === "injury" ? (
+                          <HeartPulse size={16} className="negative" />
+                        ) : event.type === "red card" ? (
+                          <span className="red-card" />
                         ) : (
                           <span className="yellow-card" />
                         )}
                         <span>
                           <p>{event.text}</p>
                           <small>
-                            {event.teamId === snapshot.home.id
-                              ? snapshot.home.name
-                              : snapshot.away.name}
+                            <ClubLink
+                              id={event.teamId}
+                              name={
+                                event.teamId === snapshot.home.id
+                                  ? snapshot.home.name
+                                  : snapshot.away.name
+                              }
+                            />
                           </small>
                         </span>
                       </div>

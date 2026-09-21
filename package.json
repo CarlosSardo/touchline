@@ -1,24 +1,23 @@
 {
-  "name": "sports-director-simulator",
-  "description": "Touchline: a local-first football sporting director simulation with a persistent SQLite world, transfers, scouting, youth development and match analytics.",
+  "name": "touchline",
+  "description": "Touchline: a football sporting director simulation with SQL-backed careers, transfers, scouting, youth development and match analytics.",
   "private": true,
   "version": "0.0.0",
   "license": "MIT",
   "author": "Carlos Sardo",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/CarlosSardo/sports-director-simulator.git"
+    "url": "git+https://github.com/CarlosSardo/touchline.git"
   },
-  "homepage": "https://github.com/CarlosSardo/sports-director-simulator#readme",
+  "homepage": "https://github.com/CarlosSardo/touchline#readme",
   "bugs": {
-    "url": "https://github.com/CarlosSardo/sports-director-simulator/issues"
+    "url": "https://github.com/CarlosSardo/touchline/issues"
   },
   "keywords": [
     "football",
     "sports-management",
     "simulation-game",
-    "local-first",
-    "sqlite",
+    "azure-sql",
     "react",
     "typescript"
   ],
@@ -28,8 +27,21 @@
     "build": "tsc -b && tsc -p tsconfig.server.json && vite build",
     "start": "tsx server/index.ts",
     "test": "vitest run",
+    "test:local": "tsx scripts/test-local.ts",
     "test:e2e": "playwright test",
+    "verify": "bash scripts/verify.sh",
+    "image:build": "bash scripts/build.sh",
+    "azure:provision": "bash scripts/azure-provision.sh",
+    "azure:auth": "tsx scripts/azure-auth.ts",
+    "azure:sql": "bash scripts/azure-sql.sh",
+    "azure:deploy": "bash scripts/azure-deploy.sh",
+    "azure:rollback": "bash scripts/azure-rollback.sh",
+    "db:migrate": "tsx scripts/db-migrate.ts",
+    "db:seed": "tsx scripts/db-seed.ts",
+    "data:migrate": "tsx scripts/data-migrate.ts",
+    "data:export": "tsx scripts/data-export.ts",
     "world:check": "tsx server/check-world.ts",
+    "simulation:check": "tsx server/check-simulation.ts",
     "lint": "oxlint",
     "format": "prettier --write src server shared e2e *.ts *.json *.md",
     "preview": "vite preview"
@@ -38,13 +50,18 @@
     "node": ">=22.13.0"
   },
   "dependencies": {
+    "@azure/identity": "^4.13.3",
+    "@faker-js/faker": "^10.6.0",
     "@fontsource-variable/dm-sans": "^5.3.0",
     "@fontsource-variable/manrope": "^5.3.0",
+    "cities.json": "^1.1.61",
     "clsx": "^2.1.1",
     "countries-list": "^3.4.1",
     "date-fns": "^4.4.0",
     "express": "^5.2.1",
+    "javascript-lp-solver": "^1.0.3",
     "lucide-react": "^1.47.0",
+    "mssql": "^12.7.2",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "recharts": "^3.10.1",
@@ -56,6 +73,7 @@
   "devDependencies": {
     "@playwright/test": "^1.63.0",
     "@types/express": "^5.0.6",
+    "@types/mssql": "^12.3.0",
     "@types/node": "^24.13.3",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.7",

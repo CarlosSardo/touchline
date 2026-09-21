@@ -4,34 +4,58 @@ import express, {
   type NextFunction,
 } from "express";
 import { resolve } from "node:path";
-import { existsSync } from "node:fs";
+import { createReadStream, existsSync } from "node:fs";
+import { rm } from "node:fs/promises";
+import { pipeline } from "node:stream/promises";
 import { z } from "zod";
 import { Store } from "./db.ts";
+import {
+  affiliateDesk,
+  affiliateInterest,
+  assistantDesk,
+  configureAssistant,
+  processAssistant,
+  requestAffiliate,
+} from "./club-support.ts";
 import { Saves } from "./saves.ts";
 import * as query from "./queries.ts";
 import { advance } from "./simulation.ts";
+import { assessPlayerInterest, submitMinorApplication } from "./recruitment.ts";
+import { mediaFeed } from "./media.ts";
+import {
+  competitionFavorites,
+  favoriteCompetition,
+  notificationFeed,
+} from "./notifications.ts";
+import { resolveUnexpectedEvent, unexpectedEvents } from "./events.ts";
 import {
   assignScout,
   clubOf,
+  closeNegotiation,
   createPartnership,
+  counterIncomingOffer,
   declareInterest,
   enquire,
   exerciseOption,
+  exerciseBuyBack,
   experience,
   GameError,
   ledger,
   mediaResponse,
   mentorPlayer,
   negotiate,
+  negotiationStep,
   news,
   playerOf,
   promoteYouth,
+  movePlayerSquad,
   recallLoan,
   requireOwnPlayer,
   settingsOf,
   squadRole,
   staffAction,
   stateOf,
+  transferTermsSchema,
   weeklyWages,
 } from "./systems.ts";
 import {
@@ -44,14 +68,102 @@ import {
   SETTING_DEFINITIONS,
   TRAINING_TYPES,
 } from "../shared/rules.ts";
-import type {
-  Club,
-  Negotiation,
-  NegotiationData,
-  PlayerProfile,
-} from "../shared/types.ts";
+import type { Club, Negotiation, PlayerProfile } from "../shared/types.ts";
+import type { Health, HealthDetails } from "../shared/api.ts";
 
 const idSchema = z.coerce.number().int().positive();
+const saveFileSchema = z
+  .string()
+  .regex(
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.touchline\.gz$/i,
+    "Choose a valid portable save slot.",
+  );
+const loopbackHosts = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
+const principalSchema = z.object({
+  auth_typ: z.literal("aad"),
+  claims: z
+    .array(
+      z.object({
+        typ: z.string().max(256),
+        val: z.string().max(4096),
+      }),
+    )
+    .max(256),
+});
+
+export function readApiConfiguration(
+  environment: NodeJS.ProcessEnv = process.env,
+) {
+  const hosted = Boolean(environment.CONTAINER_APP_NAME?.trim());
+  const host = environment.API_HOST ?? (hosted ? "0.0.0.0" : "127.0.0.1");
+  const port = Number(environment.PORT ?? environment.API_PORT ?? 3001);
+  const requireAuth = environment.REQUIRE_AUTH === "true";
+  const ownerObjectId = (environment.OWNER_OBJECT_ID ?? "").toLowerCase();
+  const tenantId = (environment.AZURE_TENANT_ID ?? "").toLowerCase();
+  const invitedObjectIds = (environment.ALLOWED_USER_OBJECT_IDS ?? "")
+    .split(",")
+    .map((value) => value.trim().toLowerCase())
+    .filter(Boolean);
+  const appOrigin = environment.APP_ORIGIN;
+  const identifier =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  if (invitedObjectIds.length > 100 || invitedObjectIds.some((value) => !identifier.test(value)))
+    throw new Error("ALLOWED_USER_OBJECT_IDS must contain at most 100 comma-separated Entra object UUIDs.");
+  const allowedUserObjectIds = new Set([ownerObjectId, ...invitedObjectIds]);
+  if (!host || host.trim() !== host)
+    throw new Error("API_HOST must be a hostname or IP address.");
+  if (!Number.isInteger(port) || port < 1 || port > 65535)
+    throw new Error("PORT or API_PORT must be between 1 and 65535.");
+  if (
+    environment.REQUIRE_AUTH !== undefined &&
+    !["true", "false"].includes(environment.REQUIRE_AUTH)
+  )
+    throw new Error("REQUIRE_AUTH must be true or false.");
+  if ((hosted || !loopbackHosts.has(host)) && !requireAuth)
+    throw new Error(
+      "Public API binding requires explicit REQUIRE_AUTH=true and hosted authentication.",
+    );
+  if (
+    requireAuth &&
+    (!hosted || !identifier.test(ownerObjectId) || !identifier.test(tenantId))
+  )
+    throw new Error(
+      "Hosted authentication requires CONTAINER_APP_NAME, OWNER_OBJECT_ID and AZURE_TENANT_ID.",
+    );
+  if (requireAuth && !appOrigin)
+    throw new Error(
+      "Hosted authentication requires APP_ORIGIN as an exact HTTPS origin.",
+    );
+  if (appOrigin) {
+    let origin: URL;
+    try {
+      origin = new URL(appOrigin);
+    } catch {
+      throw new Error("APP_ORIGIN must be a valid origin.");
+    }
+    if (
+      origin.origin !== appOrigin ||
+      (requireAuth
+        ? origin.protocol !== "https:"
+        : !["http:", "https:"].includes(origin.protocol) ||
+          !loopbackHosts.has(origin.hostname))
+    )
+      throw new Error(
+        "APP_ORIGIN must be an exact HTTPS hosted origin or a local loopback development origin.",
+      );
+  }
+  return {
+    host,
+    port,
+    hosted,
+    requireAuth,
+    ownerObjectId,
+    allowedUserObjectIds,
+    tenantId,
+    appOrigin,
+  };
+}
+
 const positive = z.number().finite().min(0);
 const roleSchema = z.enum([
   "Captain",
@@ -85,20 +197,19 @@ const loanTerms = z.object({
   ]),
 });
 
-export function updateSettings(store: Store, input: unknown) {
+export async function updateSettings(store: Store, input: unknown) {
   const values = z
     .record(z.string(), z.union([z.string(), z.boolean(), z.number()]))
     .parse(input);
-  const settings = settingsOf(store);
+  const settings = await settingsOf(store);
   for (const [key, value] of Object.entries(values)) {
+    if (key === "cloudSync" || key === "saveCompression") continue;
     const definition = SETTING_DEFINITIONS.find(
       (setting) => setting.id === key,
     );
     if (!definition) throw new GameError(`Unknown setting: ${key}`);
     if (definition.disabled && value !== definition.default)
-      throw new GameError(
-        "Cloud services are disabled. Saves remain on this machine.",
-      );
+      throw new GameError("This setting is unavailable.");
     if (definition.type === "toggle" && typeof value !== "boolean")
       throw new GameError(`Invalid value for ${definition.label}.`);
     if (
@@ -121,24 +232,59 @@ export function updateSettings(store: Store, input: unknown) {
       throw new GameError(`Invalid value for ${definition.label}.`);
     settings[key] = value;
   }
-  settings.cloudSync = false;
-  store.setMeta("settings", settings);
+  await store.setMeta("settings", settings);
   if (values.directorBackground) {
-    const state = stateOf(store);
+    const state = await stateOf(store);
     state.director.background = String(values.directorBackground);
-    store.setMeta("state", state);
+    await store.setMeta("state", state);
   }
   return settings;
 }
 
-export function dispatchAction(store: Store, input: unknown): unknown {
+export async function dispatchAction(
+  store: Store,
+  input: unknown,
+): Promise<unknown> {
   const body = z.object({ type: z.string() }).passthrough().parse(input);
-  const state = stateOf(store);
+  const state = await stateOf(store);
   if (state.gameOver && body.type !== "career")
     throw new GameError(
       "Your tenure has ended. Accept another role in Career settings.",
     );
   switch (body.type) {
+    case "minor-application": {
+      const data = z
+        .object({
+          playerId: idSchema,
+          safeguards: z.object({
+            football: z.boolean(),
+            education: z.boolean(),
+            care: z.boolean(),
+            mentor: z.boolean(),
+            parentalConsent: z.boolean(),
+          }),
+        })
+        .parse(body);
+      const result = await submitMinorApplication(
+        store,
+        data.playerId,
+        data.safeguards,
+      );
+      if (result.error) throw new GameError(result.error);
+      return result;
+    }
+    case "assistant-duties":
+      return configureAssistant(store, body);
+    case "assistant-run":
+      return processAssistant(store, true);
+    case "affiliate-request":
+      return requestAffiliate(store, body);
+    case "event-response": {
+      const { id, choiceId } = z
+        .object({ id: idSchema, choiceId: z.string().max(40) })
+        .parse(body);
+      return resolveUnexpectedEvent(store, id, choiceId);
+    }
     case "career": {
       const data = z
         .object({
@@ -155,7 +301,7 @@ export function dispatchAction(store: Store, input: unknown): unknown {
       if (data.clubId && data.clubId !== state.clubId) {
         if (state.started && !state.gameOver)
           throw new GameError("You already hold a club position.");
-        const club = clubOf(store, data.clubId);
+        const club = await clubOf(store, data.clubId);
         if (club.type !== "club") throw new GameError("Choose a senior club.");
         if (state.gameOver && club.reputation > state.director.reputation + 25)
           throw new GameError(
@@ -184,16 +330,16 @@ export function dispatchAction(store: Store, input: unknown): unknown {
         };
       }
       state.started = true;
-      store.setMeta("state", state);
-      store.setMeta("settings", {
-        ...settingsOf(store),
+      await store.setMeta("state", state);
+      await store.setMeta("settings", {
+        ...(await settingsOf(store)),
         directorBackground: data.background,
       });
-      news(
+      await news(
         store,
         "Club",
         "A new chapter begins",
-        `${state.director.name} takes charge of the sporting project at ${clubOf(store).name}.`,
+        `${state.director.name} takes charge of the sporting project at ${(await clubOf(store)).name}.`,
         "success",
         "office",
       );
@@ -203,8 +349,8 @@ export function dispatchAction(store: Store, input: unknown): unknown {
       const data = z
         .object({ playerId: idSchema, active: z.boolean() })
         .parse(body);
-      playerOf(store, data.playerId);
-      store.run(
+      await playerOf(store, data.playerId);
+      await store.run(
         "UPDATE players SET shortlisted = ? WHERE id = ?",
         data.active ? 1 : 0,
         data.playerId,
@@ -236,12 +382,21 @@ export function dispatchAction(store: Store, input: unknown): unknown {
           dealType: z.enum([
             "Permanent transfer",
             "Contract renewal",
+            "Youth approach",
+            "Future transfer",
             ...LOAN_TYPES,
           ]),
           destinationId: idSchema.optional(),
+          guardianConsent: z.boolean().default(false),
         })
         .parse(body);
-      return enquire(store, data.playerId, data.dealType, data.destinationId);
+      return enquire(
+        store,
+        data.playerId,
+        data.dealType,
+        data.destinationId,
+        data.guardianConsent,
+      );
     }
     case "offer": {
       const data = z
@@ -264,18 +419,41 @@ export function dispatchAction(store: Store, input: unknown): unknown {
             .max(5),
           terms: loanTerms.optional(),
           signingBonus: positive.max(100_000_000).optional(),
+          transferTerms: transferTermsSchema.optional(),
         })
         .parse(body);
       return negotiate(store, data.id, data);
+    }
+    case "buy-back": {
+      const { id } = z.object({ id: idSchema }).parse(body);
+      return exerciseBuyBack(store, id);
+    }
+    case "counter-transfer": {
+      const data = z
+        .object({
+          id: idSchema,
+          fee: positive.max(1_000_000_000),
+          transferTerms: transferTermsSchema,
+        })
+        .parse(body);
+      return counterIncomingOffer(store, data.id, data.fee, data.transferTerms);
     }
     case "negotiation": {
       const data = z
         .object({
           id: idSchema,
-          action: z.enum(["declare", "withdraw", "accept", "reject"]),
+          action: z.enum([
+            "declare",
+            "withdraw",
+            "accept",
+            "reject",
+            "formalize",
+            "sign",
+            "revise",
+          ]),
         })
         .parse(body);
-      const negotiation = store.get<Negotiation>(
+      const negotiation = await store.get<Negotiation>(
         "SELECT * FROM negotiations WHERE id = ?",
         data.id,
       );
@@ -293,50 +471,33 @@ export function dispatchAction(store: Store, input: unknown): unknown {
       )
         throw new GameError("This negotiation has already closed.");
       if (data.action === "declare") {
-        declareInterest(store, data.id);
+        await declareInterest(store, data.id);
         return { message: "Your interest is now public." };
       }
-      if (data.action === "accept") {
-        if (
-          negotiation.stage !== "Offer received" ||
-          negotiation.selling_club_id !== state.clubId
-        )
-          throw new GameError("Only an incoming offer can be accepted here.");
-        const details = JSON.parse(negotiation.data) as NegotiationData;
-        details.medicalDate = addDays(state.date, 2);
-        details.log.push({
-          date: state.date,
-          type: "Medical",
-          message:
-            "The selling club accepted. Registration follows the medical.",
-        });
-        store.run(
-          "UPDATE negotiations SET stage = 'Medical', data = ? WHERE id = ?",
-          JSON.stringify(details),
-          data.id,
-        );
-      } else
-        store.run(
-          "UPDATE negotiations SET stage = ? WHERE id = ?",
-          data.action === "reject" ? "Rejected" : "Withdrawn",
-          data.id,
-        );
-      return {
-        message:
-          data.action === "accept"
-            ? "Offer accepted, subject to medical and registration."
-            : "Negotiations have ended.",
-      };
+      if (
+        data.action === "formalize" ||
+        data.action === "sign" ||
+        data.action === "revise" ||
+        data.action === "accept"
+      )
+        return negotiationStep(store, data.id, data.action);
+      await closeNegotiation(
+        store,
+        negotiation,
+        data.action === "reject" ? "Rejected" : "Withdrawn",
+        "The director ended these negotiations.",
+      );
+      return { message: "Negotiations have ended." };
     }
     case "loan-recall": {
       const data = z
         .object({ id: idSchema, injury: z.boolean().default(false) })
         .parse(body);
-      recallLoan(store, data.id, data.injury);
+      await recallLoan(store, data.id, data.injury);
       return { message: "The player has returned to the parent club." };
     }
     case "loan-option":
-      exerciseOption(store, idSchema.parse(body.id));
+      await exerciseOption(store, idSchema.parse(body.id));
       return { message: "The purchase option has been exercised." };
     case "partnership": {
       const data = z
@@ -345,22 +506,22 @@ export function dispatchAction(store: Store, input: unknown): unknown {
           partnershipType: z.enum(PARTNERSHIP_TYPES),
         })
         .parse(body);
-      createPartnership(store, data.clubId, data.partnershipType);
+      await createPartnership(store, data.clubId, data.partnershipType);
       return { message: "Partnership agreed." };
     }
     case "role": {
       const data = z
         .object({ playerId: idSchema, role: roleSchema })
         .parse(body);
-      squadRole(store, data.playerId, data.role);
+      await squadRole(store, data.playerId, data.role);
       return { message: "Squad role updated." };
     }
     case "availability": {
       const data = z
         .object({ playerId: idSchema, listed: z.boolean(), loan: z.boolean() })
         .parse(body);
-      requireOwnPlayer(store, data.playerId);
-      store.run(
+      await requireOwnPlayer(store, data.playerId);
+      await store.run(
         "UPDATE players SET listed = ?, available_loan = ? WHERE id = ?",
         data.listed ? 1 : 0,
         data.loan ? 1 : 0,
@@ -377,12 +538,12 @@ export function dispatchAction(store: Store, input: unknown): unknown {
           position: z.enum(POSITIONS).optional(),
         })
         .parse(body);
-      const player = requireOwnPlayer(store, data.playerId);
+      const player = await requireOwnPlayer(store, data.playerId);
       if (player.parent_club_id)
         throw new GameError(
           "The receiving club controls daily training during a loan.",
         );
-      store.run(
+      await store.run(
         "UPDATE players SET training = ?, intensity = ? WHERE id = ?",
         data.focus,
         data.intensity,
@@ -392,7 +553,7 @@ export function dispatchAction(store: Store, input: unknown): unknown {
         const profile = JSON.parse(player.profile) as PlayerProfile;
         profile.development.positionTarget = data.position;
         profile.development.positionWeeks = 0;
-        store.run(
+        await store.run(
           "UPDATE players SET profile = ? WHERE id = ?",
           JSON.stringify(profile),
           data.playerId,
@@ -408,8 +569,8 @@ export function dispatchAction(store: Store, input: unknown): unknown {
           youthFocus: z.enum(TRAINING_TYPES),
         })
         .parse(body);
-      store.run(
-        "INSERT INTO training_plans(club_id, focus, intensity, youth_focus) VALUES (?, ?, ?, ?) ON CONFLICT(club_id) DO UPDATE SET focus = excluded.focus, intensity = excluded.intensity, youth_focus = excluded.youth_focus",
+      await store.run(
+        "MERGE INTO training_plans WITH (HOLDLOCK) AS target USING (VALUES (?, ?, ?, ?)) AS source(club_id, focus, intensity, youth_focus) ON target.club_id = source.club_id WHEN MATCHED THEN UPDATE SET focus = source.focus, intensity = source.intensity, youth_focus = source.youth_focus WHEN NOT MATCHED THEN INSERT (club_id, focus, intensity, youth_focus) VALUES (source.club_id, source.focus, source.intensity, source.youth_focus);",
         state.clubId,
         data.focus,
         data.intensity,
@@ -430,8 +591,8 @@ export function dispatchAction(store: Store, input: unknown): unknown {
           risk: z.number().int().min(0).max(100),
         })
         .parse(body);
-      store.run(
-        "INSERT INTO set_pieces(club_id, routine, target, risk) VALUES (?, ?, ?, ?) ON CONFLICT(club_id) DO UPDATE SET routine = excluded.routine, target = excluded.target, risk = excluded.risk",
+      await store.run(
+        "MERGE INTO set_pieces WITH (HOLDLOCK) AS destination USING (VALUES (?, ?, ?, ?)) AS source(club_id, routine, target, risk) ON destination.club_id = source.club_id WHEN MATCHED THEN UPDATE SET routine = source.routine, target = source.target, risk = source.risk WHEN NOT MATCHED THEN INSERT (club_id, routine, target, risk) VALUES (source.club_id, source.routine, source.target, source.risk);",
         state.clubId,
         data.routine,
         data.target,
@@ -439,18 +600,36 @@ export function dispatchAction(store: Store, input: unknown): unknown {
       );
       return { message: "Set-piece design shared with the coaching staff." };
     }
+    case "squad-move": {
+      const input = z
+        .object({
+          playerId: idSchema,
+          clubId: idSchema,
+          ageGroup: z.enum(["Senior", "U19", "U17"]),
+        })
+        .parse(body);
+      return movePlayerSquad(
+        store,
+        input.playerId,
+        input.clubId,
+        input.ageGroup,
+      );
+    }
     case "promote":
-      promoteYouth(store, idSchema.parse(body.playerId));
+      await promoteYouth(store, idSchema.parse(body.playerId));
       return { message: "Player promoted to the senior squad." };
     case "mentor": {
       const data = z
         .object({ playerId: idSchema, mentorId: idSchema })
         .parse(body);
-      mentorPlayer(store, data.playerId, data.mentorId);
+      await mentorPlayer(store, data.playerId, data.mentorId);
       return { message: "Mentorship pairing confirmed." };
     }
     case "wellbeing": {
-      const player = requireOwnPlayer(store, idSchema.parse(body.playerId));
+      const player = await requireOwnPlayer(
+        store,
+        idSchema.parse(body.playerId),
+      );
       const profile = JSON.parse(player.profile) as PlayerProfile;
       if (
         profile.development.lastSupport &&
@@ -459,9 +638,9 @@ export function dispatchAction(store: Store, input: unknown): unknown {
         throw new GameError(
           "The wellbeing team is already supporting this player this week.",
         );
-      if (clubOf(store).balance < 5000)
+      if ((await clubOf(store)).balance < 5000)
         throw new GameError("Insufficient funds for the support programme.");
-      ledger(store, state.clubId, -5000, "Player wellbeing", player.name);
+      await ledger(store, state.clubId, -5000, "Player wellbeing", player.name);
       profile.mentalHealth.anxiety = clamp(
         profile.mentalHealth.anxiety - 10,
         0,
@@ -473,8 +652,8 @@ export function dispatchAction(store: Store, input: unknown): unknown {
         100,
       );
       profile.development.lastSupport = state.date;
-      store.run(
-        "UPDATE players SET morale = min(99,morale + 5), profile = ? WHERE id = ?",
+      await store.run(
+        "UPDATE players SET morale = CASE WHEN morale + 5 > 99 THEN 99 ELSE morale + 5 END, profile = ? WHERE id = ?",
         JSON.stringify(profile),
         player.id,
       );
@@ -490,7 +669,7 @@ export function dispatchAction(store: Store, input: unknown): unknown {
       return staffAction(store, data.id, data.action);
     }
     case "media":
-      mediaResponse(
+      await mediaResponse(
         store,
         z
           .enum(["measured", "ambitious", "protect", "challenge"])
@@ -501,12 +680,12 @@ export function dispatchAction(store: Store, input: unknown): unknown {
       const approach = z
         .enum(["youth", "back-manager", "budget", "recovery"])
         .parse(body.approach);
-      const last = store.get<{ value: string }>(
-        "SELECT value FROM meta WHERE key = 'lastBoardMeeting'",
+      const last = await store.get<{ value: string }>(
+        "SELECT [value] FROM meta WHERE [key] = 'lastBoardMeeting'",
       );
       if (last && daysBetween(JSON.parse(last.value), state.date) < 7)
         throw new GameError("The board will meet with you again next week.");
-      const club = clubOf(store);
+      const club = await clubOf(store);
       let response = "";
       if (approach === "budget") {
         if (
@@ -520,34 +699,34 @@ export function dispatchAction(store: Store, input: unknown): unknown {
           10_000_000,
           Math.max(0, club.balance - club.transfer_budget) * 0.2,
         );
-        store.run(
-          "UPDATE clubs SET transfer_budget = transfer_budget + ?, board_pressure = min(100,board_pressure + 7), expectations = max(1,expectations - 1) WHERE id = ?",
+        await store.run(
+          "UPDATE clubs SET transfer_budget = transfer_budget + ?, board_pressure = CASE WHEN board_pressure + 7 > 100 THEN 100 ELSE board_pressure + 7 END, expectations = CASE WHEN expectations - 1 < 1 THEN 1 ELSE expectations - 1 END WHERE id = ?",
           allocation,
           club.id,
         );
         response =
           "The board has increased your transfer allocation. Expectations and scrutiny have risen too.";
       } else if (approach === "back-manager") {
-        store.run(
-          "UPDATE clubs SET manager_trust = min(99,manager_trust + 8), board_confidence = max(0,board_confidence - 2), chemistry = min(99,chemistry + 3) WHERE id = ?",
+        await store.run(
+          "UPDATE clubs SET manager_trust = CASE WHEN manager_trust + 8 > 99 THEN 99 ELSE manager_trust + 8 END, board_confidence = CASE WHEN board_confidence - 2 < 0 THEN 0 ELSE board_confidence - 2 END, chemistry = CASE WHEN chemistry + 3 > 99 THEN 99 ELSE chemistry + 3 END WHERE id = ?",
           club.id,
         );
         response =
           "The manager welcomes your backing. The board expects that trust to be repaid in results.";
       } else {
-        store.run(
-          "UPDATE clubs SET board_confidence = min(99,board_confidence + 4), board_pressure = max(0,board_pressure - 4) WHERE id = ?",
+        await store.run(
+          "UPDATE clubs SET board_confidence = CASE WHEN board_confidence + 4 > 99 THEN 99 ELSE board_confidence + 4 END, board_pressure = CASE WHEN board_pressure - 4 < 0 THEN 0 ELSE board_pressure - 4 END WHERE id = ?",
           club.id,
         );
-        store.setMeta("boardPlan", {
+        await store.setMeta("boardPlan", {
           approach,
           date: state.date,
           due: addDays(state.date, 35),
           confidence: club.board_confidence,
-          youthMinutes: store.get<{ total: number }>(
+          youthMinutes: (await store.get<{ total: number }>(
             "SELECT coalesce(sum(minutes),0) AS total FROM players WHERE club_id = ? AND age < 21",
             club.id,
-          )!.total,
+          ))!.total,
           crisis: club.crisis,
         });
         response =
@@ -555,8 +734,8 @@ export function dispatchAction(store: Store, input: unknown): unknown {
             ? "The academy pathway has been approved. The board will review youth minutes in five weeks."
             : "Your recovery plan has bought time. The board will review the crisis level in five weeks.";
       }
-      store.setMeta("lastBoardMeeting", state.date);
-      news(
+      await store.setMeta("lastBoardMeeting", state.date);
+      await news(
         store,
         "Board",
         "Board meeting concluded",
@@ -564,12 +743,12 @@ export function dispatchAction(store: Store, input: unknown): unknown {
         "important",
         "board",
       );
-      experience(store, 5);
+      await experience(store, 5);
       return { message: response };
     }
     case "investment": {
       const kind = z.enum(["academy", "facilities"]).parse(body.kind);
-      const club = clubOf(store);
+      const club = await clubOf(store);
       const cost = Math.round(
         (1_000_000 + club[kind] * 25_000) *
           (1 - state.director.skills.finance * 0.035),
@@ -578,7 +757,7 @@ export function dispatchAction(store: Store, input: unknown): unknown {
         throw new GameError("This facility is already at its maximum level.");
       if (club.balance < cost || club.transfer_budget < cost)
         throw new GameError("The investment exceeds available funds.");
-      ledger(
+      await ledger(
         store,
         club.id,
         -cost,
@@ -587,8 +766,8 @@ export function dispatchAction(store: Store, input: unknown): unknown {
           ? "Academy improvement"
           : "Training facility improvement",
       );
-      store.run(
-        `UPDATE clubs SET ${kind} = min(99,${kind} + 3), transfer_budget = transfer_budget - ? WHERE id = ?`,
+      await store.run(
+        `UPDATE clubs SET ${kind} = CASE WHEN ${kind} + 3 > 99 THEN 99 ELSE ${kind} + 3 END, transfer_budget = transfer_budget - ? WHERE id = ?`,
         cost,
         club.id,
       );
@@ -601,8 +780,8 @@ export function dispatchAction(store: Store, input: unknown): unknown {
         .min(-100_000_000)
         .max(100_000_000)
         .parse(body.amount);
-      const club = clubOf(store);
-      const wages = weeklyWages(store, club.id);
+      const club = await clubOf(store);
+      const wages = await weeklyWages(store, club.id);
       if (
         club.transfer_budget - amount < 0 ||
         club.wage_budget + amount / 52 < wages
@@ -610,7 +789,7 @@ export function dispatchAction(store: Store, input: unknown): unknown {
         throw new GameError(
           "The revised budgets must cover current wages and keep the transfer allocation non-negative.",
         );
-      store.run(
+      await store.run(
         "UPDATE clubs SET transfer_budget = transfer_budget - ?, wage_budget = wage_budget + ? WHERE id = ?",
         amount,
         amount / 52,
@@ -628,7 +807,7 @@ export function dispatchAction(store: Store, input: unknown): unknown {
           "leadership",
         ])
         .parse(body.skill);
-      const settings = settingsOf(store);
+      const settings = await settingsOf(store);
       if (settings.skillTreeMode === "disabled")
         throw new GameError("Director skills are disabled in settings.");
       if (state.director.skillPoints <= 0)
@@ -645,13 +824,13 @@ export function dispatchAction(store: Store, input: unknown): unknown {
         );
       state.director.skillPoints--;
       state.director.skills[skill]++;
-      store.setMeta("state", state);
+      await store.setMeta("state", state);
       return { message: "Director skill developed." };
     }
     case "read-news": {
       const id = body.id === undefined ? undefined : idSchema.parse(body.id);
-      if (id) store.run("UPDATE news SET read = 1 WHERE id = ?", id);
-      else store.run("UPDATE news SET read = 1");
+      if (id) await store.run("UPDATE news SET [read] = 1 WHERE id = ?", id);
+      else await store.run("UPDATE news SET [read] = 1");
       return { message: "Inbox updated." };
     }
     default:
@@ -659,31 +838,141 @@ export function dispatchAction(store: Store, input: unknown): unknown {
   }
 }
 
-export function createApp(store: Store, saveFolder?: string) {
+export function createApp(store: Store) {
+  const configuration = readApiConfiguration();
   const app = express();
-  const saves = new Saves(store, saveFolder);
+  const saves = new Saves(store);
   let busy = false;
+  let readers = 0;
+  let finishReads: (() => void) | undefined;
   app.disable("x-powered-by");
+  app.set("trust proxy", false);
   app.use((request, response, next) => {
     response.setHeader("X-Content-Type-Options", "nosniff");
-    response.setHeader("Referrer-Policy", "same-origin");
+    response.setHeader("Referrer-Policy", "no-referrer");
     response.setHeader("X-Frame-Options", "DENY");
-    if (!["GET", "HEAD"].includes(request.method) && request.headers.origin) {
-      try {
-        const origin = new URL(request.headers.origin);
-        if (!["127.0.0.1", "localhost", "[::1]"].includes(origin.hostname))
-          return response.status(403).json({
-            error: "This local game does not accept cross-origin commands.",
-          });
-      } catch {
-        return response.status(403).json({ error: "Invalid request origin." });
-      }
-    }
+    response.setHeader(
+      "Permissions-Policy",
+      "camera=(), microphone=(), geolocation=()",
+    );
+    response.setHeader(
+      "Content-Security-Policy",
+      "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'",
+    );
+    if (configuration.hosted)
+      response.setHeader("Strict-Transport-Security", "max-age=31536000");
     if (request.path.startsWith("/api"))
       response.setHeader("Cache-Control", "no-store");
     next();
   });
+  app.get("/api/health", (_request, response) =>
+    response.json({ status: "ok" } satisfies Health),
+  );
+  app.use("/api", (request, response, next) => {
+    if (configuration.requireAuth) {
+      const encoded = request.headers["x-ms-client-principal"];
+      if (
+        typeof encoded !== "string" ||
+        encoded.length > 65536 ||
+        !/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)
+      )
+        return response.status(401).json({ error: "Authentication required." });
+      try {
+        const principal = principalSchema.parse(
+          JSON.parse(Buffer.from(encoded, "base64").toString("utf8")),
+        );
+        const tenants = principal.claims.filter((claim) =>
+          [
+            "tid",
+            "http://schemas.microsoft.com/identity/claims/tenantid",
+          ].includes(claim.typ),
+        );
+        const owners = principal.claims.filter((claim) =>
+          [
+            "oid",
+            "http://schemas.microsoft.com/identity/claims/objectidentifier",
+          ].includes(claim.typ),
+        );
+        const objectId = owners[0]?.val.toLowerCase();
+        if (
+          !tenants.length ||
+          !objectId ||
+          !tenants.every((claim) => claim.val.toLowerCase() === configuration.tenantId) ||
+          !owners.every((claim) => claim.val.toLowerCase() === objectId) ||
+          !configuration.allowedUserObjectIds.has(objectId)
+        )
+          return response
+            .status(403)
+            .json({ error: "This account is not authorized." });
+      } catch {
+        return response.status(401).json({ error: "Authentication required." });
+      }
+    } else {
+      if (
+        !["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(
+          request.socket.remoteAddress ?? "",
+        )
+      )
+        return response.status(403).json({ error: "Local access only." });
+      try {
+        const host = new URL(`http://${request.headers.host ?? ""}`);
+        if (!loopbackHosts.has(host.hostname))
+          return response.status(403).json({ error: "Local access only." });
+      } catch {
+        return response.status(403).json({ error: "Invalid request host." });
+      }
+    }
+    const suppliedOrigin = request.headers.origin;
+    if (suppliedOrigin) {
+      try {
+        const origin = new URL(suppliedOrigin);
+        const allowed = configuration.appOrigin
+          ? suppliedOrigin === configuration.appOrigin
+          : origin.origin === suppliedOrigin &&
+            ["http:", "https:"].includes(origin.protocol) &&
+            loopbackHosts.has(origin.hostname);
+        if (!allowed)
+          return response
+            .status(403)
+            .json({ error: "Request origin is not allowed." });
+      } catch {
+        return response.status(403).json({ error: "Invalid request origin." });
+      }
+    } else if (
+      request.headers["sec-fetch-site"] === "cross-site" ||
+      (configuration.requireAuth &&
+        !["GET", "HEAD", "OPTIONS"].includes(request.method))
+    ) {
+      return response
+        .status(403)
+        .json({ error: "A same-origin request is required." });
+    }
+    next();
+  });
   app.use(express.json({ limit: "128kb" }));
+  const conflict = (response: Response) =>
+    response.status(409).json({
+      error:
+        "The game is saving or advancing. Please wait for that operation to finish.",
+    });
+  const read =
+    (handler: (request: Request) => unknown | Promise<unknown>) =>
+    async (request: Request, response: Response, next: NextFunction) => {
+      if (busy) return conflict(response);
+      readers++;
+      try {
+        const result = await store.transaction(async () => handler(request));
+        response.json(result);
+      } catch (error) {
+        next(error);
+      } finally {
+        readers--;
+        if (readers === 0) {
+          finishReads?.();
+          finishReads = undefined;
+        }
+      }
+    };
   const mutation =
     (
       handler: (
@@ -692,13 +981,14 @@ export function createApp(store: Store, saveFolder?: string) {
       ) => unknown | Promise<unknown>,
     ) =>
     async (request: Request, response: Response, next: NextFunction) => {
-      if (busy)
-        return response.status(409).json({
-          error:
-            "The game is saving or advancing. Please wait for that operation to finish.",
-        });
+      if (busy) return conflict(response);
       busy = true;
       try {
+        if (readers > 0)
+          await new Promise<void>((resolveReads) => {
+            finishReads = resolveReads;
+          });
+        if (response.destroyed) return;
         await handler(request, response);
       } catch (error) {
         next(error);
@@ -706,125 +996,292 @@ export function createApp(store: Store, saveFolder?: string) {
         busy = false;
       }
     };
-  app.get("/api/health", (_request, response) =>
-    response.json({
-      status: "ok",
-      database: "SQLite",
-      localOnly: true,
-      testCareer: /(?:^|\/)(browser-test|e2e)\.sqlite$/.test(store.path),
-      date: stateOf(store).date,
+  app.get(
+    "/api/health/details",
+    read(
+      async () =>
+        ({
+          status: "ok",
+          database: "SQL Server",
+          databaseName: store.database,
+          schema: store.schemaName,
+          hosted: configuration.hosted,
+          testCareer: store.testMode,
+          date: (await stateOf(store)).date,
+        }) satisfies HealthDetails,
+    ),
+  );
+  app.get(
+    "/api/bootstrap",
+    read(() => query.bootstrap(store)),
+  );
+  app.get(
+    "/api/dashboard",
+    read(() => query.dashboard(store)),
+  );
+  app.get(
+    "/api/players",
+    read((request) => query.players(store, request.query)),
+  );
+  app.get(
+    "/api/players/:id",
+    read((request) =>
+      query.playerDetail(store, idSchema.parse(request.params.id)),
+    ),
+  );
+  app.get(
+    "/api/players/:id/interest",
+    read(async (request) => {
+      const player = await playerOf(store, idSchema.parse(request.params.id));
+      const input = z
+        .object({
+          negotiationId: idSchema.optional(),
+          wage: z.coerce.number().finite().min(0).max(10000000).optional(),
+          role: roleSchema.optional(),
+          years: z.coerce.number().int().min(1).max(5).optional(),
+          promises: z.string().max(400).optional(),
+        })
+        .parse(request.query);
+      const negotiation = input.negotiationId
+        ? await store.get<Negotiation>(
+            "SELECT * FROM negotiations WHERE id = ?",
+            input.negotiationId,
+          )
+        : undefined;
+      if (
+        input.negotiationId &&
+        (!negotiation ||
+          negotiation.player_id !== player.id ||
+          ![negotiation.buying_club_id, negotiation.selling_club_id].includes(
+            (await stateOf(store)).clubId,
+          ))
+      )
+        throw new GameError("This negotiation is not yours.");
+      const data = negotiation ? JSON.parse(negotiation.data) : undefined;
+      const loan = !!negotiation && LOAN_TYPES.includes(negotiation.type);
+      let promises = data?.promises;
+      if (input.promises) {
+        let decoded: unknown;
+        try {
+          decoded = JSON.parse(input.promises);
+        } catch {
+          throw new GameError("Invalid contract promises.");
+        }
+        promises = z
+          .array(
+            z.enum([
+              "First-team minutes",
+              "Captaincy",
+              "Youth pathway",
+              "European football",
+              "Facilities investment",
+            ]),
+          )
+          .max(5)
+          .parse(decoded);
+      }
+      return assessPlayerInterest(
+        store,
+        player,
+        await clubOf(store, negotiation?.buying_club_id),
+        {
+          loan,
+          role: loan ? data?.terms.role : input.role,
+          wage: input.wage,
+          years: input.years,
+          promises,
+          playingTime: loan ? data?.terms.playingTime : undefined,
+          tension: negotiation?.tension,
+        },
+      );
     }),
   );
-  app.get("/api/bootstrap", (_request, response) =>
-    response.json(query.bootstrap(store)),
-  );
-  app.get("/api/dashboard", (_request, response) =>
-    response.json(query.dashboard(store)),
-  );
-  app.get("/api/players", (request, response) =>
-    response.json(query.players(store, request.query)),
-  );
-  app.get("/api/players/:id", (request, response) =>
-    response.json(query.playerDetail(store, idSchema.parse(request.params.id))),
-  );
-  app.get("/api/squad", (_request, response) =>
-    response.json(query.squad(store)),
-  );
-  app.get("/api/scouting", (_request, response) =>
-    response.json(query.scouting(store)),
-  );
-  app.get("/api/transfers", (_request, response) =>
-    response.json(query.transfers(store)),
-  );
-  app.get("/api/loans", (_request, response) =>
-    response.json(query.loans(store)),
-  );
-  app.get("/api/staff", (_request, response) =>
-    response.json(query.staff(store)),
-  );
-  app.get("/api/training", (_request, response) =>
-    response.json(query.training(store)),
-  );
-  app.get("/api/academy", (_request, response) =>
-    response.json(query.academy(store)),
-  );
-  app.get("/api/finances", (_request, response) =>
-    response.json(query.finances(store)),
-  );
-  app.get("/api/news", (request, response) => {
-    const category = z
-      .string()
-      .max(30)
-      .optional()
-      .parse(request.query.category);
-    response.json(
-      store.all(
-        `SELECT * FROM news ${category ? "WHERE category = ?" : ""} ORDER BY id DESC LIMIT 150`,
-        ...(category ? [category] : []),
+  app.get(
+    "/api/players/:id/career",
+    read((request) =>
+      query.playerCareer(
+        store,
+        idSchema.parse(request.params.id),
+        request.query,
       ),
-    );
-  });
-  app.get("/api/clubs", (request, response) => {
-    const filter = z
-      .object({
-        q: z.string().max(100).default(""),
-        country: idSchema.optional(),
-        limit: z.coerce.number().int().min(1).max(500).default(60),
-      })
-      .parse(request.query);
-    response.json(
-      store.all<Club>(
-        `SELECT clubs.*, countries.name AS country_name, countries.code AS country_code FROM clubs JOIN countries ON countries.id = clubs.country_id WHERE clubs.type = 'club' AND clubs.name LIKE ? ${filter.country ? "AND country_id = ?" : ""} ORDER BY clubs.reputation DESC LIMIT ?`,
+    ),
+  );
+  app.get(
+    "/api/squad",
+    read((request) => query.squad(store, request.query)),
+  );
+  app.get(
+    "/api/scouting",
+    read(() => query.scouting(store)),
+  );
+  app.get(
+    "/api/transfers",
+    read(() => query.transfers(store)),
+  );
+  app.get(
+    "/api/loans",
+    read(() => query.loans(store)),
+  );
+  app.get(
+    "/api/staff",
+    read(() => query.staff(store)),
+  );
+  app.get(
+    "/api/training",
+    read(() => query.training(store)),
+  );
+  app.get(
+    "/api/academy",
+    read(() => query.academy(store)),
+  );
+  app.get(
+    "/api/assistant",
+    read(() => assistantDesk(store)),
+  );
+  app.get(
+    "/api/affiliates",
+    read(() => affiliateDesk(store)),
+  );
+  app.get(
+    "/api/affiliates/:id/interest",
+    read((request) =>
+      affiliateInterest(
+        store,
+        idSchema.parse(request.params.id),
+        z
+          .enum(PARTNERSHIP_TYPES as [string, ...string[]])
+          .parse(request.query.type),
+      ),
+    ),
+  );
+  app.get(
+    "/api/events",
+    read(() => unexpectedEvents(store)),
+  );
+  app.get(
+    "/api/finances",
+    read(() => query.finances(store)),
+  );
+  app.get(
+    "/api/media",
+    read((request) => mediaFeed(store, request.query)),
+  );
+  app.get(
+    "/api/news",
+    read((request) => notificationFeed(store, request.query)),
+  );
+  app.get(
+    "/api/competitions/favorites",
+    read(() => competitionFavorites(store)),
+  );
+  app.put(
+    "/api/competitions/:id/favorite",
+    mutation(async (request, response) =>
+      response.json(
+        await store.transaction(() =>
+          favoriteCompetition(
+            store,
+            idSchema.parse(request.params.id),
+            request.body,
+          ),
+        ),
+      ),
+    ),
+  );
+  app.get(
+    "/api/clubs",
+    read(async (request) => {
+      const filter = z
+        .object({
+          q: z.string().max(100).default(""),
+          country: idSchema.optional(),
+          limit: z.coerce.number().int().min(1).max(500).default(60),
+        })
+        .parse(request.query);
+      return store.all<Club>(
+        `SELECT clubs.*, countries.name AS country_name, countries.code AS country_code FROM clubs JOIN countries ON countries.id = clubs.country_id WHERE clubs.type = 'club' AND clubs.name LIKE ? ${filter.country ? "AND country_id = ?" : ""} ORDER BY clubs.reputation DESC, clubs.id OFFSET 0 ROWS FETCH NEXT ? ROWS ONLY`,
         `%${filter.q}%`,
         ...(filter.country ? [filter.country] : []),
         filter.limit,
-      ),
-    );
-  });
-  app.get("/api/leagues", (request, response) => {
-    const filter = z
-      .object({
-        q: z.string().max(100).default(""),
-        country: idSchema.optional(),
-        confederation: z.string().max(20).optional(),
-        kind: z
-          .enum(["league", "cup", "continental", "international", "youth"])
-          .optional(),
-        age: z.string().max(10).optional(),
-        limit: z.coerce.number().int().min(1).max(3000).default(200),
-      })
-      .parse(request.query);
-    const where = ["leagues.name LIKE ?"];
-    const params: (string | number)[] = [`%${filter.q}%`];
-    if (filter.country) {
-      where.push("leagues.country_id = ?");
-      params.push(filter.country);
-    }
-    if (filter.confederation) {
-      where.push("leagues.confederation = ?");
-      params.push(filter.confederation);
-    }
-    if (filter.kind) {
-      where.push("leagues.kind = ?");
-      params.push(filter.kind);
-    }
-    if (filter.age) {
-      where.push("leagues.age_group = ?");
-      params.push(filter.age);
-    }
-    response.json(
-      store.all(
-        `SELECT leagues.*, countries.name AS country_name FROM leagues LEFT JOIN countries ON countries.id = leagues.country_id WHERE ${where.join(" AND ")} ORDER BY leagues.reputation DESC, leagues.name LIMIT ?`,
-        ...params,
-        filter.limit,
-      ),
-    );
-  });
-  app.get("/api/leagues/:id", (request, response) =>
-    response.json(query.competition(store, idSchema.parse(request.params.id))),
+      );
+    }),
   );
-  app.get("/api/matches", (request, response) =>
-    response.json(
+  app.get(
+    "/api/world/clubs",
+    read((request) => query.worldClubs(store, request.query)),
+  );
+  app.get(
+    "/api/world/audit",
+    read(() => query.worldAudit(store)),
+  );
+  app.post(
+    "/api/world/expand",
+    mutation(async (_request, response) =>
+      response.json(await store.transaction(() => saves.expandWorld())),
+    ),
+  );
+  app.get(
+    "/api/clubs/:id",
+    read((request) =>
+      query.clubDetail(store, idSchema.parse(request.params.id)),
+    ),
+  );
+  app.get(
+    "/api/leagues",
+    read(async (request) => {
+      const filter = z
+        .object({
+          q: z.string().max(100).default(""),
+          country: idSchema.optional(),
+          confederation: z.string().max(20).optional(),
+          kind: z
+            .enum(["league", "cup", "continental", "international", "youth"])
+            .optional(),
+          age: z.string().max(10).optional(),
+          favorites: z.enum(["0", "1"]).optional(),
+          page: z.coerce.number().int().min(1).max(100000).default(1),
+          limit: z.coerce.number().int().min(1).max(3000).default(200),
+        })
+        .parse(request.query);
+      const where = ["leagues.name LIKE ?"];
+      const params: (string | number)[] = [`%${filter.q}%`];
+      if (filter.country) {
+        where.push("leagues.country_id = ?");
+        params.push(filter.country);
+      }
+      if (filter.confederation) {
+        where.push("leagues.confederation = ?");
+        params.push(filter.confederation);
+      }
+      if (filter.kind) {
+        where.push("leagues.kind = ?");
+        params.push(filter.kind);
+      }
+      if (filter.age) {
+        where.push("leagues.age_group = ?");
+        params.push(filter.age);
+      }
+      if (filter.favorites === "1")
+        where.push(
+          "EXISTS(SELECT 1 FROM competition_favorites WHERE league_id = leagues.id)",
+        );
+      return store.all(
+        `SELECT leagues.*, countries.name AS country_name FROM leagues LEFT JOIN countries ON countries.id = leagues.country_id WHERE ${where.join(" AND ")} ORDER BY leagues.reputation DESC, leagues.name, leagues.id OFFSET ? ROWS FETCH NEXT ? ROWS ONLY`,
+        ...params,
+        (filter.page - 1) * filter.limit,
+        filter.limit,
+      );
+    }),
+  );
+  app.get(
+    "/api/leagues/:id",
+    read((request) =>
+      query.competition(store, idSchema.parse(request.params.id)),
+    ),
+  );
+  app.get(
+    "/api/matches",
+    read((request) =>
       query.matches(
         store,
         z
@@ -838,13 +1295,16 @@ export function createApp(store: Store, saveFolder?: string) {
       ),
     ),
   );
-  app.get("/api/matches/:id", (request, response) =>
-    response.json(query.matchDetail(store, idSchema.parse(request.params.id))),
+  app.get(
+    "/api/matches/:id",
+    read((request) =>
+      query.matchDetail(store, idSchema.parse(request.params.id)),
+    ),
   );
   app.post(
     "/api/action",
-    mutation((request, response) => {
-      const result = store.transaction(() =>
+    mutation(async (request, response) => {
+      const result = await store.transaction(() =>
         dispatchAction(store, request.body),
       );
       response.json(result ?? { message: "Done." });
@@ -852,9 +1312,9 @@ export function createApp(store: Store, saveFolder?: string) {
   );
   app.patch(
     "/api/settings",
-    mutation((request, response) =>
+    mutation(async (request, response) =>
       response.json(
-        store.transaction(() => updateSettings(store, request.body)),
+        await store.transaction(() => updateSettings(store, request.body)),
       ),
     ),
   );
@@ -865,36 +1325,85 @@ export function createApp(store: Store, saveFolder?: string) {
         .object({ days: z.number().int().min(1).max(28) })
         .parse(request.body);
       const started = performance.now();
-      const result = {
-        from: stateOf(store).date,
-        date: stateOf(store).date,
-        days: 0,
-        matches: 0,
-        seconds: 0,
-      };
-      for (let step = 0; step < days; step++) {
-        const day = advance(store, 1);
-        result.days += day.days;
-        result.matches += day.matches;
-        result.date = day.date;
-        const settings = settingsOf(store);
-        const elapsed = daysBetween(
-          stateOf(store).lastAutosave,
-          stateOf(store).date,
-        );
-        if (
-          settings.autosave === "daily" ||
-          (settings.autosave === "weekly" && elapsed >= 7) ||
-          (settings.autosave === "monthly" && elapsed >= 28)
-        )
-          await saves.create("Career", true);
-        if (stateOf(store).gameOver) break;
-      }
+      const result = await store.transaction(async () => {
+        const initial = await stateOf(store);
+        const progress = {
+          from: initial.date,
+          date: initial.date,
+          days: 0,
+          matches: 0,
+          seconds: 0,
+        };
+        for (let step = 0; step < days; step++) {
+          const day = await advance(store, 1);
+          progress.days += day.days;
+          progress.matches += day.matches;
+          progress.date = day.date;
+          const settings = await settingsOf(store);
+          const state = await stateOf(store);
+          const elapsed = daysBetween(state.lastAutosave, state.date);
+          if (
+            settings.autosave === "daily" ||
+            (settings.autosave === "weekly" && elapsed >= 7) ||
+            (settings.autosave === "monthly" && elapsed >= 28)
+          )
+            await saves.create("Career", true);
+          if (state.gameOver) break;
+        }
+        return progress;
+      });
       result.seconds = Math.round((performance.now() - started) / 10) / 100;
       response.json(result);
     }),
   );
-  app.get("/api/saves", (_request, response) => response.json(saves.list()));
+  app.get(
+    "/api/saves",
+    read(() => saves.list()),
+  );
+  app.delete(
+    "/api/careers",
+    mutation(async (request, response) => {
+      const { file } = z.object({ file: saveFileSchema }).parse(request.body);
+      response.json(await saves.deleteCareer(file));
+    }),
+  );
+  app.post(
+    "/api/careers",
+    mutation(async (request, response) => {
+      const input = z
+        .object({
+          name: z.string().trim().min(2).max(50),
+          careerName: z
+            .string()
+            .trim()
+            .min(2)
+            .max(60)
+            .regex(/[a-zA-Z0-9]/),
+          background: z.string().max(40),
+          clubId: idSchema,
+          seed: z.string().min(1).max(100).default(`touchline-${Date.now()}`),
+        })
+        .parse(request.body);
+      response.json(await store.transaction(() => saves.startCareer(input)));
+    }),
+  );
+  app.post(
+    "/api/careers/load",
+    mutation(async (request, response) => {
+      const { file } = z.object({ file: saveFileSchema }).parse(request.body);
+      const archived = await store.transaction(async () => {
+        if (!(await saves.list()).some((slot) => slot.file === file))
+          throw new GameError("Save slot not found.");
+        const state = await stateOf(store);
+        const snapshot = await saves.create(
+          `${state.careerName ?? state.director.name} before load`,
+        );
+        await saves.restore(file);
+        return snapshot;
+      });
+      response.json({ message: "Career loaded.", archived: archived.file });
+    }),
+  );
   app.post(
     "/api/saves",
     mutation(async (request, response) =>
@@ -908,9 +1417,9 @@ export function createApp(store: Store, saveFolder?: string) {
   );
   app.post(
     "/api/saves/restore",
-    mutation((request, response) => {
-      saves.restore(
-        z.object({ file: z.string().max(200) }).parse(request.body).file,
+    mutation(async (request, response) => {
+      await saves.restore(
+        z.object({ file: saveFileSchema }).parse(request.body).file,
       );
       response.json({ message: "Career restored." });
     }),
@@ -919,22 +1428,26 @@ export function createApp(store: Store, saveFolder?: string) {
     "/api/saves/export",
     mutation(async (_request, response) => {
       const result = await saves.export();
-      response.setHeader(
-        "Content-Disposition",
-        `attachment; filename="${result.name}"`,
-      );
-      response.type("application/octet-stream").send(result.bytes);
+      try {
+        response.attachment(result.name);
+        response.type("application/gzip");
+        await pipeline(createReadStream(result.file), response);
+      } finally {
+        await rm(result.file, { force: true });
+      }
     }),
   );
   app.post(
     "/api/saves/import",
-    express.raw({ type: "application/octet-stream", limit: "700mb" }),
-    mutation((request, response) => {
-      if (!Buffer.isBuffer(request.body))
-        throw new GameError("Upload a SQLite or gzip save file.");
-      saves.import(request.body);
-      response.json({ message: "Local save imported." });
+    mutation(async (request, response) => {
+      if (!request.is(["application/octet-stream", "application/gzip"]))
+        throw new GameError("Upload a portable .touchline.gz save file.");
+      await saves.import(request);
+      response.json({ message: "Portable save imported." });
     }),
+  );
+  app.use("/api", (_request, response) =>
+    response.status(404).json({ error: "API route not found." }),
   );
   const dist = resolve("dist");
   if (existsSync(resolve(dist, "index.html"))) {
@@ -952,6 +1465,7 @@ export function createApp(store: Store, saveFolder?: string) {
       response: Response,
       _next: NextFunction,
     ) => {
+      if (response.headersSent) return response.destroy();
       if (error instanceof z.ZodError)
         return response.status(400).json({
           error: error.issues
@@ -961,14 +1475,32 @@ export function createApp(store: Store, saveFolder?: string) {
             )
             .join("; "),
         });
-      if (error instanceof GameError)
+      if (
+        error instanceof GameError &&
+        error.status >= 400 &&
+        error.status < 500
+      )
         return response.status(error.status).json({ error: error.message });
-      console.error(error);
+      if (error && typeof error === "object" && "type" in error) {
+        if (error.type === "entity.too.large")
+          return response
+            .status(413)
+            .json({ error: "Request body is too large." });
+        if (error.type === "entity.parse.failed")
+          return response
+            .status(400)
+            .json({ error: "Invalid JSON request body." });
+        if (
+          error.type === "encoding.unsupported" ||
+          error.type === "charset.unsupported"
+        )
+          return response
+            .status(415)
+            .json({ error: "Unsupported request encoding." });
+      }
+      console.error("Touchline: an API request failed.");
       return response.status(500).json({
-        error:
-          error instanceof Error
-            ? error.message
-            : "An unexpected game error occurred.",
+        error: "An unexpected server error occurred.",
       });
     },
   );

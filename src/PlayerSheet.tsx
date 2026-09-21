@@ -4,9 +4,11 @@ import {
   ArrowUpRight,
   Bookmark,
   ClipboardCheck,
+  CalendarDays,
+  ChevronLeft,
+  ChevronRight,
   HeartHandshake,
   ScanLine,
-  Sparkles,
 } from "lucide-react";
 import {
   Area,
@@ -22,24 +24,32 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { useGame, useResource } from "./game-context.tsx";
+import { useCurrency, useGame, useResource } from "./game-context.tsx";
+import InterestSummary from "./InterestSummary.tsx";
 import {
   Badge,
   Button,
-  Crest,
+  ClubLink,
   DetailList,
   Empty,
   ErrorState,
+  Field,
   Loading,
+  IconButton,
   Meter,
   Modal,
   Rating,
   Silhouette,
   Tabs,
 } from "./ui.tsx";
-import { clamp, dateLabel, label, LOAN_TYPES, money } from "../shared/rules.ts";
-import type { PlayerDetail, StaffDesk } from "../shared/api.ts";
-import type { Negotiation } from "../shared/types.ts";
+import {
+  clamp,
+  compactNumber,
+  dateLabel,
+  label,
+  transferWindow,
+} from "../shared/rules.ts";
+import type { PlayerCareer, PlayerDetail, StaffDesk } from "../shared/api.ts";
 
 interface ReportDetails {
   strengths: string[];
@@ -54,35 +64,249 @@ interface ReportDetails {
   bias: string;
 }
 
+function CareerMatches({ playerId }: { playerId: number }) {
+  const { openMatch, openLeague } = useGame();
+  const [season, setSeason] = useState("");
+  const [competition, setCompetition] = useState("");
+  const [page, setPage] = useState(1);
+  const params = new URLSearchParams({ page: String(page) });
+  if (season) params.set("season", season);
+  if (competition) params.set("competition", competition);
+  const { data, error, loading } = useResource<PlayerCareer>(
+    `players/${playerId}/career?${params}`,
+  );
+  if (error) return <ErrorState message={error} />;
+  if (!data) return <Loading label="Opening career match history" />;
+  if (!data.seasons.length)
+    return (
+      <Empty
+        icon={CalendarDays}
+        title="No simulated appearances yet"
+        detail="Every competitive match and friendly played in this career will be recorded here."
+      />
+    );
+  const summary = data.seasons.find(
+    (entry) => entry.season === data.selectedSeason,
+  )!;
+  return (
+    <div className="career-match-history">
+      <div className="career-history-controls">
+        <label className="field">
+          <span>Season</span>
+          <select
+            aria-label="Player career season"
+            value={data.selectedSeason ?? ""}
+            onChange={(event) => {
+              setSeason(event.target.value);
+              setCompetition("");
+              setPage(1);
+            }}
+          >
+            {data.seasons.map((entry) => (
+              <option key={entry.season} value={entry.season}>
+                {entry.season}/{String(entry.season + 1).slice(-2)}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="field">
+          <span>Competition</span>
+          <select
+            aria-label="Player career competition"
+            value={competition}
+            onChange={(event) => {
+              setCompetition(event.target.value);
+              setPage(1);
+            }}
+          >
+            <option value="">All competitions</option>
+            {data.competitions.map((entry) => (
+              <option key={entry.id ?? 0} value={entry.id ?? 0}>
+                {entry.name}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+      <div className="career-season-summary">
+        <span>
+          <small>Appearances</small>
+          <strong>{summary?.appearances ?? 0}</strong>
+        </span>
+        <span>
+          <small>Starts</small>
+          <strong>{summary?.starts ?? 0}</strong>
+        </span>
+        <span>
+          <small>Minutes</small>
+          <strong>{compactNumber(summary?.minutes ?? 0)}</strong>
+        </span>
+        <span>
+          <small>Goals / assists</small>
+          <strong>
+            {summary?.goals ?? 0} / {summary?.assists ?? 0}
+          </strong>
+        </span>
+        <span>
+          <small>Average rating</small>
+          <strong>{summary?.rating.toFixed(2) ?? "-"}</strong>
+        </span>
+      </div>
+      <div className="career-team-links">
+        {data.teams.map((team) => (
+          <span key={team.id}>
+            <ClubLink id={team.id} name={team.name} color={team.color} crest />
+            <small>
+              {team.appearances} apps / {team.minutes}'
+            </small>
+          </span>
+        ))}
+      </div>
+      <div className="table-scroll">
+        <table className="data-table career-matches-table">
+          <thead>
+            <tr>
+              <th>Date</th>
+              <th>Match</th>
+              <th>Competition</th>
+              <th>Minutes</th>
+              <th>Rating</th>
+              <th>G / A</th>
+              <th>xG / xA</th>
+              <th>Report</th>
+            </tr>
+          </thead>
+          <tbody>
+            {data.appearances.map((appearance) => (
+              <tr key={appearance.fixture_id}>
+                <td>{dateLabel(appearance.date)}</td>
+                <td>
+                  <div className="career-match-teams">
+                    <ClubLink
+                      id={appearance.home_id}
+                      name={appearance.home_name}
+                      color={appearance.home_color}
+                    />
+                    <button
+                      className="match-result-link"
+                      title="Open player match report"
+                      onClick={() => openMatch(appearance.fixture_id, playerId)}
+                    >
+                      {appearance.home_goals} - {appearance.away_goals}
+                    </button>
+                    <ClubLink
+                      id={appearance.away_id}
+                      name={appearance.away_name}
+                      color={appearance.away_color}
+                    />
+                  </div>
+                </td>
+                <td>
+                  {appearance.league_id ? (
+                    <button
+                      className="profile-link muted"
+                      onClick={() => openLeague(appearance.league_id!)}
+                    >
+                      {appearance.competition_name}
+                    </button>
+                  ) : (
+                    <span className="muted">Friendly</span>
+                  )}
+                </td>
+                <td>
+                  <strong>{appearance.minutes}'</strong>
+                  <small className="appearance-status">
+                    {appearance.started
+                      ? "Starter"
+                      : `On ${appearance.minute_on}'`}
+                    {appearance.minute_off
+                      ? ` / Off ${appearance.minute_off}'`
+                      : ""}
+                  </small>
+                </td>
+                <td>
+                  <Badge
+                    tone={
+                      appearance.rating >= 7
+                        ? "green"
+                        : appearance.rating < 6
+                          ? "red"
+                          : "amber"
+                    }
+                  >
+                    {appearance.rating.toFixed(1)}
+                  </Badge>
+                </td>
+                <td>
+                  {appearance.goals} / {appearance.assists}
+                </td>
+                <td>
+                  {(appearance.stats.xG ?? 0).toFixed(2)} /{" "}
+                  {(appearance.stats.xA ?? 0).toFixed(2)}
+                </td>
+                <td>
+                  <Button
+                    icon={ArrowUpRight}
+                    variant="secondary"
+                    onClick={() => openMatch(appearance.fixture_id, playerId)}
+                  >
+                    Match report
+                  </Button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className="pagination">
+        <span>{data.total} appearances this selection</span>
+        <span className="pagination-actions">
+          <IconButton
+            icon={ChevronLeft}
+            label="Previous appearances"
+            disabled={data.page <= 1 || loading}
+            onClick={() => setPage(data.page - 1)}
+          />
+          {data.page} / {data.pages}
+          <IconButton
+            icon={ChevronRight}
+            label="Next appearances"
+            disabled={data.page >= data.pages || loading}
+            onClick={() => setPage(data.page + 1)}
+          />
+        </span>
+      </div>
+    </div>
+  );
+}
+
 export default function PlayerSheet() {
-  const { playerId, setPlayer, bootstrap, act, navigate, notify } = useGame();
+  const { playerId, setPlayer, bootstrap, act, navigate, notify, openOffer } =
+    useGame();
+  const { money } = useCurrency();
   const { data, error } = useResource<PlayerDetail>(
     playerId ? `players/${playerId}` : null,
   );
   const { data: staff } = useResource<StaffDesk>("staff");
   const [tab, setTab] = useState("overview");
-  const [dealType, setDealType] = useState("Permanent transfer");
   const [scoutId, setScoutId] = useState("");
   const [pending, setPending] = useState(false);
+  const [squadChoice, setSquadChoice] = useState<{
+    playerId: number;
+    value: string;
+  } | null>(null);
   if (!playerId) return null;
-  const own =
-    data?.player.club_id === bootstrap?.club.id ||
-    data?.player.parent_club_id === bootstrap?.club.id;
-  async function startEnquiry() {
-    if (!data) return;
-    setPending(true);
-    const result = (await act({
-      type: "enquiry",
-      playerId: data.player.id,
-      dealType: own ? "Contract renewal" : dealType,
-    })) as Negotiation | undefined;
-    setPending(false);
-    if (result?.id) {
-      setPlayer(null);
-      navigate("transfers");
-      notify("Enquiry received. Open the negotiation to submit your terms.");
-    }
-  }
+  const own = data?.canManage ?? false;
+  const currentSquad = data?.squadDestinations.find((entry) => entry.current);
+  const squadValue =
+    squadChoice?.playerId === playerId
+      ? squadChoice.value
+      : currentSquad
+        ? `${currentSquad.clubId}:${currentSquad.ageGroup}`
+        : "";
+  const targetSquad = data?.squadDestinations.find(
+    (entry) => `${entry.clubId}:${entry.ageGroup}` === squadValue,
+  );
   async function requestReport() {
     if (!data) return;
     const scout = Number(
@@ -104,6 +328,7 @@ export default function PlayerSheet() {
   }
   const tabs = [
     { id: "overview", label: "Overview" },
+    { id: "career", label: "Career & matches" },
     { id: "attributes", label: "Attributes" },
     { id: "development", label: "Development" },
     { id: "scout", label: "Scout report" },
@@ -129,15 +354,18 @@ export default function PlayerSheet() {
               </div>
               <h2>{data.player.name}</h2>
               <div className="profile-meta">
-                <Crest
+                <ClubLink
+                  id={data.player.club_id}
                   name={data.player.club_name ?? "Free agent"}
                   color={data.player.club_color}
-                  size={19}
+                  crest
                 />
-                <span>{data.player.club_name ?? "Free agent"}</span>
               </div>
               <p className="profile-meta" style={{ marginTop: 9 }}>
-                {data.player.age} years <span>/</span> {data.player.nationality}{" "}
+                {data.player.age} years <span>/</span>{" "}
+                {(data.player.nationalities ?? [data.player.nationality]).join(
+                  " / ",
+                )}{" "}
                 <span>/</span> {data.player.foot}-footed
               </p>
             </div>
@@ -174,6 +402,7 @@ export default function PlayerSheet() {
           </div>
           <Tabs items={tabs} value={tab} onChange={setTab} />
           <div className="profile-body">
+            {tab === "career" && <CareerMatches playerId={playerId} />}
             {tab === "overview" && (
               <div className="profile-columns">
                 <div>
@@ -182,6 +411,23 @@ export default function PlayerSheet() {
                     <DetailList
                       items={[
                         ["Date of birth", dateLabel(data.player.birth_date)],
+                        [
+                          "Birthplace",
+                          data.profile.identity.birthplace ??
+                            data.profile.identity.region,
+                        ],
+                        [
+                          "Nationalities",
+                          (
+                            data.player.nationalities ?? [
+                              data.player.nationality,
+                            ]
+                          ).join(" / "),
+                        ],
+                        [
+                          "International representation",
+                          data.player.nationality,
+                        ],
                         [
                           "Height / weight",
                           `${data.profile.identity.height} cm / ${data.profile.identity.weight} kg`,
@@ -220,6 +466,68 @@ export default function PlayerSheet() {
                       ))}
                     </ul>
                   </section>
+                  {own && (
+                    <section className="profile-section">
+                      <h3>Squad assignment</h3>
+                      <div className="form-grid">
+                        <Field label="Playing squad" className="span-2">
+                          <select
+                            aria-label="Playing squad"
+                            value={squadValue}
+                            onChange={(event) =>
+                              setSquadChoice({
+                                playerId,
+                                value: event.target.value,
+                              })
+                            }
+                          >
+                            {!currentSquad && (
+                              <option value="">Choose squad</option>
+                            )}
+                            {data.squadDestinations.map((entry) => (
+                              <option
+                                key={`${entry.clubId}:${entry.ageGroup}`}
+                                value={`${entry.clubId}:${entry.ageGroup}`}
+                                disabled={!entry.eligible}
+                              >
+                                {entry.label}
+                                {entry.reason ? ` - ${entry.reason}` : ""}
+                              </option>
+                            ))}
+                          </select>
+                        </Field>
+                      </div>
+                      <Button
+                        icon={ArrowLeftRight}
+                        variant="secondary"
+                        disabled={
+                          pending ||
+                          !targetSquad?.eligible ||
+                          targetSquad.current
+                        }
+                        onClick={() => {
+                          if (!targetSquad) return;
+                          setPending(true);
+                          void act({
+                            type: "squad-move",
+                            playerId,
+                            clubId: targetSquad.clubId,
+                            ageGroup: targetSquad.ageGroup,
+                          }).finally(() => setPending(false));
+                        }}
+                      >
+                        Move player
+                      </Button>
+                    </section>
+                  )}
+                  {!!data.profile.identity.biography?.length && (
+                    <section className="profile-section">
+                      <h3>Personal history</h3>
+                      {data.profile.identity.biography.map((entry) => (
+                        <p key={entry}>{entry}</p>
+                      ))}
+                    </section>
+                  )}
                   <section className="profile-section">
                     <h3>Player traits</h3>
                     <div className="trait-list">
@@ -623,11 +931,18 @@ export default function PlayerSheet() {
             {tab === "contract" && (
               <div className="profile-columns">
                 <div>
+                  <InterestSummary assessment={data.interest} />
                   <section className="profile-section">
                     <h3>Contract & representation</h3>
                     <DetailList
                       items={[
-                        ["Weekly wage", money(data.player.wage, true)],
+                        [
+                          "Contract status",
+                          data.youthTransfer.contractStatus === "amateur"
+                            ? "Non-professional registration"
+                            : "Protected contract",
+                        ],
+                        ["Weekly wage", money(data.player.wage)],
                         ["Annual salary", money(data.player.wage * 52)],
                         ["Expires", dateLabel(data.player.contract_end)],
                         ["Role", data.player.role],
@@ -648,6 +963,103 @@ export default function PlayerSheet() {
                         ],
                       ]}
                     />
+                  </section>
+                  {data.youthTransfer.minor && (
+                    <section className="profile-section">
+                      <h3>Youth transfer eligibility</h3>
+                      <Badge
+                        tone={
+                          data.youthTransfer.approved
+                            ? "green"
+                            : data.youthTransfer.eligibleToApply
+                              ? "amber"
+                              : "red"
+                        }
+                      >
+                        {data.youthTransfer.status}
+                      </Badge>
+                      {data.youthTransfer.reasons.map((reason) => (
+                        <p className="dossier-copy" key={reason}>
+                          {reason}
+                        </p>
+                      ))}
+                      {data.youthTransfer.canApproachWithoutFee && (
+                        <DetailList
+                          items={[
+                            ["Transfer fee", money(0)],
+                            [
+                              "Training compensation estimate",
+                              money(data.youthTransfer.trainingCompensation),
+                            ],
+                          ]}
+                        />
+                      )}
+                    </section>
+                  )}
+                  <section className="profile-section">
+                    <h3>Transfer clauses</h3>
+                    {!data.buyBackClauses.length &&
+                      !data.sellOnClauses.length && (
+                        <p className="dossier-copy">
+                          No active transfer clauses.
+                        </p>
+                      )}
+                    {data.buyBackClauses.map((clause) => (
+                      <div key={clause.id}>
+                        <DetailList
+                          items={[
+                            [
+                              "Buy-back right",
+                              <ClubLink
+                                key="beneficiary"
+                                id={clause.beneficiary_id}
+                                name={clause.beneficiary_name ?? "Club"}
+                              />,
+                            ],
+                            ["Fixed price", money(clause.fee)],
+                            ["Expires", dateLabel(clause.expires)],
+                          ]}
+                        />
+                        {bootstrap &&
+                          clause.beneficiary_id === bootstrap.club.id && (
+                            <Button
+                              variant="secondary"
+                              icon={ArrowLeftRight}
+                              disabled={!transferWindow(bootstrap.state.date)}
+                              onClick={() =>
+                                void act({
+                                  type: "buy-back",
+                                  id: clause.id,
+                                }).then((result) => {
+                                  if (result) {
+                                    setPlayer(null);
+                                    navigate("transfers");
+                                  }
+                                })
+                              }
+                            >
+                              Open buy-back talks
+                            </Button>
+                          )}
+                      </div>
+                    ))}
+                    {data.sellOnClauses.map((clause) => (
+                      <DetailList
+                        key={clause.id}
+                        items={[
+                          [
+                            "Sell-on beneficiary",
+                            <ClubLink
+                              key="beneficiary"
+                              id={clause.beneficiary_id}
+                              name={clause.beneficiary_name}
+                            />,
+                          ],
+                          ["Percentage of next sale", `${clause.percentage}%`],
+                          ["Received", money(clause.paid)],
+                        ]}
+                      />
+                    ))}
                   </section>
                   <section className="profile-section">
                     <h3>Contract promises</h3>
@@ -674,6 +1086,27 @@ export default function PlayerSheet() {
                       <p className="dossier-copy">No active promises.</p>
                     )}
                   </section>
+                  {data.registration && (
+                    <section className="profile-section">
+                      <h3>Registration assessment</h3>
+                      <Badge
+                        tone={data.registration.allowed ? "green" : "amber"}
+                      >
+                        {data.registration.status}
+                      </Badge>
+                      <DetailList
+                        items={[
+                          [
+                            "GBE points",
+                            `${data.registration.points}/${data.registration.threshold}`,
+                          ],
+                          ...Object.entries(data.registration.breakdown).map(
+                            ([key, value]) => [key, value] as [string, number],
+                          ),
+                        ]}
+                      />
+                    </section>
+                  )}
                 </div>
                 <section className="profile-section">
                   <h3>Transfer value breakdown</h3>
@@ -734,38 +1167,17 @@ export default function PlayerSheet() {
                 Scout
               </Button>
             </div>
-            {own && data.player.age_group !== "Senior" ? (
-              <Button
-                icon={Sparkles}
-                onClick={() =>
-                  void act({ type: "promote", playerId: data.player.id })
-                }
-              >
-                Promote to first team
-              </Button>
-            ) : (
+            {
               <>
-                {!own && (
-                  <select
-                    aria-label="Enquiry type"
-                    value={dealType}
-                    onChange={(event) => setDealType(event.target.value)}
-                  >
-                    <option>Permanent transfer</option>
-                    {LOAN_TYPES.map((type) => (
-                      <option key={type}>{type}</option>
-                    ))}
-                  </select>
-                )}
                 <Button
                   icon={own ? ClipboardCheck : ArrowLeftRight}
-                  onClick={() => void startEnquiry()}
+                  onClick={() => openOffer(data.player.id)}
                   disabled={pending || !!data.player.parent_club_id}
                 >
-                  {own ? "Renew contract" : "Make enquiry"}
+                  {own ? "Renew contract" : "Make an offer"}
                 </Button>
               </>
-            )}
+            }
           </footer>
         </>
       )}

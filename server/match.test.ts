@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { expectedPoints, simulateMatch } from "./match.ts";
+import { calibrationSample } from "./check-simulation.ts";
 import type { MatchSnapshot, Position } from "../shared/types.ts";
 
 const positions: Position[] = [
@@ -144,3 +145,127 @@ describe("deterministic event-level match engine", () => {
     ).toBeGreaterThan(0.65);
   });
 });
+
+describe("version-three match laws", () => {
+  const fullTeam = (id: number) => ({
+    ...team(id),
+    bench: positions
+      .slice(0, 9)
+      .map((position, index) => ({
+        id: id * 100 + 20 + index,
+        name: `Substitute ${id}-${index}`,
+        position,
+        ability: 74,
+        fitness: 99,
+        confidence: 70,
+      })),
+  });
+  const modern: MatchSnapshot = {
+    ...snapshot,
+    rulesVersion: 3,
+    home: fullTeam(1),
+    away: fullTeam(2),
+  };
+  it("uses five substitutions in at most three windows and records actual minutes", () => {
+    const result = simulateMatch(modern, "match-laws");
+    expect(result.duration).toBeGreaterThan(90);
+    for (const side of [modern.home, modern.away]) {
+      const changes = result.substitutions!.filter(
+        (sub) => sub.teamId === side.id,
+      );
+      expect(changes.length).toBeLessThanOrEqual(5);
+      expect(changes.length).toBeGreaterThan(0);
+      expect(
+        new Set(
+          changes.filter((sub) => sub.window > 0).map((sub) => sub.window),
+        ).size,
+      ).toBeLessThanOrEqual(3);
+      for (const sub of changes) {
+        expect(result.players[sub.onId].minutes).toBeGreaterThan(0);
+        expect(
+          result.actions.filter(
+            (action) =>
+              action.playerId === sub.offId &&
+              action.type !== "substitution" &&
+              action.elapsed! >= sub.elapsed,
+          ),
+        ).toHaveLength(0);
+        expect(
+          result.actions.filter(
+            (action) =>
+              action.playerId === sub.onId && action.elapsed! < sub.elapsed,
+          ),
+        ).toHaveLength(0);
+      }
+    }
+    expect(simulateMatch(modern, "match-laws", false).stats).toEqual(
+      result.stats,
+    );
+    expect(simulateMatch(modern, "match-laws")).toEqual(result);
+  });
+  it("does not play a team with fewer than seven eligible players", () => {
+    const result = simulateMatch(
+      {
+        ...modern,
+        home: { ...modern.home, lineup: modern.home.lineup.slice(0, 6) },
+      },
+      "short-squad",
+    );
+    expect(result.abandoned?.teamId).toBe(modern.home.id);
+    expect(result.actions).toHaveLength(0);
+    expect(result.duration).toBe(0);
+  });
+  it("plays extra time before a shootout and keeps shootout goals out of match statistics", () => {
+    let shootouts = 0;
+    for (let index = 0; index < 45; index++) {
+      const rules: NonNullable<MatchSnapshot["rules"]> = {
+        decisive: true,
+        extraTime: true,
+        neutral: true,
+        awayGoals: false,
+        substitutions: 5,
+        substitutionWindows: 3,
+        extraSubstitution: true,
+        aggregate: { home: 0, away: 0, homeAwayGoals: 0, awayAwayGoals: 0 },
+        injuryFrequency: 0,
+      };
+      const result = simulateMatch({ ...modern, rules }, `knockout-${index}`);
+      if (!result.shootout) continue;
+      shootouts++;
+      expect(result.wentToExtraTime).toBe(true);
+      expect(result.duration).toBeGreaterThanOrEqual(120);
+      expect(result.shootout.home).not.toBe(result.shootout.away);
+      expect(
+        result.actions.filter(
+          (action) => action.type === "shot" && action.outcome === "goal",
+        ).length,
+      ).toBe(result.homeGoals + result.awayGoals);
+      expect(result.winnerId).toBeTruthy();
+    }
+    expect(shootouts).toBeGreaterThan(0);
+  });
+  it("removes sent-off players and gives them no later actions", () => {
+    let dismissals = 0;
+    for (let index = 0; index < 45; index++) {
+      const result = simulateMatch(modern, `discipline-${index}`);
+      for (const card of result.events.filter(
+        (event) => event.type === "red card",
+      )) {
+        dismissals++;
+        expect(
+          result.actions.filter(
+            (action) =>
+              action.playerId === card.playerId &&
+              action.elapsed! > card.elapsed!,
+          ),
+        ).toHaveLength(0);
+        expect(result.players[card.playerId].redCards).toBe(1);
+      }
+    }
+    expect(dismissals).toBeGreaterThan(0);
+  });
+});
+
+it("keeps goals, results and discipline inside reproducible statistical envelopes", () => {
+  expect(calibrationSample(600).matches).toBe(600);
+}, 30000);

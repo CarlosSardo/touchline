@@ -7,7 +7,7 @@
       "warn",
       {
         "allowConstantExport": true,
-        "allowExportNames": ["api", "useGame", "useResource"]
+        "allowExportNames": ["api", "useGame", "useResource", "useCurrency"]
       }
     ]
   }

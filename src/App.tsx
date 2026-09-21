@@ -11,6 +11,7 @@ import {
   Activity,
   ArrowLeftRight,
   Bell,
+  BookOpen,
   BriefcaseBusiness,
   ChartNoAxesCombined,
   Check,
@@ -21,6 +22,7 @@ import {
   Dumbbell,
   Goal,
   GraduationCap,
+  Globe2,
   Handshake,
   House,
   Inbox,
@@ -48,7 +50,7 @@ import {
   Loading,
   Modal,
 } from "./ui.tsx";
-import { dateLabel } from "../shared/rules.ts";
+import { compactNumber, dateLabel } from "../shared/rules.ts";
 import Office from "./views/Office.tsx";
 const PlayerSheet = lazy(() => import("./PlayerSheet.tsx"));
 const CareerSheet = lazy(() =>
@@ -69,6 +71,11 @@ const ScoutingView = lazy(() =>
   })),
 );
 const TransferView = lazy(() => import("./views/Transfers.tsx"));
+const OfferView = lazy(() =>
+  import("./views/Transfers.tsx").then((module) => ({
+    default: module.OfferBuilder,
+  })),
+);
 const LoanView = lazy(() => import("./views/Loans.tsx"));
 const AcademyView = lazy(() =>
   import("./views/Development.tsx").then((module) => ({
@@ -108,6 +115,9 @@ const InboxView = lazy(() =>
   })),
 );
 const SettingsView = lazy(() => import("./views/Settings.tsx"));
+const StartView = lazy(() => import("./views/Start.tsx"));
+const WorldView = lazy(() => import("./views/World.tsx"));
+const ClubSheet = lazy(() => import("./ClubSheet.tsx"));
 
 const navigation: {
   label: string;
@@ -128,6 +138,7 @@ const navigation: {
       { id: "transfers", label: "Transfers", icon: ArrowLeftRight },
       { id: "loans", label: "Loans", icon: Handshake },
       { id: "database", label: "Player database", icon: Database },
+      { id: "world", label: "World browser", icon: Globe2 },
     ],
   },
   {
@@ -152,14 +163,20 @@ const navigation: {
 const allItems = [
   ...navigation.flatMap((group) => group.items),
   { id: "settings" as Page, label: "Settings", icon: Settings2 },
+  { id: "offer" as Page, label: "Make an offer", icon: ArrowLeftRight },
+  { id: "contract" as Page, label: "Player contract", icon: ArrowLeftRight },
 ];
 const views: Record<Page, ReactNode> = {
+  start: <StartView />,
   office: <Office />,
   inbox: <InboxView />,
   squad: <SquadView />,
   scouting: <ScoutingView />,
   database: <DatabaseView />,
+  world: <WorldView />,
   transfers: <TransferView />,
+  offer: <OfferView />,
+  contract: <OfferView />,
   loans: <LoanView />,
   academy: <AcademyView />,
   training: <TrainingView />,
@@ -201,6 +218,8 @@ function Shell() {
     page,
     navigate,
     playerId,
+    clubProfileId,
+    setClub,
     busy,
     advance,
     toast,
@@ -247,18 +266,26 @@ function Shell() {
           <>
             <ErrorState message={error} />
             <Button onClick={() => void refresh()}>
-              Reconnect to local engine
+              Reconnect to game engine
             </Button>
           </>
         ) : (
           <>
             <Loading label="Opening your football world" />
-            <span className="muted">SQLite / Local career</span>
+            <span className="muted">SQL career / Portable snapshots</span>
           </>
         )}
       </div>
     );
   const { club, state } = bootstrap;
+  if (page === "start")
+    return (
+      <ScreenBoundary>
+        <Suspense fallback={<Loading label="Opening careers" />}>
+          <StartView />
+        </Suspense>
+      </ScreenBoundary>
+    );
   const speed = String(bootstrap.settings.simulationSpeed);
   const advanceDays =
     advanceChoice?.speed === speed
@@ -292,7 +319,7 @@ function Shell() {
             </span>
             touchline.<span className="brand-version">26</span>
           </a>
-          <button className="club-switch" onClick={() => setCareer(true)}>
+          <button className="club-switch" onClick={() => setClub(club.id)}>
             <Crest name={club.name} color={club.color} size={31} />
             <span>
               <strong>{club.name}</strong>
@@ -324,6 +351,10 @@ function Shell() {
             ))}
           </nav>
           <div className="sidebar-bottom">
+            <button className="nav-item" onClick={() => navClick("start")}>
+              <BookOpen size={17} strokeWidth={1.55} />
+              <span>Careers</span>
+            </button>
             <button
               className={`nav-item ${page === "settings" ? "active" : ""}`}
               onClick={() => navClick("settings")}
@@ -340,7 +371,14 @@ function Shell() {
                   .join("")}
               </span>
               <div>
-                <strong>{state.director.name}</strong>
+                <strong>
+                  <button
+                    className="profile-link"
+                    onClick={() => setCareer(true)}
+                  >
+                    {state.director.name}
+                  </button>
+                </strong>
                 <small>Sporting Director</small>
               </div>
               <ShieldCheck size={15} strokeWidth={1.5} />
@@ -378,6 +416,12 @@ function Shell() {
                     : `${state.season}/${String(state.season + 1).slice(-2)}`}
                 </small>
               </div>
+              <IconButton
+                icon={BookOpen}
+                label="Career start menu"
+                className="mobile-essential"
+                onClick={() => navigate("start")}
+              />
               <IconButton
                 icon={Search}
                 label="Search the player database"
@@ -526,12 +570,17 @@ function Shell() {
           <div className="simulation-track">
             <span />
           </div>
-          <small>{dateLabel(state.date)} / SQLite career</small>
+          <small>{dateLabel(state.date)} / Active career</small>
         </div>
       )}
       {playerId && (
         <Suspense fallback={null}>
           <PlayerSheet key={playerId} />
+        </Suspense>
+      )}
+      {clubProfileId && (
+        <Suspense fallback={null}>
+          <ClubSheet key={clubProfileId} />
         </Suspense>
       )}
       {menu && (
@@ -576,7 +625,7 @@ function Shell() {
             </div>
             <div className="sheet-footer">
               <Button icon={Search} type="submit">
-                Search {bootstrap.world.players.toLocaleString()} players
+                Search {compactNumber(bootstrap.world.players)} players
               </Button>
             </div>
           </form>
@@ -608,15 +657,15 @@ function Shell() {
               </div>
               <div>
                 <dt>Domestic leagues</dt>
-                <dd>{bootstrap.world.leagues.toLocaleString()}</dd>
+                <dd>{compactNumber(bootstrap.world.leagues)}</dd>
               </div>
               <div>
                 <dt>Clubs</dt>
-                <dd>{bootstrap.world.clubs.toLocaleString()}</dd>
+                <dd>{compactNumber(bootstrap.world.clubs)}</dd>
               </div>
               <div>
                 <dt>Players</dt>
-                <dd>{bootstrap.world.players.toLocaleString()}</dd>
+                <dd>{compactNumber(bootstrap.world.players)}</dd>
               </div>
               <div>
                 <dt>World</dt>
@@ -624,11 +673,11 @@ function Shell() {
               </div>
               <div>
                 <dt>Storage</dt>
-                <dd>Local SQLite</dd>
+                <dd>SQL Server</dd>
               </div>
               <div>
-                <dt>Cloud services</dt>
-                <dd>None</dd>
+                <dt>Save format</dt>
+                <dd>Portable .touchline.gz</dd>
               </div>
             </dl>
           </div>

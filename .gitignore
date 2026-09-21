@@ -20,6 +20,11 @@ playwright-report/
 *.sqlite-shm
 *.tsbuildinfo
 coverage/
+.vitest/
+backups/
+*.touchline.gz
+.azure/
+.touchline-deployment.json*
 
 # Local configuration and credentials
 .env

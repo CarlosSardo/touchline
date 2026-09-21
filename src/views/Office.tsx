@@ -18,10 +18,11 @@ import {
   Users,
   Wallet,
 } from "lucide-react";
-import { useGame, useResource } from "../game-context.tsx";
+import { useCurrency, useGame, useResource } from "../game-context.tsx";
 import {
   Badge,
   Button,
+  ClubLink,
   Crest,
   Empty,
   ErrorState,
@@ -41,11 +42,12 @@ import {
   addDays,
   dateLabel,
   daysBetween,
-  money,
+  compactNumber,
   transferWindow,
 } from "../../shared/rules.ts";
 import type { Dashboard } from "../../shared/api.ts";
 import type { Player } from "../../shared/types.ts";
+import { EventsPanel } from "./ClubSupport.tsx";
 
 function MiniPitch() {
   const { bootstrap } = useGame();
@@ -114,6 +116,7 @@ function MiniPitch() {
 
 function WatchCard({ player }: { player: Player }) {
   const { setPlayer } = useGame();
+  const { money } = useCurrency();
   return (
     <article className="watch-card">
       <Badge tone="green">{player.position}</Badge>
@@ -154,6 +157,7 @@ function WatchCard({ player }: { player: Player }) {
 
 export default function Office() {
   const { bootstrap, navigate, openLeague, openMatch, setPlayer } = useGame();
+  const { money } = useCurrency();
   const { data, error, loading } = useResource<Dashboard>("dashboard");
   if (error) return <ErrorState message={error} />;
   if (!data || !bootstrap) return <Loading />;
@@ -174,7 +178,10 @@ export default function Office() {
   const firstName = surnames[0];
   const openNews = (action: string | null, payload: string) => {
     const parsed = JSON.parse(payload);
-    if (parsed.fixtureId) openMatch(parsed.fixtureId);
+    if (parsed.unexpectedEventId) navigate("board");
+    else if (parsed.assistantReportId) navigate("staff");
+    else if (parsed.competitionId) openLeague(parsed.competitionId);
+    else if (parsed.fixtureId) openMatch(parsed.fixtureId);
     else if (parsed.playerId) setPlayer(parsed.playerId);
     else
       navigate(
@@ -196,7 +203,8 @@ export default function Office() {
         title={`Good morning, ${firstName}.`}
         subtitle={
           <>
-            {club.name} <span className="muted">/</span> {dateLabel(state.date)}
+            <ClubLink id={club.id} name={club.name} />{" "}
+            <span className="muted">/</span> {dateLabel(state.date)}
           </>
         }
       >
@@ -212,6 +220,7 @@ export default function Office() {
           {data.unread > 0 && <span className="nav-count">{data.unread}</span>}
         </Button>
       </PageHeading>
+      <EventsPanel compact />
       <div className="stat-strip">
         <Stat
           label="Transfer budget"
@@ -502,7 +511,9 @@ export default function Office() {
               <div className="mandate-club">
                 <Crest name={club.name} color={club.color} size={32} />
                 <div>
-                  <strong>{club.name}</strong>
+                  <strong>
+                    <ClubLink id={club.id} name={club.name} />
+                  </strong>
                   <small>{club.philosophy}</small>
                 </div>
               </div>
@@ -531,11 +542,11 @@ export default function Office() {
       </div>
       <footer className="save-status">
         <Check size={12} />
-        <span>Local career / SQLite</span>
+        <span>Career / SQL</span>
         <span>
           Next weekly review: {dateLabel(addDays(state.date, 7))}{" "}
           <span style={{ paddingInline: 8 }}>/</span>{" "}
-          {bootstrap.world.players.toLocaleString()} players in your world
+          {compactNumber(bootstrap.world.players)} players in your world
         </span>
       </footer>
     </div>

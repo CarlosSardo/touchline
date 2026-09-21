@@ -1,10 +1,12 @@
-import { useState } from "react";
+import { useDeferredValue, useState } from "react";
 import {
   Activity,
   ArrowLeftRight,
   ArrowUpRight,
   CheckCheck,
   CircleDollarSign,
+  ChevronLeft,
+  ChevronRight,
   Flag,
   GraduationCap,
   Handshake,
@@ -16,6 +18,8 @@ import {
   MessageSquare,
   Mic,
   Newspaper,
+  RotateCcw,
+  Search,
   ShieldCheck,
   Target,
   TrendingUp,
@@ -33,74 +37,129 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { useGame, useResource, type Page } from "../game-context.tsx";
+import {
+  useCurrency,
+  useGame,
+  useResource,
+  type Page,
+} from "../game-context.tsx";
 import {
   Badge,
   Button,
+  ClubLink,
   Crest,
   DetailList,
   Empty,
   ErrorState,
   Field,
+  IconButton,
   Loading,
   Meter,
   Modal,
   PageHeading,
   Panel,
+  PlayerLink,
   SectionHeading,
   Stat,
   Tabs,
 } from "../ui.tsx";
-import { dateLabel, money } from "../../shared/rules.ts";
-import type { Dashboard, FinanceData } from "../../shared/api.ts";
+import { compactNumber, dateLabel, label } from "../../shared/rules.ts";
+import type {
+  Dashboard,
+  FinanceData,
+  Journalist,
+  MediaData,
+  MediaStory,
+  CompetitionFavorite,
+} from "../../shared/api.ts";
 import type { NewsItem } from "../../shared/types.ts";
+import { TransferPaymentTable } from "./Transfers.tsx";
+import { AffiliatesPanel, EventsPanel } from "./ClubSupport.tsx";
 
-function BudgetSheet({ close }: { close: () => void }) {
+function BudgetSheet({ close, wages }: { close: () => void; wages: number }) {
   const { bootstrap, act } = useGame();
-  const [amount, setAmount] = useState(1_000_000);
+  const { money } = useCurrency();
+  const [adjustment, setAdjustment] = useState(0);
+  const [pending, setPending] = useState(false);
+  if (!bootstrap) return null;
+  const { club } = bootstrap;
+  const minimum = Math.max(
+    -100_000_000,
+    Math.ceil((wages - club.wage_budget) * 52),
+  );
+  const maximum = Math.min(100_000_000, Math.floor(club.transfer_budget));
+  const available = minimum <= maximum;
+  const amount = available
+    ? Math.min(maximum, Math.max(minimum, adjustment))
+    : 0;
+  const position =
+    maximum > minimum ? ((amount - minimum) / (maximum - minimum)) * 100 : 0;
+  const transferBudget = club.transfer_budget - amount;
+  const wageBudget = club.wage_budget + amount / 52;
+  async function confirmAllocation() {
+    setPending(true);
+    const result = await act({ type: "budget", amount });
+    setPending(false);
+    if (result) close();
+  }
   return (
     <Modal title="Rebalance your budgets" onClose={close}>
       <div className="sheet-body">
-        <Field label="Transfer allocation to move into annual wages (GBP)">
+        <Field
+          label="Transfer and wage budget allocation"
+          className="budget-allocation-field"
+        >
           <input
-            type="number"
-            min="-100000000"
-            max={bootstrap?.club.transfer_budget ?? 0}
-            step="100000"
-            value={amount}
-            onChange={(event) => setAmount(Number(event.target.value))}
+            type="range"
+            min="0"
+            max="100"
+            step="0.1"
+            value={position}
+            aria-valuetext={`${money(transferBudget, true)} transfer budget; ${money(wageBudget, true)} weekly wage budget`}
+            disabled={pending || !available || minimum === maximum}
+            onChange={(event) =>
+              setAdjustment(
+                Math.round(
+                  minimum +
+                    (Number(event.target.value) / 100) * (maximum - minimum),
+                ),
+              )
+            }
           />
         </Field>
+        <div className="budget-slider-labels" aria-hidden="true">
+          <span>More transfer funds</span>
+          <span>More weekly wages</span>
+        </div>
+        {!available && (
+          <p className="sheet-description negative">
+            Available funds cannot cover the current wage commitments.
+          </p>
+        )}
         <div className="section-space">
           <DetailList
             items={[
-              [
-                "Revised transfer budget",
-                money((bootstrap?.club.transfer_budget ?? 0) - amount),
-              ],
-              [
-                "Revised weekly wage budget",
-                money((bootstrap?.club.wage_budget ?? 0) + amount / 52),
-              ],
+              ["Revised transfer budget", money(transferBudget)],
+              ["Revised weekly wage budget", money(wageBudget)],
+              ["Current weekly wages", money(wages)],
               [
                 "Weekly wage change",
-                `${amount >= 0 ? "+" : ""}${money(amount / 52)}`,
+                amount === 0
+                  ? money(0)
+                  : `${amount > 0 ? "+" : "-"}${money(Math.abs(amount) / 52)}`,
               ],
             ]}
           />
         </div>
       </div>
       <footer className="sheet-footer">
-        <Button variant="secondary" onClick={close}>
+        <Button variant="secondary" onClick={close} disabled={pending}>
           Cancel
         </Button>
         <Button
           icon={ArrowLeftRight}
-          onClick={() =>
-            void act({ type: "budget", amount }).then((result) => {
-              if (result) close();
-            })
-          }
+          disabled={pending || !available || amount === 0}
+          onClick={() => void confirmAllocation()}
         >
           Confirm allocation
         </Button>
@@ -111,6 +170,7 @@ function BudgetSheet({ close }: { close: () => void }) {
 
 export function Finances() {
   const { bootstrap, act, confirm } = useGame();
+  const { money, currency } = useCurrency();
   const { data, error } = useResource<FinanceData>("finances");
   const [tab, setTab] = useState("overview");
   const [budgetOpen, setBudgetOpen] = useState(false);
@@ -135,7 +195,7 @@ export function Finances() {
       <PageHeading
         eyebrow="SUSTAINABLE AMBITION"
         title="Club finances"
-        subtitle={`${club.name} / All amounts in GBP`}
+        subtitle={`${club.name} / ${currency}`}
       >
         <Button
           icon={ArrowLeftRight}
@@ -180,12 +240,37 @@ export function Finances() {
           items={[
             { id: "overview", label: "Overview" },
             { id: "ledger", label: "Transactions" },
+            { id: "payments", label: "Transfer payments" },
             { id: "ffp", label: "Financial regulations" },
             { id: "investments", label: "Infrastructure" },
           ]}
           value={tab}
           onChange={setTab}
         />
+        {tab === "payments" && (
+          <>
+            <div className="padded">
+              <DetailList
+                items={[
+                  ["Outstanding payable", money(data.transferPayable)],
+                  [
+                    "Reserved for future arrivals",
+                    money(data.futureTransferReserved),
+                  ],
+                  ["Outstanding receivable", money(data.transferReceivable)],
+                  [
+                    "Net scheduled cash",
+                    money(data.transferReceivable - data.transferPayable),
+                  ],
+                ]}
+              />
+            </div>
+            <TransferPaymentTable
+              payments={data.transferPayments}
+              clubId={club.id}
+            />
+          </>
+        )}
         {tab === "overview" && (
           <div className="padded">
             <div className="profile-columns">
@@ -337,7 +422,7 @@ export function Finances() {
                         className={`number money ${entry.amount >= 0 ? "positive" : "negative"}`}
                       >
                         {entry.amount > 0 ? "+" : ""}
-                        {money(entry.amount, true)}
+                        {money(entry.amount)}
                       </td>
                     </tr>
                   ))}
@@ -361,27 +446,71 @@ export function Finances() {
                     <h3>
                       {!bootstrap.settings.ffp
                         ? "Enforcement disabled"
-                        : club.ffp > 100_000_000
-                          ? "Registration embargo"
-                          : club.ffp > 60_000_000
-                            ? "Under review"
-                            : "Within monitoring limits"}
+                        : data.compliance.status === "review"
+                          ? "Closed accounts under review"
+                          : data.compliance.status === "monitoring"
+                            ? "Forecast requires attention"
+                            : "Within modeled limits"}
                     </h3>
-                    <p>Financial sustainability / In-game rules</p>
+                    <p>{data.compliance.policy}</p>
                   </div>
                 </div>
                 <DetailList
                   items={[
-                    ["Current deficit", money(club.ffp)],
-                    ["Monitoring threshold", money(60_000_000)],
-                    ["Registration embargo threshold", money(100_000_000)],
+                    [
+                      "Accounts",
+                      data.compliance.projected
+                        ? "Current-season forecast"
+                        : "Closed financial period",
+                    ],
+                    [
+                      "Football revenue",
+                      money(data.compliance.footballRevenue),
+                    ],
+                    ["Squad costs", money(data.compliance.squadCost)],
+                    [
+                      "Squad-cost ratio",
+                      `${(data.compliance.squadCostRatio * 100).toFixed(1)}%`,
+                    ],
+                    [
+                      "Squad-cost limit",
+                      data.compliance.squadCostLimit === null
+                        ? "Club budgets only"
+                        : `${Math.round(data.compliance.squadCostLimit * 100)}%`,
+                    ],
+                    [
+                      "Squad-cost headroom",
+                      data.compliance.costHeadroom === null
+                        ? "Not applicable"
+                        : money(data.compliance.costHeadroom),
+                    ],
+                    [
+                      "Recorded rolling earnings",
+                      money(data.compliance.rollingEarnings),
+                    ],
+                    [
+                      "Equity-supported allowable loss",
+                      data.compliance.allowableLoss === null
+                        ? "Not applicable"
+                        : money(data.compliance.allowableLoss),
+                    ],
+                    [
+                      "Simulated periods observed",
+                      `${data.compliance.yearsObserved} / 3`,
+                    ],
                     [
                       "Enforcement",
                       bootstrap.settings.ffp ? "Enabled" : "Disabled",
                     ],
-                    ["Amortization", money(data.amortization)],
+                    ["Annual amortization", money(data.amortization)],
                   ]}
                 />
+                {data.compliance.issues.map((issue) => (
+                  <p className="sheet-description negative" key={issue}>
+                    {issue}
+                  </p>
+                ))}
+                <p className="sheet-description">{data.compliance.source}</p>
               </div>
               <div>
                 <h3 className="subsection-title">
@@ -469,7 +598,9 @@ export function Finances() {
           </div>
         )}
       </Panel>
-      {budgetOpen && <BudgetSheet close={() => setBudgetOpen(false)} />}
+      {budgetOpen && (
+        <BudgetSheet wages={data.wages} close={() => setBudgetOpen(false)} />
+      )}
     </div>
   );
 }
@@ -647,23 +778,55 @@ export function Board() {
           </article>
         ))}
       </div>
+      <AffiliatesPanel />
+      <EventsPanel />
     </div>
   );
 }
 
 export function Inbox() {
-  const { act, navigate, openMatch, setPlayer } = useGame();
+  const { act, navigate, openMatch, openLeague, setPlayer } = useGame();
   const [category, setCategory] = useState("");
-  const [selectedId, setSelectedId] = useState<number | null>(null);
-  const { data, error } = useResource<NewsItem[]>(
-    `news${category ? `?category=${encodeURIComponent(category)}` : ""}`,
+  const [search, setSearch] = useState("");
+  const [status, setStatus] = useState("all");
+  const [priority, setPriority] = useState("all");
+  const [competition, setCompetition] = useState("");
+  const [archive, setArchive] = useState(false);
+  const [pagination, setPagination] = useState({ key: "", page: 1 });
+  const deferred = useDeferredValue(search);
+  const filterKey = JSON.stringify([
+    category,
+    deferred,
+    status,
+    priority,
+    competition,
+    archive,
+  ]);
+  const page = pagination.key === filterKey ? pagination.page : 1;
+  const params = new URLSearchParams({
+    q: deferred,
+    category,
+    status,
+    priority,
+    archive: archive ? "1" : "0",
+    page: String(page),
+    limit: "100",
+  });
+  if (competition) params.set("league", competition);
+  const { data: favorites } = useResource<CompetitionFavorite[]>(
+    "competitions/favorites",
   );
+  const [selectedId, setSelectedId] = useState<number | null>(null);
+  const { data, error } = useResource<NewsItem[]>(`news?${params}`, {
+    keepPreviousData: true,
+  });
   if (error) return <ErrorState message={error} />;
   if (!data) return <Loading />;
   const selected = data.find((item) => item.id === selectedId) ?? data[0];
   function openAction(item: NewsItem) {
     const details = JSON.parse(item.data);
-    if (details.fixtureId) openMatch(details.fixtureId);
+    if (details.competitionId) openLeague(details.competitionId);
+    else if (details.fixtureId) openMatch(details.fixtureId);
     else if (details.playerId) setPlayer(details.playerId);
     else navigate((item.action ?? "office") as Page);
   }
@@ -683,32 +846,102 @@ export function Inbox() {
         </Button>
       </PageHeading>
       <Panel>
-        <div className="filter-bar">
-          <select
-            aria-label="Inbox category"
-            value={category}
-            onChange={(event) => setCategory(event.target.value)}
-          >
-            <option value="">All correspondence</option>
-            {[
-              "Board",
-              "Scouting",
-              "Transfers",
-              "Loans",
-              "Academy",
-              "Squad",
-              "Match",
-              "Staff",
-              "Medical",
-              "Finance",
-              "Media",
-              "Fans",
-              "World",
-              "Club",
-            ].map((value) => (
-              <option key={value}>{value}</option>
-            ))}
-          </select>
+        <div className="organized-filters" aria-label="Inbox filters">
+          <div className="search-field">
+            <Search size={16} />
+            <input
+              aria-label="Search inbox"
+              placeholder="Search correspondence..."
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+            />
+          </div>
+          <fieldset className="filter-group">
+            <legend>Topic</legend>
+            <select
+              aria-label="Inbox category"
+              value={category}
+              onChange={(event) => setCategory(event.target.value)}
+            >
+              <option value="">All correspondence</option>
+              {[
+                "Board",
+                "Scouting",
+                "Transfers",
+                "Loans",
+                "Academy",
+                "Squad",
+                "Match",
+                "Staff",
+                "Medical",
+                "Finance",
+                "Media",
+                "Fans",
+                "World",
+                "Club",
+                "Competitions",
+                "Director",
+                "Events",
+              ].map((value) => (
+                <option key={value}>{value}</option>
+              ))}
+            </select>
+            <select
+              aria-label="Inbox competition"
+              value={competition}
+              onChange={(event) => setCompetition(event.target.value)}
+            >
+              <option value="">All competitions</option>
+              {favorites?.map((favorite) => (
+                <option key={favorite.leagueId} value={favorite.leagueId}>
+                  {favorite.name}
+                </option>
+              ))}
+            </select>
+          </fieldset>
+          <fieldset className="filter-group">
+            <legend>Status and priority</legend>
+            <select
+              aria-label="Inbox read status"
+              value={status}
+              onChange={(event) => setStatus(event.target.value)}
+            >
+              <option value="all">Read and unread</option>
+              <option value="unread">Unread only</option>
+              <option value="read">Read only</option>
+            </select>
+            <select
+              aria-label="Inbox priority"
+              value={priority}
+              onChange={(event) => setPriority(event.target.value)}
+            >
+              <option value="all">All priorities</option>
+              <option value="important">Important and warnings</option>
+            </select>
+          </fieldset>
+          <fieldset className="filter-group">
+            <legend>View</legend>
+            <label className="filter-check">
+              <input
+                type="checkbox"
+                checked={archive}
+                onChange={(event) => setArchive(event.target.checked)}
+              />
+              Include muted archive
+            </label>
+            <IconButton
+              icon={RotateCcw}
+              label="Reset inbox filters"
+              onClick={() => {
+                setSearch("");
+                setCategory("");
+                setStatus("all");
+                setPriority("all");
+                setCompetition("");
+                setArchive(false);
+              }}
+            />
+          </fieldset>
         </div>
         {data.length ? (
           <div className="inbox-layout">
@@ -763,23 +996,204 @@ export function Inbox() {
             detail="New correspondence arrives as your career unfolds."
           />
         )}
+        <div className="pagination">
+          <span>Page {page}</span>
+          <div className="inline-controls">
+            <IconButton
+              icon={ChevronLeft}
+              label="Previous inbox page"
+              disabled={page === 1}
+              onClick={() => setPagination({ key: filterKey, page: page - 1 })}
+            />
+            <IconButton
+              icon={ChevronRight}
+              label="Next inbox page"
+              disabled={data.length < 100}
+              onClick={() => setPagination({ key: filterKey, page: page + 1 })}
+            />
+          </div>
+        </div>
       </Panel>
     </div>
   );
 }
 
+function MediaArticle({
+  story,
+  journalists,
+  onJournalist,
+}: {
+  story: MediaStory;
+  journalists: Journalist[];
+  onJournalist: (id: string) => void;
+}) {
+  const { openMatch } = useGame();
+  const { money } = useCurrency();
+  const report = story.report;
+  const journalist = journalists.find(
+    (entry) => entry.id === report?.journalistId,
+  );
+  return (
+    <article className="media-article" aria-label={story.title}>
+      <header className="media-byline">
+        <div className="media-author">
+          <span className="director-avatar" aria-hidden="true">
+            {journalist
+              ? journalist.name
+                  .split(" ")
+                  .map((part) => part[0])
+                  .slice(0, 2)
+                  .join("")
+              : "ND"}
+          </span>
+          <div>
+            {journalist ? (
+              <button
+                className="profile-link"
+                onClick={() => onJournalist(journalist.id)}
+              >
+                {journalist.name}
+              </button>
+            ) : (
+              <strong>Club news desk</strong>
+            )}
+            <small>
+              {journalist?.outlet ?? story.category}
+              {report && ` / ${label(report.topic)}`}
+            </small>
+          </div>
+        </div>
+        <div>
+          <Badge
+            tone={
+              report?.status === "Confirmed"
+                ? "green"
+                : report?.status === "Reported"
+                  ? "amber"
+                  : "blue"
+            }
+          >
+            {report?.status ?? "Archive"}
+          </Badge>
+          <time dateTime={story.date}>{dateLabel(story.date)}</time>
+        </div>
+      </header>
+      <h2>{story.title}</h2>
+      <p>{story.body}</p>
+      {report && (
+        <>
+          <div className="media-story-subjects">
+            {report.playerId && (
+              <PlayerLink
+                id={report.playerId}
+                name={report.playerName ?? "Player"}
+              />
+            )}
+            {story.clubs.map((club) => (
+              <ClubLink key={club.id} id={club.id} name={club.name} />
+            ))}
+            {report.fee !== undefined && <span>Fee {money(report.fee)}</span>}
+            {report.fixtureId && (
+              <Button
+                variant="ghost"
+                icon={ArrowUpRight}
+                onClick={() => openMatch(report.fixtureId!, report.playerId)}
+              >
+                Match report
+              </Button>
+            )}
+          </div>
+          {report.paragraphs.length > 1 && (
+            <details className="media-analysis">
+              <summary>Read analysis</summary>
+              {report.paragraphs.slice(1).map((paragraph, index) => (
+                <p key={index}>{paragraph}</p>
+              ))}
+            </details>
+          )}
+          <details className="media-discussion">
+            <summary>
+              <MessageCircle size={16} />
+              Discussion <span>{report.comments.length}</span>
+            </summary>
+            <div className="media-comments">
+              {report.comments.map((comment) => (
+                <article className="media-comment" key={comment.id}>
+                  <header>
+                    <strong>{comment.author}</strong>
+                    <Badge
+                      tone={
+                        comment.sentiment === "positive"
+                          ? "green"
+                          : comment.sentiment === "critical"
+                            ? "amber"
+                            : "neutral"
+                      }
+                    >
+                      {comment.role}
+                    </Badge>
+                  </header>
+                  <small>{comment.handle}</small>
+                  <p>{comment.text}</p>
+                  <span className="comment-likes">
+                    <Heart size={13} />
+                    {compactNumber(comment.likes)}
+                  </span>
+                </article>
+              ))}
+            </div>
+          </details>
+        </>
+      )}
+    </article>
+  );
+}
+
 export function Media() {
   const { bootstrap, act } = useGame();
-  const { data } = useResource<NewsItem[]>("news");
-  const [tab, setTab] = useState("press");
+  const [tab, setTab] = useState("headlines");
+  const [scope, setScope] = useState("club");
+  const [topic, setTopic] = useState("");
+  const [source, setSource] = useState("");
+  const [search, setSearch] = useState("");
+  const [selectedJournalist, setSelectedJournalist] = useState<string | null>(
+    null,
+  );
+  const [pagination, setPagination] = useState({ key: "", page: 1 });
+  const deferred = useDeferredValue(search);
+  const filterKey = JSON.stringify([scope, topic, source, deferred]);
+  const page = pagination.key === filterKey ? pagination.page : 1;
+  const params = new URLSearchParams({
+    scope,
+    page: String(page),
+    q: deferred,
+  });
+  if (topic) params.set("topic", topic);
+  if (source) params.set("journalist", source);
+  const { data, loading, error } = useResource<MediaData>(`media?${params}`, {
+    keepPreviousData: true,
+  });
+  if (error) return <ErrorState message={error} />;
   if (!bootstrap || !data) return <Loading />;
   const club = bootstrap.club;
   const details = JSON.parse(club.data);
-  const stories = data
-    .filter((item) =>
-      ["Media", "Fans", "World", "Transfers"].includes(item.category),
-    )
-    .slice(0, 12);
+  const journalist = data.journalists.find(
+    (entry) => entry.id === selectedJournalist,
+  );
+  const interviewer = data.journalists.find(
+    (entry) => entry.id === data.pressQuestion.journalistId,
+  )!;
+  const comments = data.stories.flatMap((story) =>
+    (story.report?.comments ?? []).map((comment) => ({ ...comment, story })),
+  );
+  function readCoverage(id: string) {
+    setSource(id);
+    setScope("all");
+    setTopic("");
+    setSearch("");
+    setTab("headlines");
+    setSelectedJournalist(null);
+  }
   const mood =
     club.fan_mood > 75
       ? "Optimistic"
@@ -856,9 +1270,14 @@ export function Media() {
       <Panel>
         <Tabs
           items={[
-            { id: "press", label: "Press room" },
-            { id: "headlines", label: "Headlines & narratives" },
+            { id: "headlines", label: "News feed" },
+            {
+              id: "journalists",
+              label: "Journalists",
+              count: data.journalists.length,
+            },
             { id: "supporters", label: "Supporter feed" },
+            { id: "press", label: "Press room" },
           ]}
           value={tab}
           onChange={setTab}
@@ -869,14 +1288,16 @@ export function Media() {
               <Mic size={21} />
               <div>
                 <Badge tone="blue">PRESS CONFERENCE</Badge>
-                <h3>
-                  {club.crisis > 50
-                    ? "Is the sporting project still on track?"
-                    : club.hype > 50
-                      ? "How far can this team go?"
-                      : "What should supporters expect from your project?"}
-                </h3>
-                <p>The Touchline / {dateLabel(bootstrap.state.date)}</p>
+                <h3>{data.pressQuestion.text}</h3>
+                <p>
+                  <button
+                    className="profile-link"
+                    onClick={() => setSelectedJournalist(interviewer.id)}
+                  >
+                    {interviewer.name}
+                  </button>{" "}
+                  / {interviewer.outlet} / {dateLabel(bootstrap.state.date)}
+                </p>
               </div>
             </div>
             <div className="press-choices">
@@ -884,7 +1305,17 @@ export function Media() {
                 <button
                   key={approach.id}
                   onClick={() =>
-                    void act({ type: "media", approach: approach.id })
+                    void act({ type: "media", approach: approach.id }).then(
+                      (result) => {
+                        if (result) {
+                          setScope("club");
+                          setTopic("");
+                          setSource("");
+                          setSearch("");
+                          setTab("headlines");
+                        }
+                      },
+                    )
                   }
                 >
                   <approach.icon size={19} />
@@ -898,121 +1329,201 @@ export function Media() {
             </div>
           </div>
         )}
-        {tab === "headlines" &&
-          (stories.length ? (
-            stories.map((story) => (
-              <article key={story.id} className="headline-item">
-                <div>
-                  <Badge tone={story.severity}>{story.category}</Badge>
-                  <time>{dateLabel(story.date)}</time>
-                </div>
-                <h3>{story.title}</h3>
-                <p>{story.body}</p>
-                {JSON.parse(story.data).bias !== undefined && (
-                  <small className="muted">
-                    Outlet bias:{" "}
-                    {JSON.parse(story.data).bias > 10
-                      ? "Supportive"
-                      : JSON.parse(story.data).bias < -10
-                        ? "Critical"
-                        : "Balanced"}
-                  </small>
-                )}
-              </article>
-            ))
-          ) : (
-            <Empty
-              icon={Newspaper}
-              title="A quiet news cycle"
-              detail="The first decisions of your tenure will shape the headlines."
-            />
-          ))}
-        {tab === "supporters" && (
-          <div className="padded">
-            <div className="social-grid">
-              {[
-                {
-                  name: `${club.city} Stand`,
-                  handle: "@thelocalstand",
-                  text:
-                    club.fan_mood > 65
-                      ? `A new chapter for ${club.name}. Give the project time, but let's see a clear plan. The academy has to be part of it.`
-                      : `We need answers. ${club.name} belongs to its supporters. The board cannot keep asking for patience without progress.`,
-                  likes: Math.round(club.fan_loyalty * 13),
-                  comments: Math.round(club.crisis + 21),
-                },
-                {
-                  name: "The Academy Watch",
-                  handle: "@nextgeneration",
-                  text: `Academy rating: ${club.academy}. ${club.academy > 75 ? "There is genuine talent coming through. First-team minutes are the next step." : "The academy needs investment and a clearer route to senior football."}`,
-                  likes: Math.round(club.academy * 7),
-                  comments: 12 + Math.floor(club.academy / 3),
-                },
-                {
-                  name: "Supporters Collective",
-                  handle: "@clubcollective",
-                  text:
-                    club.crisis > 70
-                      ? `The collective is discussing a protest. We expect a meeting with the board and a credible recovery plan.`
-                      : `The priority is a sustainable club. Invest wisely, keep the dressing room together, and respect the badge.`,
-                  likes: Math.round(club.fan_patience * 9),
-                  comments: Math.round(club.board_pressure / 2),
-                },
-                {
-                  name: "Matchday Voice",
-                  handle: "@matchdayvoice",
-                  text:
-                    club.momentum > 10
-                      ? `The momentum is real. Expectations are rising, and this team has earned that belief. Keep going.`
-                      : club.momentum < -10
-                        ? `Another difficult week. The next result matters, but so does how the club responds off the pitch.`
-                        : `Looking ahead to the next fixture. ${club.manager} has the team; the director has the bigger picture.`,
-                  likes: Math.round(club.fan_mood * 6),
-                  comments: Math.round(20 + Math.abs(club.momentum)),
-                },
-              ].map((post, index) => (
-                <article className="social-post" key={post.handle}>
-                  <div className="social-post-head">
-                    <span
-                      className="director-avatar"
-                      style={{
-                        background:
-                          index % 2
-                            ? "color-mix(in srgb,var(--blue) 10%,var(--surface))"
-                            : "var(--accent-soft)",
-                      }}
-                    >
-                      {post.name
-                        .split(" ")
-                        .map((word) => word[0])
-                        .slice(0, 2)
-                        .join("")}
-                    </span>
-                    <span>
-                      <strong>{post.name}</strong>
-                      <small>{post.handle}</small>
-                    </span>
-                  </div>
-                  <p>{post.text}</p>
-                  <div className="social-post-footer">
-                    <span>
-                      <Heart size={13} />
-                      {post.likes.toLocaleString()}
-                    </span>
-                    <span>
-                      <MessageCircle size={13} />
-                      {post.comments}
-                    </span>
-                    <span>
-                      {club.hype > 50 ? "#BelieveInTheProject" : "#BackTheClub"}
-                    </span>
-                  </div>
-                </article>
-              ))}
+        {(tab === "headlines" || tab === "supporters") && (
+          <>
+            <div className="filter-bar media-filters">
+              <div className="search-field">
+                <Search size={16} />
+                <input
+                  aria-label="Search media stories"
+                  placeholder="Player, signing or headline..."
+                  maxLength={100}
+                  value={search}
+                  onChange={(event) => setSearch(event.target.value)}
+                />
+              </div>
+              <select
+                aria-label="Media scope"
+                value={scope}
+                onChange={(event) => setScope(event.target.value)}
+              >
+                <option value="club">Your club</option>
+                <option value="world">World football</option>
+                <option value="all">All coverage</option>
+              </select>
+              <select
+                aria-label="Media topic"
+                value={topic}
+                onChange={(event) => setTopic(event.target.value)}
+              >
+                <option value="">All topics</option>
+                <option value="transfer">Transfers</option>
+                <option value="player">Players</option>
+                <option value="match">Matches</option>
+                <option value="press">Press conferences</option>
+                <option value="club">Club affairs</option>
+              </select>
+              <select
+                aria-label="Media journalist"
+                value={source}
+                onChange={(event) => setSource(event.target.value)}
+              >
+                <option value="">All journalists</option>
+                {data.journalists.map((entry) => (
+                  <option key={entry.id} value={entry.id}>
+                    {entry.name}
+                  </option>
+                ))}
+              </select>
             </div>
+            {tab === "headlines" ? (
+              data.stories.length ? (
+                <div className="media-feed">
+                  {data.stories.map((story) => (
+                    <MediaArticle
+                      story={story}
+                      journalists={data.journalists}
+                      key={story.id}
+                      onJournalist={setSelectedJournalist}
+                    />
+                  ))}
+                </div>
+              ) : (
+                <Empty
+                  icon={Newspaper}
+                  title="No stories match these filters"
+                />
+              )
+            ) : comments.length ? (
+              <div className="supporter-discussions">
+                {comments.map((comment) => (
+                  <article className="media-comment" key={comment.id}>
+                    <header>
+                      <strong>{comment.author}</strong>
+                      <Badge>{comment.role}</Badge>
+                      <time>{dateLabel(comment.story.date)}</time>
+                    </header>
+                    <small>{comment.handle}</small>
+                    <p>{comment.text}</p>
+                    <div className="social-post-footer">
+                      <span>
+                        <Heart size={13} />
+                        {compactNumber(comment.likes)}
+                      </span>
+                      {comment.story.report?.playerId && (
+                        <PlayerLink
+                          id={comment.story.report.playerId}
+                          name={comment.story.report.playerName ?? "Player"}
+                        />
+                      )}
+                    </div>
+                    <small className="discussion-story">
+                      On: {comment.story.title}
+                    </small>
+                  </article>
+                ))}
+              </div>
+            ) : (
+              <Empty
+                icon={MessageCircle}
+                title="No discussions in this selection"
+              />
+            )}
+            <div className="pagination">
+              <span>{compactNumber(data.total)} stories</span>
+              <span>
+                <IconButton
+                  icon={ChevronLeft}
+                  label="Previous media page"
+                  disabled={loading || data.page <= 1}
+                  onClick={() =>
+                    setPagination({ key: filterKey, page: data.page - 1 })
+                  }
+                />
+                {data.page} / {data.pages}
+                <IconButton
+                  icon={ChevronRight}
+                  label="Next media page"
+                  disabled={loading || data.page >= data.pages}
+                  onClick={() =>
+                    setPagination({ key: filterKey, page: data.page + 1 })
+                  }
+                />
+              </span>
+            </div>
+          </>
+        )}
+        {tab === "journalists" && (
+          <div className="journalist-directory">
+            {data.journalists.map((entry) => (
+              <article className="journalist-profile" key={entry.id}>
+                <div className="media-author">
+                  <span className="director-avatar" aria-hidden="true">
+                    {entry.name
+                      .split(" ")
+                      .map((part) => part[0])
+                      .slice(0, 2)
+                      .join("")}
+                  </span>
+                  <div>
+                    <h3>{entry.name}</h3>
+                    <small>{entry.handle}</small>
+                  </div>
+                </div>
+                <p>{entry.outlet}</p>
+                <Badge tone="blue">{entry.beat}</Badge>
+                <DetailList
+                  items={[
+                    ["Source reliability", `${entry.reliability}/100`],
+                    ["Approach", entry.style],
+                  ]}
+                />
+                <p className="dossier-copy">{entry.biography}</p>
+                <Button
+                  icon={Newspaper}
+                  variant="secondary"
+                  onClick={() => readCoverage(entry.id)}
+                >
+                  Read coverage
+                </Button>
+              </article>
+            ))}
           </div>
         )}
       </Panel>
+      {journalist && (
+        <Modal
+          title={journalist.name}
+          onClose={() => setSelectedJournalist(null)}
+        >
+          <div className="sheet-body">
+            <Badge tone="blue">Fictional journalist</Badge>
+            <p className="sheet-description">{journalist.biography}</p>
+            <DetailList
+              items={[
+                ["Outlet", journalist.outlet],
+                ["Beat", journalist.beat],
+                ["Source reliability", `${journalist.reliability}/100`],
+                ["Style", journalist.style],
+              ]}
+            />
+          </div>
+          <footer className="sheet-footer">
+            <Button
+              variant="secondary"
+              onClick={() => setSelectedJournalist(null)}
+            >
+              Close
+            </Button>
+            <Button
+              icon={Newspaper}
+              onClick={() => readCoverage(journalist.id)}
+            >
+              Read coverage
+            </Button>
+          </footer>
+        </Modal>
+      )}
     </div>
   );
 }

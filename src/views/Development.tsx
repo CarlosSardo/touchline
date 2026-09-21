@@ -13,7 +13,7 @@ import {
   TrendingUp,
   Users,
 } from "lucide-react";
-import { useGame, useResource } from "../game-context.tsx";
+import { useCurrency, useGame, useResource } from "../game-context.tsx";
 import {
   Badge,
   Button,
@@ -34,14 +34,10 @@ import {
   Tabs,
   TextLink,
 } from "../ui.tsx";
-import {
-  dateLabel,
-  money,
-  POSITIONS,
-  TRAINING_TYPES,
-} from "../../shared/rules.ts";
+import { dateLabel, POSITIONS, TRAINING_TYPES } from "../../shared/rules.ts";
 import type { AcademyData, StaffDesk, TrainingData } from "../../shared/api.ts";
 import type { Player, Staff } from "../../shared/types.ts";
+import { AssistantPanel } from "./ClubSupport.tsx";
 
 function MentorSheet({ player, close }: { player: Player; close: () => void }) {
   const { act } = useGame();
@@ -788,6 +784,7 @@ function StaffCard({
   candidate?: boolean;
 }) {
   const { act, confirm } = useGame();
+  const { money } = useCurrency();
   return (
     <article className="entity-card">
       <div className="entity-card-top">
@@ -892,6 +889,7 @@ function StaffCard({
 
 export function StaffView() {
   const { bootstrap, act } = useGame();
+  const { money } = useCurrency();
   const { data, error } = useResource<StaffDesk>("staff");
   const [tab, setTab] = useState("team");
   const [role, setRole] = useState("");
@@ -904,13 +902,21 @@ export function StaffView() {
         eyebrow="THE PEOPLE BEHIND THE PROJECT"
         title="Your backroom team"
         subtitle={`${bootstrap.club.manager} / First-team manager`}
-      />
+      >
+        <Button
+          icon={Users}
+          variant="secondary"
+          onClick={() => setTab("assistant")}
+        >
+          Assistant responsibilities
+        </Button>
+      </PageHeading>
       <div className="stat-strip">
         <Stat
           label="Staff members"
           value={data.staff.length}
           icon={Users}
-          detail="Across eight specialist roles"
+          detail="Coaching and club support"
         />
         <Stat
           label="Average ability"
@@ -938,13 +944,16 @@ export function StaffView() {
         <Tabs
           items={[
             { id: "team", label: "Staff team" },
+            { id: "assistant", label: "Director assistant" },
             { id: "politics", label: "Relationships & politics" },
             { id: "recruitment", label: "Recruit staff" },
           ]}
           value={tab}
           onChange={setTab}
         />
-        {tab !== "politics" ? (
+        {tab === "assistant" ? (
+          <AssistantPanel />
+        ) : tab !== "politics" ? (
           <>
             <div className="filter-bar">
               <select

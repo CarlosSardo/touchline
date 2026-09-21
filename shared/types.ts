@@ -6,8 +6,34 @@ export type Settings = Record<string, SettingValue>;
 export type Attributes = Record<string, number>;
 
 export interface PlayerProfile {
+  contract?: {
+    status: "professional" | "amateur";
+    futureProfessionalContract?: boolean;
+    trainingClubId?: number;
+    trainingStartAge?: number;
+    expenseAllowance?: number;
+    signedDate?: string;
+  };
+  familyMove?: {
+    countryId: number;
+    reason: "employment" | "family" | "football";
+    verified: boolean;
+    date: string;
+  };
   identity: {
     heritage: { country: string; percentage: number }[];
+    nationalities?: {
+      countryId: number;
+      code: string;
+      country: string;
+      basis: "birth" | "parent";
+    }[];
+    birthCountryId?: number;
+    birthplace?: string;
+    familyOrigins?: { maternal: string; paternal: string };
+    biography?: string[];
+    nameOriginCountryId?: number;
+    internationalCountryId?: number;
     languages: { language: string; fluency: number }[];
     region: string;
     height: number;
@@ -45,15 +71,21 @@ export interface PlayerProfile {
     lastSupport?: string;
   };
   relationships: { group: string; loyalty: number; influence: number };
-  registration?: { workPermitPoints: number; adaptedCountries: number[] };
+  registration?: {
+    workPermitPoints: number;
+    adaptedCountries: number[];
+    lastAssociationId?: number;
+  };
 }
 
 export interface Player {
   id: number;
   name: string;
   nationality: string;
+  nationalities?: string[];
   country_id: number;
   club_id: number | null;
+  squad_club_id?: number | null;
   parent_club_id: number | null;
   position: Position;
   secondary_position: Position;
@@ -247,6 +279,8 @@ export interface ScoutReport {
 }
 
 export interface GameState {
+  careerId?: string;
+  careerName?: string;
   date: string;
   season: number;
   seed: string;
@@ -281,6 +315,9 @@ export interface NewsItem {
 export interface MatchAction {
   minute: number;
   second: number;
+  period?: number;
+  addedTime?: number;
+  elapsed?: number;
   teamId: number;
   playerId: number;
   targetId?: number;
@@ -310,6 +347,7 @@ export interface MatchPlayer {
   pressureHandling?: number;
   consistency?: number;
   height?: number;
+  discipline?: number;
   stats?: Record<string, number>;
 }
 
@@ -324,6 +362,7 @@ export interface MatchTeam {
   momentum: number;
   pressure: number;
   lineup: MatchPlayer[];
+  bench?: MatchPlayer[];
   setPieces: { routine: string; target: string; risk: number };
 }
 
@@ -335,6 +374,22 @@ export interface MatchSnapshot {
   importance: number;
   detail: string;
   conditions?: { temperature: number; wind: number; humidity: number };
+  rules?: {
+    decisive: boolean;
+    extraTime: boolean;
+    neutral: boolean;
+    awayGoals: boolean;
+    substitutions: number;
+    substitutionWindows: number;
+    extraSubstitution: boolean;
+    aggregate: {
+      home: number;
+      away: number;
+      homeAwayGoals: number;
+      awayAwayGoals: number;
+    };
+    injuryFrequency: number;
+  };
 }
 
 export interface MatchResult {
@@ -348,12 +403,42 @@ export interface MatchResult {
   stats: Record<number, Record<string, number>>;
   players: Record<number, Record<string, number>>;
   momentum: { minute: number; home: number; away: number }[];
+  duration?: number;
+  stoppageTime?: number[];
+  regulationScore?: { home: number; away: number };
+  wentToExtraTime?: boolean;
+  winnerId?: number | null;
+  shootout?: {
+    home: number;
+    away: number;
+    kicks: {
+      teamId: number;
+      playerId: number;
+      scored: boolean;
+      probability: number;
+    }[];
+  };
+  abandoned?: { teamId: number; reason: string };
+  substitutions?: {
+    teamId: number;
+    offId: number;
+    onId: number;
+    minute: number;
+    elapsed: number;
+    window: number;
+  }[];
+  injuries?: { playerId: number; days: number }[];
   events: {
     minute: number;
+    second?: number;
+    addedTime?: number;
+    period?: number;
+    elapsed?: number;
     type: string;
     teamId: number;
     playerId: number;
     text: string;
+    playerOnId?: number;
   }[];
 }
 
@@ -427,7 +512,95 @@ export interface Negotiation {
   seller_name?: string;
 }
 
+export interface TransferTerms {
+  upfrontPercent: number;
+  installments: number;
+  intervalMonths: number;
+  buyBackFee: number;
+  buyBackYears: number;
+  sellOnPercent: number;
+}
+
+export interface TransferPayment {
+  id: number;
+  negotiation_id: number;
+  player_id: number;
+  payer_id: number;
+  payee_id: number;
+  amount: number;
+  due_date: string;
+  paid_date: string | null;
+  kind: "fee" | "sell-on";
+  sell_on_clause_id: number | null;
+  player_name?: string;
+  payer_name?: string;
+  payee_name?: string;
+}
+
+export interface BuyBackClause {
+  id: number;
+  negotiation_id: number;
+  player_id: number;
+  beneficiary_id: number;
+  owner_id: number;
+  fee: number;
+  expires: string;
+  status: "active" | "exercised" | "expired" | "void";
+  player_name?: string;
+  owner_name?: string;
+  beneficiary_name?: string;
+}
+
+export interface SellOnClause {
+  id: number;
+  player_id: number;
+  beneficiary_id: number;
+  owner_id: number;
+  percentage: number;
+  status: string;
+  paid: number;
+  player_name: string;
+  beneficiary_name: string;
+  owner_name: string;
+}
+
+export interface AffiliateWillingness {
+  willing: boolean;
+  score: number;
+  stance: string;
+  annualFee: number;
+  reasons: string[];
+  benefits: string;
+}
+
+export interface PlayerInterest {
+  score: number;
+  stance: string;
+  expectedRole: string;
+  expectedWage: number;
+  factors: { id: string; label: string; impact: number; reason: string }[];
+  concerns: string[];
+}
+
 export interface NegotiationData {
+  futureArrivalDate?: string;
+  originalContractEnd?: string;
+  reservedBudget?: number;
+  guardianConsent?: boolean;
+  interestDetails?: PlayerInterest;
+  trainingCompensation?: number;
+  trainingClubId?: number;
+  preparedBy?: { id: number; name: string; date: string };
+  transferTerms?: TransferTerms;
+  buyBackClauseId?: number;
+  workflowVersion?: number;
+  buyerManaged?: boolean;
+  nextStageDate?: string;
+  signedDate?: string;
+  registrationDate?: string;
+  medicalPassed?: boolean;
+  offerCount?: number;
+  contractRevision?: number;
   log: { date: string; message: string; type: string }[];
   agent: PlayerProfile["agent"];
   terms: LoanTerms;

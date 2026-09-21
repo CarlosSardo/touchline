@@ -8,14 +8,24 @@ import {
 } from "react";
 import type { Bootstrap } from "../shared/api.ts";
 import type { Settings } from "../shared/types.ts";
+import {
+  accountingAmount,
+  currencyCode,
+  displayAmount,
+  money as formatMoney,
+} from "../shared/rules.ts";
 
 export type Page =
+  | "start"
   | "office"
   | "inbox"
   | "squad"
   | "scouting"
   | "database"
+  | "world"
   | "transfers"
+  | "offer"
+  | "contract"
   | "loans"
   | "academy"
   | "training"
@@ -40,14 +50,20 @@ interface GameContextValue {
   busy: boolean;
   toast: { message: string; tone: string } | null;
   playerId: number | null;
+  clubProfileId: number | null;
+  matchPlayerId: number | null;
   leagueId: number | null;
   fixtureId: number | null;
+  offerPlayerId: number | null;
   search: string;
   confirmation: { title: string; message: string; action: () => void } | null;
   navigate: (page: Page) => void;
   setPlayer: (id: number | null) => void;
+  setClub: (id: number | null) => void;
   openLeague: (id: number) => void;
-  openMatch: (id: number) => void;
+  openMatch: (id: number, playerId?: number) => void;
+  openOffer: (playerId: number) => void;
+  openContract: (playerId: number) => void;
   setSearch: (value: string) => void;
   notify: (message: string, tone?: string) => void;
   dismissToast: () => void;
@@ -92,7 +108,22 @@ export function useGame() {
   return context;
 }
 
-export function useResource<Data>(path: string | null) {
+export function useCurrency() {
+  const { bootstrap } = useGame();
+  const currency = currencyCode(bootstrap?.settings.currency);
+  return {
+    currency,
+    money: (value: number, precise = false) =>
+      formatMoney(value, precise, currency),
+    displayAmount: (value: number) => displayAmount(value, currency),
+    accountingAmount: (value: number) => accountingAmount(value, currency),
+  };
+}
+
+export function useResource<Data>(
+  path: string | null,
+  options: { keepPreviousData?: boolean } = {},
+) {
   const { revision } = useGame();
   const [resource, setResource] = useState<{
     key: string;
@@ -120,19 +151,26 @@ export function useResource<Data>(path: string | null) {
     return () => controller.abort();
   }, [path, revision, key]);
   return {
-    data: resource?.path === path ? resource.data : null,
+    data:
+      path && (resource?.path === path || options.keepPreviousData)
+        ? (resource?.data ?? null)
+        : null,
     loading: !!path && resource?.key !== key,
     error: resource?.key === key ? resource.error : null,
   };
 }
 
 const pages: Page[] = [
+  "start",
   "office",
   "inbox",
   "squad",
   "scouting",
   "database",
+  "world",
   "transfers",
+  "offer",
+  "contract",
   "loans",
   "academy",
   "training",
@@ -150,11 +188,17 @@ export function GameProvider({ children }: { children: ReactNode }) {
   const [error, setError] = useState<string | null>(null);
   const [revision, setRevision] = useState(0);
   const [page, setPage] = useState<Page>(() =>
-    pages.includes(location.hash.slice(1) as Page)
-      ? (location.hash.slice(1) as Page)
-      : "office",
+    pages.includes(location.hash.slice(1).split("/")[0] as Page)
+      ? (location.hash.slice(1).split("/")[0] as Page)
+      : "start",
   );
+  const [offerPlayerId, setOfferPlayerId] = useState<number | null>(() => {
+    const match = /^#(?:offer|contract)\/(\d+)$/.exec(location.hash);
+    return match ? Number(match[1]) : null;
+  });
   const [playerId, setPlayer] = useState<number | null>(null);
+  const [clubProfileId, setClub] = useState<number | null>(null);
+  const [matchPlayerId, setMatchPlayer] = useState<number | null>(null);
   const [leagueId, setLeagueId] = useState<number | null>(null);
   const [fixtureId, setFixtureId] = useState<number | null>(null);
   const [search, setSearch] = useState("");
@@ -211,8 +255,10 @@ export function GameProvider({ children }: { children: ReactNode }) {
   }, []);
   useEffect(() => {
     const handler = () => {
-      const requested = location.hash.slice(1) as Page;
+      const requested = location.hash.slice(1).split("/")[0] as Page;
       if (pages.includes(requested)) setPage(requested);
+      const offer = /^#(?:offer|contract)\/(\d+)$/.exec(location.hash);
+      setOfferPlayerId(offer ? Number(offer[1]) : null);
     };
     window.addEventListener("hashchange", handler);
     return () => window.removeEventListener("hashchange", handler);
@@ -266,12 +312,22 @@ export function GameProvider({ children }: { children: ReactNode }) {
             : "220ms",
     );
     root.dataset.contrast = settings.highContrast ? "high" : "normal";
+    root.dataset.uiTheme =
+      settings.uiTheme === "classic" ? "classic" : "minimal";
     root.dataset.colorblind = String(settings.colorblind);
     root.dataset.simplified = String(settings.simplifiedUI);
     return () => preference.removeEventListener("change", applyTheme);
   }, [bootstrap]);
 
   function navigate(next: Page) {
+    if (next === "start") {
+      setPlayer(null);
+      setClub(null);
+      setMatchPlayer(null);
+      setLeagueId(null);
+      setFixtureId(null);
+      setSearch("");
+    }
     setPage(next);
     location.hash = next;
     window.scrollTo({ top: 0 });
@@ -377,19 +433,50 @@ export function GameProvider({ children }: { children: ReactNode }) {
         busy,
         toast,
         playerId,
+        clubProfileId,
+        matchPlayerId,
         leagueId,
         fixtureId,
         search,
         confirmation,
         navigate,
-        setPlayer,
+        setPlayer: (id) => {
+          setClub(null);
+          setPlayer(id);
+        },
+        setClub: (id) => {
+          setPlayer(null);
+          setClub(id);
+        },
         openLeague: (id) => {
+          setPlayer(null);
+          setClub(null);
           setLeagueId(id);
           navigate("competitions");
         },
-        openMatch: (id) => {
+        openMatch: (id, playerId) => {
+          setPlayer(null);
+          setClub(null);
+          setMatchPlayer(playerId ?? null);
           setFixtureId(id);
           navigate("analytics");
+        },
+        offerPlayerId,
+        openOffer: (id) => {
+          setPlayer(null);
+          setClub(null);
+          setOfferPlayerId(id);
+          setPage("offer");
+          location.hash = `offer/${id}`;
+          window.scrollTo({ top: 0 });
+        },
+        openContract: (id) => {
+          setPlayer(null);
+          setClub(null);
+          setOfferPlayerId(id);
+          setPage("contract");
+          location.hash = `contract/${id}`;
+          window.scrollTo({ top: 0 });
         },
         setSearch,
         notify,

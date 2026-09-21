@@ -5,14 +5,20 @@ import {
   Globe2,
   Search,
   Trophy,
+  Star,
+  Bell,
+  RotateCcw,
+  ChevronLeft,
+  ChevronRight,
 } from "lucide-react";
-import { useGame, useResource } from "../game-context.tsx";
+import { api, useGame, useResource } from "../game-context.tsx";
 import {
   Badge,
   Button,
   Empty,
   ErrorState,
   FixtureRow,
+  IconButton,
   Loading,
   PageHeading,
   Panel,
@@ -21,12 +27,30 @@ import {
   Tabs,
   TextLink,
 } from "../ui.tsx";
-import { label } from "../../shared/rules.ts";
-import type { CompetitionDetail } from "../../shared/api.ts";
+import {
+  compactNumber,
+  label,
+  COMPETITION_ALERTS,
+} from "../../shared/rules.ts";
+import type {
+  CompetitionDetail,
+  CompetitionFavorite,
+} from "../../shared/api.ts";
 import type { League } from "../../shared/types.ts";
 
 export default function Competitions() {
-  const { bootstrap, leagueId, openLeague, openMatch } = useGame();
+  const { bootstrap, leagueId, openLeague, openMatch, refresh, notify } =
+    useGame();
+  const [favoritesOnly, setFavoritesOnly] = useState(false);
+  const [savingFavorite, setSavingFavorite] = useState(false);
+  const [pendingEvents, setPendingEvents] = useState<{
+    leagueId: number;
+    events: Partial<CompetitionFavorite["events"]>;
+  } | null>(null);
+  const [pagination, setPagination] = useState({ key: "", page: 1 });
+  const { data: favorites } = useResource<CompetitionFavorite[]>(
+    "competitions/favorites",
+  );
   const [country, setCountry] = useState("");
   const [kind, setKind] = useState("");
   const [age, setAge] = useState("");
@@ -35,7 +59,20 @@ export default function Competitions() {
   const [group, setGroup] = useState("");
   const [schedule, setSchedule] = useState("upcoming");
   const deferredSearch = useDeferredValue(search);
-  const params = new URLSearchParams({ q: deferredSearch, limit: "300" });
+  const filterKey = JSON.stringify([
+    deferredSearch,
+    country,
+    kind,
+    age,
+    favoritesOnly,
+  ]);
+  const page = pagination.key === filterKey ? pagination.page : 1;
+  const params = new URLSearchParams({
+    q: deferredSearch,
+    limit: "50",
+    page: String(page),
+  });
+  if (favoritesOnly) params.set("favorites", "1");
   if (country) params.set("country", country);
   if (kind) params.set("kind", kind);
   if (age) params.set("age", age);
@@ -44,6 +81,40 @@ export default function Competitions() {
   const { data, error } = useResource<CompetitionDetail>(
     selected ? `leagues/${selected}` : null,
   );
+  const favorite = favorites?.find((entry) => entry.leagueId === selected);
+  const favoriteEvents = favorite
+    ? {
+        ...favorite.events,
+        ...(pendingEvents && pendingEvents.leagueId === selected
+          ? pendingEvents.events
+          : {}),
+      }
+    : null;
+  async function updateFavorite(
+    id: number,
+    active: boolean,
+    events?: Partial<CompetitionFavorite["events"]>,
+  ) {
+    setSavingFavorite(true);
+    if (events) setPendingEvents({ leagueId: id, events });
+    try {
+      await api(`competitions/${id}/favorite`, {
+        method: "PUT",
+        body: JSON.stringify({ active, ...(events ? { events } : {}) }),
+      });
+      await refresh();
+    } catch (failure) {
+      notify(
+        failure instanceof Error
+          ? failure.message
+          : "Could not update favorites.",
+        "error",
+      );
+    } finally {
+      setSavingFavorite(false);
+      setPendingEvents(null);
+    }
+  }
   if (!bootstrap) return <Loading />;
   const groups = [
     ...new Set(data?.table.map((entry) => entry.group_name) ?? []),
@@ -61,7 +132,7 @@ export default function Competitions() {
       <PageHeading
         eyebrow="THE FOOTBALL WORLD"
         title="Competitions"
-        subtitle={`${bootstrap.world.countries} associations / ${bootstrap.world.leagues.toLocaleString()} domestic leagues`}
+        subtitle={`${bootstrap.world.countries} associations / ${compactNumber(bootstrap.world.leagues)} domestic leagues`}
       >
         <Badge tone="blue">
           <Globe2 size={12} />
@@ -69,7 +140,7 @@ export default function Competitions() {
           {String(bootstrap.state.season + 1).slice(-2)}
         </Badge>
       </PageHeading>
-      <div className="competition-toolbar">
+      <div className="organized-filters" aria-label="Competition filters">
         <div className="search-field">
           <Search size={16} />
           <input
@@ -79,41 +150,70 @@ export default function Competitions() {
             onChange={(event) => setSearch(event.target.value)}
           />
         </div>
-        <select
-          aria-label="Competition country"
-          value={country}
-          onChange={(event) => setCountry(event.target.value)}
-        >
-          <option value="">All associations</option>
-          {bootstrap.countries.map((item) => (
-            <option key={item.id} value={item.id}>
-              {item.name}
-            </option>
-          ))}
-        </select>
-        <select
-          aria-label="Competition type"
-          value={kind}
-          onChange={(event) => setKind(event.target.value)}
-        >
-          <option value="">All competitions</option>
-          <option value="league">Domestic leagues</option>
-          <option value="continental">Continental</option>
-          <option value="international">International</option>
-          <option value="youth">Youth tournaments</option>
-          <option value="cup">Domestic cups</option>
-        </select>
-        <select
-          aria-label="Competition age group"
-          value={age}
-          onChange={(event) => setAge(event.target.value)}
-        >
-          <option value="">All age groups</option>
-          <option>Senior</option>
-          <option>U20</option>
-          <option>U19</option>
-          <option>U17</option>
-        </select>
+        <fieldset className="filter-group">
+          <legend>Association</legend>
+          <select
+            aria-label="Competition country"
+            value={country}
+            onChange={(event) => setCountry(event.target.value)}
+          >
+            <option value="">All associations</option>
+            {bootstrap.countries.map((item) => (
+              <option key={item.id} value={item.id}>
+                {item.name}
+              </option>
+            ))}
+          </select>
+        </fieldset>
+        <fieldset className="filter-group">
+          <legend>Competition</legend>
+          <select
+            aria-label="Competition type"
+            value={kind}
+            onChange={(event) => setKind(event.target.value)}
+          >
+            <option value="">All competitions</option>
+            <option value="league">Domestic leagues</option>
+            <option value="continental">Continental</option>
+            <option value="international">International</option>
+            <option value="youth">Youth tournaments</option>
+            <option value="cup">Domestic cups</option>
+          </select>
+          <select
+            aria-label="Competition age group"
+            value={age}
+            onChange={(event) => setAge(event.target.value)}
+          >
+            <option value="">All age groups</option>
+            <option>Senior</option>
+            <option>U20</option>
+            <option>U19</option>
+            <option>U17</option>
+          </select>
+        </fieldset>
+        <fieldset className="filter-group">
+          <legend>Following</legend>
+          <label className="filter-check">
+            <input
+              type="checkbox"
+              checked={favoritesOnly}
+              onChange={(event) => setFavoritesOnly(event.target.checked)}
+            />
+            <Star size={14} />
+            Favorites only
+          </label>
+          <IconButton
+            icon={RotateCcw}
+            label="Reset competition filters"
+            onClick={() => {
+              setSearch("");
+              setCountry("");
+              setKind("");
+              setAge("");
+              setFavoritesOnly(false);
+            }}
+          />
+        </fieldset>
       </div>
       <div className="competition-browser">
         <Panel className="competition-selector-panel">
@@ -124,24 +224,61 @@ export default function Competitions() {
           </SectionHeading>
           <div className="competition-list">
             {leagues?.map((league) => (
-              <button
-                key={league.id}
-                onClick={() => {
-                  openLeague(league.id);
-                  setTab("table");
-                }}
-                className={`competition-button ${selected === league.id ? "active" : ""}`}
-              >
-                <strong>{league.name}</strong>
-                <small>
-                  {league.confederation} / {league.age_group} /{" "}
-                  {label(league.kind)}
-                </small>
-              </button>
+              <div className="competition-index-entry" key={league.id}>
+                <button
+                  onClick={() => {
+                    openLeague(league.id);
+                    setTab("table");
+                  }}
+                  className={`competition-button ${selected === league.id ? "active" : ""}`}
+                >
+                  <strong>{league.name}</strong>
+                  <small>
+                    {league.confederation} / {league.age_group} /{" "}
+                    {label(league.kind)}
+                  </small>
+                </button>
+                <IconButton
+                  icon={Star}
+                  label={`${favorites?.some((entry) => entry.leagueId === league.id) ? "Remove" : "Add"} ${league.name} ${favorites?.some((entry) => entry.leagueId === league.id) ? "from" : "to"} favorites`}
+                  aria-pressed={
+                    favorites?.some((entry) => entry.leagueId === league.id) ??
+                    false
+                  }
+                  disabled={savingFavorite}
+                  onClick={() =>
+                    void updateFavorite(
+                      league.id,
+                      !favorites?.some((entry) => entry.leagueId === league.id),
+                    )
+                  }
+                />
+              </div>
             ))}
             {leagues?.length === 0 && (
               <Empty icon={Search} title="No competitions found" />
             )}
+          </div>
+          <div className="pagination">
+            <span>Page {page}</span>
+            <div className="inline-controls">
+              <IconButton
+                icon={ChevronLeft}
+                label="Previous competition page"
+                disabled={page === 1}
+                onClick={() =>
+                  setPagination({ key: filterKey, page: page - 1 })
+                }
+              />
+              <IconButton
+                icon={ChevronRight}
+                label="Next competition page"
+                disabled={!leagues || leagues.length < 50}
+                onClick={() =>
+                  setPagination({ key: filterKey, page: page + 1 })
+                }
+              />
+            </div>
           </div>
         </Panel>
         <div className="stack">
@@ -156,12 +293,51 @@ export default function Competitions() {
                   title={data.league.name}
                   subtitle={`${data.league.format} / ${data.league.confederation} / ${data.league.age_group}`}
                 >
+                  <IconButton
+                    icon={Star}
+                    label={
+                      favorite
+                        ? "Remove competition from favorites"
+                        : "Add competition to favorites"
+                    }
+                    aria-pressed={!!favorite}
+                    disabled={savingFavorite}
+                    onClick={() =>
+                      void updateFavorite(data.league.id, !favorite)
+                    }
+                  />
                   <Badge tone="green">
                     {competitionData.phase
                       ? label(competitionData.phase)
                       : "Season league"}
                   </Badge>
                 </SectionHeading>
+                {favorite && (
+                  <details className="competition-alert-settings">
+                    <summary>
+                      <Bell size={15} />
+                      Competition alerts
+                    </summary>
+                    <div className="alert-options">
+                      {COMPETITION_ALERTS.map((type) => (
+                        <label className="filter-check" key={type}>
+                          <input
+                            type="checkbox"
+                            aria-label={`${label(type)} alerts`}
+                            checked={favoriteEvents![type]}
+                            disabled={savingFavorite}
+                            onChange={(event) =>
+                              void updateFavorite(data.league.id, true, {
+                                [type]: event.target.checked,
+                              })
+                            }
+                          />
+                          {label(type)}
+                        </label>
+                      ))}
+                    </div>
+                  </details>
+                )}
                 {competitionData.championName && (
                   <div className="champion-banner">
                     <Trophy size={24} />

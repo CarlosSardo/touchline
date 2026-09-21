@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { MatchAction } from "../shared/types.ts";
+import { compactNumber } from "../shared/rules.ts";
 
 function mapActions(
   actions: MatchAction[],
@@ -13,7 +14,7 @@ function mapActions(
     if (
       (teamId && action.teamId !== teamId) ||
       (playerId && action.playerId !== playerId) ||
-      action.minute > minute
+      (action.elapsed ?? action.minute) > minute
     )
       return false;
     if (mode === "Pass map")
@@ -297,14 +298,10 @@ export default function PitchMap({
           Goal
         </span>
         <span className="pitch-event-count">
-          {mapActions(
-            actions,
-            mode,
-            teamId,
-            playerId,
-            minute,
-            progressive,
-          ).length.toLocaleString()}{" "}
+          {compactNumber(
+            mapActions(actions, mode, teamId, playerId, minute, progressive)
+              .length,
+          )}{" "}
           actions
         </span>
       </div>

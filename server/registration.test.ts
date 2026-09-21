@@ -1,0 +1,620 @@
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import {
+  assessYouthTransfer,
+  minorTransferRoute,
+  processMinorApplications,
+  submitMinorApplication,
+} from "./recruitment.ts";
+import { Store } from "./db.ts";
+import { generateWorld } from "./world.ts";
+import {
+  closeNegotiation,
+  clubOf,
+  completeNegotiation,
+  enquire,
+  negotiate,
+  negotiationStep,
+  playerOf,
+  progressDealMilestones,
+  stateOf,
+} from "./systems.ts";
+import type {
+  Club,
+  Negotiation,
+  Player,
+  PlayerProfile,
+} from "../shared/types.ts";
+import {
+  adultTransferArrival,
+  ageOn,
+  transferWindow,
+} from "../shared/rules.ts";
+import { advance, seasonRollover } from "./simulation.ts";
+import {
+  endorsementPoints,
+  leagueBand,
+  type EndorsementEvidence,
+} from "./registration.ts";
+
+const evidence: EndorsementEvidence = {
+  nationalityCode: "BR",
+  destinationCode: "EN",
+  age: 24,
+  leagueBand: 6,
+  domesticMinutesPercent: 0,
+  internationalAppearancesPercent: 0,
+  internationalRank: 1,
+  continentalMinutesPercent: 0,
+  continentalBand: 3,
+  domesticFinish: "mid-table",
+  continentalStage: "Other",
+  seniorAppearance: false,
+  youthDebut: false,
+  existingPermission: false,
+};
+
+describe("minor international-transfer exceptions", () => {
+  it("schedules future arrivals only after adulthood and inside a registration window", () => {
+    expect(adultTransferArrival("2012-07-20")).toBe("2030-07-20");
+    expect(adultTransferArrival("2011-09-20")).toBe("2030-01-01");
+    expect(adultTransferArrival("2010-02-10")).toBe("2028-06-15");
+    for (const birth of [
+      "2012-07-20",
+      "2011-09-20",
+      "2010-02-10",
+      "2008-02-29",
+    ]) {
+      expect(ageOn(birth, adultTransferArrival(birth))).toBeGreaterThanOrEqual(
+        18,
+      );
+      expect(transferWindow(adultTransferArrival(birth))).toBe(true);
+    }
+  });
+  it("requires age 16-17 and a move within the EU/EEA, not simply a European destination", () => {
+    expect(minorTransferRoute(17, "FR", "LU").route).toBe("eu-eea");
+    expect(minorTransferRoute(16, "NO", "DE").eligibleToApply).toBe(true);
+    expect(minorTransferRoute(15, "FR", "LU").eligibleToApply).toBe(false);
+    expect(minorTransferRoute(17, "BR", "FR").eligibleToApply).toBe(false);
+    expect(minorTransferRoute(17, "FR", "EN").eligibleToApply).toBe(false);
+    expect(minorTransferRoute(17, "CH", "FR").eligibleToApply).toBe(false);
+    expect(minorTransferRoute(17, "SCO", "EN").route).toBe("same-country");
+  });
+  it("distinguishes independent parental relocation, domestic moves and adult transfers", () => {
+    expect(minorTransferRoute(15, "BR", "LU", true).route).toBe(
+      "parent-relocation",
+    );
+    expect(minorTransferRoute(15, "BR", "LU", false).route).toBe("blocked");
+    expect(minorTransferRoute(15, "LU", "LU").route).toBe("domestic");
+    expect(minorTransferRoute(18, "BR", "LU").route).toBe("adult");
+  });
+});
+
+describe("youth recruitment registration", () => {
+  let store: Store;
+  let player: Player;
+  let buyer: Club;
+  const safeguards = {
+    football: true,
+    education: true,
+    care: true,
+    mentor: true,
+    parentalConsent: true,
+  };
+  beforeAll(async () => {
+    store = await Store.createTest("registration");
+  });
+  beforeEach(async () =>
+    store.transaction(async () => {
+      await store.clearWorld();
+      await store.schema();
+      await generateWorld(store, {
+        countryLimit: 6,
+        seniors: 1200,
+        youth: 600,
+      });
+      const clubs = await store.all<Club>(
+        "SELECT clubs.* FROM clubs JOIN countries ON countries.id = clubs.country_id WHERE clubs.type = 'club' AND countries.code IN ('FR','ES','DE','IT','PT','NL') AND clubs.id = (SELECT MIN(candidate.id) FROM clubs AS candidate WHERE candidate.country_id = clubs.country_id AND candidate.type = 'club') ORDER BY clubs.id",
+      );
+      buyer = clubs[1];
+      expect(buyer).toBeTruthy();
+      await store.run(
+        "UPDATE clubs SET balance = 100000000, transfer_budget = 10000000, wage_budget = 10000000",
+      );
+      await store.setMeta("state", {
+        ...(await stateOf(store)),
+        clubId: buyer.id,
+      });
+      player = (await store.get<Player>(
+        "SELECT TOP (1) * FROM players WHERE club_id = ? AND age_group != 'Senior'",
+        clubs[0].id,
+      ))!;
+      const profile = JSON.parse(player.profile) as PlayerProfile;
+      profile.contract = {
+        status: "amateur",
+        trainingClubId: player.club_id!,
+        trainingStartAge: 12,
+      };
+      delete profile.familyMove;
+      await store.run(
+        "UPDATE players SET age = 17,birth_date='2009-01-01',profile = ? WHERE id = ?",
+        JSON.stringify(profile),
+        player.id,
+      );
+      player = await playerOf(store, player.id);
+      buyer = await clubOf(store, buyer.id);
+    }),
+  );
+  afterAll(async () => await store?.close());
+
+  async function futureDeal(
+    birthDate = "2011-08-01",
+    contractEnd = "2030-06-30",
+  ) {
+    await store.run(
+      "UPDATE players SET age = ?,birth_date = ?,contract_end = ? WHERE id = ?",
+      ageOn(birthDate, (await stateOf(store)).date),
+      birthDate,
+      contractEnd,
+      player.id,
+    );
+    player = await playerOf(store, player.id);
+    const enquiry = await enquire(
+      store,
+      player.id,
+      "Future transfer",
+      undefined,
+      true,
+    );
+    await negotiationStep(store, enquiry.id, "formalize");
+    const offer = {
+      fee: enquiry.asking_price,
+      wage: enquiry.wage * 2,
+      years: 3,
+      role: "Prospect",
+      promises: [],
+    };
+    await negotiate(store, enquiry.id, offer);
+    await negotiate(store, enquiry.id, offer);
+    await negotiationStep(store, enquiry.id, "sign");
+    return async () =>
+      (await store.get<Negotiation>(
+        "SELECT * FROM negotiations WHERE id = ?",
+        enquiry.id,
+      ))!;
+  }
+
+  it("retains scheduled deals past enquiry expiry and registers at 18 without spending the budget twice", async () => {
+    const deal = await futureDeal();
+    const reserved = JSON.parse((await deal()).data).reservedBudget;
+    const currentWage = player.wage;
+    const sellerBalance = (await clubOf(store, player.club_id!)).balance;
+    await store.setMeta("state", {
+      ...(await stateOf(store)),
+      date: "2026-07-16",
+    });
+    await advance(store, 1);
+    expect((await deal()).stage).toBe("Scheduled");
+    expect((await playerOf(store, player.id)).club_id).toBe(player.club_id);
+    await store.setMeta("state", {
+      ...(await stateOf(store)),
+      date: "2029-07-30",
+      season: 2029,
+    });
+    await progressDealMilestones(store, await deal());
+    expect((await deal()).stage).toBe("Registration");
+    await store.setMeta("state", {
+      ...(await stateOf(store)),
+      date: "2029-07-31",
+    });
+    await progressDealMilestones(store, await deal());
+    expect((await playerOf(store, player.id)).club_id).toBe(player.club_id);
+    expect((await playerOf(store, player.id)).wage).toBe(currentWage);
+    const balance = (await clubOf(store)).balance;
+    const budget = (await clubOf(store)).transfer_budget;
+    await store.setMeta("state", {
+      ...(await stateOf(store)),
+      date: "2029-08-01",
+    });
+    await progressDealMilestones(store, await deal());
+    expect((await deal()).stage).toBe("Completed");
+    expect((await playerOf(store, player.id)).age).toBe(18);
+    expect((await playerOf(store, player.id)).club_id).toBe(buyer.id);
+    expect((await playerOf(store, player.id)).wage).toBe((await deal()).wage);
+    expect((await clubOf(store)).balance).toBeCloseTo(balance - reserved, 2);
+    expect((await clubOf(store)).transfer_budget).toBeCloseTo(budget, 2);
+    expect((await clubOf(store, player.club_id!)).balance).toBeCloseTo(
+      sellerBalance + (await deal()).offer,
+      2,
+    );
+    expect(JSON.parse((await deal()).data).reservedBudget).toBe(0);
+    const after = (await clubOf(store)).balance;
+    await expect(completeNegotiation(store, await deal())).rejects.toThrow();
+    expect((await clubOf(store)).balance).toBe(after);
+  });
+
+  it("waits for the next window and releases the fee if the player became a free agent", async () => {
+    const deal = await futureDeal("2011-10-15", "2028-06-30");
+    const quotedFee = (await deal()).offer;
+    expect(JSON.parse((await deal()).data).futureArrivalDate).toBe(
+      "2030-01-01",
+    );
+    await store.setMeta("state", {
+      ...(await stateOf(store)),
+      date: "2029-10-15",
+    });
+    await store.run(
+      "UPDATE players SET club_id = NULL,wage = 0,role = 'Free agent' WHERE id = ?",
+      player.id,
+    );
+    await progressDealMilestones(store, await deal());
+    expect((await deal()).stage).toBe("Scheduled");
+    const budget = (await clubOf(store)).transfer_budget;
+    const sellerBalance = (await clubOf(store, player.club_id!)).balance;
+    await store.setMeta("state", {
+      ...(await stateOf(store)),
+      date: "2029-12-30",
+    });
+    await progressDealMilestones(store, await deal());
+    await store.setMeta("state", {
+      ...(await stateOf(store)),
+      date: "2030-01-01",
+      season: 2029,
+    });
+    await progressDealMilestones(store, await deal());
+    expect((await deal()).stage).toBe("Completed");
+    expect((await deal()).offer).toBe(0);
+    expect((await deal()).selling_club_id).toBeNull();
+    expect((await clubOf(store)).transfer_budget).toBeCloseTo(
+      budget + quotedFee,
+      2,
+    );
+    expect((await clubOf(store, player.club_id!)).balance).toBe(sellerBalance);
+    expect((await playerOf(store, player.id)).club_id).toBe(buyer.id);
+  });
+
+  it("returns the reservation after a failed medical and holds it across budget renewal", async () => {
+    const deal = await futureDeal();
+    const reserved = JSON.parse((await deal()).data).reservedBudget;
+    await store.setMeta("state", {
+      ...(await stateOf(store)),
+      date: "2027-07-01",
+    });
+    await seasonRollover(store);
+    expect((await clubOf(store)).transfer_budget).toBeCloseTo(
+      (await clubOf(store)).balance * 0.4 - reserved,
+      2,
+    );
+    const budget = (await clubOf(store)).transfer_budget;
+    const balance = (await clubOf(store)).balance;
+    await store.run(
+      "UPDATE players SET injury_until = '2029-10-01' WHERE id = ?",
+      player.id,
+    );
+    await store.setMeta("state", {
+      ...(await stateOf(store)),
+      date: "2029-07-30",
+    });
+    await progressDealMilestones(store, await deal());
+    expect((await deal()).stage).toBe("Rejected");
+    expect((await clubOf(store)).transfer_budget).toBeCloseTo(
+      budget + reserved,
+      2,
+    );
+    expect((await clubOf(store)).balance).toBe(balance);
+    expect((await playerOf(store, player.id)).club_id).toBe(player.club_id);
+    await closeNegotiation(store, await deal(), "Rejected", "Repeated failure");
+    expect((await clubOf(store)).transfer_budget).toBeCloseTo(
+      budget + reserved,
+      2,
+    );
+  });
+
+  it("reserves a future agreement for a 15-year-old without moving or paying the player early", async () => {
+    await store.run(
+      "UPDATE players SET age = 15,birth_date = '2011-08-01',contract_end = '2030-06-30' WHERE id = ?",
+      player.id,
+    );
+    player = await playerOf(store, player.id);
+    await expect(
+      enquire(store, player.id, "Permanent transfer"),
+    ).rejects.toThrow("under-18");
+    await expect(enquire(store, player.id, "Future transfer")).rejects.toThrow(
+      "Guardian consent",
+    );
+    const deal = await enquire(
+      store,
+      player.id,
+      "Future transfer",
+      undefined,
+      true,
+    );
+    await negotiationStep(store, deal.id, "formalize");
+    const offer = {
+      fee: deal.asking_price,
+      wage: deal.wage * 2,
+      years: 3,
+      role: "Prospect",
+      promises: [],
+    };
+    await negotiate(store, deal.id, offer);
+    await negotiate(store, deal.id, offer);
+    expect((await negotiationStep(store, deal.id, "sign")).stage).toBe(
+      "Scheduled",
+    );
+    const saved = (await store.get<Negotiation>(
+      "SELECT * FROM negotiations WHERE id = ?",
+      deal.id,
+    ))!;
+    const details = JSON.parse(saved.data);
+    expect(details.futureArrivalDate).toBe("2029-08-01");
+    expect(details.reservedBudget).toBeGreaterThan(deal.asking_price);
+    expect((await clubOf(store)).transfer_budget).toBeCloseTo(
+      buyer.transfer_budget - details.reservedBudget,
+      2,
+    );
+    expect((await clubOf(store)).balance).toBe(buyer.balance);
+    expect((await playerOf(store, player.id)).club_id).toBe(player.club_id);
+    expect((await playerOf(store, player.id)).wage).toBe(player.wage);
+    await expect(negotiationStep(store, deal.id, "sign")).rejects.toThrow();
+    await closeNegotiation(
+      store,
+      saved,
+      "Withdrawn",
+      "Cancelled future test agreement.",
+    );
+    expect((await clubOf(store)).transfer_budget).toBeCloseTo(
+      buyer.transfer_budget,
+      2,
+    );
+    await closeNegotiation(store, saved, "Withdrawn", "Repeated cancellation.");
+    expect((await clubOf(store)).transfer_budget).toBeCloseTo(
+      buyer.transfer_budget,
+      2,
+    );
+  });
+
+  it("waits for prior approval and pays youth compensation once without a club transfer fee", async () => {
+    const assessment = await assessYouthTransfer(store, player, buyer);
+    expect(assessment.route).toBe("eu-eea");
+    expect(assessment.approved).toBe(false);
+    expect(assessment.canApproachWithoutFee).toBe(true);
+    expect(
+      (
+        await submitMinorApplication(store, player.id, {
+          ...safeguards,
+          education: false,
+        })
+      ).error,
+    ).toContain("required");
+    expect(await store.all("SELECT * FROM minor_applications")).toHaveLength(0);
+    expect(
+      (await submitMinorApplication(store, player.id, safeguards)).error,
+    ).toBeUndefined();
+    expect(
+      (await submitMinorApplication(store, player.id, safeguards)).error,
+    ).toContain("already");
+    const enquiry = await enquire(store, player.id, "Youth approach");
+    expect(enquiry.asking_price).toBe(0);
+    await negotiationStep(store, enquiry.id, "formalize");
+    const deal = async () =>
+      (await store.get<Negotiation>(
+        "SELECT * FROM negotiations WHERE id = ?",
+        enquiry.id,
+      ))!;
+    expect((await deal()).stage).toBe("Agent talks");
+    const offer = {
+      fee: 0,
+      wage: enquiry.wage * 2,
+      years: 3,
+      role: "Prospect",
+      promises: [],
+    };
+    await expect(
+      negotiate(store, enquiry.id, { ...offer, fee: 1 }),
+    ).rejects.toThrow("no transfer fee");
+    await expect(
+      negotiate(store, enquiry.id, { ...offer, years: 4 }),
+    ).rejects.toThrow("three years");
+    await negotiate(store, enquiry.id, offer);
+    await negotiationStep(store, enquiry.id, "sign");
+    const sellerBalance = (await clubOf(store, player.club_id!)).balance;
+    await store.setMeta("state", {
+      ...(await stateOf(store)),
+      date: "2026-07-03",
+    });
+    await progressDealMilestones(store, await deal());
+    await store.setMeta("state", {
+      ...(await stateOf(store)),
+      date: "2026-07-04",
+    });
+    await progressDealMilestones(store, await deal());
+    expect((await deal()).stage).toBe("Registration");
+    expect((await playerOf(store, player.id)).club_id).toBe(player.club_id);
+    expect((await clubOf(store)).balance).toBe(buyer.balance);
+    await store.setMeta("state", {
+      ...(await stateOf(store)),
+      date: "2026-07-08",
+    });
+    await store.run("UPDATE clubs SET academy = 99 WHERE id = ?", buyer.id);
+    await processMinorApplications(store);
+    expect((await assessYouthTransfer(store, player, buyer)).approved).toBe(
+      true,
+    );
+    await completeNegotiation(store, await deal());
+    expect((await deal()).stage).toBe("Completed");
+    expect((await playerOf(store, player.id)).club_id).toBe(buyer.id);
+    expect(
+      JSON.parse((await playerOf(store, player.id)).profile).contract.status,
+    ).toBe("professional");
+    expect((await clubOf(store, player.club_id!)).balance).toBe(
+      sellerBalance + assessment.trainingCompensation,
+    );
+    expect(
+      (await store.get<{ cost: number }>(
+        "SELECT cost FROM player_assets WHERE player_id = ? AND club_id = ?",
+        player.id,
+        buyer.id,
+      ))!.cost,
+    ).toBe(assessment.trainingCompensation);
+    expect(
+      await store.all(
+        "SELECT * FROM ledger WHERE club_id = ? AND category = 'Training compensation'",
+        buyer.id,
+      ),
+    ).toHaveLength(1);
+    await expect(completeNegotiation(store, await deal())).rejects.toThrow();
+  });
+
+  it("does not waive legacy/professional contracts or invent parental evidence", async () => {
+    const profile = JSON.parse(player.profile) as PlayerProfile;
+    delete profile.contract;
+    await store.run(
+      "UPDATE players SET profile = ? WHERE id = ?",
+      JSON.stringify(profile),
+      player.id,
+    );
+    await expect(enquire(store, player.id, "Youth approach")).rejects.toThrow(
+      "recorded amateur",
+    );
+    const english = (await store.get<Club>(
+      "SELECT TOP (1) clubs.* FROM clubs JOIN countries ON countries.id = clubs.country_id WHERE countries.code = 'EN' AND clubs.type = 'club'",
+    ))!;
+    await store.run(
+      "UPDATE players SET club_id = ? WHERE id = ?",
+      english.id,
+      player.id,
+    );
+    profile.familyMove = {
+      countryId: buyer.country_id,
+      reason: "football",
+      verified: true,
+      date: "2026-06-01",
+    };
+    await store.run(
+      "UPDATE players SET profile = ? WHERE id = ?",
+      JSON.stringify(profile),
+      player.id,
+    );
+    expect(
+      (
+        await assessYouthTransfer(
+          store,
+          await playerOf(store, player.id),
+          buyer,
+        )
+      ).eligibleToApply,
+    ).toBe(false);
+    profile.familyMove.reason = "employment";
+    profile.familyMove.verified = false;
+    await store.run(
+      "UPDATE players SET profile = ? WHERE id = ?",
+      JSON.stringify(profile),
+      player.id,
+    );
+    expect(
+      (
+        await assessYouthTransfer(
+          store,
+          await playerOf(store, player.id),
+          buyer,
+        )
+      ).eligibleToApply,
+    ).toBe(false);
+    profile.familyMove.verified = true;
+    await store.run(
+      "UPDATE players SET profile = ? WHERE id = ?",
+      JSON.stringify(profile),
+      player.id,
+    );
+    expect(
+      (
+        await assessYouthTransfer(
+          store,
+          await playerOf(store, player.id),
+          buyer,
+        )
+      ).route,
+    ).toBe("parent-relocation");
+    expect(
+      (
+        await assessYouthTransfer(
+          store,
+          await playerOf(store, player.id),
+          buyer,
+        )
+      ).approved,
+    ).toBe(false);
+  });
+});
+
+describe("FA 2026/27 endorsement criteria", () => {
+  it("classifies league bands from the published criteria", () => {
+    expect(leagueBand("EN", 1)).toBe(1);
+    expect(leagueBand("EN", 2)).toBe(2);
+    expect(leagueBand("BR", 1)).toBe(2);
+    expect(leagueBand("US", 1)).toBe(3);
+    expect(leagueBand("DE", 2)).toBe(4);
+    expect(leagueBand("EN", 3)).toBe(5);
+    expect(leagueBand("IS", 1)).toBe(6);
+  });
+  it("does not grant a permit without sporting evidence", () => {
+    const report = endorsementPoints(evidence);
+    expect(report.allowed).toBe(false);
+    expect(report.points).toBe(0);
+  });
+  it("uses the international automatic-pass thresholds", () => {
+    for (const [rank, percent] of [
+      [10, 30],
+      [20, 40],
+      [30, 60],
+      [50, 70],
+    ]) {
+      expect(
+        endorsementPoints({
+          ...evidence,
+          internationalRank: rank,
+          internationalAppearancesPercent: percent,
+        }).automatic,
+      ).toBe(true);
+      expect(
+        endorsementPoints({
+          ...evidence,
+          internationalRank: rank,
+          internationalAppearancesPercent: percent - 1,
+        }).automatic,
+      ).toBe(false);
+    }
+  });
+  it("awards the correct league minutes, youth debut and league quality points", () => {
+    const regular = endorsementPoints({
+      ...evidence,
+      leagueBand: 2,
+      domesticMinutesPercent: 90,
+      seniorAppearance: true,
+    });
+    expect(regular.breakdown["Domestic league minutes"]).toBe(10);
+    expect(regular.breakdown["Current league quality"]).toBe(10);
+    expect(regular.allowed).toBe(true);
+    const youth = endorsementPoints({
+      ...evidence,
+      age: 19,
+      leagueBand: 2,
+      seniorAppearance: true,
+      youthDebut: true,
+      domesticMinutesPercent: 2,
+    });
+    expect(youth.points).toBe(15);
+    expect(youth.allowed).toBe(true);
+  });
+  it("recognizes British and Irish work rights and already-approved registration", () => {
+    expect(
+      endorsementPoints({ ...evidence, nationalityCode: "IE" }).allowed,
+    ).toBe(true);
+    expect(
+      endorsementPoints({ ...evidence, nationalityCode: "SCO" }).allowed,
+    ).toBe(true);
+    expect(
+      endorsementPoints({ ...evidence, existingPermission: true }).allowed,
+    ).toBe(true);
+  });
+});

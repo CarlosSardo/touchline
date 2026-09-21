@@ -11,6 +11,7 @@ import {
   Moon,
   Network,
   Plus,
+  RotateCcw,
   Save,
   ScanLine,
   Search,
@@ -20,7 +21,7 @@ import {
   UserRound,
   Wallet,
 } from "lucide-react";
-import { api, useGame, useResource } from "../game-context.tsx";
+import { api, useCurrency, useGame, useResource } from "../game-context.tsx";
 import {
   Badge,
   Button,
@@ -28,6 +29,7 @@ import {
   Empty,
   ErrorState,
   Field,
+  IconButton,
   Loading,
   Modal,
   PageHeading,
@@ -37,12 +39,13 @@ import {
 } from "../ui.tsx";
 import {
   dateLabel,
+  CURRENCIES,
   label,
-  money,
   SETTING_DEFINITIONS,
 } from "../../shared/rules.ts";
-import type { SaveSlot } from "../../shared/api.ts";
+import { PORTABLE_SAVE_EXTENSION, type SaveSlot } from "../../shared/api.ts";
 import type { Club, SettingValue } from "../../shared/types.ts";
+import SavedCareers from "../SavedCareers.tsx";
 
 export function CareerSheet({ close }: { close: () => void }) {
   const { bootstrap, act } = useGame();
@@ -160,7 +163,7 @@ function SaveSettings() {
     try {
       await api("saves", { method: "POST", body: JSON.stringify({ name }) });
       await refresh();
-      notify("Local save created.");
+      notify("Career snapshot created.");
     } catch (failure) {
       notify(
         failure instanceof Error ? failure.message : "Save failed.",
@@ -197,7 +200,7 @@ function SaveSettings() {
         body: file,
       });
       await refresh();
-      notify("Local career imported.");
+      notify("Portable career imported.");
     } catch (failure) {
       notify(
         failure instanceof Error ? failure.message : "Import failed.",
@@ -212,7 +215,7 @@ function SaveSettings() {
     <>
       <Panel className="section-space">
         <SectionHeading
-          title="Local save slots"
+          title="Career snapshots"
           subtitle={`Current career: ${dateLabel(bootstrap?.state.date ?? "2026-07-01")}`}
         />
         <div className="save-controls">
@@ -229,7 +232,14 @@ function SaveSettings() {
           >
             {pending ? "Working..." : "Save career"}
           </Button>
-          <a href="/api/saves/export" className="button button-secondary">
+          <a
+            href="/api/saves/export"
+            className="button button-secondary"
+            aria-disabled={pending}
+            onClick={(event) => {
+              if (pending) event.preventDefault();
+            }}
+          >
             <Download size={16} />
             Export
           </a>
@@ -246,67 +256,53 @@ function SaveSettings() {
             key={revision}
             className="sr-only"
             type="file"
-            aria-label="Import local game save"
-            accept=".sqlite,.gz"
+            aria-label="Import portable game save"
+            accept={PORTABLE_SAVE_EXTENSION}
             onChange={(event) => {
               const file = event.target.files?.[0];
-              if (file)
-                confirm(
-                  "Replace the current career?",
-                  "The selected local save will replace the active game. Create a save slot first to preserve your current progress.",
-                  () => {
-                    void importFile(file);
-                  },
-                );
+              if (!file) return;
+              if (!file.name.toLowerCase().endsWith(PORTABLE_SAVE_EXTENSION)) {
+                notify("Choose a portable .touchline.gz save file.", "error");
+                event.currentTarget.value = "";
+                return;
+              }
+              confirm(
+                "Replace the current career?",
+                "The selected snapshot will replace the active game. Create a save slot first to preserve your current progress.",
+                () => {
+                  void importFile(file);
+                },
+              );
             }}
           />
         </div>
         {error && <ErrorState message={error} />}
         {slots?.length ? (
-          slots.map((slot) => (
-            <div className="save-row" key={slot.file}>
-              <HardDrive size={20} />
-              <span>
-                <strong>
-                  {slot.name.replace(/_\d{13}$/, "").slice(0, 65)}
-                </strong>
-                <small>
-                  {new Date(slot.modified).toLocaleString("en-GB")} /{" "}
-                  {(slot.size / 1_000_000).toFixed(1)} MB /{" "}
-                  {slot.compressed ? "Compressed" : "SQLite"}
-                </small>
-              </span>
-              <Button
-                variant="secondary"
-                disabled={pending}
-                onClick={() =>
-                  confirm(
-                    "Restore this career?",
-                    "The selected save will replace your active career. Unsaved progress after this point will be lost.",
-                    () => {
-                      void restore(slot.file);
-                    },
-                  )
-                }
-              >
-                Load
-              </Button>
-            </div>
-          ))
+          <SavedCareers
+            slots={slots}
+            activeCareerId={bootstrap?.state.careerId}
+            pending={pending}
+            onLoad={(slot) =>
+              confirm(
+                "Restore this career?",
+                "The selected snapshot will replace your active career. Unsaved progress after this point will be lost.",
+                () => {
+                  void restore(slot.file);
+                },
+              )
+            }
+          />
         ) : (
           <Empty
             icon={HardDrive}
             title="No saved snapshots yet"
-            detail="The active career is persisted in the local SQLite database."
+            detail="Your active career is stored in the game database."
           />
         )}
       </Panel>
       <div className="information-note section-space">
         <LockKeyhole size={16} />
-        <span>
-          Local storage only. No accounts, telemetry, external APIs or cloud
-          services.
-        </span>
+        <span>Portable career snapshots / .touchline.gz</span>
       </div>
     </>
   );
@@ -364,9 +360,107 @@ function DirectorSkills() {
   );
 }
 
+function AccentColorControl({
+  id,
+  value,
+  defaultValue,
+  onChange,
+}: {
+  id: string;
+  value: string;
+  defaultValue: string;
+  onChange: (color: string) => void;
+}) {
+  const [draft, setDraft] = useState<{ base: string; text: string } | null>(
+    null,
+  );
+  const text = draft?.base === value ? draft.text : value;
+  const digits = text.trim().replace(/^#/, "");
+  const normalized = /^(?:[0-9a-f]{3}|[0-9a-f]{6})$/i.test(digits)
+    ? `#${(digits.length === 3 ? [...digits].map((digit) => digit + digit).join("") : digits).toLowerCase()}`
+    : null;
+  function choose(color: string) {
+    setDraft(null);
+    if (color !== value) onChange(color);
+  }
+  return (
+    <div className="accent-color-control">
+      <div className="color-swatches">
+        {["#087f6d", "#367cb5", "#ad4d65", "#896522", "#665c9a"].map(
+          (color) => (
+            <button
+              type="button"
+              key={color}
+              className={`color-swatch ${value.toLowerCase() === color ? "active" : ""}`}
+              style={{ background: color }}
+              aria-label={`Accent ${color}`}
+              aria-pressed={value.toLowerCase() === color}
+              title={`Accent ${color}`}
+              onClick={() => choose(color)}
+            >
+              {value.toLowerCase() === color && <Check size={13} />}
+            </button>
+          ),
+        )}
+        <input
+          aria-label="Custom accent color"
+          className="color-custom"
+          type="color"
+          value={value}
+          onChange={(event) => choose(event.target.value)}
+        />
+      </div>
+      <div className="accent-code-controls">
+        <span aria-hidden="true">HEX</span>
+        <input
+          id={id}
+          aria-label="Accent color HEX code"
+          aria-invalid={!normalized}
+          aria-describedby={!normalized ? `${id}-error` : undefined}
+          value={text}
+          maxLength={9}
+          autoComplete="off"
+          autoCapitalize="none"
+          spellCheck={false}
+          placeholder="#087f6d"
+          onChange={(event) =>
+            setDraft({ base: value, text: event.target.value })
+          }
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              if (normalized) choose(normalized);
+            } else if (event.key === "Escape") setDraft(null);
+          }}
+        />
+        <IconButton
+          icon={Check}
+          label="Apply accent color"
+          disabled={!normalized || normalized === value.toLowerCase()}
+          onClick={() => {
+            if (normalized) choose(normalized);
+          }}
+        />
+        <IconButton
+          icon={RotateCcw}
+          label="Reset accent color"
+          disabled={value === defaultValue && !draft}
+          onClick={() => choose(defaultValue)}
+        />
+      </div>
+      {!normalized && (
+        <span className="accent-code-error" id={`${id}-error`} role="alert">
+          Invalid HEX code
+        </span>
+      )}
+    </div>
+  );
+}
+
 export default function Settings() {
   const { bootstrap, changeSettings } = useGame();
-  const [group, setGroup] = useState("Interface");
+  const { money } = useCurrency();
+  const [group, setGroup] = useState("Appearance");
   const [career, setCareer] = useState(false);
   const categories = [
     ...new Set(SETTING_DEFINITIONS.map((setting) => setting.group)),
@@ -380,7 +474,7 @@ export default function Settings() {
       <PageHeading
         eyebrow="YOUR CAREER, YOUR WORLD"
         title="Settings"
-        subtitle="Game preferences are stored locally with your career."
+        subtitle="Preferences for this career."
       >
         <Button
           icon={UserRound}
@@ -412,11 +506,14 @@ export default function Settings() {
                 const value = bootstrap.settings[setting.id] ?? setting.default;
                 return (
                   <div
-                    className={`setting-row${setting.id === "theme" ? " setting-appearance" : ""}`}
+                    className={`setting-row${setting.id === "theme" ? " setting-appearance" : ""}${setting.type === "color" ? " setting-color" : ""}`}
                     key={setting.id}
                   >
-                    {setting.id === "theme" ? (
-                      <span id="setting-theme-label" className="setting-label">
+                    {setting.id === "theme" || setting.id === "uiTheme" ? (
+                      <span
+                        id={`setting-${setting.id}-label`}
+                        className="setting-label"
+                      >
                         {setting.label}
                       </span>
                     ) : (
@@ -424,7 +521,36 @@ export default function Settings() {
                         {setting.label}
                       </label>
                     )}
-                    {setting.id === "theme" ? (
+                    {setting.id === "uiTheme" ? (
+                      <div
+                        className="theme-choices ui-layout-choices"
+                        role="radiogroup"
+                        aria-labelledby="setting-uiTheme-label"
+                      >
+                        {[
+                          {
+                            id: "minimal",
+                            label: "Minimal",
+                            icon: SlidersHorizontal,
+                          },
+                          { id: "classic", label: "Classic", icon: Monitor },
+                        ].map((layout) => (
+                          <label className="theme-choice" key={layout.id}>
+                            <input
+                              type="radio"
+                              name="ui-layout"
+                              value={layout.id}
+                              checked={value === layout.id}
+                              onChange={() => update("uiTheme", layout.id)}
+                            />
+                            <span>
+                              <layout.icon size={16} />
+                              {layout.label}
+                            </span>
+                          </label>
+                        ))}
+                      </div>
+                    ) : setting.id === "theme" ? (
                       <div
                         className="theme-choices"
                         role="radiogroup"
@@ -471,7 +597,9 @@ export default function Settings() {
                       >
                         {setting.options?.map((option) => (
                           <option key={option} value={option}>
-                            {label(option)}
+                            {setting.id === "currency"
+                              ? `${option} / ${CURRENCIES.find((currency) => currency.code === option)?.name}`
+                              : label(option)}
                           </option>
                         ))}
                       </select>
@@ -491,36 +619,12 @@ export default function Settings() {
                         <span>{String(value)}</span>
                       </div>
                     ) : (
-                      <div className="color-swatches">
-                        {[
-                          "#087f6d",
-                          "#367cb5",
-                          "#ad4d65",
-                          "#896522",
-                          "#665c9a",
-                        ].map((color) => (
-                          <button
-                            key={color}
-                            className={`color-swatch ${value === color ? "active" : ""}`}
-                            style={{ background: color }}
-                            aria-label={`Accent ${color}`}
-                            title={`Accent ${color}`}
-                            onClick={() => update(setting.id, color)}
-                          >
-                            {value === color && <Check size={13} />}
-                          </button>
-                        ))}
-                        <input
-                          id={`setting-${setting.id}`}
-                          aria-label="Custom accent color"
-                          className="color-custom"
-                          type="color"
-                          value={String(value)}
-                          onChange={(event) =>
-                            update(setting.id, event.target.value)
-                          }
-                        />
-                      </div>
+                      <AccentColorControl
+                        id={`setting-${setting.id}`}
+                        value={String(value)}
+                        defaultValue={String(setting.default)}
+                        onChange={(color) => update(setting.id, color)}
+                      />
                     )}
                   </div>
                 );
