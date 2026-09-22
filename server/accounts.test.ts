@@ -1,0 +1,626 @@
+import { createHash, randomUUID } from "node:crypto";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  AccountNotProvisionedError, Accounts, registeredAccountSchemas,
+  type AccountRecord, type AuthenticatedIdentity,
+} from "./accounts.ts";
+import { bindSql, sqlPoolConfig, Store } from "./db.ts";
+import { readSqlSettings } from "./sql-config.ts";
+import { accountsTableSql, quoteIdentifier, schemaMigrations, sqlLiteral, STORE_TABLES, tableName, WORLD_TABLES } from "./sql-schema.ts";
+import {
+  accountProvisioningPlan, LEGACY_EMAIL, LEGACY_OBJECT_ID, main as migrateAccounts, provisionAccounts,
+} from "../scripts/accounts-migrate.ts";
+import { runtimeGrants } from "../scripts/db-authorize.ts";
+
+const tenantId = "11111111-1111-4111-8111-111111111111";
+const ownerObjectId = "22222222-2222-4222-8222-222222222222";
+const otherObjectId = "33333333-3333-4333-8333-333333333333";
+const legacyAccountId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const ownerAccountId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+const ownerSchema = `touchline_user_${ownerAccountId.replaceAll("-", "")}`;
+const registryIndexes = [
+  { is_primary_key: true, columns: "id" },
+  { is_primary_key: false, columns: "tenant_id,object_id" },
+  { is_primary_key: false, columns: "game_schema" },
+];
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllEnvs();
+});
+
+function identity(objectId = LEGACY_OBJECT_ID): AuthenticatedIdentity {
+  return { tenantId, objectId, displayName: "Trusted display name", email: LEGACY_EMAIL };
+}
+
+function accountHarness() {
+  const records: AccountRecord[] = [
+    { id: legacyAccountId, tenant_id: tenantId, object_id: LEGACY_OBJECT_ID,
+      display_name: "Old name", email: null, game_schema: "dbo" },
+    { id: ownerAccountId, tenant_id: tenantId, object_id: ownerObjectId,
+      display_name: "Other name", email: null, game_schema: ownerSchema },
+  ];
+  const registry = {
+    schemaName: "accounts",
+    testMode: false,
+    all: vi.fn(async (sql: string): Promise<unknown[]> => {
+      if (sql.includes("FROM sys.tables")) return [{ name: "users" }];
+      if (sql.includes("FROM sys.indexes")) return registryIndexes;
+      if (sql.includes("SELECT [game_schema]")) return records.map((record) => ({ game_schema: record.game_schema }));
+      return [];
+    }),
+    get: vi.fn(async (_sql: string, registeredTenant: string, objectId: string) => {
+      const record = records.find((account) => account.tenant_id === registeredTenant && account.object_id === objectId);
+      return record ? { ...record } : undefined;
+    }),
+    run: vi.fn(async (_sql: string, ...parameters: unknown[]) => {
+      const record = records.find((account) => account.id === parameters[2]);
+      if (record) {
+        record.display_name = parameters[0] as string;
+        record.email = parameters[1] as string | null;
+      }
+      return { changes: record ? 1 : 0, lastInsertRowid: null };
+    }),
+    close: vi.fn(async () => {}),
+  };
+  const root = {
+    schemaName: "dbo", testMode: false,
+    get: vi.fn(async () => ({ object_id: 1 as number | null })),
+    forSchema: vi.fn((schema: string) => schema === "accounts" ? registry : { schemaName: schema }),
+  };
+  return { root: root as unknown as Store, registry, records };
+}
+
+describe("Account resolution (no database)", () => {
+  it("checks the separate registry without migrations or profile writes", async () => {
+    const harness = accountHarness();
+    const accounts = new Accounts(harness.root);
+    await accounts.assertReady();
+    expect(harness.root.forSchema).toHaveBeenCalledExactlyOnceWith("accounts");
+    expect(harness.registry.run).not.toHaveBeenCalled();
+    for (const [sql] of harness.registry.all.mock.calls) expect(sql.trim()).toMatch(/^SELECT /);
+    expect(harness.registry.all.mock.calls[0][0]).toContain("FROM [accounts].[users]");
+  });
+
+  it("fails readiness for absent tables, world contamination or missing uniqueness constraints", async () => {
+    const harness = accountHarness();
+    const accounts = new Accounts(harness.root);
+    harness.registry.all.mockRejectedValueOnce(new Error("Invalid object name 'accounts.users'"));
+    await expect(accounts.assertReady()).rejects.toThrow(/Invalid object/);
+    harness.registry.all.mockImplementation(async (sql) => sql.includes("FROM sys.tables")
+      ? [{ name: "users" }, { name: "save_slots" }] : []);
+    await expect(accounts.assertReady()).rejects.toThrow(/never world or save tables/);
+    harness.registry.all.mockImplementation(async (sql) => sql.includes("FROM sys.tables") ? [{ name: "users" }] : []);
+    await expect(accounts.assertReady()).rejects.toThrow(/uniqueness constraints/);
+  });
+
+  it("returns the fixed legacy mapping and a different empty-world scope for the platform owner", async () => {
+    const harness = accountHarness();
+    const accounts = new Accounts(harness.root);
+    const [legacy, owner] = await Promise.all([accounts.resolve(identity()), accounts.resolve(identity(ownerObjectId))]);
+    expect(legacy.user).toEqual({ id: legacyAccountId, displayName: "Trusted display name", email: LEGACY_EMAIL });
+    expect(legacy.store.schemaName).toBe("dbo");
+    expect(owner.user.id).toBe(ownerAccountId);
+    expect(owner.store.schemaName).toBe(ownerSchema);
+    expect(owner.store).not.toBe(legacy.store);
+    expect(harness.root.schemaName).toBe("dbo");
+    expect(harness.registry.run.mock.calls.every(([sql]) => sql.includes("UPDATE [accounts].[users] SET [display_name]"))).toBe(true);
+    expect(harness.registry.run.mock.calls.every(([sql]) => !/SET\s+\[(id|tenant_id|object_id|game_schema)\]/i.test(sql))).toBe(true);
+  });
+
+  it("looks up only tenant/object ID, never email, and never falls back for missing users", async () => {
+    const harness = accountHarness();
+    const accounts = new Accounts(harness.root);
+    await expect(accounts.resolve(identity(otherObjectId))).rejects.toBeInstanceOf(AccountNotProvisionedError);
+    await expect(accounts.resolve({ ...identity(), tenantId: otherObjectId })).rejects.toMatchObject({ status: 403 });
+    expect(harness.root.forSchema).not.toHaveBeenCalledWith("dbo");
+    expect(harness.registry.run).not.toHaveBeenCalled();
+    for (const [sql] of harness.registry.get.mock.calls) {
+      expect(sql).toContain("WHERE [tenant_id] = CONVERT(uniqueidentifier, ?)");
+      expect(sql).toContain("AND [object_id] = CONVERT(uniqueidentifier, ?)");
+      expect(sql).not.toMatch(/WHERE.*email/);
+    }
+  });
+
+  it("normalizes UUIDs, refreshes trusted profiles, and rechecks mappings before reusing a scoped store", async () => {
+    const harness = accountHarness();
+    const accounts = new Accounts(harness.root);
+    const first = await accounts.resolve({ ...identity(), objectId: LEGACY_OBJECT_ID.toUpperCase() });
+    const second = await accounts.resolve(identity());
+    expect(first.store).toBe(second.store);
+    expect(harness.registry.get).toHaveBeenCalledTimes(2);
+    expect(harness.registry.run).toHaveBeenCalledTimes(1);
+    expect(harness.registry.run.mock.calls[0].slice(1)).toEqual([
+      "Trusted display name", LEGACY_EMAIL, legacyAccountId, tenantId, LEGACY_OBJECT_ID, "dbo",
+    ]);
+    await accounts.resolve({ ...identity(), displayName: "Renamed", email: null });
+    expect(harness.records[0]).toMatchObject({ display_name: "Renamed", email: null, game_schema: "dbo" });
+    harness.records.shift();
+    await expect(accounts.resolve(identity())).rejects.toBeInstanceOf(AccountNotProvisionedError);
+  });
+
+  it("refuses inconsistent identity data, reassignment and lost profile updates", async () => {
+    const harness = accountHarness();
+    const accounts = new Accounts(harness.root);
+    harness.registry.get.mockResolvedValueOnce({ ...harness.records[0], tenant_id: otherObjectId });
+    await expect(accounts.resolve(identity())).rejects.toThrow(/inconsistent/);
+    harness.registry.run.mockResolvedValueOnce({ changes: 0, lastInsertRowid: null });
+    await expect(accounts.resolve(identity())).rejects.toBeInstanceOf(AccountNotProvisionedError);
+    await accounts.resolve(identity());
+    harness.records[0].game_schema = "touchline_user_reassigned";
+    await expect(accounts.resolve(identity())).rejects.toThrow(/reassignment/);
+  });
+
+  it("reuses one scoped Store for simultaneous first requests from the same account", async () => {
+    const harness = accountHarness();
+    const accounts = new Accounts(harness.root);
+    const resolved = await Promise.all(Array.from({ length: 3 }, () => accounts.resolve(identity())));
+    expect(new Set(resolved.map((account) => account.store)).size).toBe(1);
+    expect(vi.mocked(harness.root.forSchema).mock.calls.filter(([schema]) => schema === "dbo")).toHaveLength(1);
+  });
+
+  it.each(["accounts", "sys", "dbo.players", "bad]name", "touchline_test_live", "a".repeat(129)])(
+    "refuses unsafe world mapping %s", async (schema) => {
+      const harness = accountHarness();
+      harness.records[0].game_schema = schema;
+      await expect(new Accounts(harness.root).resolve(identity())).rejects.toThrow(/schema/i);
+      expect(harness.registry.run).not.toHaveBeenCalled();
+    },
+  );
+
+  it("rejects invalid claims and registry/world overlap before issuing SQL", async () => {
+    const harness = accountHarness();
+    const accounts = new Accounts(harness.root);
+    await expect(accounts.resolve({ ...identity(), objectId: "not-a-uuid" })).rejects.toThrow(/UUID/);
+    await expect(accounts.resolve({ ...identity(), displayName: " " })).rejects.toThrow(/profile/);
+    await expect(accounts.resolve({ ...identity(), email: "a".repeat(321) })).rejects.toThrow(/profile/);
+    for (const schema of ["dbo", "sys", "touchline_user_existing"])
+      expect(() => new Accounts(harness.root, schema)).toThrow(/separate/);
+    expect(harness.registry.get).not.toHaveBeenCalled();
+  });
+
+  it("enumerates only existing registered worlds and refuses missing or duplicate mappings", async () => {
+    const harness = accountHarness();
+    await expect(registeredAccountSchemas(harness.root)).resolves.toEqual(["dbo", ownerSchema]);
+    expect(harness.registry.close).toHaveBeenCalledOnce();
+    vi.mocked(harness.root.get).mockResolvedValueOnce({ object_id: null });
+    await expect(registeredAccountSchemas(harness.root)).rejects.toThrow(/refusing to recreate/);
+    harness.records[1].game_schema = "DBO";
+    await expect(registeredAccountSchemas(harness.root)).rejects.toThrow(/collision/);
+  });
+});
+
+describe("Account provisioning and grants (no database)", () => {
+  const options = { tenantId, legacyObjectId: LEGACY_OBJECT_ID, legacyEmail: LEGACY_EMAIL };
+  const environment = {
+    SQL_SERVER: "127.0.0.1", SQL_DATABASE: "touchline", SQL_SCHEMA: "dbo", SQL_TEST_MODE: "false",
+    AZURE_TENANT_ID: tenantId, OWNER_OBJECT_ID: ownerObjectId,
+    ALLOWED_USER_OBJECT_IDS: `${LEGACY_OBJECT_ID},${otherObjectId}`,
+  };
+
+  it("requires verified legacy claims and includes every allowlisted identity, including the distinct owner", () => {
+    const plan = accountProvisioningPlan(options, environment);
+    expect(plan).toMatchObject({ accountSchema: "accounts", database: "touchline", ...options });
+    expect(plan.objectIds).toEqual([LEGACY_OBJECT_ID, ownerObjectId, otherObjectId]);
+    expect(() => accountProvisioningPlan({ ...options, legacyObjectId: ownerObjectId }, environment)).toThrow(/approved dbo/);
+    expect(() => accountProvisioningPlan({ ...options, legacyEmail: "someone@example.com" }, environment)).toThrow(/approved dbo/);
+    expect(() => accountProvisioningPlan({ ...options, tenantId: otherObjectId }, environment)).toThrow(/verified tenant/);
+    expect(() => accountProvisioningPlan(options, { ...environment, OWNER_OBJECT_ID: LEGACY_OBJECT_ID })).toThrow(/must not inherit/);
+    expect(() => accountProvisioningPlan(options, { ...environment, ALLOWED_USER_OBJECT_IDS: "" })).toThrow(/explicitly allowlisted/);
+    expect(() => accountProvisioningPlan(options, { ...environment, ALLOWED_USER_OBJECT_IDS: LEGACY_EMAIL })).toThrow(/UUID/);
+  });
+
+  it.each([
+    { SQL_SCHEMA: "touchline_user_existing" }, { SQL_TEST_MODE: "true", SQL_SCHEMA: "touchline_test_accounts" },
+    { SQL_ALLOW_REMOTE_TESTS: "true" }, { SQL_TEST_DATABASE: "touchline" }, { TOUCHLINE_E2E_SCHEMA: "touchline_e2e_accounts" },
+    { CONTAINER_APP_NAME: "touchline" }, { AZURE_CLIENT_ID: ownerObjectId },
+  ])("refuses non-operator contexts: %o", (override) => {
+    expect(() => accountProvisioningPlan(options, { ...environment, ...override })).toThrow(/operator context/);
+  });
+
+  it("keeps account tables completely outside world migrations and snapshot table allowlists", () => {
+    const sql = accountsTableSql("accounts");
+    expect(sql).toContain("CREATE TABLE [accounts].[users]");
+    expect(sql).toContain("[id] UNIQUEIDENTIFIER NOT NULL PRIMARY KEY");
+    expect(sql).toContain("UNIQUE ([tenant_id], [object_id])");
+    expect(sql).toContain("[game_schema] NVARCHAR(128) COLLATE Latin1_General_100_CI_AS NOT NULL UNIQUE");
+    expect(sql).toContain("[email] NVARCHAR(320) NULL");
+    expect(STORE_TABLES.has("users")).toBe(false);
+    expect(WORLD_TABLES).not.toContain("users");
+    expect(schemaMigrations("dbo").flatMap((migration) => migration.statements).join("\n")).not.toContain("[users]");
+    expect(() => bindSql(sql, [], "accounts")).not.toThrow();
+  });
+
+  it("grants each world a fixed-schema reseed helper and only profile updates in the registry", () => {
+    const grants = runtimeGrants("touchline-app", ["dbo", ownerSchema], "accounts").join("\n");
+    for (const schema of ["dbo", ownerSchema]) {
+      expect(grants).toContain(`ON SCHEMA::[${schema}] TO [touchline-app]`);
+      expect(grants).toContain(`GRANT EXECUTE ON OBJECT::[${schema}].[reseed_world_identity]`);
+      expect(grants).toContain(`GRANT ALTER ON OBJECT::[${schema}].[players]`);
+    }
+    expect(grants).toContain("GRANT SELECT, VIEW DEFINITION ON OBJECT::[accounts].[users]");
+    expect(grants).toContain("GRANT UPDATE ON OBJECT::[accounts].[users] ([display_name], [email], [updated_at])");
+    expect(grants).not.toMatch(/db_owner|db_ddladmin|CREATE SCHEMA|ON SCHEMA::\[accounts\]|GRANT ALTER ON OBJECT::\[accounts\]/);
+    expect(() => bindSql(grants, [], "dbo")).not.toThrow();
+    expect(() => runtimeGrants("touchline-app", ["accounts"], "accounts")).toThrow(/schema/);
+    expect(() => runtimeGrants("touchline-app", ["dbo", "DBO"])).toThrow(/collision/);
+    expect(() => runtimeGrants("dbo", ["dbo"])).toThrow(/principal/);
+    expect(runtimeGrants("touchline-app", ["dbo"]).join("\n")).not.toContain("[accounts]");
+  });
+
+  it("defaults to an offline plan and requires both mutation acknowledgements before opening SQL", async () => {
+    for (const name of ["AZURE_CLIENT_ID", "CONTAINER_APP_NAME", "SQL_USER", "SQL_PASSWORD", "SQL_ALLOW_REMOTE_TESTS", "SQL_TEST_DATABASE", "TOUCHLINE_E2E_SCHEMA", "GAME_DB", "SAVE_DIR"])
+      vi.stubEnv(name, undefined);
+    for (const [name, value] of Object.entries(environment)) vi.stubEnv(name, value);
+    const open = vi.spyOn(Store, "open").mockRejectedValue(new Error("SQL must not be opened"));
+    const output = vi.spyOn(console, "log").mockImplementation(() => {});
+    const args = ["--tenant-id", tenantId, "--legacy-object-id", LEGACY_OBJECT_ID, "--legacy-email", LEGACY_EMAIL];
+    await migrateAccounts(args);
+    expect(JSON.parse(String(output.mock.calls[0][0]))).toMatchObject({ dryRun: true, legacySchema: "dbo" });
+    await expect(migrateAccounts([...args, "--apply"])).rejects.toThrow(/--apply --yes/);
+    await expect(migrateAccounts([...args, "--apply", "--yes", "--dry-run"])).rejects.toThrow(/not both/);
+    expect(open).not.toHaveBeenCalled();
+  });
+});
+
+if (process.env.SQL_INTEGRATION_TESTS === "true") {
+  describe("Account isolation (explicit opt-in, real configured SQL)", () => {
+    it("keeps profiles outside isolated worlds and saves across concurrent resolve, clear and close", async () => {
+      const root = await Store.createTest("account_world");
+      let other: Store | undefined;
+      let registry: Store | undefined;
+      let registryCreated = false;
+      try {
+        other = await Store.createTest("other_account_world");
+        const accountSchema = `touchline_test_${randomUUID().replaceAll("-", "")}_accounts`;
+        registry = root.forSchema(accountSchema);
+        await registry.exec(`CREATE SCHEMA ${quoteIdentifier(accountSchema)};`);
+        registryCreated = true;
+        await registry.exec(accountsTableSql(accountSchema));
+        const users = tableName(accountSchema, "users");
+        for (const [id, objectId, schema] of [
+          [legacyAccountId, LEGACY_OBJECT_ID, root.schemaName],
+          [ownerAccountId, ownerObjectId, other.schemaName],
+        ]) await registry.run(
+          `INSERT INTO ${users} ([id], [tenant_id], [object_id], [display_name], [game_schema]) VALUES (?, ?, ?, ?, ?)`,
+          id, tenantId, objectId, "Initial name", schema,
+        );
+        const accounts = new Accounts(root, accountSchema);
+        await accounts.assertReady();
+        const [first, second] = await Promise.all([accounts.resolve(identity()), accounts.resolve(identity(ownerObjectId))]);
+        expect(first.store.schemaName).toBe(root.schemaName);
+        expect(second.store.schemaName).toBe(other.schemaName);
+        await Promise.all([first.store.setMeta("isolation", "first"), second.store.setMeta("isolation", "second")]);
+        expect(await first.store.meta("isolation")).toBe("first");
+        expect(await second.store.meta("isolation")).toBe("second");
+        const saveId = randomUUID();
+        await first.store.run(
+          "INSERT INTO save_slots (id,name,created_at,automatic,format_version) VALUES (?,?,?,?,?)",
+          saveId, "Private snapshot", new Date(), false, 1,
+        );
+        await first.store.run("INSERT INTO save_chunks (save_id,ordinal,data) VALUES (?,?,?)", saveId, 0, Buffer.from("first"));
+        expect(await second.store.get("SELECT id FROM save_slots WHERE id = ?", saveId)).toBeUndefined();
+        expect(await second.store.get("SELECT data FROM save_chunks WHERE save_id = ?", saveId)).toBeUndefined();
+        await first.store.transaction(async () => first.store.clearWorld());
+        expect(await second.store.meta("isolation")).toBe("second");
+        expect(await first.store.get("SELECT id FROM save_slots WHERE id = ?", saveId)).toBeDefined();
+        expect(await registry.all(`SELECT [id] FROM ${users}`)).toHaveLength(2);
+        await expect(registry.schema()).rejects.toThrow(/account registry/);
+        await expect(registry.run(
+          `INSERT INTO ${users} ([id], [tenant_id], [object_id], [display_name], [game_schema]) VALUES (?,?,?,?,?)`,
+          randomUUID(), tenantId, otherObjectId, "Collision", root.schemaName,
+        )).rejects.toThrow();
+        await expect(registry.run(
+          `INSERT INTO ${users} ([id], [tenant_id], [object_id], [display_name], [game_schema]) VALUES (?,?,?,?,?)`,
+          randomUUID(), tenantId, LEGACY_OBJECT_ID, "Collision", "touchline_test_unassigned",
+        )).rejects.toThrow();
+        await expect(accounts.resolve(identity(otherObjectId))).rejects.toBeInstanceOf(AccountNotProvisionedError);
+        await first.store.close();
+        await expect(second.store.meta("isolation")).resolves.toBe("second");
+        expect((await registry.get<{ email: string }>(`SELECT [email] FROM ${users} WHERE [id] = ?`, legacyAccountId))?.email).toBe(LEGACY_EMAIL);
+      } finally {
+        try {
+          if (registry && registryCreated) await registry.transaction(async () => {
+            await registry!.exec(`DROP TABLE IF EXISTS ${tableName(registry!.schemaName, "users")};`);
+            await registry!.exec(`DROP SCHEMA ${quoteIdentifier(registry!.schemaName)};`);
+          });
+        } finally {
+          await registry?.close();
+          await other?.close();
+          await root.close();
+        }
+      }
+    });
+  });
+}
+
+// Operator provisioning needs dbo: only loopback opts into a disposable database; remote tests above stay schema-isolated.
+if (process.env.SQL_INTEGRATION_TESTS === "true" &&
+    ["127.0.0.1", "localhost", "::1"].includes(process.env.SQL_SERVER ?? "")) {
+  describe("Account provisioning and runtime grants (local-only disposable SQL database)", () => {
+    it("provisions immutable accounts without copying dbo and enforces runtime grants in a disposable local database", async () => {
+      const configuredDatabase = process.env.SQL_DATABASE;
+      const database = `touchline_test_accounts_${randomUUID().replaceAll("-", "")}`;
+      const ownedDatabasePattern = /^touchline_test_accounts_[a-f0-9]{32}$/;
+      if (!ownedDatabasePattern.test(database) || database === configuredDatabase ||
+          !["127.0.0.1", "localhost", "::1"].includes(process.env.SQL_SERVER ?? "") ||
+          process.env.SQL_PORT !== "14330" || process.env.SQL_USER !== "sa" || !process.env.SQL_PASSWORD)
+        throw new Error("Provisioning regression requires test:local sa credentials on loopback:14330 and a fresh owned database.");
+      for (const name of ["SQL_ALLOW_REMOTE_TESTS", "SQL_TEST_DATABASE", "TOUCHLINE_E2E_SCHEMA", "AZURE_CLIENT_ID", "CONTAINER_APP_NAME", "GAME_DB", "SAVE_DIR"])
+        vi.stubEnv(name, undefined);
+      for (const [name, value] of Object.entries({
+        SQL_DATABASE: database, SQL_SCHEMA: "dbo", SQL_TEST_MODE: "false",
+        AZURE_TENANT_ID: tenantId, OWNER_OBJECT_ID: ownerObjectId,
+        ALLOWED_USER_OBJECT_IDS: `${LEGACY_OBJECT_ID},${otherObjectId}`,
+      })) vi.stubEnv(name, value);
+      const settings = readSqlSettings();
+      const plan = accountProvisioningPlan({ tenantId, legacyObjectId: LEGACY_OBJECT_ID, legacyEmail: LEGACY_EMAIL });
+      expect(plan.database).toBe(database);
+      const { default: sql } = await import("mssql");
+      const master = new sql.ConnectionPool(sqlPoolConfig({ ...settings, database: "master" }));
+      let databaseCreated = false;
+      let root: Store | undefined;
+      try {
+        await master.connect();
+        await master.request().batch(`CREATE DATABASE ${quoteIdentifier(database)};`);
+        databaseCreated = true;
+        root = await Store.open(database);
+        const store = root;
+        expect({ database: store.database, schema: store.schemaName, testMode: store.testMode })
+          .toEqual({ database, schema: "dbo", testMode: false });
+        expect(await store.get("SELECT DB_NAME() AS [database]")).toEqual({ database });
+        await store.schema();
+        const career = { careerId: randomUUID(), date: "2026-07-20", director: { name: "Fictional legacy director" } };
+        await store.setMeta("state", career);
+        const saveId = randomUUID();
+        const saveChunks = [Buffer.from([0, 1, 127, 128, 255]), Buffer.from("unchanged legacy checkpoint")];
+        const saveBytes = Buffer.concat(saveChunks);
+        const saveHash = createHash("sha256").update(saveBytes).digest("hex");
+        await store.run(
+          `INSERT INTO save_slots
+            ([id], [name], [career_id], [career_metadata], [created_at], [automatic], [imported],
+             [format_version], [byte_length], [sha256], [complete]) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+          saveId, "Legacy checkpoint sentinel", career.careerId, JSON.stringify(career),
+          new Date("2026-07-20T12:00:00.000Z"), false, true, 1, saveBytes.length, saveHash, true,
+        );
+        for (const [ordinal, chunk] of saveChunks.entries())
+          await store.run("INSERT INTO save_chunks ([save_id], [ordinal], [data]) VALUES (?,?,?)", saveId, ordinal, chunk);
+        const readWorld = async (world: Store) => ({
+          meta: await world.all("SELECT * FROM meta ORDER BY [key]"),
+          news: await world.all("SELECT * FROM news ORDER BY [id]"),
+          migrations: await world.all("SELECT * FROM schema_migrations ORDER BY [version]"),
+          saves: await world.all("SELECT * FROM save_slots ORDER BY [id]"),
+          chunks: await world.all<{ save_id: string; ordinal: number; data: Buffer }>(
+            "SELECT * FROM save_chunks ORDER BY [save_id], [ordinal]",
+          ),
+        });
+        const legacyBefore = await readWorld(store);
+        expect(legacyBefore.saves).toHaveLength(1);
+        expect(legacyBefore.saves[0]).toMatchObject({ complete: true, sha256: saveHash });
+        const assertLegacyUnchanged = async () => {
+          const current = await readWorld(store);
+          expect(current).toEqual(legacyBefore);
+          const bytes = Buffer.concat(current.chunks.map((chunk) => chunk.data));
+          expect(bytes).toEqual(saveBytes);
+          expect(createHash("sha256").update(bytes).digest("hex")).toBe(saveHash);
+        };
+        const assertEmptyWorld = async (world: Store) => {
+          expect(await world.all("SELECT [key], [value] FROM meta ORDER BY [key]"))
+            .toEqual([{ key: "appearanceIndexVersion", value: "1" }]);
+          const emptyTables = [...WORLD_TABLES.filter((table) => table !== "meta"), "save_slots", "save_chunks"];
+          const counts = await world.all(emptyTables.map((table) =>
+            `SELECT ${sqlLiteral(table)} AS [table_name], COUNT(*) AS [rows] FROM ${tableName(world.schemaName, table)}`,
+          ).join(" UNION ALL "));
+          expect(counts).toHaveLength(emptyTables.length);
+          expect(counts).toEqual(expect.arrayContaining(emptyTables.map((table) => ({ table_name: table, rows: 0 }))));
+          expect(await world.all("SELECT [version], [name] FROM schema_migrations ORDER BY [version]"))
+            .toEqual(schemaMigrations(world.schemaName).map(({ version, name }) => ({ version, name })));
+        };
+        const tableInventory = () => store.all<{ schema_name: string; name: string; object_id: number }>(
+          `SELECT SCHEMA_NAME([schema_id]) AS [schema_name], [name], [object_id]
+           FROM sys.tables WHERE [is_ms_shipped] = 0 ORDER BY [schema_name], [name]`,
+        );
+        expect(await store.get("SELECT SCHEMA_ID(N'accounts') AS [schema_id]")).toEqual({ schema_id: null });
+        const provisioned = await provisionAccounts(store, plan);
+        expect(provisioned.map((account) => account.objectId)).toEqual([LEGACY_OBJECT_ID, ownerObjectId, otherObjectId]);
+        expect(provisioned.every((account) => account.created)).toBe(true);
+        expect(new Set(provisioned.map((account) => account.id)).size).toBe(3);
+        expect(new Set(provisioned.map((account) => account.schema)).size).toBe(3);
+        const [legacy, owner, guest] = provisioned;
+        expect(legacy.schema).toBe("dbo");
+        for (const account of [owner, guest])
+          expect(account.schema).toBe(`touchline_user_${account.id.replaceAll("-", "")}`);
+        const worlds = [store.forSchema(owner.schema), store.forSchema(guest.schema)];
+        for (const world of worlds) await assertEmptyWorld(world);
+        await assertLegacyUnchanged();
+        const tablesBeforeRerun = await tableInventory();
+        expect(tablesBeforeRerun).toHaveLength(STORE_TABLES.size * 3 + 1);
+        expect(tablesBeforeRerun.filter((table) => table.schema_name === "accounts").map((table) => table.name))
+          .toEqual(["users"]);
+        for (const { schema } of provisioned) {
+          expect(tablesBeforeRerun.filter((table) => table.schema_name === schema).map((table) => table.name).sort())
+            .toEqual([...STORE_TABLES].sort());
+          expect(await store.get("SELECT OBJECT_ID(?, N'P') AS [helper_id]", tableName(schema, "reseed_world_identity")))
+            .toEqual({ helper_id: expect.any(Number) });
+        }
+        const readRegistry = () => store.all<AccountRecord>("SELECT * FROM [accounts].[users] ORDER BY [object_id]");
+        const registryBeforeRerun = await readRegistry();
+        expect(registryBeforeRerun).toHaveLength(3);
+        expect(await provisionAccounts(store, plan)).toEqual(provisioned.map((account) => ({ ...account, created: false })));
+        expect(await readRegistry()).toEqual(registryBeforeRerun);
+        expect(await tableInventory()).toEqual(tablesBeforeRerun);
+        for (const world of worlds) await assertEmptyWorld(world);
+        await assertLegacyUnchanged();
+
+        const accounts = new Accounts(store);
+        await accounts.assertReady();
+        const claims = [
+          { ...identity(), displayName: "Legacy guest human" },
+          { ...identity(ownerObjectId), displayName: "Platform owner human", email: "owner@example.test" },
+          { ...identity(otherObjectId), displayName: "Invited guest human", email: "guest@example.test" },
+        ];
+        const resolved = await Promise.all(claims.map((claim) => accounts.resolve(claim)));
+        for (const [index, account] of resolved.entries()) {
+          expect(account.user).toEqual({ id: provisioned[index].id, displayName: claims[index].displayName, email: claims[index].email });
+          expect(account.store.schemaName).toBe(provisioned[index].schema);
+          expect(account.user.displayName).not.toBe(career.director.name);
+        }
+        const userWorlds = resolved.slice(1).map((account) => account.store);
+        for (const world of userWorlds) await assertEmptyWorld(world);
+        await expect(accounts.resolve({ ...identity(), objectId: randomUUID() })).rejects.toBeInstanceOf(AccountNotProvisionedError);
+        await assertLegacyUnchanged();
+
+        const principal = "touchline_accounts_runtime";
+        await store.exec(`CREATE USER ${quoteIdentifier(principal)} WITHOUT LOGIN;`);
+        const registeredSchemas = await registeredAccountSchemas(store);
+        expect(registeredSchemas).toEqual(provisioned.map((account) => account.schema).sort());
+        for (const grant of runtimeGrants(principal, registeredSchemas, "accounts")) await store.exec(grant);
+        expect(await store.get(
+          "SELECT [type_desc], [authentication_type_desc] FROM sys.database_principals WHERE [name] = ?", principal,
+        )).toEqual({ type_desc: "SQL_USER", authentication_type_desc: "NONE" });
+        expect(await store.all("SELECT [role_principal_id] FROM sys.database_role_members WHERE [member_principal_id] = USER_ID(?)", principal))
+          .toEqual([]);
+        expect(await store.all("SELECT [name] FROM sys.schemas WHERE [principal_id] = USER_ID(?)", principal)).toEqual([]);
+        const queryAsRuntime = <Result>(statement: string) => store.all<Result>(`
+          EXECUTE AS USER = ${sqlLiteral(principal)};
+          BEGIN TRY
+            ${statement}
+            REVERT;
+          END TRY
+          BEGIN CATCH
+            REVERT;
+            THROW;
+          END CATCH;`);
+        expect(await queryAsRuntime(`
+          DECLARE @registry nvarchar(260) = N'accounts.users';
+          SELECT USER_NAME() AS [principal],
+            HAS_PERMS_BY_NAME(@registry, N'OBJECT', N'SELECT') AS [registry_read],
+            HAS_PERMS_BY_NAME(@registry, N'OBJECT', N'VIEW DEFINITION') AS [registry_definition],
+            HAS_PERMS_BY_NAME(@registry, N'OBJECT', N'UPDATE', N'display_name', N'COLUMN') AS [profile_name],
+            HAS_PERMS_BY_NAME(@registry, N'OBJECT', N'UPDATE', N'email', N'COLUMN') AS [profile_email],
+            HAS_PERMS_BY_NAME(@registry, N'OBJECT', N'UPDATE', N'updated_at', N'COLUMN') AS [profile_timestamp],
+            HAS_PERMS_BY_NAME(@registry, N'OBJECT', N'UPDATE', N'id', N'COLUMN') AS [change_id],
+            HAS_PERMS_BY_NAME(@registry, N'OBJECT', N'UPDATE', N'tenant_id', N'COLUMN') AS [change_tenant],
+            HAS_PERMS_BY_NAME(@registry, N'OBJECT', N'UPDATE', N'object_id', N'COLUMN') AS [change_object],
+            HAS_PERMS_BY_NAME(@registry, N'OBJECT', N'UPDATE', N'game_schema', N'COLUMN') AS [change_schema],
+            HAS_PERMS_BY_NAME(@registry, N'OBJECT', N'UPDATE', N'created_at', N'COLUMN') AS [change_created],
+            HAS_PERMS_BY_NAME(@registry, N'OBJECT', N'INSERT') AS [registry_insert],
+            HAS_PERMS_BY_NAME(@registry, N'OBJECT', N'DELETE') AS [registry_delete],
+            HAS_PERMS_BY_NAME(@registry, N'OBJECT', N'ALTER') AS [registry_alter],
+            HAS_PERMS_BY_NAME(N'accounts', N'SCHEMA', N'ALTER') AS [registry_schema_alter],
+            HAS_PERMS_BY_NAME(DB_NAME(), N'DATABASE', N'CONTROL') AS [database_control],
+            HAS_PERMS_BY_NAME(DB_NAME(), N'DATABASE', N'CREATE SCHEMA') AS [create_schema],
+            HAS_PERMS_BY_NAME(DB_NAME(), N'DATABASE', N'CREATE TABLE') AS [create_table],
+            HAS_PERMS_BY_NAME(DB_NAME(), N'DATABASE', N'CREATE PROCEDURE') AS [create_procedure],
+            HAS_PERMS_BY_NAME(DB_NAME(), N'DATABASE', N'ALTER ANY SCHEMA') AS [alter_schemas],
+            HAS_PERMS_BY_NAME(DB_NAME(), N'DATABASE', N'ALTER ANY USER') AS [alter_users],
+            HAS_PERMS_BY_NAME(DB_NAME(), N'DATABASE', N'ALTER ANY ROLE') AS [alter_roles],
+            IS_ROLEMEMBER(N'db_owner') AS [db_owner], IS_ROLEMEMBER(N'db_ddladmin') AS [db_ddladmin];
+        `)).toEqual([{
+          principal, registry_read: 1, registry_definition: 1, profile_name: 1, profile_email: 1, profile_timestamp: 1,
+          change_id: 0, change_tenant: 0, change_object: 0, change_schema: 0, change_created: 0,
+          registry_insert: 0, registry_delete: 0, registry_alter: 0, registry_schema_alter: 0,
+          database_control: 0, create_schema: 0, create_table: 0, create_procedure: 0,
+          alter_schemas: 0, alter_users: 0, alter_roles: 0, db_owner: 0, db_ddladmin: 0,
+        }]);
+        for (const schema of registeredSchemas) {
+          expect(await queryAsRuntime(`SELECT
+            HAS_PERMS_BY_NAME(${sqlLiteral(schema)}, N'SCHEMA', N'SELECT') AS [world_read],
+            HAS_PERMS_BY_NAME(${sqlLiteral(schema)}, N'SCHEMA', N'INSERT') AS [world_insert],
+            HAS_PERMS_BY_NAME(${sqlLiteral(schema)}, N'SCHEMA', N'UPDATE') AS [world_update],
+            HAS_PERMS_BY_NAME(${sqlLiteral(schema)}, N'SCHEMA', N'DELETE') AS [world_delete],
+            HAS_PERMS_BY_NAME(${sqlLiteral(schema)}, N'SCHEMA', N'ALTER') AS [world_alter],
+            HAS_PERMS_BY_NAME(${sqlLiteral(`${schema}.players`)}, N'OBJECT', N'ALTER') AS [restore_alter],
+            HAS_PERMS_BY_NAME(${sqlLiteral(`${schema}.reseed_world_identity`)}, N'OBJECT', N'EXECUTE') AS [reseed],
+            HAS_PERMS_BY_NAME(${sqlLiteral(`${schema}.reseed_world_identity`)}, N'OBJECT', N'ALTER') AS [helper_alter],
+            HAS_PERMS_BY_NAME(${sqlLiteral(`${schema}.save_slots`)}, N'OBJECT', N'ALTER') AS [catalog_alter],
+            HAS_PERMS_BY_NAME(${sqlLiteral(`${schema}.save_chunks`)}, N'OBJECT', N'ALTER') AS [chunks_alter];
+          `)).toEqual([{
+            world_read: 1, world_insert: 1, world_update: 1, world_delete: 1, world_alter: 0,
+            restore_alter: 1, reseed: 1, helper_alter: 0, catalog_alter: 0, chunks_alter: 0,
+          }]);
+          await queryAsRuntime(`EXEC ${tableName(schema, "reseed_world_identity")} @table = N'news';`);
+        }
+        const refreshedClaim = { ...claims[1], displayName: "Runtime refreshed owner", email: "refreshed.owner@example.test" };
+        expect(await queryAsRuntime(`
+          UPDATE [accounts].[users] SET [display_name] = ${sqlLiteral(refreshedClaim.displayName)},
+            [email] = ${sqlLiteral(refreshedClaim.email)}, [updated_at] = SYSUTCDATETIME()
+          WHERE [id] = CONVERT(uniqueidentifier, ${sqlLiteral(owner.id)});
+          SELECT [display_name], [email] FROM [accounts].[users]
+          WHERE [id] = CONVERT(uniqueidentifier, ${sqlLiteral(owner.id)});
+        `)).toEqual([{ display_name: refreshedClaim.displayName, email: refreshedClaim.email }]);
+        expect((await accounts.resolve(refreshedClaim)).user)
+          .toEqual({ id: owner.id, displayName: refreshedClaim.displayName, email: refreshedClaim.email });
+        const registryAfterProfiles = await readRegistry();
+        expect(registryAfterProfiles.map(({ id, tenant_id, object_id, game_schema }) => ({ id, tenant_id, object_id, game_schema })))
+          .toEqual(registryBeforeRerun.map(({ id, tenant_id, object_id, game_schema }) => ({ id, tenant_id, object_id, game_schema })));
+
+        const inRuntimeWorld = (world: Store, action: () => Promise<void>) => world.transaction(async () => {
+          await world.exec(`EXECUTE AS USER = ${sqlLiteral(principal)};`);
+          try {
+            expect(await world.get("SELECT USER_NAME() AS [principal]")).toEqual({ principal });
+            await action();
+          } finally {
+            await world.exec("REVERT;");
+          }
+        });
+        const insertNews = (world: Store, title: string) => world.run(
+          "INSERT INTO news ([date], [category], [title], [body], [severity]) VALUES (?,?,?,?,?)",
+          career.date, "Account regression", title, "Isolated world sentinel", "info",
+        );
+        for (const world of userWorlds) await inRuntimeWorld(world, async () => {
+          await world.setMeta("state", { account: world.schemaName, reset: false });
+          expect((await insertNews(world, "First")).lastInsertRowid).toBe(1);
+          expect((await insertNews(world, "Second")).lastInsertRowid).toBe(2);
+          const bytes = Buffer.from(world.schemaName);
+          await world.run(
+            `INSERT INTO save_slots
+              ([id], [name], [career_id], [career_metadata], [created_at], [automatic], [imported],
+               [format_version], [byte_length], [sha256], [complete]) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+            saveId, world.schemaName, world.schemaName, JSON.stringify({ account: world.schemaName }),
+            new Date("2026-07-20T12:00:00.000Z"), false, false, 1, bytes.length,
+            createHash("sha256").update(bytes).digest("hex"), true,
+          );
+          await world.run("INSERT INTO save_chunks ([save_id], [ordinal], [data]) VALUES (?,?,?)", saveId, 0, bytes);
+        });
+        for (const [index, world] of userWorlds.entries()) {
+          const before = await readWorld(world);
+          const peer = userWorlds[1 - index];
+          const peerBefore = await readWorld(peer);
+          await inRuntimeWorld(world, async () => {
+            await world.clearWorld();
+            expect(await world.all("SELECT * FROM meta")).toEqual([]);
+            expect(await world.all("SELECT * FROM news")).toEqual([]);
+            await world.setMeta("state", { account: world.schemaName, reset: true });
+            expect((await insertNews(world, "After reset")).lastInsertRowid).toBe(1);
+            expect(await world.get("SELECT USER_NAME() AS [principal]")).toEqual({ principal });
+          });
+          expect(await world.meta("state")).toEqual({ account: world.schemaName, reset: true });
+          const after = await readWorld(world);
+          expect(after.saves).toEqual(before.saves);
+          expect(after.chunks).toEqual(before.chunks);
+          expect(after.migrations).toEqual(before.migrations);
+          expect(await readWorld(peer)).toEqual(peerBefore);
+          expect(await readRegistry()).toEqual(registryAfterProfiles);
+          await assertLegacyUnchanged();
+        }
+        expect(await tableInventory()).toEqual(tablesBeforeRerun);
+      } finally {
+        try {
+          await root?.close();
+        } finally {
+          try {
+            if (databaseCreated) {
+              if (!ownedDatabasePattern.test(database) || database === configuredDatabase)
+                throw new Error("Refusing to clean up a database not owned by this regression.");
+              await master.request().batch(`ALTER DATABASE ${quoteIdentifier(database)} SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
+                DROP DATABASE ${quoteIdentifier(database)};`);
+            }
+          } finally {
+            await master.close();
+          }
+        }
+      }
+    });
+  });
+}

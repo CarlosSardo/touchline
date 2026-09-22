@@ -8,7 +8,9 @@ rollback_usage() {
     '       bash scripts/azure-rollback.sh --list' \
     'Select an existing digest-pinned revision explicitly. No build, push, migration, seed or data restore.' \
     'Requires AUTH_CLIENT_ID and the normal Azure target env. Optional AUTH_SMOKE_TOKEN for owner verification.' \
-    'Refuses revision/schema mismatches. Uses scripts/azure-sql.sh for a read-only schema-version check.' \
+    'Refuses runtime rollback once the accounts registry exists: retained release metadata does not prove image-bound per-user isolation.' \
+    'Use a reviewed forward fix; this command has no maintenance-only bypass. Never remove the registry to enable old shared-world code.' \
+    'Before account provisioning only, checks dbo schema compatibility through read-only SQL metadata with operator visibility.' \
     'Checks ARM/SQL internally, then wakes cold candidates through protected HTTP ingress; failure closes ingress.' \
     'Keeps only the verified revision active, with 0..1 replicas; other revisions remain available for rollback.'
 }
@@ -45,7 +47,7 @@ deployment_private_registry
 app_id="/subscriptions/$AZURE_SUBSCRIPTION_ID/resourceGroups/$AZURE_RESOURCE_GROUP/providers/Microsoft.App/containerApps/$AZURE_APP"
 candidate="$(azure containerapp revision show --name "$AZURE_APP" --resource-group "$AZURE_RESOURCE_GROUP" --revision "$revision" --output json)"
 schema_version="$(printf '%s' "$candidate" | node -e 'let text=""; process.stdin.on("data",chunk=>text+=chunk); process.stdin.on("end",()=>{const revision=JSON.parse(text), containers=revision.properties.template.containers; if(containers.length!==1) process.exit(1); const container=containers[0]; if(!container.image.startsWith(`${process.env.GHCR_IMAGE}@sha256:`) || !/@sha256:[a-f0-9]{64}$/.test(container.image)) process.exit(1); const version=container.env.find(item=>item.name==="TOUCHLINE_SCHEMA_VERSION")?.value; if(!/^\d+$/.test(version)) process.exit(1); process.stdout.write(version);});')" || fail 'Rollback requires a private digest and recorded schema version.'
-deployment_schema_check "$schema_version"
+deployment_schema_check "$schema_version" legacy-rollback
 public_domain="$(azure containerapp env show --resource-group "$AZURE_RESOURCE_GROUP" --name "$AZURE_ENVIRONMENT" --query properties.defaultDomain --output tsv)"
 [[ "$public_domain" == *.azurecontainerapps.io && "$public_domain" != *[/:[:space:]]* && "$public_domain" != internal.* ]] || fail 'A public-capable Container Apps environment DNS suffix is required.'
 origin="https://$AZURE_APP.$public_domain"
@@ -56,6 +58,7 @@ printf '%s\n' '[rollback] Closing ingress before validating and selecting the co
 azure containerapp ingress enable --name "$AZURE_APP" --resource-group "$AZURE_RESOURCE_GROUP" --type internal --target-port 3001 --transport auto --output none
 deployment_candidate_check "$revision" "$origin"
 deployment_firewall
+deployment_schema_check "$schema_version" legacy-rollback
 azure containerapp revision activate --name "$AZURE_APP" --resource-group "$AZURE_RESOURCE_GROUP" --revision "$revision" --output none
 azure containerapp ingress traffic set --name "$AZURE_APP" --resource-group "$AZURE_RESOURCE_GROUP" --revision-weight "$revision=100" --output none
 deployment_traffic_check "$revision" false

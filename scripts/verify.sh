@@ -34,7 +34,7 @@ if (args.includes('--parallel')) {
   const files = readdirSync('server', { recursive: true })
     .filter(file => file.endsWith('.test.ts')).map(file => `server/${file}`).sort();
   const gameplay = ['server/systems.test.ts', 'server/club-support.test.ts', 'server/registration.test.ts'];
-  const persistence = ['server/app.test.ts', 'server/db.test.ts', 'server/saves.test.ts'];
+  const persistence = ['server/accounts.test.ts', 'server/app.test.ts', 'server/db.test.ts', 'server/saves.test.ts'];
   const remaining = files.filter(file => !gameplay.includes(file) && !persistence.includes(file));
   const stamp = randomUUID().replaceAll('-', '');
   const jobs = [

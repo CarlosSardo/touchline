@@ -95,6 +95,23 @@ export function migrationTableSql(schema: string): string {
       [name] NVARCHAR(200) NOT NULL, [applied_at] DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME());`;
 }
 
+export function accountsTableSql(schema: string): string {
+  const table = tableName(schema, "users");
+  return `IF OBJECT_ID(${sqlLiteral(table)}, N'U') IS NULL
+    CREATE TABLE ${table} (
+      [id] UNIQUEIDENTIFIER NOT NULL PRIMARY KEY,
+      [tenant_id] UNIQUEIDENTIFIER NOT NULL,
+      [object_id] UNIQUEIDENTIFIER NOT NULL,
+      [display_name] NVARCHAR(200) NOT NULL,
+      [email] NVARCHAR(320) NULL,
+      [game_schema] NVARCHAR(128) COLLATE Latin1_General_100_CI_AS NOT NULL UNIQUE,
+      [created_at] DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
+      [updated_at] DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
+      UNIQUE ([tenant_id], [object_id]),
+      CHECK ([game_schema] <> ${sqlLiteral(schema)} AND [game_schema] NOT IN (N'accounts', N'sys', N'guest', N'information_schema'))
+    );`;
+}
+
 export function schemaMigrations(schema: string): SqlMigration[] {
   const ref = (table: string) => tableName(schema, table);
   const definitions: Record<(typeof WORLD_TABLES)[number], string> = {

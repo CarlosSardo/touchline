@@ -87,6 +87,19 @@ describe("logical checkpoint manifest (no database)", () => {
     expect(() => validateManifest(extra, schema)).toThrow("incompatible");
   });
 
+  it.each(["users", "accounts", "account_users"])("never accepts account records from a portable world: %s", (name) => {
+    const imported = manifest();
+    imported.tables.push({
+      name,
+      columns: [
+        { name: "id", type: "nvarchar", nullable: false, maxLength: 100 },
+        { name: "game_schema", type: "nvarchar", nullable: false, maxLength: 128 },
+      ],
+      rowCount: 1,
+    });
+    expect(() => validateManifest(imported, schema)).toThrow();
+  });
+
   it("rejects unsafe identifiers and duplicate tables", () => {
     const unsafe = manifest();
     unsafe.tables[1].name = "countries]; DROP TABLE meta";
@@ -440,6 +453,10 @@ if (process.env.SQL_SAVE_TESTS === "true") {
           seed: "save-lifecycle-tests",
         }),
       );
+      await store.setMeta("state", {
+        ...await store.meta<GameState>("state"),
+        started: true,
+      });
       saves = new Saves(store);
       baseline = await saveTestStep("write baseline checkpoint", () =>
         saves.create("Baseline"),
@@ -469,6 +486,47 @@ if (process.env.SQL_SAVE_TESTS === "true") {
         await saveTestStep("drop isolated schema and close connections", () =>
           store.close(),
         );
+    }, 300_000);
+
+    it("rejects partial worlds and rolls back interrupted first-world preparation before a safe retry", async () => {
+      const { Store } = await import("./db.ts");
+      const { Saves } = await import("./saves.ts");
+      const world = await import("./world.ts");
+      const generateWorldFixture = world.generateWorld;
+      const empty = await Store.createTest("prepare-world");
+      const personal = new Saves(empty);
+      const generate = vi.spyOn(world, "generateWorld");
+      try {
+        expect(await personal.currentState()).toBeNull();
+        expect(await personal.list()).toEqual([]);
+        await expect(personal.create("Not prepared")).rejects.toMatchObject({ status: 409 });
+        await expect(personal.export()).rejects.toMatchObject({ status: 409 });
+        await empty.setMeta("world", { incomplete: true });
+        await expect(personal.prepareCareer("Verified Director")).rejects.toMatchObject({ status: 409 });
+        expect(generate).not.toHaveBeenCalled();
+        await empty.run("DELETE FROM meta WHERE [key] = 'world'");
+        const generateSmallWorld = async (target: Store, options?: Parameters<typeof world.generateWorld>[1]) =>
+          generateWorldFixture(target, { ...options, countryLimit: 2, seniors: 1200, youth: 400, expanded: false });
+        generate.mockImplementationOnce(async (target, options) => {
+          await generateSmallWorld(target, options);
+          throw new Error("injected preparation failure");
+        });
+        await expect(personal.prepareCareer("Verified Director")).rejects.toThrow("injected preparation failure");
+        expect(await personal.currentState()).toBeNull();
+        expect((await empty.get<{ total: number }>("SELECT COUNT(*) AS total FROM countries"))!.total).toBe(0);
+        expect(await personal.list()).toEqual([]);
+        generate.mockImplementation(generateSmallWorld);
+        expect(await personal.prepareCareer("Verified Director")).toEqual({ created: true });
+        const prepared = await personal.currentState();
+        expect(prepared).toMatchObject({ started: false, director: { name: "Verified Director" } });
+        expect(await personal.prepareCareer("Changed profile name")).toEqual({ created: false });
+        expect(await personal.currentState()).toEqual(prepared);
+        expect(generate).toHaveBeenCalledTimes(2);
+        expect(await personal.list()).toEqual([]);
+      } finally {
+        generate.mockRestore();
+        await empty.close();
+      }
     }, 300_000);
 
     it("round-trips dirty world rows without replacing the catalog and bounds SQL chunks", async () => {
@@ -653,6 +711,30 @@ if (process.env.SQL_SAVE_TESTS === "true") {
             rows.set(table.name, batch);
           },
         });
+        const withAccounts = structuredClone(contents.manifest);
+        withAccounts.tables.push({
+          name: "users",
+          columns: [
+            { name: "id", type: "nvarchar", nullable: false, maxLength: 100 },
+            { name: "game_schema", type: "nvarchar", nullable: false, maxLength: 128 },
+          ],
+          rowCount: 1,
+        });
+        const accountChunks: Buffer[] = [];
+        await writeCheckpoint(
+          new Writable({
+            write(chunk, _encoding, callback) {
+              accountChunks.push(Buffer.from(chunk));
+              callback();
+            },
+          }),
+          withAccounts,
+          (table) => table.name === "users" ? [["foreign-account", "dbo"]] : rows.get(table.name) ?? [],
+        );
+        const clearAccounts = vi.spyOn(store, "clearWorld");
+        await expect(saves.import(Buffer.concat(accountChunks))).rejects.toThrow();
+        expect(clearAccounts).not.toHaveBeenCalled();
+        clearAccounts.mockRestore();
         const players = contents.manifest.tables.find(
           (table) => table.name === "players",
         )!;
@@ -708,6 +790,27 @@ if (process.env.SQL_SAVE_TESTS === "true") {
       } finally {
         expand.mockRestore();
         await store.setMeta("world", original);
+      }
+    }, 300_000);
+
+    it("does not reuse a legacy unstarted world with an initialized inbox or archive it as a started career", async () => {
+      const world = await import("./world.ts");
+      const original = await store.meta<GameState>("state");
+      const unstarted = { ...original, started: false };
+      await store.setMeta("state", unstarted);
+      await store.setMeta("inboxInitialized", true);
+      const beforeSlots = await saves.list();
+      const generate = vi.spyOn(world, "generateWorld")
+        .mockRejectedValueOnce(new Error("fresh generation required"));
+      try {
+        await expect(saves.startCareer({
+          name: "First Director", careerName: "First career", background: "Former scout", clubId: original.clubId,
+        })).rejects.toThrow("fresh generation required");
+        expect(generate).toHaveBeenCalledOnce();
+        expect(await store.meta("state")).toEqual(unstarted);
+        expect(await saves.list()).toEqual(beforeSlots);
+      } finally {
+        generate.mockRestore();
       }
     }, 300_000);
 

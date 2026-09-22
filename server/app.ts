@@ -9,6 +9,7 @@ import { rm } from "node:fs/promises";
 import { pipeline } from "node:stream/promises";
 import { z } from "zod";
 import { Store } from "./db.ts";
+import { AccountNotProvisionedError, Accounts, type AuthenticatedIdentity } from "./accounts.ts";
 import {
   affiliateDesk,
   affiliateInterest,
@@ -69,7 +70,7 @@ import {
   TRAINING_TYPES,
 } from "../shared/rules.ts";
 import type { Club, Negotiation, PlayerProfile } from "../shared/types.ts";
-import type { Health, HealthDetails } from "../shared/api.ts";
+import type { AccountSession, AccountUser, Health, HealthDetails } from "../shared/api.ts";
 
 const idSchema = z.coerce.number().int().positive();
 const saveFileSchema = z
@@ -838,13 +839,12 @@ export async function dispatchAction(
   }
 }
 
-export function createApp(store: Store) {
+export function createApp(store: Store, accounts?: Pick<Accounts, "resolve">) {
   const configuration = readApiConfiguration();
   const app = express();
-  const saves = new Saves(store);
-  let busy = false;
-  let readers = 0;
-  let finishReads: (() => void) | undefined;
+  const resolver = configuration.requireAuth ? accounts ?? new Accounts(store) : undefined;
+  const worlds = new Map<string, ReturnType<typeof createWorldRouter>>();
+  const localUser: AccountUser = { id: "local", displayName: "Local director", email: null };
   app.disable("x-powered-by");
   app.set("trust proxy", false);
   app.use((request, response, next) => {
@@ -904,6 +904,27 @@ export function createApp(store: Store) {
           return response
             .status(403)
             .json({ error: "This account is not authorized." });
+        const profileClaim = (...types: string[]) => {
+          for (const type of types) {
+            const value = principal.claims.find((claim) => claim.typ === type)?.val.trim();
+            if (value) return value;
+          }
+          return null;
+        };
+        response.locals.identity = {
+          tenantId: configuration.tenantId,
+          objectId,
+          displayName: profileClaim(
+            "name",
+            "http://schemas.microsoft.com/identity/claims/displayname",
+            "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name",
+          ) ?? "Sporting director",
+          email: profileClaim(
+            "email",
+            "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress",
+            "preferred_username",
+          ),
+        } satisfies AuthenticatedIdentity;
       } catch {
         return response.status(401).json({ error: "Authentication required." });
       }
@@ -950,18 +971,108 @@ export function createApp(store: Store) {
     next();
   });
   app.use(express.json({ limit: "128kb" }));
+  app.use(async (request, response, next) => {
+    if (request.path !== "/api" && !request.path.startsWith("/api/")) return next();
+    try {
+      const account = resolver
+        ? await resolver.resolve(response.locals.identity as AuthenticatedIdentity)
+        : { user: localUser, store };
+      response.locals.user = account.user;
+      const key = `${account.store.database}:${account.store.schemaName}`.toLowerCase();
+      let world = worlds.get(key);
+      if (!world) {
+        world = createWorldRouter(account.store, configuration);
+        worlds.set(key, world);
+      }
+      world(request, response, next);
+    } catch (error) {
+      next(error);
+    }
+  });
+  app.use("/api", (_request, response) =>
+    response.status(404).json({ error: "API route not found." }),
+  );
+  const dist = resolve("dist");
+  if (existsSync(resolve(dist, "index.html"))) {
+    app.use(express.static(dist));
+    app.get("/{*path}", (request, response) =>
+      request.path.startsWith("/api/")
+        ? response.status(404).json({ error: "API route not found." })
+        : response.sendFile(resolve(dist, "index.html")),
+    );
+  }
+  app.use(
+    (
+      error: unknown,
+      _request: Request,
+      response: Response,
+      _next: NextFunction,
+    ) => {
+      if (response.headersSent) return response.destroy();
+      if (error instanceof AccountNotProvisionedError)
+        return response.status(error.status).json({ error: error.message, code: error.code });
+      if (error instanceof z.ZodError)
+        return response.status(400).json({
+          error: error.issues
+            .map(
+              (issue) =>
+                `${issue.path.join(".") || "Request"}: ${issue.message}`,
+            )
+            .join("; "),
+        });
+      if (
+        error instanceof GameError &&
+        error.status >= 400 &&
+        error.status < 500
+      )
+        return response.status(error.status).json({ error: error.message });
+      if (error && typeof error === "object" && "type" in error) {
+        if (error.type === "entity.too.large")
+          return response
+            .status(413)
+            .json({ error: "Request body is too large." });
+        if (error.type === "entity.parse.failed")
+          return response
+            .status(400)
+            .json({ error: "Invalid JSON request body." });
+        if (
+          error.type === "encoding.unsupported" ||
+          error.type === "charset.unsupported"
+        )
+          return response
+            .status(415)
+            .json({ error: "Unsupported request encoding." });
+      }
+      console.error("Touchline: an API request failed.");
+      return response.status(500).json({
+        error: "An unexpected server error occurred.",
+      });
+    },
+  );
+  return app;
+}
+
+function createWorldRouter(
+  store: Store,
+  configuration: ReturnType<typeof readApiConfiguration>,
+) {
+  const app = express.Router();
+  const saves = new Saves(store);
+  let busy = false;
+  let readers = 0;
+  let finishReads: (() => void) | undefined;
   const conflict = (response: Response) =>
     response.status(409).json({
       error:
         "The game is saving or advancing. Please wait for that operation to finish.",
     });
   const read =
-    (handler: (request: Request) => unknown | Promise<unknown>) =>
+    (handler: (request: Request, response: Response) => unknown | Promise<unknown>) =>
     async (request: Request, response: Response, next: NextFunction) => {
       if (busy) return conflict(response);
       readers++;
       try {
-        const result = await store.transaction(async () => handler(request));
+        const result = await store.transaction(async () => handler(request, response));
         response.json(result);
       } catch (error) {
         next(error);
@@ -1007,13 +1118,20 @@ export function createApp(store: Store) {
           schema: store.schemaName,
           hosted: configuration.hosted,
           testCareer: store.testMode,
-          date: (await stateOf(store)).date,
+          date: (await saves.currentState())?.date ?? "",
         }) satisfies HealthDetails,
     ),
   );
   app.get(
+    "/api/me",
+    read(async (_request, response) => ({
+      user: response.locals.user as AccountUser,
+      hasWorld: Boolean(await saves.currentState()),
+    } satisfies AccountSession)),
+  );
+  app.get(
     "/api/bootstrap",
-    read(() => query.bootstrap(store)),
+    read(async () => await saves.currentState() ? query.bootstrap(store) : null),
   );
   app.get(
     "/api/dashboard",
@@ -1368,11 +1486,18 @@ export function createApp(store: Store) {
     }),
   );
   app.post(
+    "/api/careers/prepare",
+    mutation(async (_request, response) => {
+      response.json(await saves.prepareCareer((response.locals.user as AccountUser).displayName));
+    }),
+  );
+  app.post(
     "/api/careers",
     mutation(async (request, response) => {
       const input = z
         .object({
-          name: z.string().trim().min(2).max(50),
+          name: z.string().trim().min(2).max(50)
+            .default((response.locals.user as AccountUser).displayName.slice(0, 50)),
           careerName: z
             .string()
             .trim()
@@ -1381,7 +1506,7 @@ export function createApp(store: Store) {
             .regex(/[a-zA-Z0-9]/),
           background: z.string().max(40),
           clubId: idSchema,
-          seed: z.string().min(1).max(100).default(`touchline-${Date.now()}`),
+          seed: z.string().min(1).max(100).optional(),
         })
         .parse(request.body);
       response.json(await store.transaction(() => saves.startCareer(input)));
@@ -1393,15 +1518,15 @@ export function createApp(store: Store) {
       const { file } = z.object({ file: saveFileSchema }).parse(request.body);
       const archived = await store.transaction(async () => {
         if (!(await saves.list()).some((slot) => slot.file === file))
-          throw new GameError("Save slot not found.");
-        const state = await stateOf(store);
-        const snapshot = await saves.create(
+          throw Object.assign(new GameError("Save slot not found."), { status: 404 });
+        const state = await saves.currentState();
+        const snapshot = state && state.started !== false ? await saves.create(
           `${state.careerName ?? state.director.name} before load`,
-        );
+        ) : undefined;
         await saves.restore(file);
         return snapshot;
       });
-      response.json({ message: "Career loaded.", archived: archived.file });
+      response.json({ message: "Career loaded.", archived: archived?.file ?? null });
     }),
   );
   app.post(
@@ -1426,8 +1551,9 @@ export function createApp(store: Store) {
   );
   app.get(
     "/api/saves/export",
-    mutation(async (_request, response) => {
-      const result = await saves.export();
+    mutation(async (request, response) => {
+      const { file } = z.object({ file: saveFileSchema.optional() }).parse(request.query);
+      const result = await saves.export(file);
       try {
         response.attachment(result.name);
         response.type("application/gzip");
@@ -1445,64 +1571,6 @@ export function createApp(store: Store) {
       await saves.import(request);
       response.json({ message: "Portable save imported." });
     }),
-  );
-  app.use("/api", (_request, response) =>
-    response.status(404).json({ error: "API route not found." }),
-  );
-  const dist = resolve("dist");
-  if (existsSync(resolve(dist, "index.html"))) {
-    app.use(express.static(dist));
-    app.get("/{*path}", (request, response) =>
-      request.path.startsWith("/api/")
-        ? response.status(404).json({ error: "API route not found." })
-        : response.sendFile(resolve(dist, "index.html")),
-    );
-  }
-  app.use(
-    (
-      error: unknown,
-      _request: Request,
-      response: Response,
-      _next: NextFunction,
-    ) => {
-      if (response.headersSent) return response.destroy();
-      if (error instanceof z.ZodError)
-        return response.status(400).json({
-          error: error.issues
-            .map(
-              (issue) =>
-                `${issue.path.join(".") || "Request"}: ${issue.message}`,
-            )
-            .join("; "),
-        });
-      if (
-        error instanceof GameError &&
-        error.status >= 400 &&
-        error.status < 500
-      )
-        return response.status(error.status).json({ error: error.message });
-      if (error && typeof error === "object" && "type" in error) {
-        if (error.type === "entity.too.large")
-          return response
-            .status(413)
-            .json({ error: "Request body is too large." });
-        if (error.type === "entity.parse.failed")
-          return response
-            .status(400)
-            .json({ error: "Invalid JSON request body." });
-        if (
-          error.type === "encoding.unsupported" ||
-          error.type === "charset.unsupported"
-        )
-          return response
-            .status(415)
-            .json({ error: "Unsupported request encoding." });
-      }
-      console.error("Touchline: an API request failed.");
-      return response.status(500).json({
-        error: "An unexpected server error occurred.",
-      });
-    },
   );
   return app;
 }

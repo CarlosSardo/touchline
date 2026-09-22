@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import type * as Sql from "mssql";
-import { readSqlSettings, type SqlSettings } from "./sql-config.ts";
+import { readSqlSettings, validateSqlSchema, type SqlSettings } from "./sql-config.ts";
 import {
   appearanceBackfill,
   IDENTITY_TABLES,
@@ -543,18 +543,34 @@ export class Store {
   private readonly context = new AsyncLocalStorage<TransactionContext>();
   private readonly activeTransactions = new Set<Promise<unknown>>();
   private readonly columnCache = new Map<string, ColumnInfo[]>();
+  private readonly scopedStores = new Set<Store>();
   private ownsTestSchema = false;
   private closed = false;
   private closing?: Promise<void>;
 
   private constructor(
-    settings: SqlSettings,
+    settings: Pick<SqlSettings, "database" | "schema" | "testMode">,
     private readonly pool: Sql.ConnectionPool,
     private readonly driver: Omit<typeof Sql, "default">,
+    private readonly poolOwner?: Store,
   ) {
     this.database = settings.database;
-    this.schemaName = settings.schema;
+    this.schemaName = validateSqlSchema(settings.schema, settings.testMode);
     this.testMode = settings.testMode;
+    Object.defineProperty(this, "schemaName", { writable: false, configurable: false });
+  }
+
+  forSchema(schema: string): Store {
+    this.assertOpen();
+    const owner = this.poolOwner ?? this;
+    const store = new Store(
+      { database: this.database, schema, testMode: this.testMode },
+      this.pool,
+      this.driver,
+      owner,
+    );
+    owner.scopedStores.add(store);
+    return store;
   }
 
   private static async connect(settings: SqlSettings): Promise<Store> {
@@ -615,7 +631,10 @@ export class Store {
 
   private assertOpen(): void {
     const context = this.context.getStore();
-    if (this.closed || (this.closing && !context?.active))
+    if (
+      this.closed || this.poolOwner?.closed ||
+      ((this.closing || this.poolOwner?.closing) && !context?.active)
+    )
       throw new Error("SQL store is closed or closing.");
     if (context && !context.active)
       throw new Error("The SQL transaction has already completed.");
@@ -833,6 +852,11 @@ export class Store {
   async schema(): Promise<void> {
     await this.transaction(async () => {
       await this.lockSchemaMaintenance();
+      if (
+        this.schemaName.toLowerCase() === "accounts" ||
+        await this.get("SELECT [name] FROM sys.tables WHERE [schema_id] = SCHEMA_ID(?) AND [name] = N'users'", this.schemaName)
+      )
+        throw new Error("World migrations cannot run in an account registry schema.");
       await this.exec(`IF SCHEMA_ID(${sqlLiteral(this.schemaName)}) IS NULL
         EXEC(${sqlLiteral(`CREATE SCHEMA ${quoteIdentifier(this.schemaName)};`)});`);
       await this.exec(migrationTableSql(this.schemaName));
@@ -1098,20 +1122,25 @@ export class Store {
   }
 
   async close(): Promise<void> {
-    if (this.context.getStore()?.active)
+    if (
+      this.context.getStore()?.active ||
+      [...this.scopedStores].some((store) => store.context.getStore()?.active)
+    )
       throw new Error("Cannot close a SQL store inside its transaction.");
     if (this.closing) return this.closing;
     if (this.closed) return;
     this.closing = (async () => {
-      await Promise.allSettled([...this.activeTransactions]);
       try {
+        await Promise.all([...this.scopedStores].map((store) => store.close()));
+        await Promise.allSettled([...this.activeTransactions]);
         if (this.ownsTestSchema)
           await this.startTransaction(async () => this.dropTestSchema());
       } finally {
         try {
-          await this.pool.close();
+          if (!this.poolOwner) await this.pool.close();
         } finally {
           this.closed = true;
+          this.poolOwner?.scopedStores.delete(this);
         }
       }
     })();

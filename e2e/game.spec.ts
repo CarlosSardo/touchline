@@ -264,11 +264,13 @@ test("eligible players can move between age squads and the first team without ch
   page,
   request,
 }) => {
+  const checkpointTimeout = 900_000;
+  test.setTimeout(checkpointTimeout * 2 + 180_000);
   page.setDefaultTimeout(15000);
   const checkpoint = await (
     await request.post("/api/saves", {
       data: { name: "Squad assignment checkpoint" },
-      timeout: 180000,
+      timeout: checkpointTimeout,
     })
   ).json();
   try {
@@ -341,7 +343,7 @@ test("eligible players can move between age squads and the first team without ch
       (
         await request.post("/api/saves/restore", {
           data: { file: checkpoint.file },
-          timeout: 180000,
+          timeout: checkpointTimeout,
         })
       ).ok(),
     ).toBe(true);

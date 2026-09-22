@@ -961,8 +961,36 @@
   background: color-mix(in srgb, var(--surface) 80%, transparent);
 }
 .career-start-header .brand {
+  flex-shrink: 0;
   padding: 0;
   margin: 0;
+}
+.career-account-menu {
+  min-width: 0;
+  flex-wrap: nowrap;
+}
+.career-account-button {
+  min-width: 0;
+  max-width: 22rem;
+}
+.career-account-button > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.career-account-button > svg {
+  flex-shrink: 0;
+}
+.account-identity {
+  margin-bottom: 24px;
+}
+.account-identity .detail-list dt {
+  flex-shrink: 0;
+}
+.account-identity .detail-list dd {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .career-start-content {
   position: relative;
@@ -1274,6 +1302,17 @@
   }
 }
 @media (max-width: 440px) {
+  .career-start-header {
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+  .career-account-menu {
+    flex: 1 1 100%;
+    justify-content: space-between;
+  }
+  .career-account-button {
+    max-width: calc(100% - 44px);
+  }
   .career-save-grid {
     grid-template-columns: 1fr;
   }

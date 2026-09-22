@@ -626,6 +626,39 @@ async function* storedChunks(store: Store, slot: CatalogRow) {
 export class Saves {
   constructor(readonly store: Store) {}
 
+  async currentState(): Promise<GameState | null> {
+    const row = await this.store.get<{ value: string }>(
+      "SELECT value FROM meta WHERE [key] = 'state'",
+    );
+    return row ? JSON.parse(row.value) as GameState : null;
+  }
+
+  private async requireState() {
+    const state = await this.currentState();
+    if (!state)
+      throw Object.assign(new GameError("Prepare a new career or load a saved career first."), { status: 409 });
+    return state;
+  }
+
+  async prepareCareer(displayName: string) {
+    return this.store.transaction(async () => {
+      if (await this.currentState()) return { created: false };
+      for (const table of [...WORLD_TABLES, "save_slots", "save_chunks"]) {
+        const existing = await this.store.get(
+          `SELECT TOP (1) 1 AS present FROM ${tableName(this.store, table)}${table === "meta" ? " WHERE [key] <> 'appearanceIndexVersion' OR [value] <> '1'" : ""}`,
+        );
+        if (existing)
+          throw Object.assign(new GameError("This world contains existing data and cannot be prepared as a new career."), { status: 409 });
+      }
+      await generateWorld(this.store, { seed: `touchline-${randomUUID()}` });
+      const state = await stateOf(this.store);
+      state.director.name = displayName.trim().slice(0, 50) || "Sporting director";
+      await this.store.setMeta("state", state);
+      await this.store.setMeta("careerPreparationSeed", state.seed);
+      return { created: true };
+    });
+  }
+
   async list(): Promise<SaveSlot[]> {
     return (
       await this.store.all<CatalogRow>(
@@ -641,9 +674,9 @@ export class Saves {
         `SELECT * FROM ${tableName(this.store, "save_slots")} WITH (UPDLOCK,HOLDLOCK) WHERE id = ? AND complete = 1`,
         id,
       );
-      if (!selected) throw new GameError("Save slot not found.");
-      const state = await stateOf(this.store);
-      if (selected.career_id && selected.career_id === state.careerId)
+      if (!selected) throw Object.assign(new GameError("Save slot not found."), { status: 404 });
+      const state = await this.currentState();
+      if (selected.career_id && selected.career_id === state?.careerId)
         throw new GameError(
           "The active career cannot be deleted. Load another career first.",
         );
@@ -670,7 +703,7 @@ export class Saves {
   async create(name: string, automatic = false) {
     saveName(name);
     return this.store.transaction(async () => {
-      const state = await stateOf(this.store);
+      const state = await this.requireState();
       const club = await clubOf(this.store);
       let changed = false;
       if (!state.careerId) {
@@ -723,7 +756,7 @@ export class Saves {
     careerName: string;
     background: string;
     clubId: number;
-    seed: string;
+    seed?: string;
   }) {
     saveName(input.careerName);
     const backgrounds = SETTING_DEFINITIONS.find(
@@ -731,17 +764,25 @@ export class Saves {
     )!.options!;
     if (!backgrounds.includes(input.background))
       throw new GameError("Choose a valid director background.");
+    const oldState = await this.requireState();
+    const preparation = oldState.started === false
+      ? await this.store.get<{ value: string }>("SELECT value FROM meta WHERE [key] = 'careerPreparationSeed'")
+      : undefined;
+    const prepared = Boolean(preparation && JSON.parse(preparation.value) === oldState.seed);
+    const seed = input.seed ?? (prepared
+      ? oldState.seed
+      : `touchline-${Date.now()}`);
     if (
       !input.name.trim() ||
       input.name.trim().length > 50 ||
-      !input.seed ||
-      input.seed.length > 100
+      !seed ||
+      seed.length > 100
     )
       throw new GameError("Choose a valid director name and world seed.");
     const selected = await clubOf(this.store, input.clubId);
     if (selected.type !== "club")
       throw new GameError("Choose a senior club for your appointment.");
-    const oldState = await stateOf(this.store);
+    const reusePrepared = prepared && seed === oldState.seed;
     const oldSettings = await settingsOf(this.store);
     const world = await this.store.meta<{
       countries: number;
@@ -762,21 +803,23 @@ export class Saves {
     const selectedKey =
       JSON.parse(selected.data).worldKey ??
       `${country!.code}:club:${ordinal!.total}`;
-    const archived = await this.create(
+    const archived = oldState.started === false ? undefined : await this.create(
       oldState.careerName ??
         `${oldState.director.name} - ${(await clubOf(this.store)).name}`,
     );
     return this.store.transaction(async () => {
-      await this.store.clearWorld();
-      await generateWorld(this.store, {
-        seed: input.seed,
-        countryLimit: world.countries,
-        seniors: world.seniors,
-        youth: world.youth,
-        expanded,
-      });
+      if (!reusePrepared) {
+        await this.store.clearWorld();
+        await generateWorld(this.store, {
+          seed,
+          countryLimit: world.countries,
+          seniors: world.seniors,
+          youth: world.youth,
+          expanded,
+        });
+      }
       const state = await stateOf(this.store);
-      state.clubId = expanded
+      state.clubId = expanded && !reusePrepared
         ? ((
             await this.store.get<{ id: number }>(
               "SELECT id FROM clubs WHERE type = 'club' AND JSON_VALUE(data,'$.worldKey') = ?",
@@ -809,6 +852,7 @@ export class Saves {
         [skill]: 2,
       };
       await this.store.setMeta("state", state);
+      await this.store.run("DELETE FROM meta WHERE [key] = 'careerPreparationSeed'");
       const settings = await settingsOf(this.store);
       for (const definition of SETTING_DEFINITIONS.filter((setting) =>
         ["Interface", "Appearance", "Accessibility", "Saves"].includes(
@@ -827,7 +871,7 @@ export class Saves {
       const saved = await this.create(input.careerName);
       return {
         message: `Career started at ${(await clubOf(this.store)).name}.`,
-        archived: archived.file,
+        archived: archived?.file ?? null,
         saved: saved.file,
         careerId: state.careerId,
       };
@@ -835,6 +879,7 @@ export class Saves {
   }
 
   async expandWorld() {
+    await this.requireState();
     if (
       ((await this.store.meta<{ version?: number }>("world")).version ?? 1) >=
       WORLD_VERSION
@@ -854,20 +899,37 @@ export class Saves {
     });
   }
 
-  async export(): Promise<{ file: string; name: string }> {
+  async export(savedFile?: string): Promise<{ file: string; name: string }> {
     const file = temporaryFile();
     try {
       let date = "career";
       await this.store.transaction(async () => {
-        date = (await stateOf(this.store)).date;
-        await writeWorldCheckpoint(
-          this.store,
-          createWriteStream(file, {
-            flags: "wx",
-            mode: 0o600,
-            highWaterMark: SQL_CHUNK_BYTES,
-          }),
-        );
+        if (savedFile) {
+          const slot = await this.store.get<CatalogRow>(
+            `SELECT * FROM ${tableName(this.store, "save_slots")} WITH (HOLDLOCK) WHERE id = ? AND complete = 1`,
+            slotId(savedFile),
+          );
+          if (!slot) throw Object.assign(new GameError("Save slot not found."), { status: 404 });
+          date = slot.id;
+          await pipeline(
+            Readable.from(storedChunks(this.store, slot), { objectMode: false }),
+            createWriteStream(file, {
+              flags: "wx",
+              mode: 0o600,
+              highWaterMark: SQL_CHUNK_BYTES,
+            }),
+          );
+        } else {
+          date = (await this.requireState()).date;
+          await writeWorldCheckpoint(
+            this.store,
+            createWriteStream(file, {
+              flags: "wx",
+              mode: 0o600,
+              highWaterMark: SQL_CHUNK_BYTES,
+            }),
+          );
+        }
       });
       return { file, name: `Touchline-${date}.touchline.gz` };
     } catch (error) {
@@ -885,7 +947,7 @@ export class Saves {
           `SELECT * FROM ${tableName(this.store, "save_slots")} WITH (HOLDLOCK) WHERE id = ? AND complete = 1`,
           id,
         );
-        if (!slot) throw new GameError("Save slot not found.");
+        if (!slot) throw Object.assign(new GameError("Save slot not found."), { status: 404 });
         if (
           slot.format_version !== SAVE_FORMAT_VERSION ||
           !slot.sha256 ||
