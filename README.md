@@ -1,6 +1,6 @@
 # Touchline
 
-A private football sporting director simulation with one shared world for its owner and invited collaborators. Every new career starts on **1 July 2026**. You run the sporting project; the manager selects the team and plays the matches.
+A private football sporting director simulation with separate worlds and saves for provisioned user accounts. Every new career starts on **1 July 2026**. You run the sporting project; the manager selects the team and plays the matches.
 
 [Development status](REQUIREMENTS.md) | [Contributing](CONTRIBUTING.md) | [MIT License](LICENSE)
 
@@ -11,6 +11,8 @@ Requires Node.js **22.13 or newer**, npm and a reachable SQL database. Use the N
 **Recorded status (21 September 2026):** Migration to Azure SQL Free in **Sweden Central (`swedencentral`)** completed and passed independent verification: **34 active-world tables, 160,000 players and six imported checkpoints**, with all constraints trusted. Active-world table hashes and original-file checksums matched. The five historical saves received format/digest validation, not individual destination restore certification. The original SQLite files, metadata and checksummed offline archive remain untouched. SQL Free retains `AutoPause` on quota exhaustion and a 32 GiB maximum. Hosted deployment completed: managed-identity SQL startup and public health pass, browsers redirect to Entra sign-in, and anonymous API access is blocked. The owner confirmed successful sign-in. Restricted guest access is deployed; the complete gameplay/browser regression suite has not been rerun for this release.
 
 **World-version-3 verification (22 September 2026):** production build, lint and all **371 backend tests** passed, including SQL integration and save recovery. Four focused browser workflows passed on an isolated full-sized SQL world: competition notifications, database filters, academy cohorts and squad controls, including 390px/320px layouts. The complete 33-scenario browser suite is not certified; full-expanded-world checkpoint performance remains a limitation. Deploying the application does not expand an existing career; use the explicit backup-first **World > Expand career world** action described under [Saves](#saves).
+
+**Multi-user integration status:** the account-isolated design and release guards below require separate provisioning, deployment and validation confirmation. The dated results above concern the earlier release, not acceptance of this change.
 
 Hosted game: **[Open Touchline](https://touchline.thankfulgrass-3ef59c98.swedencentral.azurecontainerapps.io/)**. Signed-out browsers redirect to Microsoft Entra; the [direct sign-in link](https://touchline.thankfulgrass-3ef59c98.swedencentral.azurecontainerapps.io/.auth/login/aad) is also available.
 
@@ -28,7 +30,7 @@ set -a
 set +a
 ```
 
-Review and explicitly apply the schema migrations:
+For a separate local development database, review and explicitly apply the schema migrations below. Do not use a player's hosted world as a local no-auth development target. Hosted account setup instead follows [Account Provisioning](#account-provisioning).
 
 ```sh
 npm run db:migrate
@@ -50,6 +52,8 @@ npm run dev
 ```
 
 Open **[http://127.0.0.1:5173](http://127.0.0.1:5173)**; the API listens on `127.0.0.1:3001`. Both development listeners bind to loopback, but persistence uses the configured SQL server. Startup neither migrates the schema nor generates a world. Stop if initialization fails; never reseed to repair an existing career.
+
+Local no-auth development uses the explicitly supplied Store, not an inferred account or the hosted owner's identity. It is not evidence that Entra sign-in or cross-account isolation works.
 
 For the production build:
 
@@ -89,7 +93,7 @@ flowchart LR
     workstation -. Provision and deploy .-> app
 ```
 
-One Container App serves both UI and API, with **minimum 0 / maximum 1 replica**. One Azure SQL **Database** on the free offer holds the active world and saved checkpoints; this is not Azure SQL Managed Instance. The app uses managed identity for SQL. The browser uses Container Apps authentication with Microsoft Entra, restricted to the owner and tenant; never expose an unauthenticated game API. Local tools use the owner's Azure CLI login.
+One Container App serves both UI and API, with **minimum 0 / maximum 1 replica**. One Azure SQL **Database** on the free offer holds a separate `accounts.users` registry and each user's world and save tables; this is not Azure SQL Managed Instance. The registry uniquely maps `(tenant_id, object_id)` to an account ID and a unique `game_schema`. The app resolves requests through `Accounts` and `Store.forSchema` using one managed identity; this is application-enforced schema isolation, not a database or SQL login per human. Entra access remains tenant-bound and object-ID-allowlisted; never expose an unauthenticated game API. Local operator tools use Azure CLI identity.
 
 Container storage is temporary, not the home of a career. Save slots remain in SQL across container restarts and revisions. There is no separate frontend service, save-storage service or additional Azure test environment.
 
@@ -107,16 +111,20 @@ Deployment requires a **single-tenant Entra application**, `AUTH_CLIENT_ID`, `AU
 | `npm run image:build`                                               | Build the React + Express container locally                                                                               |
 | `npm run azure:provision -- --yes`                                  | Provision SQL Free, Consumption environment and managed identity; `--sql-only` omits the latter two; never imports/seeds  |
 | `npm run azure:sql -- -- COMMAND`                                   | Run a command using Azure identity and temporary workstation-IP SQL access; `--tests` opts into isolated remote tests     |
-| `npm run azure:deploy -- --yes`                                     | Verify, back up, migrate, authorize SQL and build/push/deploy a private image; `--image` accepts a configured GHCR digest |
-| `npm run azure:rollback -- --yes --revision APP--REVISION`          | Select a retained, digest-pinned, schema-compatible revision; `--list` lists candidates; never restores SQL data          |
-| `npm run db:migrate -- --apply --yes`                               | Apply explicit versioned schema migrations, never seed; [scripts/db-migrate.ts](scripts/db-migrate.ts)                    |
 | `npm run db:seed -- --seed touchline-2026 --expanded --apply --yes` | Seed only a new empty database; [scripts/db-seed.ts](scripts/db-seed.ts)                                                  |
 | `npm run data:migrate -- --source FILE --saves DIR`                 | Inventory legacy files; add `--apply --yes` for conversion; [scripts/data-migrate.ts](scripts/data-migrate.ts)            |
 | `npm run data:export -- --out new.touchline.gz`                     | Export the active SQL world to a new portable file; [scripts/data-export.ts](scripts/data-export.ts)                      |
 
+Account-aware release commands:
+
+- `npm run azure:deploy -- --yes` closes existing ingress before SQL verification/preparation, requires the registry, verifies, exports dbo, migrates/grants registered worlds and builds/pushes the reviewed source. Closing ingress does not drain writers.
+- `npm run azure:rollback -- --yes --revision APP--REVISION` is legacy-only before registry creation; once `accounts` exists it fails closed. `--list` remains inspection only.
+- `npm run accounts:migrate -- --help` lists the explicit provisioning inputs; the default is an offline plan, with separate reviewed `--apply --yes` for changes.
+- `npm run db:migrate -- --registered --apply --yes` migrates every registered world, never provisions accounts or seeds a career.
+
 For reviewed workstation SQL operations, the wrapper verifies the free-offer settings, sets the Azure SQL host/database and verified TLS, clears `SQL_USER`/`SQL_PASSWORD`, and temporarily permits **only this workstation's IPv4 address**. It removes that firewall rule on exit; cleanup failure is reported as an error. `--tests` sets the remote-test opt-in and matching test database for the child command only:
 
-For concurrent local verification, use `npm run test:local -- npm run verify -- --parallel`. Lint, build, three backend groups and browser workflows run together. Each SQL group uses its own disposable local database; browser scenarios sharing a career remain sequential. The runner retains individual logs under the ignored `.azure/reports` folder, waits for all groups and removes only the databases it created. Parallel mode refuses cloud and gameplay database targets; remote verification remains schema-isolated and sequential.
+For concurrent local verification, use `npm run test:local -- npm run verify -- --parallel`. Lint, build, three backend groups and browser workflows run together. Account tests run in the persistence group with API, Store and save tests. Each SQL group uses its own disposable local database; browser scenarios sharing a career remain sequential. The runner retains individual logs under the ignored `.azure/reports` folder, waits for all groups and removes only the databases it created. Parallel mode refuses cloud and gameplay database targets; remote verification remains schema-isolated and sequential.
 
 Provisioning uses SQL's `Redirect` connection policy for direct database-node connections, including from this workstation. This requires outbound TCP 1433 and 11000-11999 to the region's Azure SQL addresses; no inbound firewall range is opened. `AZURE_SQL_CONNECTION_TYPE=Proxy` or `Default` is available for networks that prohibit those outbound ports. Connection policy does not change the database tier or free-limit exhaustion setting.
 
@@ -124,16 +132,20 @@ Provisioning uses SQL's `Redirect` connection policy for direct database-node co
 npm run azure:sql -- --tests -- npm run verify
 ```
 
-Schema migration is a separate explicit operation, not an import:
+After account provisioning, schema migration is a separate explicit operation, not an import. The default plan is offline; only apply enumerates the registered schemas:
 
 ```sh
-npm run azure:sql -- -- npm run db:migrate
-npm run azure:sql -- -- npm run db:migrate -- --apply --yes
+npm run db:migrate -- --registered
+npm run azure:sql -- -- npm run db:migrate -- --registered --apply --yes
 ```
 
-Do not reimport or seed over the migrated career. For a new installation, follow [Migrate Legacy Careers](#migrate-legacy-careers). Deployment requires provisioned SQL, a Consumption environment, managed identity and an initialized world; it never seeds. The deploy wrapper runs verification before backup, explicit migration and runtime SQL authorization, then builds/pushes unless given a private digest-pinned `--image`.
+Do not reimport or seed over the migrated career. Gameplay deployment requires an explicitly provisioned registry, the preserved Kiko `dbo` career, a Consumption environment and managed identity. Other registered schemas may have no game state. A missing/invalid registry or legacy identity mapping blocks the release before preparation; the wrapper never provisions accounts, adopts worlds or seeds. Preparation uses `db-migrate --registered` and `db-authorize --registered`, then checks the registry and **every** registered schema version before public promotion.
 
-Verification defaults to the full suite. `npm run azure:deploy -- --yes --verification smoke` explicitly selects a fresh build plus read-only live API checks for an incremental release; the selected scope is recorded in the deployment report. This does not certify complete gameplay/browser regression. `--stage-only` configures an internal-only maintenance app, with no playable world or public ingress.
+The automatic pre-deploy export covers only the active `dbo` world, not other users, the account registry or save catalogs. Review separate recovery backups for those before a schema-changing release. Omitting `--registered` on standalone migration/grant tools still targets only `SQL_SCHEMA`/`dbo` and is not multi-user release preparation.
+
+Verification defaults to the full suite. `npm run azure:deploy -- --yes --verification smoke` selects a fresh build plus read-only legacy-career API probes against an internal synthetic no-auth app pinned to `dbo`; it never changes public EasyAuth. The selected scope is recorded, but does not certify complete regression or user isolation. Public token verification checks `/api/me` and accepts `hasWorld: false`. `--stage-only` remains internal maintenance without public promotion and cannot replace an already-public app.
+
+Retained revision metadata has no trustworthy image-bound account-isolation proof. Runtime rollback therefore **fails closed whenever the `accounts` schema exists**, including a partial registry; unknown SQL metadata visibility also blocks rollback. A schema version or inherited environment variable is not sufficient proof. Gameplay `--image` deployments are likewise blocked; prebuilt digests are allowed only with `--stage-only`. Build a reviewed forward fix from source instead. Any old-image maintenance procedure needs separate review and closed gameplay access; never delete the registry to bypass this policy.
 
 For an application-only retry against the already-prepared database, skip further exports, migrations and runtime grants:
 
@@ -141,15 +153,122 @@ For an application-only retry against the already-prepared database, skip furthe
 npm run azure:deploy -- --yes --verification smoke --skip-db-prepare
 ```
 
-This retains the read-only schema compatibility check and records the skipped preparation in the deployment report. Runtime SQL users use the managed identity's application/client ID as their SID, not its object/principal ID.
+This retains read-only registry, legacy-binding and **all registered schema** compatibility checks and records skipped preparation. It performs no exports, migrations, runtime grants, account/profile updates or world mutations during release probes. The optional authenticated `/api/me` probe is skipped even when `AUTH_SMOKE_TOKEN` is supplied, because profile resolution can write metadata; the report records owner smoke as unverified. Full verification still writes only its isolated test schemas; the existing temporary firewall/deployment operations are unchanged. Runtime SQL users use the managed identity's application/client ID as their SID, not its object/principal ID.
 
-Private image pull, hosted SQL startup, public health, browser sign-in redirection and anonymous rejection have passed live checks. The owner confirmed sign-in manually. Guest browser gameplay, rejection of an unlisted authenticated user and browser save/restore remain manual acceptance checks; focused API tests cover the authorization decisions. The optional locally supplied `AUTH_SMOKE_TOKEN` enables an authenticated smoke check; without it, the wrapper reports automated owner verification as incomplete. Export before a schema-changing release, retain the previous image, and check schema compatibility before an application rollback.
+The historical live checks above do not certify the multi-user release. Confirm each human's profile, Kiko's preserved career, empty first-run accounts, cross-user save/action isolation and rejection of unlisted or unprovisioned users separately. `AUTH_SMOKE_TOKEN` is optional and supplied locally; outside `--skip-db-prepare`, `/api/me` can refresh trusted profile metadata but must not generate or alter a world. Without a token, or when preparation is skipped, automated owner verification remains incomplete. Retaining an old image does not make it eligible for runtime rollback.
+
+### Held Candidate Cutover
+
+For the private-world cutover, separately freeze ingress, deactivate every shared-world writer and prove in-flight writes have drained **before any SQL preparation**. Complete and verify active-world/catalog backups, explicit account provisioning and approved grants first. The deployment wrapper's ingress freeze is not a substitute for this coordinated procedure. No live command below is authorized until the source tests and cutover gates are accepted.
+
+Build and publish the reviewed source as a SQL-configured candidate, stopping before external ingress or any public HTTP probe:
+
+```sh
+npm run azure:deploy -- --yes --verification smoke --skip-db-prepare --hold-ingress
+```
+
+`--hold-ingress` is incompatible with `--stage-only` and `--image`. It preserves the existing read-only registry, immutable Kiko binding and every registered schema-version check. It records the exact image digest, revision, internal endpoint, tenant, owner, allowlist and identity in the ignored, private `.azure/held-app.json`, with `status: pendingPromotion`. It does not write a successful deployment record, deactivate old revisions, raise the replica minimum, wait for a public wake-up, or claim runtime readiness. The existing `.touchline-deployment.json`, if any, still describes the previous release. Without `--skip-db-prepare`, normal database preparation still runs; without smoke verification, full tests still use isolated test schemas.
+
+**Internal inspection:** use `az containerapp replica list` for the exact held revision. If it has a running replica, use `az containerapp exec --name "$AZURE_APP" --resource-group "$AZURE_RESOURCE_GROUP" --subscription "$AZURE_SUBSCRIPTION_ID" --revision "$INSPECTED_REVISION" --replica "$INSPECTED_REPLICA" --container "$AZURE_APP" --command /bin/sh`, then run a read-only Node HTTP check of `http://127.0.0.1:3001/api/health`. Record the selected revision/digest with the result. Exec needs an existing replica; a zero-replica candidate remains runtime-unverified. Do not change the 0..1 policy, add an auth exception, or open ingress merely to obtain inspection evidence.
+
+For post-cutover identity mapping evidence, Data should run a fail-on-write synthetic harness against the actual SQL target using `createApp(root, new Accounts(root))`, `REQUIRE_AUTH=true`, the approved tenant/owner/allowlist and loopback-only HTTP. Build each `x-ms-client-principal` from its persisted registry tenant/object ID and **exact, already-trimmed display name/email**, so `Accounts.resolve` does not refresh profile metadata; abort if those fields need normalization. Exercise `GET /api/me`, bootstrap and save-list reads for owner/Kiko/other guest, check the expected account IDs, preserved Kiko world/catalog and empty new worlds, and reject cross-user reads. Compare registry profile timestamps and world/catalog invariants before/after; refuse all writes, migrations and world generation. The same harness can run inside the inspected container using its managed identity when a replica exists. A workstation run uses operator SQL access and does not prove the runtime identity's effective grants. This is **synthetic application/SQL evidence, not real Entra authentication**; it must never be sent as a forged header through public ingress or require a permanent test route. EasyAuth configuration and interactive owner/guest sign-ins are separate gates.
+
+**Same-candidate promotion:** do not rerun deployment or use rollback/`--image`. There is deliberately no general-purpose promotion flag. After Cloud/Data accept the candidate-bound inspection evidence, set `INSPECTED_REVISION` and `INSPECTED_IMAGE` locally to those exact inspected values. Run the following in Bash from the repository root with the approved local target configuration. The held record is an inspection reference, not cryptographic source/isolation proof. A cold candidate's pending runtime check and pending interactive Entra evidence must be explicitly accepted by the coordinator before a protected wake-up; otherwise keep ingress internal.
+
+```bash
+promote_held_candidate() (
+    set -euo pipefail
+    set +x
+    source scripts/azure-deploy.sh
+    source scripts/common.sh
+    : "${INSPECTED_REVISION:?Set the accepted held revision}"
+    : "${INSPECTED_IMAGE:?Set its accepted immutable image digest}"
+    export INSPECTED_REVISION INSPECTED_IMAGE AUTH_CLIENT_ID
+    unset AUTH_SMOKE_TOKEN AUTH_CLIENT_SECRET GHCR_TOKEN GHCR_PULL_TOKEN AZURE_CLIENT_ID
+    check_target
+    app_id="/subscriptions/$AZURE_SUBSCRIPTION_ID/resourceGroups/$AZURE_RESOURCE_GROUP/providers/Microsoft.App/containerApps/$AZURE_APP"
+    completed=false
+    trap 'status=$?; trap - EXIT; if [[ "$completed" != true ]]; then azure containerapp ingress enable --name "$AZURE_APP" --resource-group "$AZURE_RESOURCE_GROUP" --type internal --target-port 3001 --transport auto --output none || printf "%s\n" "CRITICAL: Close ingress manually immediately." >&2; fi; exit "$status"' EXIT
+    deployment_traffic_check "$INSPECTED_REVISION" false
+    candidate="$(azure containerapp revision show --name "$AZURE_APP" --resource-group "$AZURE_RESOURCE_GROUP" --revision "$INSPECTED_REVISION" --output json)"
+    held="$(DEPLOY_CANDIDATE="$candidate" node --input-type=module <<'NODE'
+import {readFileSync} from 'node:fs';
+const environment=process.env, held=JSON.parse(readFileSync('.azure/held-app.json','utf8'));
+const candidate=JSON.parse(environment.DEPLOY_CANDIDATE), container=candidate.properties?.template?.containers?.[0];
+const values=Object.fromEntries((container?.env ?? []).map(entry=>[entry.name,entry.value]));
+const target={subscriptionId:environment.AZURE_SUBSCRIPTION_ID,tenantId:environment.AZURE_TENANT_ID,
+    resourceGroup:environment.AZURE_RESOURCE_GROUP,app:environment.AZURE_APP,authClientId:environment.AUTH_CLIENT_ID};
+if(held.status!=='pendingPromotion' || held.externalIngress!==false || held.maintenance!==false ||
+     held.revision!==environment.INSPECTED_REVISION || held.image!==environment.INSPECTED_IMAGE ||
+     Object.entries(target).some(([name,value])=>!value || held[name]!==value) ||
+     !Number.isSafeInteger(held.schemaVersion) || held.schemaVersion<1 ||
+     typeof held.allowedUserObjectIds!=='string' || !['full','smoke'].includes(held.verification) ||
+     candidate.name!==held.revision || candidate.properties?.active!==true || container?.image!==held.image ||
+     values.OWNER_OBJECT_ID!==held.ownerObjectId || values.AZURE_CLIENT_ID!==held.identityClientId ||
+     values.ALLOWED_USER_OBJECT_IDS!==held.allowedUserObjectIds)
+    throw new Error('Held candidate, inspected digest or approved identity configuration changed; keep ingress closed.');
+process.stdout.write(JSON.stringify(held));
+NODE
+    )"
+    revision="$INSPECTED_REVISION"
+    origin="$(printf '%s' "$held" | json_value origin)"
+    schema_version="$(printf '%s' "$held" | json_value schemaVersion)"
+    ALLOWED_USER_OBJECT_IDS="$(printf '%s' "$held" | json_value allowedUserObjectIds)"
+    export ALLOWED_USER_OBJECT_IDS
+    stage_only=false
+    skip_db_prepare=true
+    smoke_token=''
+    sql_environment
+    verify_free_database
+    deployment_private_registry
+    deployment_auth_check
+    deployment_candidate_check "$revision" "$origin"
+    deployment_schema_check "$schema_version"
+    active="$(azure containerapp revision list --name "$AZURE_APP" --resource-group "$AZURE_RESOURCE_GROUP" --query '[?properties.active].name' --output tsv)"
+    [[ "$active" == "$revision" ]] || fail 'Old writer revisions must already be inactive; stop for the cutover drain procedure.'
+    deployment_traffic_check "$revision" false
+    azure containerapp ingress enable --name "$AZURE_APP" --resource-group "$AZURE_RESOURCE_GROUP" --type external --target-port 3001 --transport auto --output none
+    fqdn="$(azure containerapp show --name "$AZURE_APP" --resource-group "$AZURE_RESOURCE_GROUP" --query properties.configuration.ingress.fqdn --output tsv)"
+    [[ "https://$fqdn" == "$origin" ]] || fail 'Public FQDN differs from the inspected origin.'
+    deployment_auth_check
+    deployment_public_check "$origin"
+    deployment_wait "$revision"
+    deployment_deactivate_others "$revision"
+    completed=true
+    trap - EXIT
+    printf 'Protected ingress selected inspected revision %s; interactive identity evidence remains pending.\n' "$revision"
+)
+promote_held_candidate
+```
+
+This procedure neither rebuilds nor changes SQL data/grants/schema, and suppresses the profile-writing token probe. The existing SQL wrapper still uses temporary workstation-IP firewall access for its read-only checks. It keeps old writers inactive before opening, checks public health and anonymous denial behind verified EasyAuth, and closes ingress on any failure. It does not update the historical deployment/held records or certify actual human sign-in: retain promotion evidence separately and complete protected interactive owner/guest checks without generating a world. Failures require closed ingress and a reviewed forward repair, never old shared-world activation or a database restore.
 
 ### Invited Access
 
-Invite collaborators through **Microsoft Entra ID > Users > Invite external user**, then let them accept the email invitation. Tenant membership alone does not grant gameplay access. Configure `ALLOWED_USER_OBJECT_IDS` as a comma-separated list of their guest object IDs **in this tenant**, not email addresses or IDs from their home tenants. `OWNER_OBJECT_ID` always retains access, and the API still requires the configured tenant and a consistent identity claim.
+Invite collaborators through **Microsoft Entra ID > Users > Invite external user**, then let them accept the email invitation. Tenant membership alone does not grant gameplay access. Configure `ALLOWED_USER_OBJECT_IDS` as a comma-separated list of guest object IDs **in this tenant**, not emails or home-tenant IDs. `OWNER_OBJECT_ID` is included in the authorization allowlist, but the owner also needs an explicitly provisioned account. Allowed but unprovisioned identities receive `account_not_provisioned`, not somebody else's world.
 
-Deploy allowlist changes with `--skip-db-prepare` against the prepared database. Leaving `ALLOWED_USER_OBJECT_IDS` unset preserves the deployed list; explicitly setting it to an empty string removes guest access. Guests have the same game controls as the owner: advancing time, loading saves and starting careers affect the shared world for everyone. There are no separate per-user careers or read-only guest roles.
+Provision newly allowed users and their runtime grants before an application-only release with `--skip-db-prepare`. Leaving `ALLOWED_USER_OBJECT_IDS` unset during deployment preserves the deployed list; explicitly setting it empty removes guest access without deleting accounts or saves. Each provisioned human has full game controls only within their own schema; there are no read-only guest roles or shared-world multiplayer controls.
+
+### Account Provisioning
+
+`accounts.users` is separate from world/save tables. **Only Kiko**, tenant guest object ID **`13dbb944-b4fb-471b-b5a3-6420a5fb5139`**, verified email **`sardo.kiko@gmail.com`**, receives the existing `dbo` world and saves. The platform owner and other allowed users receive new empty `touchline_user_<account UUID>` schemas. Email is a provisioning cross-check and profile field, never an authorization key; changing a profile must not reassign a world.
+
+Set the reviewed tenant, `OWNER_OBJECT_ID` and complete `ALLOWED_USER_OBJECT_IDS` locally, including Kiko's guest ID. The platform owner must match the deployment operator and must not be substituted for the legacy guest. Review the offline plan first; it opens no SQL connection and cannot certify existing mappings:
+
+```sh
+npm run accounts:migrate -- --tenant-id "$AZURE_TENANT_ID" --legacy-object-id 13dbb944-b4fb-471b-b5a3-6420a5fb5139 --legacy-email sardo.kiko@gmail.com
+```
+
+Before separately approving apply, make the old shared-world revision inaccessible and review backups. Do not serve it while provisioning or run account provisioning concurrently with release/rollback. Keep gameplay closed until the isolated runtime and grants are ready:
+
+```sh
+npm run azure:sql -- -- npm run accounts:migrate -- --tenant-id "$AZURE_TENANT_ID" --legacy-object-id 13dbb944-b4fb-471b-b5a3-6420a5fb5139 --legacy-email sardo.kiko@gmail.com --apply --yes
+npm run azure:sql -- -- node --import tsx scripts/db-authorize.ts --registered --client-id "$RUNTIME_IDENTITY_CLIENT_ID" --name "$AZURE_IDENTITY" --apply --yes
+```
+
+Use the reviewed managed identity **application/client ID** for `RUNTIME_IDENTITY_CLIENT_ID`, not its object ID or a runtime `AZURE_CLIENT_ID` environment. Provisioning refuses test/hosted contexts, requires all three explicit legacy-binding arguments, never copies/seeds a world and never reassigns an existing schema. Rerun its reviewed plan/apply when adding users. Existing world upgrades use `db:migrate --registered`; normal prepared deployment can supply registered runtime grants instead of the separate grant command above.
+
+Hosted startup requires the registry; it cannot fall back to the owner or auto-create accounts. `GET /api/me` returns the **human** account ID, trusted Entra display name/email and `hasWorld`. That profile is distinct from the fictional in-game sporting director's name/background. New accounts legitimately return `hasWorld: false` and `GET /api/bootstrap` returns `null`; world generation waits for explicit `POST /api/careers/prepare`, not login or a deployment check. The supplied-Store local mode does not exercise this hosted identity routing.
 
 ### Cost And Availability
 
@@ -157,7 +276,7 @@ Deploy allowlist changes with `--skip-db-prepare` against the prepared database.
 - **Container Apps Consumption:** published subscription-wide monthly grants include 180,000 vCPU-seconds, 360,000 GiB-seconds and two million HTTP requests. Scale-to-zero reduces idle use, but **maximum one replica is not a spending cap or a guarantee of free hosting**. Active play, imports, tests, image traffic and other services can consume allowances or incur charges.
 - Expect cold startup from container/image startup and SQL resume. Do not add always-on SQL health probes, keepalive queries or scheduled requests to keep the app warm. The process-only `/api/health` endpoint does not verify SQL availability.
 - Do not provision billable default Log Analytics/Application Insights ingestion, ACR, dedicated compute, NAT gateways, private endpoints or extra networking for this hobby plan. Review Azure usage and GHCR allowances; budget alerts notify, but do not impose a hard cap.
-- The **32 GB data budget includes active tables, indexes, compressed logical save slots and future growth**. Managed SQL backups have a separate allowance. Measure actual SQL usage after migration, including restore/test headroom; compression does not make snapshot storage unlimited.
+- The **32 GB data budget is shared by every account's active tables, indexes, compressed save slots and future growth**. Managed SQL backups have a separate allowance. Measure actual SQL usage after migration, including restore/test headroom; compression does not make snapshot storage unlimited.
 
 Current service terms: [Azure SQL free offer](https://learn.microsoft.com/en-us/azure/azure-sql/database/free-offer) and [Container Apps billing](https://learn.microsoft.com/en-us/azure/container-apps/billing).
 
@@ -281,7 +400,7 @@ Player transfer estimates use a nonlinear quality curve, bounded young-player po
 
 ## Saves
 
-The active career is written to SQL transactionally. **Settings > Saves** creates and restores SQL-backed snapshot slots and imports/exports portable **`.touchline.gz`** logical checkpoints. Autosaves run at the selected cadence, including during multi-day advances; the latest three newly created automatic snapshots are retained **per career**. Imported legacy snapshots are protected from automatic pruning. Slots include the career, director, club and in-game date. In the hosted app, imports are uploaded to your authenticated server and persistent saves reside in Azure SQL.
+The active career is written to SQL transactionally within the resolved account's schema. **Settings > Saves** creates and restores that account's SQL-backed snapshot slots and imports/exports portable **`.touchline.gz`** logical checkpoints. Autosaves run at the selected cadence, including during multi-day advances; the latest three newly created automatic snapshots are retained **per career**. Imported legacy snapshots are protected from automatic pruning. Slots include the game director, not an account ownership claim. The separate account registry is not part of a world checkpoint; loading or importing a save never rebinds a human account.
 
 Save compression, upload/download and restore use bounded streaming, temporary staging files and **1 MiB SQL chunks**, not an in-memory copy of the whole world. The save catalog stores metadata and compressed chunks in SQL. Imports validate format, schema, integrity and references before transactional replacement of active-world tables; a failed replacement rolls back. The safeguards are **16 GiB compressed / 64 GiB expanded**, not capacity promises for the 32 GB SQL Free database or container scratch disk. Old `.sqlite` / `.sqlite.gz` files must go through the [one-time importer](#migrate-legacy-careers), never the normal upload control.
 
@@ -317,7 +436,9 @@ International movement of minors is not generally permitted just because parents
 
 ## Verification
 
-These are checks to run, not a report that they have all passed for world version 3 and the related identity, economy and interface changes. The dated deployment/migration record above does not certify these changes. Configure SQL first. Integration and browser tests use the **full SQL schema** in isolated `touchline_test_` / `touchline_e2e_` schemas, not SQLite. There is no additional Azure test environment: an approved remote run uses isolated schemas in the configured database and consumes that database's quota.
+These are checks to run, not a report that the multi-user release or complete world-version-3 suite has passed. The dated deployment/migration record above does not certify these changes. Configure SQL first. Integration and browser tests use the **full SQL schema** in isolated `touchline_test_` / `touchline_e2e_` schemas, not SQLite. There is no additional Azure test environment: an approved remote run uses isolated schemas in the configured database and consumes that database's quota.
+
+For focused account/API/persistence coverage on the configured local SQL test server, run `npm run test:local -- npm test -- server/accounts.test.ts server/app.test.ts server/db.test.ts server/saves.test.ts`. This wrapper is a test context, not a way to run the operator-only account provisioning CLI. Local supplied-store and synthetic principal tests do not certify public EasyAuth or real invited-user browser sessions. Release verification must also exercise missing registry, stale non-dbo schema, empty registered world, skipped-preparation and old-image rejection paths without mutating any player's world.
 
 `npm run verify` runs lint, build, SQL-enabled unit/integration/save tests and the browser suite. Install Playwright Chromium first with `npx playwright install chromium`. For the provisioned Azure target, use `npm run azure:sql -- --tests -- npm run verify` to scope test permission and temporary workstation-IP access to that invocation. Individual checks remain available:
 
@@ -364,11 +485,12 @@ Browser tests start a non-watching API and local UI on ports 3002/5180 (`E2E_API
 | Unexpected-event generation and choices        | [server/events.ts](server/events.ts)                                                                                     |
 | Scouting, deals, loans, staff and consequences | [server/systems.ts](server/systems.ts)                                                                                   |
 | Filtered read models and screen queries        | [server/queries.ts](server/queries.ts)                                                                                   |
-| HTTP actions and owner authorization           | [server/app.ts](server/app.ts)                                                                                           |
 | SQL save catalog, chunks and portable format   | [server/saves.ts](server/saves.ts), [server/save-format.ts](server/save-format.ts)                                       |
 | Explicit migration, seeding and export tools   | [scripts/](scripts/)                                                                                                     |
 | Shared player model, formulas and settings     | [shared/](shared/)                                                                                                       |
 | React screens and canvas pitch analysis        | [src/](src/)                                                                                                             |
+
+Human identity and HTTP routing: [server/accounts.ts](server/accounts.ts), [server/app.ts](server/app.ts). Explicit account provisioning: [scripts/accounts-migrate.ts](scripts/accounts-migrate.ts).
 
 Uses React 19, TypeScript, Vite, Express, mssql, Azure Identity, Zod, seedrandom, roundrobin, javascript-lp-solver, simple-statistics, Recharts and Lucide. Node's SQLite driver is restricted to the one-time legacy importer. Match snapshots include an engine version so earlier event streams remain reproducible when the current rules evolve.
 

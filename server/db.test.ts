@@ -3,6 +3,8 @@ import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { bindSql, runSql, sqlPoolConfig, Store } from "./db.ts";
 import { readSqlSettings, type SqlSettings } from "./sql-config.ts";
+import { provisionAccounts, LEGACY_EMAIL, LEGACY_OBJECT_ID, type AccountProvisioningPlan } from "../scripts/accounts-migrate.ts";
+import type { AccountRecord } from "./accounts.ts";
 import {
   appearanceBackfill,
   IDENTITY_TABLES,
@@ -748,6 +750,72 @@ function localEnvironment() {
 }
 
 describe("SQL Store lifecycle (fake driver, no database)", () => {
+  it("borrows one pool without changing root scope, environment or transaction state", async () => {
+    const harness = fakeStore();
+    const configuredSchema = process.env.SQL_SCHEMA;
+    const first = harness.store.forSchema("touchline_test_first_account");
+    const second = first.forSchema("touchline_test_second_account");
+    expect(harness.calls).toEqual([]);
+    expect(harness.store.schemaName).toBe("touchline_test_mock");
+    expect(process.env.SQL_SCHEMA).toBe(configuredSchema);
+    expect(() => Reflect.set(first, "schemaName", "dbo")).not.toThrow();
+    expect(first.schemaName).toBe("touchline_test_first_account");
+    await Promise.all([
+      first.run("UPDATE meta SET [value] = ? WHERE [key] = ?", "first", "state"),
+      second.run("UPDATE meta SET [value] = ? WHERE [key] = ?", "second", "state"),
+    ]);
+    expect(harness.transactions).toHaveLength(2);
+    expect(harness.transactions.every((transaction) => transaction.pool === harness.pool)).toBe(true);
+    expect(harness.calls.filter((call) => call.parameters.worldLock).map((call) => call.parameters.worldLock)).toEqual([
+      "touchline:world:touchline_test_first_account",
+      "touchline:world:touchline_test_second_account",
+    ]);
+    expect(harness.calls.some((call) => call.sql.includes("UPDATE [touchline_test_first_account].meta"))).toBe(true);
+    expect(harness.calls.some((call) => call.sql.includes("UPDATE [touchline_test_second_account].meta"))).toBe(true);
+    await first.close();
+    expect(harness.pool.close).not.toHaveBeenCalled();
+    await expect(first.all("SELECT 1")).rejects.toThrow(/closed/);
+    await second.all("SELECT 1");
+    await harness.store.close();
+    expect(harness.pool.close).toHaveBeenCalledOnce();
+    expect(harness.calls.some((call) => /DROP SCHEMA/.test(call.sql))).toBe(false);
+    await expect(second.all("SELECT 1")).rejects.toThrow(/closed/);
+  });
+
+  it("rejects invalid or live schema scopes before a test store touches SQL", async () => {
+    const harness = fakeStore();
+    for (const schema of ["dbo", "accounts", "touchline_user_live", "a.b", "bad]name", "a".repeat(129)])
+      expect(() => harness.store.forSchema(schema)).toThrow(/schema/i);
+    expect(harness.calls).toEqual([]);
+    await harness.store.close();
+    expect(() => harness.store.forSchema("touchline_test_after_close")).toThrow(/closed/);
+  });
+
+  it("waits for borrowed transactions before root disposal and refuses an in-transaction root close", async () => {
+    const harness = fakeStore();
+    const scoped = harness.store.forSchema("touchline_test_account_close");
+    await scoped.transaction(async () => {
+      await expect(harness.store.close()).rejects.toThrow(/inside its transaction/);
+    });
+    let release!: () => void;
+    let entered!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const pending = scoped.transaction(async () => {
+      entered();
+      await gate;
+      await scoped.exec("DELETE FROM news");
+    });
+    await started;
+    const closing = harness.store.close();
+    expect(harness.pool.close).not.toHaveBeenCalled();
+    release();
+    await pending;
+    await closing;
+    expect(harness.pool.close).toHaveBeenCalledOnce();
+    expect(harness.events.at(-1)).toBe("close");
+  });
+
   it("open connects without migrations, seeding or an implicit test schema", async () => {
     localEnvironment();
     const harness = fakeStore();
@@ -843,6 +911,88 @@ describe("SQL Store lifecycle (fake driver, no database)", () => {
     expect(harness.calls).toEqual([]);
     expect(harness.pool.close).toHaveBeenCalledOnce();
     await expect(harness.store.all("SELECT 1")).rejects.toThrow(/closed/);
+  });
+});
+
+describe("Account provisioning transaction scopes (fake driver, no database)", () => {
+  const plan: AccountProvisioningPlan = {
+    database: "touchline", accountSchema: "accounts",
+    tenantId: "11111111-1111-4111-8111-111111111111",
+    legacyObjectId: LEGACY_OBJECT_ID, legacyEmail: LEGACY_EMAIL,
+    objectIds: [LEGACY_OBJECT_ID, "22222222-2222-4222-8222-222222222222"],
+  };
+
+  function provisioningHarness(records: AccountRecord[] = []) {
+    const schemas = new Set(["dbo"]);
+    let registryCreated = false;
+    return fakeStore((call) => {
+      const parameters = Object.values(call.parameters);
+      if (call.sql.includes("CREATE TABLE [accounts].[users]")) registryCreated = true;
+      const created = call.sql.match(/^CREATE SCHEMA \[(touchline_user_[a-f0-9]{32})\]/)?.[1];
+      if (created) schemas.add(created);
+      if (call.sql.includes("INSERT INTO [accounts].[users]")) {
+        const [id, tenant_id, object_id, display_name, email, game_schema] = parameters as [string, string, string, string, string | null, string];
+        records.push({ id, tenant_id, object_id, display_name, email, game_schema });
+      }
+      if (call.sql.includes("AS [__touchline_changes]"))
+        return [{ __touchline_changes: 1, __touchline_identity: null }];
+      if (call.sql.includes("FROM sys.tables")) {
+        if (parameters[0] === "accounts") return registryCreated ? [{ name: "users" }] : [];
+        if (call.sql.includes("[name] = N'users'")) return [];
+        return schemas.has(String(parameters[0])) ? [...STORE_TABLES].map((name) => ({ name })) : [];
+      }
+      if (call.sql.includes("FROM sys.indexes")) return [
+        { is_primary_key: true, columns: "id" },
+        { is_primary_key: false, columns: "tenant_id,object_id" },
+        { is_primary_key: false, columns: "game_schema" },
+      ];
+      if (call.sql.startsWith("SELECT * FROM [accounts].[users]")) return call.sql.includes(" WHERE ")
+        ? records.filter((account) =>
+          (account.tenant_id === parameters[0] && account.object_id === parameters[1]) ||
+          account.game_schema === parameters[2] || account.id === parameters[3])
+        : records.map((account) => ({ ...account }));
+      if (call.sql.includes("SELECT SCHEMA_ID(?)")) return [{ schema_id: schemas.has(String(parameters[0])) ? 1 : null }];
+      return [];
+    }, readSqlSettings({}));
+  }
+
+  it("atomically registers empty schemas, binds only the legacy guest to dbo, and is idempotent", async () => {
+    const harness = provisioningHarness();
+    try {
+      const accounts = await provisionAccounts(harness.store, plan);
+      expect(accounts).toHaveLength(2);
+      expect(accounts[0]).toMatchObject({ objectId: LEGACY_OBJECT_ID, schema: "dbo", created: true });
+      const schema = accounts[1].schema;
+      expect(schema).toMatch(/^touchline_user_[a-f0-9]{32}$/);
+      const creation = harness.calls.find((call) => call.sql === `CREATE SCHEMA [${schema}] AUTHORIZATION [dbo];`)!;
+      const insertion = harness.calls.find((call) => call.sql.includes("INSERT INTO [accounts].[users]") && Object.values(call.parameters).includes(schema))!;
+      expect(creation).toBeDefined();
+      expect(insertion.owner).toBe(creation.owner);
+      const maintenance = harness.calls.findIndex((call) => call.owner === creation.owner && call.sql.includes("touchline:schema-maintenance"));
+      expect(maintenance).toBeGreaterThan(-1);
+      expect(maintenance).toBeLessThan(harness.calls.indexOf(creation));
+      expect(harness.calls.map((call) => call.sql).join("\n")).not.toMatch(/(?:CREATE|ALTER|DROP) TABLE \[dbo\]|DELETE FROM \[dbo\]|INSERT INTO \[dbo\]/);
+      const checkpoint = harness.calls.length;
+      const repeated = await provisionAccounts(harness.store, plan);
+      expect(repeated.map((account) => ({ ...account, created: true }))).toEqual(accounts);
+      expect(repeated.every((account) => !account.created)).toBe(true);
+      expect(harness.calls.slice(checkpoint).some((call) => call.sql.startsWith("CREATE SCHEMA [touchline_user_") || call.sql.includes("INSERT INTO [accounts].[users]"))).toBe(false);
+    } finally {
+      await harness.store.close();
+    }
+  });
+
+  it("refuses a wrong legacy owner without creating or adopting another world", async () => {
+    const harness = provisioningHarness([{
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", tenant_id: plan.tenantId,
+      object_id: plan.objectIds[1], display_name: "Wrong owner", email: null, game_schema: "dbo",
+    }]);
+    try {
+      await expect(provisionAccounts(harness.store, plan)).rejects.toThrow(/reassign/);
+      expect(harness.calls.some((call) => call.sql.startsWith("CREATE SCHEMA [touchline_user_") || call.sql.includes("INSERT INTO [accounts].[users]"))).toBe(false);
+    } finally {
+      await harness.store.close();
+    }
   });
 });
 

@@ -1,7 +1,9 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import request from "supertest";
 import { randomUUID } from "node:crypto";
+import { readFile, rm } from "node:fs/promises";
 import { Store } from "./db.ts";
+import { AccountNotProvisionedError, type AuthenticatedIdentity } from "./accounts.ts";
 import { processCompetitionNotifications } from "./notifications.ts";
 import { generateWorld } from "./world.ts";
 import { createCalendar } from "./calendar.ts";
@@ -9,31 +11,40 @@ import { createApp, readApiConfiguration } from "./app.ts";
 import { initialInbox, stateOf } from "./systems.ts";
 import { Saves } from "./saves.ts";
 import { DEFAULT_ASSISTANT_DUTIES, groupCareerSaves } from "../shared/rules.ts";
-import type { SaveSlot } from "../shared/api.ts";
+import type { AccountUser, SaveSlot } from "../shared/api.ts";
 import { createUnexpectedEvent } from "./events.ts";
 
+const owner = "11111111-1111-1111-1111-111111111111";
+const guest = "22222222-2222-2222-2222-222222222222";
+const secondGuest = "33333333-3333-3333-3333-333333333333";
+const tenant = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+const configuration = {
+  CONTAINER_APP_NAME: "touchline",
+  API_HOST: "0.0.0.0",
+  REQUIRE_AUTH: "true",
+  OWNER_OBJECT_ID: owner,
+  ALLOWED_USER_OBJECT_IDS: `${guest}, ${secondGuest}`,
+  AZURE_TENANT_ID: tenant,
+  APP_ORIGIN: "https://touchline.example.com",
+};
+const principal = (objectId: string, tenantId = tenant, additional: { typ: string; val: string }[] = []) =>
+  Buffer.from(JSON.stringify({ auth_typ: "aad", claims: [
+    { typ: "oid", val: objectId }, { typ: "tid", val: tenantId }, ...additional,
+  ] })).toString("base64");
+
 describe("hosted invitation access (no database)", () => {
-  const owner = "11111111-1111-1111-1111-111111111111";
-  const guest = "22222222-2222-2222-2222-222222222222";
-  const secondGuest = "33333333-3333-3333-3333-333333333333";
-  const tenant = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
-  const configuration = {
-    CONTAINER_APP_NAME: "touchline",
-    API_HOST: "0.0.0.0",
-    REQUIRE_AUTH: "true",
-    OWNER_OBJECT_ID: owner,
-    ALLOWED_USER_OBJECT_IDS: `${guest}, ${secondGuest}`,
-    AZURE_TENANT_ID: tenant,
-    APP_ORIGIN: "https://touchline.example.com",
-  };
-  const principal = (objectId: string, tenantId = tenant, additional: { typ: string; val: string }[] = []) =>
-    Buffer.from(JSON.stringify({ auth_typ: "aad", claims: [
-      { typ: "oid", val: objectId }, { typ: "tid", val: tenantId }, ...additional,
-    ] })).toString("base64");
-  const app = (allowed = configuration.ALLOWED_USER_OBJECT_IDS) => {
+  const app = (
+    allowed = configuration.ALLOWED_USER_OBJECT_IDS,
+    resolver?: Parameters<typeof createApp>[1],
+  ) => {
     for (const [name, value] of Object.entries({ ...configuration, ALLOWED_USER_OBJECT_IDS: allowed }))
       vi.stubEnv(name, value);
-    return createApp(Object.create(Store.prototype) as Store);
+    const store = Object.create(Store.prototype) as Store;
+    return createApp(store, resolver ?? {
+      async resolve(identity) {
+        return { user: { id: identity.objectId, displayName: identity.displayName, email: identity.email }, store };
+      },
+    });
   };
   afterEach(() => vi.unstubAllEnvs());
 
@@ -58,6 +69,35 @@ describe("hosted invitation access (no database)", () => {
     }]);
     expect((await request(app()).get("/api/access-probe")
       .set("x-ms-client-principal", identity)).status).toBe(403);
+  });
+
+  it("rejects conflicting tenant claims before resolving an account", async () => {
+    const resolve = vi.fn(async () => { throw new AccountNotProvisionedError(); });
+    const application = app(undefined, { resolve });
+    const response = await request(application).get("/api/me")
+      .set("x-ms-client-principal", principal(owner, tenant, [{
+        typ: "http://schemas.microsoft.com/identity/claims/tenantid", val: guest,
+      }]));
+    expect(response.status).toBe(403);
+    expect(resolve).not.toHaveBeenCalled();
+  });
+
+  it.each([owner, guest])("denies an unprovisioned allowed account without an owner fallback: %s", async (objectId) => {
+    const resolve = vi.fn(async () => { throw new AccountNotProvisionedError(); });
+    const application = app(undefined, { resolve });
+    const response = await request(application).get("/api/me")
+      .set("x-ms-client-principal", principal(objectId));
+    expect(response.status).toBe(403);
+    expect(response.body.code).toBe("account_not_provisioned");
+    expect(resolve).toHaveBeenCalledOnce();
+  });
+
+  it("keeps anonymous health public without invoking account resolution", async () => {
+    const resolve = vi.fn(async () => { throw new Error("Must not resolve health"); });
+    const response = await request(app(undefined, { resolve })).get("/api/health");
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({ status: "ok" });
+    expect(resolve).not.toHaveBeenCalled();
   });
 
   it("keeps owner-only access when no guest IDs are configured", async () => {
@@ -91,11 +131,286 @@ describe("hosted invitation access (no database)", () => {
   });
 
   it.each([undefined, "null", "https://other.example.com"])("rejects mutations with untrusted origin %s", async (origin) => {
-    const mutation = request(app()).post("/api/access-probe")
+    const resolve = vi.fn(async () => { throw new Error("Untrusted origins must not resolve accounts"); });
+    const mutation = request(app(undefined, { resolve })).post("/api/careers/prepare")
       .set("x-ms-client-principal", principal(guest))
       .set("Referer", `${configuration.APP_ORIGIN}/`);
     if (origin) mutation.set("Origin", origin);
     expect((await mutation.send({ type: "read-news" })).status).toBe(403);
+    expect(resolve).not.toHaveBeenCalled();
+  });
+});
+
+describe("per-user HTTP isolation (two isolated SQL schemas)", () => {
+  const fixture = { countryLimit: 2, seniors: 1200, youth: 400, expanded: false };
+  let root: Store;
+  let schemaOwner: Store;
+  let ownerWorld: Store;
+  let app: ReturnType<typeof createApp>;
+  let baseline: { file: string; name: string };
+  const access = (method: "get" | "post" | "patch" | "delete", path: string, objectId = owner) =>
+    request(app)[method](path)
+      .set("x-ms-client-principal", principal(objectId, tenant, [
+        { typ: "name", val: objectId === owner ? "Owner Director" : "Guest Director" },
+        { typ: "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress", val: "shared@example.test" },
+      ]))
+      .set("Origin", configuration.APP_ORIGIN);
+
+  beforeAll(async () => {
+    root = await Store.createTest("user-api-root");
+    schemaOwner = await Store.createTest("user-api-owner");
+    ownerWorld = root.forSchema(schemaOwner.schemaName);
+    expect(ownerWorld.schemaName).not.toBe(root.schemaName);
+    await generateWorld(root, { ...fixture, seed: "existing-guest-world" });
+    const state = await stateOf(root);
+    state.started = true;
+    state.director.name = "Existing guest director";
+    await root.setMeta("state", state);
+    await createCalendar(root);
+    await initialInbox(root);
+    baseline = await new Saves(root).create("Guest checkpoint");
+  }, 300_000);
+
+  beforeEach(async () => {
+    for (const [name, value] of Object.entries(configuration)) vi.stubEnv(name, value);
+    await ownerWorld.transaction(async () => {
+      await ownerWorld.clearWorld();
+      await ownerWorld.run("DELETE FROM save_slots");
+    });
+    await new Saves(root).restore(baseline.file);
+    const worlds = new Map([[owner, ownerWorld], [guest, root]]);
+    app = createApp(root, {
+      async resolve(identity: AuthenticatedIdentity) {
+        const store = worlds.get(identity.objectId);
+        if (identity.tenantId !== tenant || !store) throw new AccountNotProvisionedError();
+        const user: AccountUser = {
+          id: identity.objectId === owner ? "owner-account" : "guest-account",
+          displayName: identity.displayName,
+          email: identity.email,
+        };
+        return { user, store };
+      },
+    });
+  }, 300_000);
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+  });
+  afterAll(async () => {
+    await ownerWorld?.close();
+    await schemaOwner?.close();
+    await root?.close();
+  }, 300_000);
+
+  it("returns verified profiles and empty owner state without email or root-world fallback", async () => {
+    const world = await import("./world.ts");
+    const generate = vi.spyOn(world, "generateWorld");
+    const session = await access("get", "/api/me")
+      .query({ schema: root.schemaName, userId: guest, email: "shared@example.test" });
+    expect(session.status).toBe(200);
+    expect(session.body).toEqual({
+      user: { id: "owner-account", displayName: "Owner Director", email: "shared@example.test" },
+      hasWorld: false,
+    });
+    const empty = await access("get", "/api/bootstrap").query({ schema: root.schemaName });
+    expect(empty.status).toBe(200);
+    expect(empty.body).toBeNull();
+    expect((await access("get", "/api/saves")).body).toEqual([]);
+    expect((await access("get", "/api/health/details")).body.schema).toBe(ownerWorld.schemaName);
+    expect((await access("post", "/api/saves").send({ name: "No world" })).status).toBe(409);
+    expect((await access("get", "/api/saves/export")).status).toBe(409);
+    expect((await access("post", "/api/careers").send({
+      careerName: "Not prepared", background: "Former scout", clubId: 1,
+    })).status).toBe(409);
+    expect((await access("get", "/api/me", guest)).body).toEqual({
+      user: { id: "guest-account", displayName: "Guest Director", email: "shared@example.test" },
+      hasWorld: true,
+    });
+    expect((await access("get", "/api/bootstrap", guest)).body.state.director.name).toBe("Existing guest director");
+    const renamed = await access("get", "/api/me")
+      .set("x-ms-client-principal", principal(owner, tenant, [
+        { typ: "http://schemas.microsoft.com/identity/claims/displayname", val: "Updated owner" },
+        { typ: "email", val: "updated@example.test" },
+      ]));
+    expect(renamed.body.user).toEqual({ id: "owner-account", displayName: "Updated owner", email: "updated@example.test" });
+    expect(await new Saves(ownerWorld).currentState()).toBeNull();
+    expect(generate).not.toHaveBeenCalled();
+  });
+
+  it("denies foreign save export, restore, load and deletion in both directions", async () => {
+    const deny = async (objectId: string, file: string) => {
+      expect((await access("get", "/api/saves/export", objectId).query({ file })).status).toBe(404);
+      for (const [method, path] of [
+        ["post", "/api/saves/restore"], ["post", "/api/careers/load"], ["delete", "/api/careers"],
+      ] as const) {
+        const response = await access(method, path, objectId)
+          .send({ file, schema: root.schemaName, userId: guest });
+        expect(response.status, path).toBe(404);
+      }
+    };
+    await deny(owner, baseline.file);
+    expect(await new Saves(ownerWorld).currentState()).toBeNull();
+    expect(await new Saves(ownerWorld).list()).toEqual([]);
+    await generateWorld(ownerWorld, { ...fixture, seed: "separate-owner-world" });
+    const saved = await new Saves(ownerWorld).create("Owner checkpoint");
+    await deny(guest, saved.file);
+    expect((await access("get", "/api/saves")).body.map((slot: SaveSlot) => slot.file)).toEqual([saved.file]);
+    expect((await access("get", "/api/saves", guest)).body.map((slot: SaveSlot) => slot.file)).toEqual([baseline.file]);
+    expect((await access("get", "/api/saves/export").query({ file: saved.file })).status).toBe(200);
+  }, 300_000);
+
+  it("prepares once on explicit action and finalizes the prepared world without generating or archiving it again", async () => {
+    const world = await import("./world.ts");
+    const generateWorldFixture = world.generateWorld;
+    let release!: () => void;
+    let entered!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const generate = vi.spyOn(world, "generateWorld").mockImplementation(async (store, options) => {
+      entered();
+      await gate;
+      await generateWorldFixture(store, { ...options, ...fixture });
+    });
+    const pending = access("post", "/api/careers/prepare")
+      .send({ schema: root.schemaName, displayName: "Untrusted name" }).then((response) => response);
+    try {
+      await Promise.race([started, pending.then(() => { throw new Error("Preparation ended before generation"); })]);
+      expect((await access("post", "/api/careers/prepare").send({})).status).toBe(409);
+      expect((await access("get", "/api/bootstrap", guest).timeout({ response: 20_000 })).status).toBe(200);
+    } finally {
+      release();
+      await pending;
+    }
+    const prepared = await pending;
+    expect(prepared.status).toBe(200);
+    expect(prepared.body).toEqual({ created: true });
+    expect(generate).toHaveBeenCalledWith(ownerWorld, { seed: expect.stringMatching(/^touchline-/) });
+    const state = await stateOf(ownerWorld);
+    expect(state.started).toBe(false);
+    expect(state.director.name).toBe("Owner Director");
+    expect((await access("get", "/api/me")).body.hasWorld).toBe(true);
+    expect((await access("get", "/api/bootstrap")).body.state).toEqual(state);
+    expect((await access("post", "/api/careers/prepare").send({})).body).toEqual({ created: false });
+    expect(await stateOf(ownerWorld)).toEqual(state);
+    expect(await new Saves(ownerWorld).list()).toEqual([]);
+    expect((await ownerWorld.get<{ total: number }>("SELECT COUNT(*) AS total FROM fixtures"))!.total).toBe(0);
+    const clear = vi.spyOn(ownerWorld, "clearWorld");
+    const career = await access("post", "/api/careers").send({
+      careerName: "Owner season", background: "Former scout", clubId: state.clubId,
+    });
+    expect(career.status).toBe(200);
+    expect(career.body.archived).toBeNull();
+    expect(career.body.saved).toMatch(/\.touchline\.gz$/);
+    expect(await stateOf(ownerWorld)).toMatchObject({ started: true, seed: state.seed, director: { name: "Owner Director" } });
+    expect(generate).toHaveBeenCalledOnce();
+    expect(clear).not.toHaveBeenCalled();
+    expect(await new Saves(ownerWorld).list()).toHaveLength(1);
+    expect((await ownerWorld.get<{ total: number }>("SELECT COUNT(*) AS total FROM fixtures"))!.total).toBeGreaterThan(0);
+    expect((await ownerWorld.get<{ total: number }>("SELECT COUNT(*) AS total FROM news"))!.total).toBeGreaterThan(0);
+    const finalized = await stateOf(ownerWorld);
+    expect((await access("post", "/api/careers/prepare").send({})).body).toEqual({ created: false });
+    expect(await stateOf(ownerWorld)).toEqual(finalized);
+    expect((await new Saves(root).list()).map((slot) => slot.file)).toEqual([baseline.file]);
+  }, 300_000);
+
+  it("keeps an in-flight writer and its busy responses scoped to one user", async () => {
+    await generateWorld(ownerWorld, { ...fixture, seed: "concurrent-owner-world" });
+    let release!: () => void;
+    let entered!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const setMeta = ownerWorld.setMeta.bind(ownerWorld);
+    vi.spyOn(ownerWorld, "setMeta").mockImplementation(async (key, value) => {
+      if (key === "settings") {
+        entered();
+        await gate;
+      }
+      await setMeta(key, value);
+    });
+    const pending = access("patch", "/api/settings").send({ currency: "EUR" }).then((response) => response);
+    try {
+      await Promise.race([started, pending.then(() => { throw new Error("Writer ended before settings update"); })]);
+      expect((await access("get", "/api/bootstrap")).status).toBe(409);
+      expect((await access("patch", "/api/settings", guest).send({ currency: "USD" })
+        .timeout({ response: 20_000 })).status).toBe(200);
+      expect((await access("get", "/api/bootstrap", guest)).body.settings.currency).toBe("USD");
+    } finally {
+      release();
+      await pending;
+    }
+    expect((await pending).status).toBe(200);
+    expect((await access("get", "/api/bootstrap")).body.settings.currency).toBe("EUR");
+    expect((await access("get", "/api/bootstrap", guest)).body.settings.currency).toBe("USD");
+  }, 300_000);
+
+  it("does not make another user's mutation wait for an in-flight reader", async () => {
+    let release!: () => void;
+    let entered!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    vi.spyOn(ownerWorld, "all").mockImplementationOnce(async () => {
+      entered();
+      await gate;
+      return [];
+    });
+    const pending = access("get", "/api/clubs").then((response) => response);
+    try {
+      await Promise.race([started, pending.then(() => { throw new Error("Reader ended before its query"); })]);
+      expect((await access("patch", "/api/settings", guest).send({ currency: "EUR" })
+        .timeout({ response: 20_000 })).status).toBe(200);
+    } finally {
+      release();
+      await pending;
+    }
+    expect((await pending).status).toBe(200);
+  });
+
+  it("imports and loads into an empty world without transferring the authenticated account or touching the source", async () => {
+    const before = await stateOf(root);
+    const exported = await new Saves(root).export();
+    try {
+      const imported = await access("post", "/api/saves/import")
+        .set("Content-Type", "application/gzip").send(await readFile(exported.file));
+      expect(imported.status).toBe(200);
+      expect((await access("get", "/api/me")).body).toMatchObject({ user: { id: "owner-account", displayName: "Owner Director" }, hasWorld: true });
+      expect((await access("get", "/api/health/details")).body.schema).toBe(ownerWorld.schemaName);
+      const slots = await new Saves(ownerWorld).list();
+      expect(slots).toHaveLength(1);
+      expect(slots[0].file).not.toBe(baseline.file);
+      await ownerWorld.transaction(() => ownerWorld.clearWorld());
+      const loaded = await access("post", "/api/careers/load").send({ file: slots[0].file });
+      expect(loaded.status).toBe(200);
+      expect(loaded.body.archived).toBeNull();
+      expect(await new Saves(ownerWorld).list()).toHaveLength(1);
+      await ownerWorld.transaction(() => ownerWorld.clearWorld());
+      expect((await access("post", "/api/saves/restore").send({ file: slots[0].file })).status).toBe(200);
+      await ownerWorld.transaction(() => ownerWorld.clearWorld());
+      const deleted = await access("delete", "/api/careers").send({ file: slots[0].file });
+      expect(deleted.status).toBe(200);
+      expect(deleted.body.deleted).toBe(1);
+      expect((await access("get", "/api/me")).body.hasWorld).toBe(false);
+      expect(await stateOf(root)).toEqual(before);
+      expect((await new Saves(root).list()).map((slot) => slot.file)).toEqual([baseline.file]);
+      expect((await access("get", "/api/me", guest)).body.user.id).toBe("guest-account");
+    } finally {
+      await rm(exported.file, { force: true });
+    }
+  }, 300_000);
+
+  it("uses an explicit local identity and ignores forged identity headers and resolver injection in no-auth mode", async () => {
+    vi.stubEnv("CONTAINER_APP_NAME", "");
+    vi.stubEnv("API_HOST", "127.0.0.1");
+    vi.stubEnv("REQUIRE_AUTH", "false");
+    vi.stubEnv("APP_ORIGIN", undefined);
+    const resolve = vi.fn(async () => { throw new Error("Local mode must not use a hosted identity"); });
+    const local = createApp(ownerWorld, { resolve });
+    const response = await request(local).get("/api/me").set("x-ms-client-principal", principal(guest));
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({ user: { id: "local", displayName: "Local director", email: null }, hasWorld: false });
+    expect(resolve).not.toHaveBeenCalled();
+    expect((await request(local).get("/api/me").set("Host", "untrusted.example")
+      .set("x-ms-client-principal", principal(owner))).status).toBe(403);
   });
 });
 
@@ -130,6 +445,7 @@ describe("game HTTP API and SQL saves", () => {
     await generateWorld(store, { countryLimit: 3, seniors: 1800, youth: 900 });
     await createCalendar(store);
     await initialInbox(store);
+    await store.setMeta("state", { ...await stateOf(store), started: true });
     app = await createApp(store);
   });
   afterAll(async () => {
@@ -1217,7 +1533,7 @@ describe("game HTTP API and SQL saves", () => {
     expect(
       (await request(app).delete("/api/careers").send({ file: first.file }))
         .status,
-    ).toBe(400);
+    ).toBe(404);
   });
 
   it("deletes a legacy snapshot without removing other unknown saves or the current career", async () => {

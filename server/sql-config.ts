@@ -12,6 +12,14 @@ export interface SqlSettings {
   requestTimeout: number;
 }
 
+export function validateSqlSchema(schema: string, testMode = false): string {
+  if (typeof schema !== "string" || !/^[A-Za-z][A-Za-z0-9_]{0,127}$/.test(schema))
+    throw new Error("SQL_SCHEMA must be a SQL schema name.");
+  if (testMode && !/^touchline_(?:test|e2e)_/.test(schema))
+    throw new Error("Tests require an isolated touchline_test_ or touchline_e2e_ schema.");
+  return schema;
+}
+
 export function readSqlSettings(
   environment: NodeJS.ProcessEnv = process.env,
 ): SqlSettings {
@@ -35,10 +43,7 @@ export function readSqlSettings(
     throw new Error("Remote SQL connections require verified TLS.");
   if (Boolean(environment.SQL_USER) !== Boolean(environment.SQL_PASSWORD))
     throw new Error("Set both SQL_USER and SQL_PASSWORD, or use Azure identity.");
-  if (!/^[A-Za-z][A-Za-z0-9_]{0,127}$/.test(schema))
-    throw new Error("SQL_SCHEMA must be a SQL schema name.");
-  if (testMode && !/^touchline_(?:test|e2e)_/.test(schema))
-    throw new Error("Tests require an isolated touchline_test_ or touchline_e2e_ schema.");
+  validateSqlSchema(schema, testMode);
   if (
     testMode &&
     !local &&

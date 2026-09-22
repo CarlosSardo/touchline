@@ -1,5 +1,6 @@
 import express from "express";
 import { Store } from "./db.ts";
+import { Accounts } from "./accounts.ts";
 import { stateOf } from "./systems.ts";
 import { createApp, readApiConfiguration } from "./app.ts";
 import { describeSqlError } from "./sql-config.ts";
@@ -34,11 +35,18 @@ async function start() {
       console.log("Touchline maintenance mode: SQL is not opened; game access is disabled.");
     } else {
       store = await Store.open();
-      phase = "career state loading";
-      const state = await stateOf(store);
-      if (!state?.date) throw new Error("Uninitialized career");
+      let accounts: Accounts | undefined;
+      if (configuration.requireAuth) {
+        phase = "account registry validation";
+        accounts = new Accounts(store);
+        await accounts.assertReady();
+      } else {
+        phase = "career state loading";
+        const state = await stateOf(store);
+        if (!state?.date) throw new Error("Uninitialized career");
+      }
       phase = "HTTP application initialization";
-      app = await createApp(store);
+      app = createApp(store, accounts);
     }
     const server = app.listen(port, host, () => {
       console.log(`Touchline API listening on ${host}:${port}.`);

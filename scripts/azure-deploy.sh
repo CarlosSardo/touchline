@@ -4,22 +4,29 @@ set +x
 
 deploy_usage() {
   printf '%s\n' \
-    'Usage: bash scripts/azure-deploy.sh --yes [--stage-only] [--skip-db-prepare] [--verification full|smoke] [--image ghcr.io/OWNER/IMAGE@sha256:DIGEST]' \
+    'Usage: bash scripts/azure-deploy.sh --yes [--stage-only | --hold-ingress] [--skip-db-prepare] [--verification full|smoke] [--image ghcr.io/OWNER/IMAGE@sha256:DIGEST]' \
     '--stage-only builds/publishes and configures internal-only maintenance mode without opening SQL or enabling gameplay.' \
-    '--skip-db-prepare skips SQL export, migrations and runtime grants for an already-prepared database; schema compatibility is still checked.' \
+    '--hold-ingress builds a SQL-configured gameplay candidate but leaves ingress internal, without public probes or promotion.' \
+    'Held candidates are recorded in .azure/held-app.json as pendingPromotion; runtime health and human sign-in remain unverified.' \
+    'Promote only the inspected revision/digest using the guarded README procedure; rerunning deployment builds a new candidate.' \
+    '--skip-db-prepare skips SQL export, migrations and runtime grants; read-only registry and every registered schema check remain mandatory.' \
     'Runs SQL-backed verification first. Without --image, builds locally, pushes privately and resolves the pushed digest.' \
+    'Prebuilt --image digests are maintenance-stage-only until image-bound per-user compatibility proof is available; omit --image for a reviewed source release.' \
     '--verification smoke runs a fresh build and read-only live API checks; it does not certify the full regression suite. Default: full.' \
-    'Requires existing provisioned SQL, an initialized world, UMI and Consumption environment; never seeds.' \
+    'Gameplay deployment requires an explicitly provisioned accounts.users registry, the preserved dbo career, UMI and Consumption environment; other worlds may be empty.' \
+    'Missing accounts block upgrades: review scripts/accounts-migrate.ts and separately provision with --apply --yes; deployment never binds users or seeds.' \
     'Required env: GHCR_USER, GHCR_PULL_TOKEN (or GHCR_TOKEN), AUTH_CLIENT_ID, AUTH_CLIENT_SECRET.' \
     'Building also requires GHCR_TOKEN with read:packages/write:packages and working Docker permissions.' \
     'Prefer a separate read:packages-only GHCR_PULL_TOKEN. Supply secrets locally, never in chat or CLI arguments.' \
     'Optional AUTH_SMOKE_TOKEN: owner access token for the configured app audience; never acquired automatically.' \
+    'With --skip-db-prepare the authenticated account probe is skipped to avoid profile refresh writes; owner verification remains pending.' \
     'Optional ALLOWED_USER_OBJECT_IDS: comma-separated guest object IDs; unset preserves the deployed list, empty removes guests.' \
     'Register the single-tenant auth app and its HTTPS /.auth/login/aad/callback web redirect yourself.' \
-    'SQL access uses scripts/azure-sql.sh; backup precedes explicit migration and runtime authorization.' \
+    'SQL access uses scripts/azure-sql.sh; the dbo export precedes --registered world migrations and runtime authorization.' \
     'Runtime SQL permissions use a constrained identity-reseeding helper; no database-owner role is granted.' \
     'Reconciles exact advertised egress IP rules named touchline-app-<ip>; never enables blanket Azure SQL access.' \
-    'Cold candidates use ARM/SQL checks followed by guarded HTTP readiness; other revisions are retained inactive.' \
+    'Existing app ingress closes before SQL verification/preparation; this does not drain writers or replace the explicit cutover freeze.' \
+    'Cold candidates use ARM/SQL checks; public HTTP readiness and old-revision deactivation run only on promotion.' \
     'Writes .touchline-deployment.json on success; this file must be ignored by Git.' \
     'Failures after app modification leave ingress internal. Rollback never restores data.'
 }
@@ -31,19 +38,23 @@ deployment_sql() {
 }
 
 deployment_readonly_smoke() {
-  deployment_sql -- node --import tsx --input-type=module <<'NODE'
+  deployment_sql -- env -u CONTAINER_APP_NAME -u APP_ORIGIN REQUIRE_AUTH=false API_HOST=127.0.0.1 SQL_SCHEMA=dbo \
+    node --import tsx --input-type=module <<'NODE'
 import assert from 'node:assert/strict';
 import request from 'supertest';
 import {Store} from './server/db.ts';
 import {createApp} from './server/app.ts';
 const store=await Store.open();
 try {
+  assert.equal(store.schemaName,'dbo');
+  assert.equal(store.testMode,false);
   const before=await store.meta('state');
   const app=await createApp(store);
   for(const path of ['/api/health/details','/api/bootstrap','/api/dashboard','/api/players?pageSize=10','/api/saves']) {
     const response=await request(app).get(path);
     assert.equal(response.status,200,`Read-only ${path} failed`);
     if(path==='/api/health/details') {
+      assert.equal(response.body.hosted,false);
       assert.equal(response.body.testCareer,false);
       assert.equal(response.body.schema,'dbo');
       assert.equal(response.body.databaseName,process.env.AZURE_SQL_DATABASE);
@@ -51,7 +62,7 @@ try {
     console.log(`[smoke] GET ${path}: 200`);
   }
   assert.deepEqual(await store.meta('state'),before,'Smoke checks must not alter the career');
-  console.log('[smoke] Active career unchanged; complete gameplay/browser regression not rerun.');
+  console.log('[smoke] Legacy dbo career unchanged in the internal synthetic app; public authentication was not changed. Complete gameplay/browser regression not rerun.');
 } finally { await store.close(); }
 NODE
 }
@@ -118,8 +129,47 @@ NODE
 }
 
 deployment_schema_check() {
-  printf '%s\n' '[sql] Checking the recorded candidate schema version through operator access.'
-  deployment_sql -- node --import tsx --input-type=module -e 'const {Store}=await import("./server/db.ts"); const store=await Store.open(); try { const row=await store.get("SELECT MAX(version) AS version FROM schema_migrations"); if(String(row?.version)!==process.argv[1]) throw new Error("Candidate schema mismatch; database downgrade/restore is never automatic."); } finally { await store.close(); }' "$1"
+  printf '%s\n' '[sql] Checking account registry and world schema compatibility through read-only operator queries.'
+  deployment_sql -- node --import tsx --input-type=module - "${1:-}" "${2:-registered}" <<'NODE'
+import {Store} from './server/db.ts';
+import {registeredAccountSchemas} from './server/accounts.ts';
+const expectedVersion=process.argv[2], mode=process.argv[3];
+if(!['registered','legacy-rollback'].includes(mode)) throw new Error('Unknown schema verification mode.');
+const store=await Store.open();
+try {
+  let schemas;
+  if(mode==='legacy-rollback') {
+    const metadata=await store.get("SELECT HAS_PERMS_BY_NAME(DB_NAME(), N'DATABASE', N'VIEW DEFINITION') AS can_inspect, SCHEMA_ID(N'accounts') AS registry_schema_id");
+    if(metadata?.can_inspect!==1)
+      throw new Error('Rollback blocked: database metadata visibility is required to establish whether the account registry exists. Use an authorized operator identity; do not bypass the guard.');
+    if(metadata.registry_schema_id!==null)
+      throw new Error('Runtime rollback blocked: the accounts registry exists, and retained revision metadata cannot prove per-user isolation for its immutable image. Schema versions or inherited environment markers are not proof. Keep the current isolated revision and prepare a reviewed forward fix; an old shared-world image requires a separately reviewed internal-only maintenance procedure. Never drop the registry to bypass this guard.');
+    schemas=['dbo'];
+  } else {
+    try {
+      schemas=await registeredAccountSchemas(store);
+    } catch(error) {
+      throw new Error('Release blocked: account registry or registered worlds are not ready. Review scripts/accounts-migrate.ts with explicit --tenant-id, --legacy-object-id and --legacy-email; provisioning requires a separate --apply --yes operation. Deployment never binds an owner, recreates a world or seeds data.', {cause:error});
+    }
+    const registry=store.forSchema('accounts');
+    try {
+      const legacy=await registry.get("SELECT [tenant_id], [object_id] FROM [accounts].[users] WHERE [game_schema] = N'dbo'");
+      if(!schemas.includes('dbo') || legacy?.tenant_id.toLowerCase()!==process.env.AZURE_TENANT_ID?.toLowerCase() ||
+         legacy?.object_id.toLowerCase()!=='13dbb944-b4fb-471b-b5a3-6420a5fb5139')
+        throw new Error('Release blocked: dbo must remain bound to Kiko (sardo.kiko@gmail.com, object ID 13dbb944-b4fb-471b-b5a3-6420a5fb5139) in the configured tenant, never implicitly to the platform owner. Review explicit account provisioning.');
+    } finally { await registry.close(); }
+  }
+  for(const schema of schemas) {
+    const scoped=store.forSchema(schema);
+    try {
+      const row=await scoped.get('SELECT MAX(version) AS version FROM schema_migrations');
+      if(!Number.isSafeInteger(row?.version) || row.version<1 || (expectedVersion && String(row.version)!==expectedVersion))
+        throw new Error(`Candidate schema mismatch for ${schema}; database downgrade/restore is never automatic.`);
+      console.log(`[sql] ${schema}: schema version ${row.version}`);
+    } finally { await scoped.close(); }
+  }
+} finally { await store.close(); }
+NODE
 }
 
 deployment_firewall() {
@@ -193,7 +243,14 @@ deployment_wait() {
 }
 
 deployment_public_check() {
-  DEPLOY_ORIGIN="$1" AUTH_SMOKE_TOKEN="$smoke_token" node --input-type=module <<'NODE'
+  local account_smoke_token="$smoke_token"
+  if [[ "${skip_db_prepare:-false}" == true ]]; then
+    if [[ -n "$account_smoke_token" ]]; then
+      printf '%s\n' '[smoke] Authenticated account probe skipped with --skip-db-prepare to avoid profile refresh writes; manual sign-in verification remains pending.'
+    fi
+    account_smoke_token=''
+  fi
+  DEPLOY_ORIGIN="$1" AUTH_SMOKE_TOKEN="$account_smoke_token" node --input-type=module <<'NODE'
 import { setTimeout } from 'node:timers/promises';
 const origin=process.env.DEPLOY_ORIGIN;
 const deadline=Date.now()+300000;
@@ -220,15 +277,16 @@ for(const path of ['/','/api/health/details']) {
   if(denied.status!==302 || !expectedLogin) throw new Error('Anonymous game/API access must redirect to the configured sign-in provider.');
 }
 if(process.env.AUTH_SMOKE_TOKEN) {
-  const response=await fetch(`${origin}/api/health/details`, {
+  const response=await fetch(`${origin}/api/me`, {
     redirect:'manual', signal:AbortSignal.timeout(30000),
     headers:{Authorization:`Bearer ${process.env.AUTH_SMOKE_TOKEN}`},
   });
   if(response.status!==200) throw new Error('Owner smoke token was rejected.');
-  const details=await response.json();
-  if(details.status!=='ok' || details.hosted!==true || details.testCareer!==false || details.schema!=='dbo' ||
-     details.databaseName!==process.env.AZURE_SQL_DATABASE || !details.date)
-    throw new Error('Owner smoke returned an unexpected SQL target or uninitialized world.');
+  const session=await response.json();
+  if(!/^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i.test(session.user?.id ?? '') ||
+     typeof session.user?.displayName!=='string' || !session.user.displayName.trim() ||
+     !(session.user.email===null || typeof session.user.email==='string') || typeof session.hasWorld!=='boolean')
+    throw new Error('Owner smoke did not return a provisioned human account profile; an empty world is valid.');
 }
 console.log(`PUBLIC_HEALTH_OK SIGN_IN_REQUIRED ownerSmokeVerified=${Boolean(process.env.AUTH_SMOKE_TOKEN)}`);
 NODE
@@ -248,12 +306,13 @@ NODE
 }
 
 deployment_main() {
-  local consent='' image='' stage_only=false verification=full skip_db_prepare=false
+  local consent='' image='' stage_only=false hold_ingress=false verification=full skip_db_prepare=false
   while (( $# )); do
     case "$1" in
       --help|-h) deploy_usage; return ;;
       --yes) consent=--yes; shift ;;
       --stage-only) stage_only=true; shift ;;
+      --hold-ingress) hold_ingress=true; shift ;;
       --skip-db-prepare) skip_db_prepare=true; shift ;;
       --verification) [[ $# -ge 2 ]] || { deploy_usage >&2; return 2; }; verification="$2"; shift 2 ;;
       --image) [[ $# -ge 2 ]] || { deploy_usage >&2; return 2; }; image="$2"; shift 2 ;;
@@ -262,6 +321,8 @@ deployment_main() {
   done
   source "$(dirname -- "${BASH_SOURCE[0]}")/common.sh"
   [[ "$verification" == full || "$verification" == smoke ]] || fail '--verification must be full or smoke.'
+  [[ "$hold_ingress" != true || "$stage_only" != true ]] || fail '--hold-ingress and --stage-only are mutually exclusive.'
+  [[ "$hold_ingress" != true || -z "$image" ]] || fail '--hold-ingress requires a reviewed source build, not a prebuilt --image.'
   [[ "$consent" == --yes ]] || fail 'Deployment requires --yes. Use --help to review prerequisites.'
   [[ "$GHCR_IMAGE" =~ ^ghcr\.io/[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._/-]*$ ]] || fail 'GHCR_IMAGE must be an untagged private ghcr.io repository.'
   if [[ -n "$image" ]]; then
@@ -297,49 +358,11 @@ deployment_main() {
   deployment_private_registry
   local stamp backup=''
   stamp="$(date -u +%Y%m%d%H%M%S)-$$"
-  if [[ "$stage_only" == true ]]; then
-    printf '%s\n' '[stage] Internal-only maintenance deployment. No career or SQL permission changes; public promotion remains disabled.'
-  else
-    printf '%s\n' '[verify] Checking the initialized world, then running isolated SQL-backed verification.'
-    deployment_sql -- node --import tsx --input-type=module -e 'const {Store}=await import("./server/db.ts"); const {stateOf}=await import("./server/systems.ts"); const store=await Store.open(); try { if(!(await stateOf(store))?.date || !(await store.get("SELECT TOP(1) id FROM clubs"))) throw new Error("Load an initialized world before deployment; no seed is performed."); } finally { await store.close(); }'
-    if [[ "$verification" == full ]]; then
-      deployment_sql --tests -- npm run verify
-    else
-      printf '%s\n' '[verify] Focused release checks selected; full gameplay/browser regression will not be rerun.'
-      npm run build
-      deployment_readonly_smoke
-    fi
-    if [[ "$skip_db_prepare" == true ]]; then
-      printf '%s\n' '[deploy] Using the prepared database; SQL export, migrations and runtime grants skipped.'
-    else
-      backup=".azure/backups/pre-deploy-${stamp}.touchline.gz"
-      mkdir -p .azure/backups
-      printf '%s\n' '[backup] Exporting SQL before migration or permission changes.'
-      deployment_sql -- node --import tsx scripts/data-export.ts --out "$backup"
-      printf '%s\n' '[migrate] Applying explicit migrations, then constrained runtime grants.'
-      deployment_sql -- node --import tsx scripts/db-migrate.ts --apply --yes
-      deployment_sql -- node --import tsx scripts/db-authorize.ts --client-id "$identity_client" --name "$AZURE_IDENTITY" --apply --yes
-    fi
-  fi
   schema_version="$(node --import tsx --input-type=module -e 'import {schemaMigrations} from "./server/sql-schema.ts"; console.log(schemaMigrations("dbo").at(-1).version)')"
   umask 077
   temp_dir="$(mktemp -d)"
   app_id="/subscriptions/$AZURE_SUBSCRIPTION_ID/resourceGroups/$AZURE_RESOURCE_GROUP/providers/Microsoft.App/containerApps/$AZURE_APP"
   trap 'status=$?; trap - EXIT; if [[ "$touched" == true && "$completed" != true ]]; then azure containerapp ingress enable --name "$AZURE_APP" --resource-group "$AZURE_RESOURCE_GROUP" --type internal --target-port 3001 --transport auto --output none >/dev/null 2>&1 || printf "%s\n" "CRITICAL: Could not close ingress after failure; close it manually immediately." >&2; fi; rm -rf -- "$temp_dir"; exit "$status"' EXIT
-  if [[ -z "$image" ]]; then
-    printf '%s\n' '[image] Building locally and pushing to private GHCR.'
-    need docker
-    docker info >/dev/null 2>&1 || fail 'Docker permission/daemon check failed. No build or push attempted.'
-    local tag="$GHCR_IMAGE:local-$(git rev-parse --short HEAD)-$stamp"
-    bash scripts/build.sh "$tag"
-    mkdir "$temp_dir/docker"
-    printf '%s' "$push_token" | DOCKER_CONFIG="$temp_dir/docker" docker login ghcr.io --username "$GHCR_USER" --password-stdin >/dev/null 2>&1 || fail 'Private GHCR login failed.'
-    DOCKER_CONFIG="$temp_dir/docker" docker push "$tag"
-    image="$(docker image inspect "$tag" --format '{{json .RepoDigests}}' | node -e 'let text=""; process.stdin.on("data",chunk=>text+=chunk); process.stdin.on("end",()=>{ const digest=JSON.parse(text).find(value=>value.startsWith(`${process.env.GHCR_IMAGE}@sha256:`)); if(!digest) process.exit(1); process.stdout.write(digest); });')"
-  fi
-  [[ "$image" == "$GHCR_IMAGE"@sha256:* && "${image##*@sha256:}" =~ ^[a-f0-9]{64}$ ]] || fail 'Registry did not return the expected immutable digest.'
-  deployment_private_registry
-  unset push_token
   azure containerapp list --resource-group "$AZURE_RESOURCE_GROUP" --output json >"$temp_dir/apps.json"
   APP_NAME="$AZURE_APP" DEPLOY_STAGE_ONLY="$stage_only" node --input-type=module - "$temp_dir" <<'NODE'
 import {readFileSync,writeFileSync} from 'node:fs';
@@ -355,8 +378,54 @@ NODE
   previous_revision="$(node -e 'const app=require(process.argv[1]); process.stdout.write(app?.properties?.configuration?.ingress?.traffic?.find(item=>item.weight===100)?.revisionName ?? app?.properties?.latestReadyRevisionName ?? "")' "$temp_dir/existing.json")"
   if [[ "$(<"$temp_dir/existing.json")" != null ]]; then
     touched=true
+    printf '%s\n' '[ingress] Closing existing ingress before SQL verification/preparation; writer drain remains an operator gate.'
     azure containerapp ingress enable --name "$AZURE_APP" --resource-group "$AZURE_RESOURCE_GROUP" --type internal --target-port 3001 --transport auto --output none
+    [[ "$(azure containerapp show --name "$AZURE_APP" --resource-group "$AZURE_RESOURCE_GROUP" --query properties.configuration.ingress.external --output tsv)" == false ]] || fail 'Internal ingress was not confirmed; SQL preparation blocked.'
   fi
+  if [[ "$stage_only" == true ]]; then
+    printf '%s\n' '[stage] Internal-only maintenance deployment. No career or SQL permission changes; public promotion remains disabled.'
+  else
+    if [[ "$skip_db_prepare" == true ]]; then
+      deployment_schema_check "$schema_version"
+    else
+      deployment_schema_check
+    fi
+    [[ -z "$image" ]] || fail 'Gameplay deployment with --image is blocked: a digest and schema version do not prove per-user isolation. Omit --image to build the reviewed isolated source, or use --stage-only for internal maintenance without promotion.'
+    printf '%s\n' '[verify] Checking only the preserved dbo career, then running isolated SQL-backed verification; other registered worlds may be empty.'
+    deployment_sql -- node --import tsx --input-type=module -e 'const {Store}=await import("./server/db.ts"); const {stateOf}=await import("./server/systems.ts"); const store=await Store.open(); try { if(!(await stateOf(store))?.date || !(await store.get("SELECT TOP(1) id FROM clubs"))) throw new Error("Load an initialized world before deployment; no seed is performed."); } finally { await store.close(); }'
+    if [[ "$verification" == full ]]; then
+      deployment_sql --tests -- npm run verify
+    else
+      printf '%s\n' '[verify] Focused release checks selected; full gameplay/browser regression will not be rerun.'
+      npm run build
+      deployment_readonly_smoke
+    fi
+    if [[ "$skip_db_prepare" == true ]]; then
+      printf '%s\n' '[deploy] Using the prepared database; SQL export, migrations and runtime grants skipped.'
+    else
+      backup=".azure/backups/pre-deploy-${stamp}.touchline.gz"
+      mkdir -p .azure/backups
+      printf '%s\n' '[backup] Exporting the legacy dbo active world before migration or permission changes; other worlds and save catalogs require separate operator backups.'
+      deployment_sql -- node --import tsx scripts/data-export.ts --out "$backup"
+      printf '%s\n' '[migrate] Applying explicit migrations to every registered world, then constrained world and registry-profile runtime grants.'
+      deployment_sql -- node --import tsx scripts/db-migrate.ts --registered --apply --yes
+      deployment_sql -- node --import tsx scripts/db-authorize.ts --registered --client-id "$identity_client" --name "$AZURE_IDENTITY" --apply --yes
+    fi
+  fi
+  if [[ -z "$image" ]]; then
+    printf '%s\n' '[image] Building locally and pushing to private GHCR.'
+    need docker
+    docker info >/dev/null 2>&1 || fail 'Docker permission/daemon check failed. No build or push attempted.'
+    local tag="$GHCR_IMAGE:local-$(git rev-parse --short HEAD)-$stamp"
+    bash scripts/build.sh "$tag"
+    mkdir "$temp_dir/docker"
+    printf '%s' "$push_token" | DOCKER_CONFIG="$temp_dir/docker" docker login ghcr.io --username "$GHCR_USER" --password-stdin >/dev/null 2>&1 || fail 'Private GHCR login failed.'
+    DOCKER_CONFIG="$temp_dir/docker" docker push "$tag"
+    image="$(docker image inspect "$tag" --format '{{json .RepoDigests}}' | node -e 'let text=""; process.stdin.on("data",chunk=>text+=chunk); process.stdin.on("end",()=>{ const digest=JSON.parse(text).find(value=>value.startsWith(`${process.env.GHCR_IMAGE}@sha256:`)); if(!digest) process.exit(1); process.stdout.write(digest); });')"
+  fi
+  [[ "$image" == "$GHCR_IMAGE"@sha256:* && "${image##*@sha256:}" =~ ^[a-f0-9]{64}$ ]] || fail 'Registry did not return the expected immutable digest.'
+  deployment_private_registry
+  unset push_token
   local revision_suffix="d$stamp" revision origin fqdn
   revision="$AZURE_APP--$revision_suffix"
   origin="https://$AZURE_APP.$public_domain"
@@ -405,6 +474,32 @@ NODE
   if [[ "$stage_only" != true ]]; then deployment_schema_check "$schema_version"; fi
   azure containerapp ingress traffic set --name "$AZURE_APP" --resource-group "$AZURE_RESOURCE_GROUP" --revision-weight "$revision=100" --output none
   deployment_traffic_check "$revision" false
+  if [[ "$hold_ingress" == true ]]; then
+    DEPLOY_IMAGE="$image" DEPLOY_REVISION="$revision" DEPLOY_ORIGIN="$origin" DEPLOY_INTERNAL_ORIGIN="https://$fqdn" \
+      DEPLOY_SCHEMA="$schema_version" DEPLOY_VERIFICATION="$verification" DEPLOY_DB_PREPARE_SKIPPED="$skip_db_prepare" \
+      DEPLOY_OWNER="$owner" DEPLOY_CLIENT="$identity_client" node --input-type=module <<'NODE'
+import {writeFileSync,mkdirSync,renameSync} from 'node:fs';
+const environment=process.env;
+mkdirSync('.azure',{recursive:true});
+const state={status:'pendingPromotion',subscriptionId:environment.AZURE_SUBSCRIPTION_ID,
+  tenantId:environment.AZURE_TENANT_ID,resourceGroup:environment.AZURE_RESOURCE_GROUP,app:environment.AZURE_APP,
+  image:environment.DEPLOY_IMAGE,revision:environment.DEPLOY_REVISION,origin:environment.DEPLOY_ORIGIN,
+  internalOrigin:environment.DEPLOY_INTERNAL_ORIGIN,schemaVersion:Number(environment.DEPLOY_SCHEMA),
+  authClientId:environment.AUTH_CLIENT_ID,ownerObjectId:environment.DEPLOY_OWNER,identityClientId:environment.DEPLOY_CLIENT,
+  allowedUserObjectIds:environment.ALLOWED_USER_OBJECT_IDS,verification:environment.DEPLOY_VERIFICATION,
+  databasePreparationSkipped:environment.DEPLOY_DB_PREPARE_SKIPPED==='true',maintenance:false,externalIngress:false,
+  runtimeHealthVerified:false,ownerSmokeVerified:false,recordedAt:new Date().toISOString()};
+writeFileSync('.azure/held-app.json.tmp',JSON.stringify(state,null,2)+'\n',{mode:0o600});
+renameSync('.azure/held-app.json.tmp','.azure/held-app.json');
+NODE
+    completed=true
+    printf 'Candidate held: pendingPromotion (NOT deployed)\nImage: %s\nRevision: %s\nInternal endpoint: https://%s\nPromotion origin (not opened): %s\n' "$image" "$revision" "$fqdn" "$origin"
+    printf '%s\n' 'Ingress remains internal; no public wake/probe or old-revision deactivation performed. Runtime health and interactive identity verification remain pending.'
+    printf '%s\n' 'Review .azure/held-app.json and the README held-candidate promotion procedure. Do not rerun deployment or use --image to promote.'
+    rm -rf -- "$temp_dir"
+    trap - EXIT
+    return
+  fi
   if [[ "$stage_only" == true ]]; then
     deployment_wait "$revision"
     DEPLOY_IMAGE="$image" DEPLOY_REVISION="$revision" DEPLOY_ORIGIN="$origin" node --input-type=module <<'NODE'
@@ -431,7 +526,7 @@ NODE
   deployment_wait "$revision"
   deployment_deactivate_others "$revision"
   DEPLOY_IMAGE="$image" DEPLOY_REVISION="$revision" DEPLOY_PREVIOUS="$previous_revision" DEPLOY_ORIGIN="$origin" \
-    DEPLOY_BACKUP="$backup" DEPLOY_SCHEMA="$schema_version" DEPLOY_VERIFICATION="$verification" DEPLOY_DB_PREPARE_SKIPPED="$skip_db_prepare" OWNER_SMOKE_VERIFIED="$([[ -n "$smoke_token" ]] && printf true || printf false)" \
+    DEPLOY_BACKUP="$backup" DEPLOY_SCHEMA="$schema_version" DEPLOY_VERIFICATION="$verification" DEPLOY_DB_PREPARE_SKIPPED="$skip_db_prepare" OWNER_SMOKE_VERIFIED="$([[ -n "$smoke_token" && "$skip_db_prepare" != true ]] && printf true || printf false)" \
     node --input-type=module <<'NODE'
 import {writeFileSync,renameSync} from 'node:fs';
 const environment=process.env;
@@ -444,7 +539,7 @@ renameSync('.touchline-deployment.json.tmp','.touchline-deployment.json');
 NODE
   completed=true
   printf 'Deployed %s\nImage: %s\nRevision: %s\nOwner login: %s/.auth/login/aad\nRegister redirect: %s/.auth/login/aad/callback\n' "$origin" "$image" "$revision" "$origin" "$origin"
-  [[ -n "$smoke_token" ]] || printf '%s\n' 'Owner smoke NOT verified: manual owner sign-in is still required.'
+  [[ -n "$smoke_token" && "$skip_db_prepare" != true ]] || printf '%s\n' 'Owner smoke NOT verified: manual owner sign-in is still required.'
   rm -rf -- "$temp_dir"
   trap - EXIT
 }

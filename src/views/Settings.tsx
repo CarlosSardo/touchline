@@ -1,5 +1,6 @@
 import { useDeferredValue, useRef, useState } from "react";
 import {
+  ArrowLeft,
   Award,
   Check,
   Download,
@@ -47,106 +48,135 @@ import { PORTABLE_SAVE_EXTENSION, type SaveSlot } from "../../shared/api.ts";
 import type { Club, SettingValue } from "../../shared/types.ts";
 import SavedCareers from "../SavedCareers.tsx";
 
+function AccountIdentity() {
+  const { session } = useGame();
+  if (!session) return null;
+  const details: [string, string][] = [["Account name", session.user.displayName]];
+  if (session.user.email) details.push(["Email", session.user.email]);
+  return (
+    <section className="account-identity" aria-label="Signed-in account">
+      <SectionHeading title="Signed-in account" />
+      <DetailList items={details} />
+    </section>
+  );
+}
+
 export function CareerSheet({ close }: { close: () => void }) {
-  const { bootstrap, act } = useGame();
-  const [name, setName] = useState(bootstrap?.state.director.name ?? "");
+  const { session, bootstrap, act } = useGame();
+  const [name, setName] = useState(
+    bootstrap?.state.started
+      ? bootstrap.state.director.name
+      : session?.user.displayName.slice(0, 50) ?? "",
+  );
   const [background, setBackground] = useState(
     bootstrap?.state.director.background ?? "Former scout",
   );
   const [clubId, setClubId] = useState(bootstrap?.club.id ?? 1);
   const [search, setSearch] = useState("");
   const deferred = useDeferredValue(search);
+  const canChoose =
+    !!bootstrap && (!bootstrap.state.started || bootstrap.state.gameOver);
   const { data: clubs } = useResource<Club[]>(
-    `clubs?q=${encodeURIComponent(deferred)}&limit=100`,
+    canChoose ? `clubs?q=${encodeURIComponent(deferred)}&limit=100` : null,
   );
-  const canChoose = !bootstrap?.state.started || bootstrap.state.gameOver;
   return (
     <Modal
       title={
-        bootstrap?.state.gameOver ? "Your next chapter" : "Director profile"
+        !bootstrap
+          ? "Account profile"
+          : bootstrap.state.gameOver
+            ? "Your next chapter"
+            : "Director profile"
       }
       onClose={close}
     >
       <div className="sheet-body">
-        <div className="form-grid">
-          <Field label="Director name" className="span-2">
-            <input
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-              maxLength={50}
-            />
-          </Field>
-          <Field label="Professional background" className="span-2">
-            <select
-              value={background}
-              onChange={(event) => setBackground(event.target.value)}
-            >
-              {SETTING_DEFINITIONS.find(
-                (setting) => setting.id === "directorBackground",
-              )!.options!.map((value) => (
-                <option key={value}>{value}</option>
-              ))}
-            </select>
-          </Field>
-          {canChoose && (
-            <>
-              <div className="search-field span-2">
-                <Search size={16} />
+        <AccountIdentity />
+        {bootstrap && (
+          <>
+            <SectionHeading title="In-game director" />
+            <div className="form-grid">
+              <Field label="Director name" className="span-2">
                 <input
-                  aria-label="Search career clubs"
-                  placeholder="Search clubs..."
-                  value={search}
-                  onChange={(event) => setSearch(event.target.value)}
+                  value={name}
+                  onChange={(event) => setName(event.target.value)}
+                  maxLength={50}
                 />
-              </div>
-              <Field label="Club appointment" className="span-2">
+              </Field>
+              <Field label="Professional background" className="span-2">
                 <select
-                  value={clubId}
-                  onChange={(event) => setClubId(Number(event.target.value))}
+                  value={background}
+                  onChange={(event) => setBackground(event.target.value)}
                 >
-                  {bootstrap &&
-                    !clubs?.some((club) => club.id === bootstrap.club.id) && (
-                      <option value={bootstrap.club.id}>
-                        {bootstrap.club.name}
-                      </option>
-                    )}
-                  {clubs?.map((club) => (
-                    <option key={club.id} value={club.id}>
-                      {club.name} / {club.country_name}
-                    </option>
+                  {SETTING_DEFINITIONS.find(
+                    (setting) => setting.id === "directorBackground",
+                  )!.options!.map((value) => (
+                    <option key={value}>{value}</option>
                   ))}
                 </select>
               </Field>
-            </>
-          )}
-        </div>
-        <div className="section-space">
-          <Badge tone="green">
-            {bootstrap?.state.started
-              ? dateLabel(bootstrap.state.date)
-              : "SUMMER 2026"}
-          </Badge>
-        </div>
+              {canChoose && (
+                <>
+                  <div className="search-field span-2">
+                    <Search size={16} />
+                    <input
+                      aria-label="Search career clubs"
+                      placeholder="Search clubs..."
+                      value={search}
+                      onChange={(event) => setSearch(event.target.value)}
+                    />
+                  </div>
+                  <Field label="Club appointment" className="span-2">
+                    <select
+                      value={clubId}
+                      onChange={(event) => setClubId(Number(event.target.value))}
+                    >
+                      {!clubs?.some((club) => club.id === bootstrap.club.id) && (
+                        <option value={bootstrap.club.id}>
+                          {bootstrap.club.name}
+                        </option>
+                      )}
+                      {clubs?.map((club) => (
+                        <option key={club.id} value={club.id}>
+                          {club.name} / {club.country_name}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+                </>
+              )}
+            </div>
+            <div className="section-space">
+              <Badge tone="green">
+                {bootstrap.state.started
+                  ? dateLabel(bootstrap.state.date)
+                  : "SUMMER 2026"}
+              </Badge>
+            </div>
+          </>
+        )}
       </div>
       <footer className="sheet-footer">
         <Button variant="secondary" onClick={close}>
-          Cancel
+          {bootstrap ? "Cancel" : "Close"}
         </Button>
-        <Button
-          icon={UserRound}
-          disabled={name.trim().length < 2}
-          onClick={() =>
-            void act({ type: "career", name, background, clubId }).then(
-              (result) => {
-                if (result) close();
-              },
-            )
-          }
-        >
-          {bootstrap?.state.started && !bootstrap.state.gameOver
-            ? "Update profile"
-            : "Accept appointment"}
-        </Button>
+        {bootstrap && (
+          <Button
+            icon={UserRound}
+            disabled={name.trim().length < 2}
+            onClick={() =>
+              void act({ type: "career", name, background, clubId }).then(
+                (result) => {
+                  if (result) close();
+                },
+              )
+            }
+          >
+            {bootstrap.state.started && !bootstrap.state.gameOver
+              ? "Update profile"
+              : "Accept appointment"}
+          </Button>
+        )}
       </footer>
     </Modal>
   );
@@ -458,14 +488,29 @@ function AccentColorControl({
 }
 
 export default function Settings() {
-  const { bootstrap, changeSettings } = useGame();
+  const { session, bootstrap, navigate, changeSettings } = useGame();
   const { money } = useCurrency();
   const [group, setGroup] = useState("Appearance");
   const [career, setCareer] = useState(false);
   const categories = [
     ...new Set(SETTING_DEFINITIONS.map((setting) => setting.group)),
   ];
-  if (!bootstrap) return <Loading />;
+  if (!session) return <Loading label="Opening your account" />;
+  if (!bootstrap)
+    return (
+      <div className="page">
+        <PageHeading title="Account">
+          <Button
+            icon={ArrowLeft}
+            variant="secondary"
+            onClick={() => navigate("start")}
+          >
+            Careers
+          </Button>
+        </PageHeading>
+        <AccountIdentity />
+      </div>
+    );
   function update(id: string, value: SettingValue) {
     void changeSettings({ [id]: value });
   }
@@ -484,6 +529,7 @@ export default function Settings() {
           Director profile
         </Button>
       </PageHeading>
+      <AccountIdentity />
       <div className="settings-layout">
         <nav className="settings-nav" aria-label="Settings categories">
           {categories.map((category) => (

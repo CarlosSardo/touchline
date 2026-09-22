@@ -218,6 +218,8 @@ class ScreenBoundary extends Component<
 
 function Shell() {
   const {
+    session,
+    loading,
     bootstrap,
     error,
     page,
@@ -245,6 +247,7 @@ function Shell() {
   } | null>(null);
   const touch = useRef<{ x: number; y: number } | null>(null);
   useEffect(() => {
+    if (!bootstrap) return;
     const handleKey = (event: KeyboardEvent) => {
       if (
         event.key === "/" &&
@@ -257,8 +260,8 @@ function Shell() {
     };
     document.addEventListener("keydown", handleKey);
     return () => document.removeEventListener("keydown", handleKey);
-  }, []);
-  if (!bootstrap)
+  }, [bootstrap]);
+  if (loading || error || !session)
     return (
       <div className="startup">
         <span className="brand">
@@ -271,19 +274,18 @@ function Shell() {
           <>
             <ErrorState message={error} />
             <Button onClick={() => void refresh()}>
-              Reconnect to game engine
+              Reconnect to account
             </Button>
           </>
         ) : (
           <>
-            <Loading label="Opening your football world" />
+            <Loading label="Opening your account" />
             <span className="muted">SQL career / Portable snapshots</span>
           </>
         )}
       </div>
     );
-  const { club, state } = bootstrap;
-  if (page === "start")
+  if (page === "start" || !bootstrap)
     return (
       <ScreenBoundary>
         <Suspense fallback={<Loading label="Opening careers" />}>
@@ -291,6 +293,7 @@ function Shell() {
         </Suspense>
       </ScreenBoundary>
     );
+  const { club, state } = bootstrap;
   const speed = String(bootstrap.settings.simulationSpeed);
   const advanceDays =
     advanceChoice?.speed === speed

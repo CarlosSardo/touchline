@@ -24,6 +24,17 @@ import type { AssistantDuty } from "./rules.ts";
 
 export const PORTABLE_SAVE_EXTENSION = ".touchline.gz";
 
+export interface AccountUser {
+  id: string;
+  displayName: string;
+  email: string | null;
+}
+
+export interface AccountSession {
+  user: AccountUser;
+  hasWorld: boolean;
+}
+
 export interface Health {
   status: "ok";
 }
