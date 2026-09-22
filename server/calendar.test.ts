@@ -10,12 +10,36 @@ import {
 import { internationalBreak } from "../shared/rules.ts";
 import type { Fixture, League } from "../shared/types.ts";
 import { drawLeaguePhase } from "./draw.ts";
+import { clubCompetitionEligible } from "../shared/competition-rules.ts";
+
+describe("club competition entry rules", () => {
+  it("keeps B-team academies in domestic leagues but excludes reserves and inactive additions from cups and continental events", () => {
+    const reserve = { type: "bteam" as const, parent_id: 1, data: "{}" };
+    expect(clubCompetitionEligible(reserve, "league", 2026)).toBe(true);
+    expect(clubCompetitionEligible(reserve, "cup", 2026)).toBe(false);
+    expect(clubCompetitionEligible(reserve, "continental", 2026)).toBe(false);
+    expect(clubCompetitionEligible(reserve, "youth", 2026)).toBe(false);
+    expect(clubCompetitionEligible({ ...reserve, type: "club" }, "cup", 2026)).toBe(false);
+    const future = { type: "club" as const, parent_id: null, data: JSON.stringify({ activeFromSeason: 2027 }) };
+    expect(clubCompetitionEligible(future, "league", 2026)).toBe(false);
+    expect(clubCompetitionEligible(future, "cup", 2026)).toBe(false);
+    expect(clubCompetitionEligible(future, "continental", 2026)).toBe(false);
+    expect(clubCompetitionEligible(future, "league", 2027)).toBe(true);
+    expect(clubCompetitionEligible(future, "cup", 2027)).toBe(true);
+    expect(clubCompetitionEligible({
+      ...future, data: JSON.stringify({ activeFromSeason: 2027, pendingSeniorLeague: 10 }),
+    }, "continental", 2027)).toBe(false);
+  });
+});
 
 describe("football calendar", () => {
   let store: Store;
   beforeAll(async () => {
     store = await Store.createTest("calendar");
     await generateWorld(store, { countryLimit: 160, seniors: 400, youth: 200 });
+    await store.run(
+      "INSERT INTO standings(league_id,club_id) SELECT leagues.id,clubs.id FROM clubs JOIN leagues ON leagues.country_id = clubs.country_id WHERE clubs.type = 'bteam' AND leagues.kind = 'league' AND leagues.age_group IN ('U19','U17') AND NOT EXISTS (SELECT 1 FROM standings WHERE standings.league_id = leagues.id AND standings.club_id = clubs.id)",
+    );
     await createCalendar(store);
   }, 600000);
   afterAll(async () => {
@@ -72,6 +96,21 @@ describe("football calendar", () => {
         "SELECT id FROM fixtures WHERE league_id = 1 AND stage = 'League'",
       ),
     ).toHaveLength(count);
+  });
+
+  it("schedules both B-team academies without granting any reserve cup or continental entry", async () => {
+    const reserves = await store.all<{ id: number }>(
+      "SELECT id FROM clubs WHERE type = 'bteam'",
+    );
+    expect(reserves.length).toBeGreaterThan(0);
+    for (const age of ["U19", "U17"])
+      expect(await store.all(
+        "SELECT clubs.id FROM clubs WHERE clubs.type = 'bteam' AND NOT EXISTS (SELECT 1 FROM fixtures JOIN leagues ON leagues.id = fixtures.league_id WHERE leagues.kind = 'league' AND leagues.age_group = ? AND clubs.id IN (fixtures.home_id,fixtures.away_id))",
+        age,
+      )).toEqual([]);
+    expect(await store.all(
+      "SELECT fixtures.id FROM fixtures JOIN leagues ON leagues.id = fixtures.league_id JOIN clubs ON clubs.id IN (fixtures.home_id,fixtures.away_id) WHERE (clubs.type = 'bteam' OR clubs.parent_id IS NOT NULL) AND leagues.kind != 'league'",
+    )).toEqual([]);
   });
 
   it("retains every eligible UEFA entrant beyond the former qualifying cap without duplicate competition entries", async () => {
@@ -164,7 +203,15 @@ describe("football calendar", () => {
 
   it("avoids same-age club fixture collisions and respects recovery days", async () => {
     const collisions = await store.all(
-      `SELECT TOP (1) first.id FROM fixtures AS first JOIN fixtures AS second ON first.id < second.id AND (first.home_id IN (second.home_id,second.away_id) OR first.away_id IN (second.home_id,second.away_id)) LEFT JOIN leagues AS first_league ON first_league.id = first.league_id LEFT JOIN leagues AS second_league ON second_league.id = second.league_id WHERE ABS(DATEDIFF(day, first.date, second.date)) < 3 AND coalesce(first_league.age_group,'Senior') = coalesce(second_league.age_group,'Senior')`,
+      `WITH appearances AS (
+         SELECT fixtures.id,fixtures.date,coalesce(leagues.age_group,'Senior') AS age_group,teams.club_id
+         FROM fixtures LEFT JOIN leagues ON leagues.id = fixtures.league_id
+         CROSS APPLY (VALUES (fixtures.home_id),(fixtures.away_id)) AS teams(club_id)
+       ), ordered AS (
+         SELECT id,date,LAG(date) OVER (PARTITION BY club_id,age_group ORDER BY date,id) AS previous_date
+         FROM appearances
+       )
+       SELECT TOP (1) id FROM ordered WHERE DATEDIFF(day,previous_date,date) < 3`,
     );
     expect(collisions).toHaveLength(0);
   });

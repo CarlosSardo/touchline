@@ -18,6 +18,7 @@ import {
 import { stateOf } from "./systems.ts";
 import { playerCareer } from "./queries.ts";
 import { simulateMatch } from "./match.ts";
+import { estimateClubRevenue } from "./finance.ts";
 import { addDays } from "../shared/rules.ts";
 import {
   JOURNALISTS,
@@ -89,6 +90,29 @@ describe("connected simulation", () => {
         "SELECT * FROM players WHERE ability < 1 OR ability > 99 OR potential < ability OR potential > 99",
       ),
     ).toHaveLength(0);
+    const club = (await store.get<import("../shared/types.ts").Club>(
+      "SELECT * FROM clubs WHERE id = 1",
+    ))!;
+    const league = (await store.get<import("../shared/types.ts").League>(
+      "SELECT * FROM leagues WHERE id = ?", club.league_id,
+    ))!;
+    const homeMatches = (await store.get<{ total: number }>(
+      "SELECT count(*) AS total FROM fixtures LEFT JOIN leagues ON leagues.id = fixtures.league_id WHERE fixtures.home_id = 1 AND fixtures.status = 'played' AND fixtures.date > '2026-07-01' AND fixtures.date <= '2026-07-08' AND (leagues.age_group = 'Senior' OR fixtures.league_id IS NULL)",
+    ))!.total;
+    const revenue = estimateClubRevenue({
+      reputation: club.reputation,
+      leagueReputation: league.reputation,
+      tier: league.tier,
+      capacity: club.capacity,
+      fanMood: club.fan_mood,
+      homeMatches,
+    });
+    expect((await store.get<{ amount: number }>(
+      "SELECT amount FROM ledger WHERE club_id = 1 AND category = 'Sponsorship & broadcasting'",
+    ))!.amount).toBe(Math.round(revenue.annualCommercial / 52));
+    expect((await store.get<{ amount: number }>(
+      "SELECT amount FROM ledger WHERE club_id = 1 AND category = 'Matchday income'",
+    ))!.amount).toBe(revenue.annualMatchday);
   });
 
   it("updates a complete league table from the same result used by match analytics", async () => {

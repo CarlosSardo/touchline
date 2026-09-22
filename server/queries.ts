@@ -58,7 +58,12 @@ import type {
   TransferPayment,
 } from "../shared/types.ts";
 import { simulateMatch } from "./match.ts";
-import { assessFinances, annualAmortization } from "./finance.ts";
+import {
+  assessFinances,
+  annualAmortization,
+  clubValuation,
+  projectedOperatingRevenue,
+} from "./finance.ts";
 import { assessRegistration } from "./registration.ts";
 import { assessPlayerInterest, assessYouthTransfer } from "./recruitment.ts";
 import { clubAffiliates } from "./club-support.ts";
@@ -166,6 +171,17 @@ export async function worldClubs(
   };
 }
 
+async function clubWorth(store: Store, club: Club) {
+  const annualOperatingRevenue = await projectedOperatingRevenue(store, club);
+  const { enterpriseValue, revenueMultiple } = clubValuation({
+    annualOperatingRevenue,
+    reputation: club.reputation,
+    cashBalance: club.balance,
+    financialDebt: 0,
+  });
+  return { enterpriseValue, revenueMultiple, annualOperatingRevenue };
+}
+
 export async function clubDetail(
   store: Store,
   id: number,
@@ -190,6 +206,7 @@ export async function clubDetail(
   );
   return {
     club,
+    valuation: club.type === "national" ? null : await clubWorth(store, club),
     affiliates: await clubAffiliates(store, id),
     country: (await store.get<Country>(
       "SELECT * FROM countries WHERE id = ?",
@@ -943,6 +960,7 @@ export async function finances(store: Store): Promise<FinanceData> {
     club.id,
   ))!.total;
   return {
+    valuation: await clubWorth(store, club),
     ledger: await store.all(
       "SELECT TOP (80) * FROM ledger WHERE club_id = ? ORDER BY id DESC",
       club.id,

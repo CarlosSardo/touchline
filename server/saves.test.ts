@@ -17,6 +17,7 @@ import {
 import type { Store } from "./db.ts";
 import type { Saves } from "./saves.ts";
 import type { GameState } from "../shared/types.ts";
+import { WORLD_VERSION } from "../shared/world-rules.ts";
 import {
   SAVE_FORMAT_VERSION,
   SAVE_SCHEMA_VERSION,
@@ -685,6 +686,31 @@ if (process.env.SQL_SAVE_TESTS === "true") {
       }
     }, 300_000);
 
+    it("allows older expanded careers to upgrade and skips completed upgrades before saving", async () => {
+      const expansion = await import("./world-expansion.ts");
+      const original = await store.meta<{ version?: number }>("world");
+      const before = await saves.list();
+      const expand = vi
+        .spyOn(expansion, "expandWorld")
+        .mockRejectedValueOnce(new Error("older expansion reached"));
+      try {
+        await store.setMeta("world", { ...original, version: WORLD_VERSION - 1 });
+        await expect(saves.expandWorld()).rejects.toThrow("older expansion reached");
+        expect(expand).toHaveBeenCalledOnce();
+        const after = await saves.list();
+        expect(after).toHaveLength(before.length + 1);
+        for (const version of [WORLD_VERSION, WORLD_VERSION + 1]) {
+          await store.setMeta("world", { ...original, version });
+          expect(await saves.expandWorld()).toMatchObject({ changed: false });
+          expect(await saves.list()).toEqual(after);
+        }
+        expect(expand).toHaveBeenCalledOnce();
+      } finally {
+        expand.mockRestore();
+        await store.setMeta("world", original);
+      }
+    }, 300_000);
+
     it("rolls back failed generation and expansion while retaining their safety checkpoints", async () => {
       const world = await import("./world.ts");
       const expansion = await import("./world-expansion.ts");
@@ -780,6 +806,27 @@ describe("streamed logical checkpoints (no database)", () => {
     ]);
     expect(result).toEqual(summary);
     expect(result.tables.map((table) => table.rowCount)).toEqual([1, 1]);
+  });
+
+  it("round-trips rows larger than compression batches with bounded backpressure and unchanged digests", async () => {
+    const input = manifest();
+    input.tables[0].rowCount = 2;
+    const values = [["large", "0123456789".repeat(220000)], ["tail", "preserved"]];
+    const chunks: Buffer[] = [];
+    const written = await writeCheckpoint(new Writable({
+      highWaterMark: 1024,
+      write(chunk, _encoding, callback) {
+        chunks.push(Buffer.from(chunk));
+        setImmediate(callback);
+      },
+    }), input, (table) => table.name === "meta" ? values : []);
+    const restored: RestoredValue[][] = [];
+    const read = await readCheckpoint(Readable.from(chunks), {
+      expected: schema,
+      onRow(_table, row) { restored.push(row); },
+    });
+    expect(restored).toEqual(values);
+    expect(read).toEqual(written);
   });
 
   it("rejects payload corruption even when gzip itself is valid", async () => {

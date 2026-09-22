@@ -1,11 +1,13 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { Store } from "./db.ts";
 import {
+  buildWorldStructure,
   countryDefinitions,
   ensureClubRosters,
   generateWorld,
 } from "./world.ts";
 import { ensureClubSupport } from "./club-support.ts";
+import { initialClubFinances } from "./finance.ts";
 import {
   ATTRIBUTE_GROUPS,
   DEFAULT_SETTINGS,
@@ -13,13 +15,15 @@ import {
   loanScore,
   valuation,
 } from "../shared/rules.ts";
-import type { Player, PlayerProfile } from "../shared/types.ts";
+import type { Club, League, Player, PlayerProfile } from "../shared/types.ts";
 import {
+  associationRuleAudit,
   domesticPyramid,
   minimumReserveTier,
   planPyramidMoves,
   reservePolicy,
   SQUAD_MINIMUMS,
+  WORLD_VERSION,
   youthGroups,
 } from "../shared/world-rules.ts";
 import {
@@ -30,7 +34,7 @@ import {
 } from "./world-names.ts";
 import seedrandom from "seedrandom";
 import { expandWorld } from "./world-expansion.ts";
-import { createCalendar } from "./calendar.ts";
+import { activateWorldStructure, createCalendar } from "./calendar.ts";
 
 async function expectSchemaIntegrity(store: Store) {
   const tables = await store.all<{ id: number; name: string }>(
@@ -170,6 +174,85 @@ describe("persistent football world", () => {
 });
 
 describe("expanded football world", () => {
+  it("builds a SQL-free structure with legal reserve placement and both academies for every association", () => {
+    const structure = buildWorldStructure({ expanded: true });
+    const clubs = structure.rows.clubs as unknown as Club[];
+    const leagues = structure.rows.leagues as unknown as League[];
+    const clubById = new Map(clubs.map((club) => [club.id, club]));
+    const leagueById = new Map(leagues.map((league) => [league.id, league]));
+    const countries = new Map(structure.countryRows.map((country) => [country.id, country]));
+    const youthEntries = new Map<string, number>();
+    for (const standing of structure.rows.standings) {
+      const age = leagueById.get(Number(standing.league_id))!.age_group;
+      const key = `${standing.club_id}:${age}`;
+      youthEntries.set(key, (youthEntries.get(key) ?? 0) + 1);
+    }
+    expect(structure.countryRows).toHaveLength(countryDefinitions().length);
+    expect(clubs.filter((club) => club.type !== "national" &&
+      (youthEntries.get(`${club.id}:U19`) !== 1 || youthEntries.get(`${club.id}:U17`) !== 1),
+    )).toEqual([]);
+    const leagueSizes = new Map<number, number>();
+    for (const standing of structure.rows.standings) {
+      const leagueId = Number(standing.league_id);
+      leagueSizes.set(leagueId, (leagueSizes.get(leagueId) ?? 0) + 1);
+    }
+    for (const club of clubs.filter((entry) => entry.type !== "national")) {
+      const league = leagueById.get(club.league_id!)!;
+      const finances = initialClubFinances({
+        reputation: club.reputation,
+        leagueReputation: league.reputation,
+        tier: league.tier,
+        capacity: club.capacity,
+        fanMood: club.fan_mood,
+        homeMatches: leagueSizes.get(league.id)! + 1,
+      });
+      expect(club).toMatchObject(finances);
+      expect(structure.clubRows.find((entry) => entry.id === club.id)).toMatchObject(finances);
+    }
+    for (const country of structure.countryRows) {
+      const domestic = leagues.filter((league) =>
+        league.country_id === country.id && league.age_group === "Senior" &&
+        !JSON.parse(league.data).reserveOnly,
+      );
+      expect(domestic.map((league) => league.tier), country.code).toEqual(
+        domesticPyramid(country).map((division) => division.tier),
+      );
+    }
+    for (const club of clubs.filter((club) => club.type === "bteam")) {
+      const country = countries.get(club.country_id)!;
+      const policy = reservePolicy(country.code);
+      const parent = clubById.get(club.parent_id!)!;
+      const division = leagueById.get(club.league_id!)!;
+      expect(parent.type).toBe("club");
+      expect(parent.country_id).toBe(club.country_id);
+      expect(policy.mode).not.toBe("unverified");
+      if (policy.mode === "pyramid")
+        expect(division.tier).toBeGreaterThanOrEqual(
+          minimumReserveTier(country.code, leagueById.get(parent.league_id!)!.tier),
+        );
+      else {
+        expect(JSON.parse(division.data)).toMatchObject({
+          reserveOnly: true, promotion: 0, relegation: 0,
+          reserveCompetition: policy.competition,
+        });
+      }
+    }
+  });
+
+  it("adds modeled local tiers in large and smaller countries without presenting them as certified formats", () => {
+    const countries = countryDefinitions();
+    for (const [code, tiers] of [["EN", 10], ["DE", 10], ["FR", 10], ["PT", 8], ["LU", 5], ["FO", 4], ["IS", 6]] as const) {
+      const pyramid = domesticPyramid(countries.find((country) => country.code === code)!);
+      expect(pyramid, code).toHaveLength(tiers);
+      expect(pyramid.every((division) => division.evidence === "modeled")).toBe(true);
+      expect(new Set(pyramid.map((division) => division.name)).size).toBe(tiers);
+    }
+    expect(domesticPyramid(countries.find((country) => country.code === "FR")!)
+      .slice(2, 5).map((division) => division.name)).toEqual([
+        "France Ligue 3", "France National 1", "France National 2",
+      ]);
+  });
+
   it("creates plausible dual and triple family backgrounds without equating club location to ancestry", () => {
     const countries = countryDefinitions().map((country, index) => ({
       ...country,
@@ -209,22 +292,35 @@ describe("expanded football world", () => {
     expect(counts).toEqual(new Set([1, 2, 3]));
   });
 
-  it("expands an existing career without resetting state, player attributes, money or scheduled and played fixtures", async () => {
+  it.each([1, 2])("upgrades a v%i career without resetting state, identities, contracts, money or existing fixtures", async (version) => {
     const store = await Store.createTest("world");
+    let testStoreGuard: ReturnType<typeof vi.spyOn> | undefined;
     try {
       await generateWorld(store, { countryLimit: 1, seniors: 480, youth: 240 });
       await createCalendar(store);
+      const initialState = await store.meta<{ date: string; season: number }>("state");
+      await store.setMeta("state", { ...initialState, date: "2026-10-01" });
+      await store.setMeta("world", { ...await store.meta<object>("world"), version });
       const state = await store.meta("state");
       const fixtures = await store.all("SELECT * FROM fixtures ORDER BY id");
       const players = await store.all(
-        "SELECT id,club_id,ability,potential,contract_end,wage FROM players ORDER BY id",
+        "SELECT * FROM players ORDER BY id",
+      );
+      const staff = await store.all("SELECT * FROM staff ORDER BY id");
+      const clubIdentities = await store.all(
+        "SELECT id,name,short_name,city,manager,balance,transfer_budget,wage_budget FROM clubs ORDER BY id",
       );
       const club = await store.get(
         "SELECT id,name,balance,transfer_budget,wage_budget FROM clubs WHERE id = 1",
       );
+      testStoreGuard = vi.spyOn(Store, "createTest").mockRejectedValue(
+        new Error("Remote test schemas are not permitted in production"),
+      );
       const expansion = await expandWorld(store);
+      expect(testStoreGuard).not.toHaveBeenCalled();
       expect(expansion.clubsAdded).toBeGreaterThan(90);
       expect(expansion.playersAdded).toBeGreaterThan(5000);
+      expect(expansion).toHaveProperty("activeFromSeason", 2027);
       expect(await store.meta("state")).toEqual(state);
       expect(
         await store.get(
@@ -233,10 +329,28 @@ describe("expanded football world", () => {
       ).toEqual(club);
       expect(
         await store.all(
-          "SELECT id,club_id,ability,potential,contract_end,wage FROM players WHERE id <= ? ORDER BY id",
+          "SELECT * FROM players WHERE id <= ? ORDER BY id",
           players.length,
         ),
       ).toEqual(players);
+      expect(await store.all(
+        "SELECT * FROM staff WHERE id <= ? ORDER BY id", staff.length,
+      )).toEqual(staff);
+      expect(await store.all(
+        "SELECT id,name,short_name,city,manager,balance,transfer_budget,wage_budget FROM clubs WHERE id <= ? ORDER BY id",
+        clubIdentities.length,
+      )).toEqual(clubIdentities);
+      expect(await store.all("SELECT * FROM fixtures ORDER BY id")).toEqual(fixtures);
+      expect(await store.all(
+        "SELECT id FROM clubs WHERE JSON_VALUE(data,'$.pendingSeniorLeague') IS NOT NULL AND league_id IS NOT NULL",
+      )).toEqual([]);
+      const pending = await store.all(
+        "SELECT id FROM clubs WHERE JSON_VALUE(data,'$.pendingSeniorLeague') IS NOT NULL",
+      );
+      expect(pending.length).toBeGreaterThan(0);
+      expect(await activateWorldStructure(store, 2026)).toEqual({
+        leaguesActivated: 0, clubsAdmitted: 0,
+      });
       expect(
         await store.all(
           "SELECT * FROM fixtures WHERE id <= ? ORDER BY id",
@@ -244,13 +358,60 @@ describe("expanded football world", () => {
         ),
       ).toEqual(fixtures);
       expect((await expandWorld(store)).changed).toBe(false);
+      expect((await store.meta<{ version: number }>("world")).version).toBe(WORLD_VERSION);
+      if (version === 2) {
+        await store.setMeta("state", { ...await store.meta<object>("state"), season: 2027, date: "2027-07-01" });
+        const activation = await activateWorldStructure(store, 2027);
+        expect(activation.clubsAdmitted).toBeGreaterThanOrEqual(pending.length);
+        expect(await store.all(
+          "SELECT id FROM clubs WHERE JSON_VALUE(data,'$.pendingSeniorLeague') IS NOT NULL",
+        )).toEqual([]);
+        const seniorDivisions = await store.all<League>(
+          "SELECT * FROM leagues WHERE kind = 'league' AND age_group = 'Senior' AND tier > 0 ORDER BY tier",
+        );
+        for (const division of seniorDivisions) {
+          const expected = domesticPyramid(countryDefinitions()[0])[division.tier - 1];
+          expect((await store.get<{ count: number }>(
+            "SELECT count(*) AS count FROM clubs WHERE type = 'club' AND league_id = ?",
+            division.id,
+          ))!.count).toBeGreaterThanOrEqual(expected.clubs);
+        }
+        expect(await activateWorldStructure(store, 2027)).toEqual({
+          leaguesActivated: 0, clubsAdmitted: 0,
+        });
+        expect(await store.all("SELECT * FROM fixtures ORDER BY id")).toEqual(fixtures);
+      }
       await expectSchemaIntegrity(store);
+    } finally {
+      testStoreGuard?.mockRestore();
+      await store.close();
+    }
+  });
+
+  it("localizes incompatible legacy club suffixes while retaining player identities, cities and finances", async () => {
+    const store = await Store.createTest("world");
+    try {
+      await generateWorld(store, { countryLimit: 1, seniors: 48, youth: 24 });
+      await store.run("UPDATE countries SET code = 'PT', name = 'Portugal', language = 'pt' WHERE id = 1");
+      await store.run("UPDATE clubs SET name = 'Porto United', city = 'Porto' WHERE id = 1");
+      await store.run("UPDATE clubs SET name = 'Porto United B', city = 'Porto', type = 'bteam', parent_id = 1 WHERE id = 2");
+      await store.run("UPDATE clubs SET name = 'Personal Club' WHERE id = 3");
+      await store.setMeta("state", { ...await store.meta<object>("state"), date: "2026-10-01" });
+      const clubs = await store.all("SELECT id,city,balance,transfer_budget,wage_budget FROM clubs ORDER BY id");
+      const players = await store.all("SELECT * FROM players ORDER BY id");
+      expect((await expandWorld(store)).changed).toBe(true);
+      expect(await store.get("SELECT name,city FROM clubs WHERE id = 1")).toEqual({ name: "FC Porto", city: "Porto" });
+      expect((await store.get<{ name: string }>("SELECT name FROM clubs WHERE id = 2"))!.name).toBe("FC Porto B");
+      expect((await store.get<{ name: string }>("SELECT name FROM clubs WHERE id = 3"))!.name).toBe("Personal Club");
+      expect(await store.all("SELECT id,city,balance,transfer_budget,wage_budget FROM clubs WHERE id <= ? ORDER BY id", clubs.length)).toEqual(clubs);
+      expect(await store.all("SELECT * FROM players WHERE id <= ? ORDER BY id", players.length)).toEqual(players);
+      expect((await expandWorld(store)).changed).toBe(false);
     } finally {
       await store.close();
     }
   });
 
-  it("fills missing age squads without rewriting existing players or finances and is idempotent", async () => {
+  it("fills missing and expired age squads without rewriting existing players or finances and is idempotent", async () => {
     const store = await Store.createTest("world");
     try {
       await generateWorld(store, { countryLimit: 1, seniors: 48, youth: 12 });
@@ -280,6 +441,26 @@ describe("expanded football world", () => {
             minimum,
           ),
         ).toHaveLength(0);
+      await store.run(
+        "UPDATE players SET contract_end = '2026-06-30' WHERE club_id = 1 AND age_group = 'U17' AND position = 'GK'",
+      );
+      const expired = await store.all(
+        "SELECT * FROM players WHERE contract_end < ? ORDER BY id",
+        START_DATE,
+      );
+      expect(expired).toHaveLength(2);
+      expect(await ensureClubRosters(store, { youthOnly: true })).toBe(2);
+      expect(await ensureClubRosters(store, { youthOnly: true })).toBe(0);
+      expect(
+        await store.all("SELECT * FROM players WHERE contract_end < ? ORDER BY id", START_DATE),
+      ).toEqual(expired);
+      expect(
+        await store.all(
+          "SELECT clubs.id FROM clubs LEFT JOIN players ON players.club_id = clubs.id AND players.age_group = 'U17' AND players.contract_end >= ? WHERE clubs.type != 'national' GROUP BY clubs.id HAVING count(players.id) < ? OR SUM(CASE WHEN players.position = 'GK' THEN 1 ELSE 0 END) < 2",
+          START_DATE,
+          SQUAD_MINIMUMS.U17,
+        ),
+      ).toHaveLength(0);
     } finally {
       await store.close();
     }
@@ -321,11 +502,21 @@ describe("expanded football world", () => {
       entries: division.entries.map((entry) => ({ ...entry, parentId: null })),
     }));
     expect(planPyramidMoves("US", closed)).toEqual([]);
+    for (const country of ["US", "CA", "AU"])
+      expect(planPyramidMoves(country, closed.map((division) => ({
+        ...division, promotion: 2, relegation: 2,
+      })))).toEqual([]);
   });
 
   it("audits every association and enforces documented reserve ceilings without inventing unknown permissions", () => {
     for (const country of countryDefinitions()) {
       const policy = reservePolicy(country.code);
+      const audit = associationRuleAudit(country);
+      expect(audit.scope).toBe("partial");
+      expect(audit.code).toBe(country.code);
+      expect(audit.pyramid.evidence).toBe("modeled");
+      expect(policy.verification).toBeTruthy();
+      expect(policy.competition).toBeTruthy();
       expect(policy.summary.length).toBeGreaterThan(20);
       if (policy.mode === "pyramid") {
         expect(policy.source).toMatch(/^https:\/\//);
@@ -341,7 +532,12 @@ describe("expanded football world", () => {
     expect(reservePolicy("US")).toMatchObject({
       mode: "separate",
       professional: true,
+      competition: "closed-development",
     });
+    expect(reservePolicy("CA")).toMatchObject({
+      mode: "separate", professional: true, competition: "closed-development",
+    });
+    expect(reservePolicy("EN").competition).toBe("reserve-league");
     expect(reservePolicy("LU").evidence).toBe("unverified");
     const groups = youthGroups(
       Array.from({ length: 257 }, (_, index) => index),
@@ -382,7 +578,7 @@ describe("expanded football world", () => {
       namingPools(
         countryDefinitions().find((country) => country.code === "NG")!,
       ).source,
-    ).toContain("en_NG");
+    ).toBe("country:NG");
   });
 
   it("scales country pyramids and gives every club three complete squads and bounded youth leagues", async () => {
@@ -394,7 +590,7 @@ describe("expanded football world", () => {
         youth: 0,
         expanded: true,
       });
-      expect(domesticPyramid(countryDefinitions()[0])).toHaveLength(8);
+      expect(domesticPyramid(countryDefinitions()[0])).toHaveLength(10);
       for (const [ageGroup, minimum] of Object.entries(SQUAD_MINIMUMS)) {
         expect(
           await store.all(

@@ -1,4 +1,19 @@
-import type { Fixture } from "./types.ts";
+import type { Club, Fixture, League } from "./types.ts";
+
+export function clubCompetitionEligible(
+  club: Pick<Club, "type" | "parent_id" | "data">,
+  kind: League["kind"],
+  season: number,
+) {
+  if (club.type === "national") return false;
+  const data = JSON.parse(club.data);
+  const activeFromSeason = Number(data.activeFromSeason ?? season);
+  if (!Number.isInteger(activeFromSeason) || activeFromSeason > season)
+    return false;
+  if (kind === "league") return true;
+  return club.type === "club" && club.parent_id === null &&
+    !data.pendingSeniorLeague;
+}
 
 export interface KnockoutRules {
   version: number;

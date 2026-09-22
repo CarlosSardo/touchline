@@ -581,8 +581,27 @@ export async function writeCheckpoint(
       limits.compressedBytes,
       "Compressed checkpoint",
     );
+    async function* batches() {
+      let buffer = Buffer.allocUnsafe(SQL_CHUNK_BYTES);
+      let size = 0;
+      for await (const record of records()) {
+        let offset = 0;
+        while (offset < record.length) {
+          const count = Math.min(SQL_CHUNK_BYTES - size, record.length - offset);
+          record.copy(buffer, size, offset, offset + count);
+          size += count;
+          offset += count;
+          if (size === SQL_CHUNK_BYTES) {
+            yield buffer;
+            buffer = Buffer.allocUnsafe(SQL_CHUNK_BYTES);
+            size = 0;
+          }
+        }
+      }
+      if (size) yield buffer.subarray(0, size);
+    }
     await pipeline(
-      Readable.from(records(), {
+      Readable.from(batches(), {
         objectMode: false,
         highWaterMark: SQL_CHUNK_BYTES,
       }),

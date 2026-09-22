@@ -820,6 +820,50 @@ describe("game HTTP API and SQL saves", () => {
     ).toBe(200);
   });
 
+  it("exposes consistent club enterprise estimates without changing cash or squad values", async () => {
+    const state = await stateOf(store);
+    const before = await store.get("SELECT * FROM clubs WHERE id = ?", state.clubId);
+    const players = await store.all("SELECT id,value,wage FROM players ORDER BY id");
+    const finance = await request(app).get("/api/finances");
+    const club = await request(app).get(`/api/clubs/${state.clubId}`);
+    expect(finance.status).toBe(200);
+    expect(club.status).toBe(200);
+    expect(finance.body.valuation).toEqual(club.body.valuation);
+    expect(finance.body.valuation.annualOperatingRevenue).toBeGreaterThan(0);
+    expect(finance.body.valuation.enterpriseValue).toBe(Math.round(
+      finance.body.valuation.annualOperatingRevenue * finance.body.valuation.revenueMultiple,
+    ));
+    expect(finance.body.valuation.enterpriseValue).not.toBe(finance.body.squadValue);
+    expect(await store.get("SELECT * FROM clubs WHERE id = ?", state.clubId)).toEqual(before);
+    expect(await store.all("SELECT id,value,wage FROM players ORDER BY id")).toEqual(players);
+  });
+
+  it("retains a loadable safety checkpoint when an HTTP world expansion fails", async () => {
+    const saves = new Saves(store);
+    const expansion = await import("./world-expansion.ts");
+    await saves.create("HTTP expansion regression checkpoint");
+    const state = await stateOf(store);
+    const club = await store.get("SELECT * FROM clubs WHERE id = ?", state.clubId);
+    const beforeFiles = new Set((await saves.list()).map((slot) => slot.file));
+    const expand = vi.spyOn(expansion, "expandWorld").mockImplementationOnce(async () => {
+      await store.run("UPDATE clubs SET balance = 0 WHERE id = ?", state.clubId);
+      throw new Error("injected HTTP expansion failure");
+    });
+    try {
+      expect((await request(app).post("/api/world/expand")).status).toBe(500);
+      expect(await stateOf(store)).toEqual(state);
+      expect(await store.get("SELECT * FROM clubs WHERE id = ?", state.clubId)).toEqual(club);
+      const retained = (await saves.list()).filter((slot) => !beforeFiles.has(slot.file));
+      expect(retained).toHaveLength(1);
+      expect(retained[0].name).toBe("Before world expansion");
+      await saves.restore(retained[0].file);
+      expect(await stateOf(store)).toEqual(state);
+      expect(await store.get("SELECT * FROM clubs WHERE id = ?", state.clubId)).toEqual(club);
+    } finally {
+      expand.mockRestore();
+    }
+  });
+
   it("backs up a mid-season world expansion and preserves contracts, finances and fixtures until new divisions activate", async () => {
     const saves = new Saves(store);
     const checkpoint = await saves.create("Expansion regression checkpoint");
@@ -871,9 +915,11 @@ describe("game HTTP API and SQL saves", () => {
         ),
       ).toEqual(clubs);
       expect((await request(app).get("/api/world/audit")).status).toBe(200);
+      const slots = await saves.list();
       expect((await request(app).post("/api/world/expand")).body.changed).toBe(
         false,
       );
+      expect(await saves.list()).toEqual(slots);
       await expectSchemaIntegrity(store);
       await saves.restore(response.body.archived);
       expect(await stateOf(store)).toEqual(state);

@@ -1,6 +1,7 @@
 import { useDeferredValue, useState } from "react";
 import {
   ArrowDownWideNarrow,
+  ArrowUpNarrowWide,
   Bookmark,
   ChevronLeft,
   ChevronRight,
@@ -13,7 +14,6 @@ import {
 } from "lucide-react";
 import { useCurrency, useGame, useResource } from "../game-context.tsx";
 import {
-  Badge,
   Button,
   Empty,
   ErrorState,
@@ -64,9 +64,87 @@ const defaultFilters: Filters = {
   freeAgent: "",
 };
 
+const filterLabels: Record<string, string> = {
+  position: "Position",
+  ageMax: "Maximum age",
+  ageMin: "Minimum age",
+  country: "Nationality",
+  abilityMin: "Minimum ability",
+  potentialMin: "Minimum potential",
+  valueMax: "Maximum value",
+  wageMax: "Maximum weekly wage",
+  foot: "Preferred foot",
+  ageGroup: "Age group",
+  contractStatus: "Contract status",
+  attribute: "Attribute",
+  attributeMin: "Attribute minimum",
+  personality: "Personality",
+  personalityMin: "Personality minimum",
+  lifestyle: "Lifestyle",
+  trait: "Trait",
+  listed: "Transfer listed",
+  availableLoan: "Loan listed",
+  contractMonths: "Expiry within",
+  formMin: "Minimum match rating",
+  heightMin: "Minimum height",
+  heightMax: "Maximum height",
+  goalsMin: "Minimum goals",
+  minutesMin: "Minimum minutes",
+  injured: "Fitness",
+  freeAgent: "Free agents",
+};
+
+function MoneyFilter({
+  title,
+  value,
+  onChange,
+}: {
+  title: string;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  const { currency, displayAmount, accountingAmount } = useCurrency();
+  const [draft, setDraft] = useState<{
+    base: string;
+    currency: string;
+    text: string;
+  } | null>(null);
+  const text =
+    draft?.base === value && draft.currency === currency
+      ? draft.text
+      : value === ""
+        ? ""
+        : displayAmount(Number(value));
+  return (
+    <Field label={`${title} (${currency})`}>
+      <span className="money-input">
+        <input
+          type="number"
+          min="0"
+          step="any"
+          placeholder="No limit"
+          value={text}
+          onChange={(event) => {
+            const nextText = event.target.value;
+            if (nextText !== "" && !Number.isFinite(Number(nextText))) return;
+            const base =
+              nextText === ""
+                ? ""
+                : String(accountingAmount(Number(nextText)));
+            setDraft({ base, currency, text: nextText });
+            onChange(base);
+          }}
+          onBlur={() => setDraft(null)}
+        />
+        <span aria-hidden="true">{currency}</span>
+      </span>
+    </Field>
+  );
+}
+
 export default function Database() {
   const { bootstrap, search, setSearch, notify } = useGame();
-  const { currency, displayAmount, accountingAmount } = useCurrency();
+  const { money } = useCurrency();
   const [filters, setFilters] = useState<Filters>(defaultFilters);
   const [advanced, setAdvanced] = useState(false);
   const [shortlisted, setShortlisted] = useState(false);
@@ -97,11 +175,34 @@ export default function Database() {
   for (const [key, value] of Object.entries(deferredFilters))
     if (value !== "") params.set(key, value);
   if (shortlisted) params.set("shortlisted", "1");
-  const { data, loading, error } = useResource<PlayerPage>(`players?${params}`);
+  const { data, loading, error } = useResource<PlayerPage>(`players?${params}`, {
+    keepPreviousData: true,
+  });
   const activeFilters =
     Object.values(filters).filter(Boolean).length + (shortlisted ? 1 : 0);
+  const advancedCount = [
+    "attribute", "attributeMin", "personality", "personalityMin", "lifestyle",
+    "trait", "formMin", "minutesMin", "goalsMin", "heightMin", "foot",
+  ].filter((key) => filters[key] !== "").length;
+  function filterValue(key: string, value: string) {
+    if (key === "country")
+      return bootstrap?.countries.find((country) => String(country.id) === value)?.name ?? value;
+    if (key === "valueMax" || key === "wageMax") return money(Number(value), true);
+    if (key === "injured") return value === "1" ? "Injured" : "Fit";
+    if (key === "contractMonths") return `${value} months`;
+    if (key === "heightMin" || key === "heightMax") return `${value} cm`;
+    if (key === "contractStatus")
+      return value === "amateur" ? "Non-professional" : "Protected";
+    if (["listed", "availableLoan", "freeAgent"].includes(key)) return "";
+    return ["attribute", "personality", "lifestyle"].includes(key) ? label(value) : value;
+  }
   function update(key: string, value: string) {
-    setFilters((current) => ({ ...current, [key]: value }));
+    setFilters((current) => ({
+      ...current,
+      [key]: value,
+      ...(key === "attribute" && !value ? { attributeMin: "" } : {}),
+      ...(key === "personality" && !value ? { personalityMin: "" } : {}),
+    }));
   }
   function reset() {
     setFilters(defaultFilters);
@@ -141,14 +242,14 @@ export default function Database() {
       <PageHeading
         eyebrow="GLOBAL INTELLIGENCE"
         title="Player database"
-        subtitle={`${compactNumber(bootstrap?.world.players ?? 160000)} players. Every career has a story.`}
+        subtitle={`${compactNumber(bootstrap?.world.players ?? 0)} players`}
       >
-        <Button variant="secondary" icon={Download} onClick={download}>
+        <Button variant="secondary" icon={Download} onClick={download} disabled={!data || loading}>
           Export page
         </Button>
       </PageHeading>
-      <Panel>
-        <div className="filter-bar">
+      <Panel className="database-workspace">
+        <div className="database-toolbar">
           <div className="search-field">
             <Search size={17} />
             <input
@@ -158,45 +259,86 @@ export default function Database() {
               onChange={(event) => setSearch(event.target.value)}
             />
           </div>
-          <select
-            aria-label="Position filter"
-            value={filters.position}
-            onChange={(event) => update("position", event.target.value)}
-          >
-            <option value="">All positions</option>
-            {POSITIONS.map((position) => (
-              <option key={position}>{position}</option>
-            ))}
-          </select>
-          <select
-            aria-label="Age filter"
-            value={filters.ageMax}
-            onChange={(event) => update("ageMax", event.target.value)}
-          >
-            <option value="">Any age</option>
-            <option value="17">Under 18</option>
-            <option value="20">Under 21</option>
-            <option value="23">Under 24</option>
-            <option value="29">Under 30</option>
-          </select>
+          <div className="database-sort" role="group" aria-label="Player sorting">
+            <select
+              aria-label="Sort players"
+              value={sort}
+              onChange={(event) => setSort(event.target.value)}
+            >
+              {[
+                "ability", "potential", "value", "age", "name", "wage",
+                "form", "goals", "minutes", "contract_end",
+              ].map((key) => (
+                <option key={key} value={key}>
+                  {key === "contract_end" ? "Contract expiry" : label(key)}
+                </option>
+              ))}
+            </select>
+            <IconButton
+              icon={direction === "desc" ? ArrowDownWideNarrow : ArrowUpNarrowWide}
+              label={direction === "desc" ? "Sort ascending" : "Sort descending"}
+              className="bordered"
+              onClick={() => setDirection(direction === "desc" ? "asc" : "desc")}
+            />
+          </div>
           <Button
             icon={SlidersHorizontal}
             variant={advanced ? "primary" : "secondary"}
+            className="database-filter-toggle"
+            aria-label={`Advanced filters${advancedCount > 0 ? ` (${advancedCount})` : ""}`}
+            title="Advanced filters"
+            aria-expanded={advanced}
+            aria-controls="player-database-filters"
             onClick={() => setAdvanced(!advanced)}
           >
-            Filters{activeFilters > 0 ? ` (${activeFilters})` : ""}
+            <span>Advanced filters{advancedCount > 0 ? ` (${advancedCount})` : ""}</span>
           </Button>
           <IconButton
             label={
               shortlisted ? "Show all players" : "Show shortlisted players"
             }
             icon={Bookmark}
+            aria-pressed={shortlisted}
             className={shortlisted ? "bookmarked bordered" : "bordered"}
             onClick={() => setShortlisted(!shortlisted)}
           />
         </div>
-        {advanced && (
-          <div className="filter-extra">
+        {(activeFilters > 0 || search) && (
+          <div className="active-filter-list" role="group" aria-label="Active player filters">
+            {search && (
+              <button type="button" className="filter-chip" aria-label={`Remove search: ${search}`} onClick={() => setSearch("")}>
+                <span>Search: {search}</span><X size={13} aria-hidden="true" />
+              </button>
+            )}
+            {Object.entries(filters).filter(([, value]) => value !== "").map(([key, value]) => (
+              <button
+                key={key}
+                type="button"
+                className="filter-chip"
+                aria-label={`Remove ${filterLabels[key]}`}
+                onClick={() => setFilters((current) => ({
+                  ...current,
+                  [key]: "",
+                  ...(key === "attribute" ? { attributeMin: "" } : {}),
+                  ...(key === "personality" ? { personalityMin: "" } : {}),
+                }))}
+              >
+                <span>{filterLabels[key]}{filterValue(key, value) ? `: ${filterValue(key, value)}` : ""}</span>
+                <X size={13} aria-hidden="true" />
+              </button>
+            ))}
+            {shortlisted && (
+              <button type="button" className="filter-chip" aria-label="Remove shortlist filter" onClick={() => setShortlisted(false)}>
+                <span>Shortlist</span><X size={13} aria-hidden="true" />
+              </button>
+            )}
+            <Button variant="ghost" icon={RotateCcw} onClick={reset}>Clear all filters</Button>
+          </div>
+        )}
+        <div className="database-filter-groups">
+          <fieldset className="filter-group">
+            <legend>Identity & location</legend>
+            <div className="filter-fields">
             <Field label="Nationality">
               <select
                 value={filters.country}
@@ -221,6 +363,26 @@ export default function Database() {
                 <option>U17</option>
               </select>
             </Field>
+            <Field label="Age">
+              <select aria-label="Age filter" value={filters.ageMax} onChange={(event) => update("ageMax", event.target.value)}>
+                <option value="">Any age</option>
+                <option value="17">Under 18</option>
+                <option value="20">Under 21</option>
+                <option value="23">Under 24</option>
+                <option value="29">Under 30</option>
+              </select>
+            </Field>
+            </div>
+          </fieldset>
+          <fieldset className="filter-group">
+            <legend>Position & ability</legend>
+            <div className="filter-fields">
+            <Field label="Position">
+              <select aria-label="Position filter" value={filters.position} onChange={(event) => update("position", event.target.value)}>
+                <option value="">All positions</option>
+                {POSITIONS.map((position) => <option key={position}>{position}</option>)}
+              </select>
+            </Field>
             <Field label="Minimum ability">
               <input
                 type="number"
@@ -241,59 +403,23 @@ export default function Database() {
                 onChange={(event) => update("potentialMin", event.target.value)}
               />
             </Field>
-            <Field label={`Maximum value (${currency})`}>
-              <input
-                type="number"
-                min="0"
-                step="1000000"
-                placeholder="No limit"
-                value={
-                  filters.valueMax === ""
-                    ? ""
-                    : displayAmount(Number(filters.valueMax))
-                }
-                onChange={(event) =>
-                  update(
-                    "valueMax",
-                    event.target.value === ""
-                      ? ""
-                      : String(accountingAmount(Number(event.target.value))),
-                  )
-                }
-              />
-            </Field>
-            <Field label={`Maximum wage / week (${currency})`}>
-              <input
-                type="number"
-                min="0"
-                step="1000"
-                placeholder="No limit"
-                value={
-                  filters.wageMax === ""
-                    ? ""
-                    : displayAmount(Number(filters.wageMax))
-                }
-                onChange={(event) =>
-                  update(
-                    "wageMax",
-                    event.target.value === ""
-                      ? ""
-                      : String(accountingAmount(Number(event.target.value))),
-                  )
-                }
-              />
-            </Field>
-            <Field label="Preferred foot">
+            <Field label="Fitness status">
               <select
-                value={filters.foot}
-                onChange={(event) => update("foot", event.target.value)}
+                value={filters.injured}
+                onChange={(event) => update("injured", event.target.value)}
               >
-                <option value="">Either foot</option>
-                <option>Right</option>
-                <option>Left</option>
-                <option>Both</option>
+                <option value="">Any status</option>
+                <option value="0">Fit players</option>
+                <option value="1">Injured players</option>
               </select>
             </Field>
+            </div>
+          </fieldset>
+          <fieldset className="filter-group">
+            <legend>Contract & availability</legend>
+            <div className="filter-fields">
+            <MoneyFilter title="Maximum value" value={filters.valueMax} onChange={(value) => update("valueMax", value)} />
+            <MoneyFilter title="Maximum wage / week" value={filters.wageMax} onChange={(value) => update("wageMax", value)} />
             <Field label="Contract status">
               <select
                 value={filters.contractStatus}
@@ -319,6 +445,29 @@ export default function Database() {
                 <option value="24">24 months</option>
               </select>
             </Field>
+            <Field label="Availability">
+              <select
+                value={filters.freeAgent ? "freeAgent" : filters.availableLoan ? "availableLoan" : filters.listed ? "listed" : ""}
+                onChange={(event) => setFilters((current) => ({
+                  ...current,
+                  freeAgent: event.target.value === "freeAgent" ? "1" : "",
+                  availableLoan: event.target.value === "availableLoan" ? "1" : "",
+                  listed: event.target.value === "listed" ? "1" : "",
+                }))}
+              >
+                <option value="">Any availability</option>
+                <option value="listed">Transfer listed</option>
+                <option value="availableLoan">Loan listed</option>
+                <option value="freeAgent">Free agents</option>
+              </select>
+            </Field>
+            </div>
+          </fieldset>
+        </div>
+          <div className="database-filter-groups advanced-filter-groups" id="player-database-filters" hidden={!advanced}>
+          <fieldset className="filter-group">
+            <legend>Attributes & physical profile</legend>
+            <div className="filter-fields">
             <Field label="Attribute">
               <select
                 value={filters.attribute}
@@ -339,6 +488,7 @@ export default function Database() {
             <Field label="Attribute minimum">
               <input
                 aria-label="Attribute minimum"
+                disabled={!filters.attribute}
                 type="number"
                 min="1"
                 max="99"
@@ -347,6 +497,22 @@ export default function Database() {
                 placeholder="1-99"
               />
             </Field>
+            <Field label="Preferred foot">
+              <select value={filters.foot} onChange={(event) => update("foot", event.target.value)}>
+                <option value="">Either foot</option>
+                <option>Right</option>
+                <option>Left</option>
+                <option>Both</option>
+              </select>
+            </Field>
+            <Field label="Height minimum (cm)">
+              <input type="number" min="140" max="220" placeholder="Any" value={filters.heightMin} onChange={(event) => update("heightMin", event.target.value)} />
+            </Field>
+            </div>
+          </fieldset>
+          <fieldset className="filter-group">
+            <legend>Personality & traits</legend>
+            <div className="filter-fields">
             <Field label="Personality">
               <select
                 value={filters.personality}
@@ -362,6 +528,7 @@ export default function Database() {
             </Field>
             <Field label="Personality minimum">
               <input
+                disabled={!filters.personality}
                 type="number"
                 min="1"
                 max="99"
@@ -419,6 +586,11 @@ export default function Database() {
                 ))}
               </select>
             </Field>
+            </div>
+          </fieldset>
+          <fieldset className="filter-group">
+            <legend>Match performance</legend>
+            <div className="filter-fields">
             <Field label="Minimum match rating">
               <input
                 type="number"
@@ -449,109 +621,22 @@ export default function Database() {
                 onChange={(event) => update("goalsMin", event.target.value)}
               />
             </Field>
-            <Field label="Height minimum (cm)">
-              <input
-                type="number"
-                min="140"
-                max="220"
-                placeholder="Any"
-                value={filters.heightMin}
-                onChange={(event) => update("heightMin", event.target.value)}
-              />
-            </Field>
-            <Field label="Fitness status">
-              <select
-                value={filters.injured}
-                onChange={(event) => update("injured", event.target.value)}
-              >
-                <option value="">Any status</option>
-                <option value="0">Fit players</option>
-                <option value="1">Injured players</option>
-              </select>
-            </Field>
-            <Field label="Availability">
-              <select
-                value={
-                  filters.freeAgent
-                    ? "freeAgent"
-                    : filters.availableLoan
-                      ? "availableLoan"
-                      : filters.listed
-                        ? "listed"
-                        : ""
-                }
-                onChange={(event) =>
-                  setFilters((current) => ({
-                    ...current,
-                    freeAgent: event.target.value === "freeAgent" ? "1" : "",
-                    availableLoan:
-                      event.target.value === "availableLoan" ? "1" : "",
-                    listed: event.target.value === "listed" ? "1" : "",
-                  }))
-                }
-              >
-                <option value="">Any availability</option>
-                <option value="listed">Transfer listed</option>
-                <option value="availableLoan">Loan listed</option>
-                <option value="freeAgent">Free agents</option>
-              </select>
-            </Field>
+            </div>
+          </fieldset>
           </div>
-        )}
-        <div className="filter-summary">
-          <DatabaseIcon size={13} />
+        <div className="filter-summary" role="status" aria-live="polite">
+          <DatabaseIcon size={13} aria-hidden="true" />
           <span className="filter-total">
             {data ? compactNumber(data.total) : "..."} players
           </span>
           <span>{loading ? "Updating results" : "in your selection"}</span>
-          {shortlisted && <Badge tone="green">Shortlist</Badge>}
-          <div className="sort-controls">
-            <ArrowDownWideNarrow size={13} />
-            <select
-              aria-label="Sort players"
-              value={sort}
-              onChange={(event) => setSort(event.target.value)}
-            >
-              {[
-                "ability",
-                "potential",
-                "value",
-                "age",
-                "name",
-                "wage",
-                "form",
-                "goals",
-                "minutes",
-                "contract_end",
-              ].map((key) => (
-                <option key={key} value={key}>
-                  {key === "contract_end" ? "Contract expiry" : label(key)}
-                </option>
-              ))}
-            </select>
-            <button
-              className="text-link"
-              onClick={() =>
-                setDirection(direction === "desc" ? "asc" : "desc")
-              }
-            >
-              {direction === "desc" ? "High to low" : "Low to high"}
-            </button>
-          </div>
-          {(activeFilters > 0 || search) && (
-            <IconButton
-              icon={RotateCcw}
-              label="Clear all filters"
-              onClick={reset}
-            />
-          )}
         </div>
         {error ? (
           <ErrorState message={error} />
         ) : !data ? (
           <Loading label="Searching the player database" />
         ) : data.players.length ? (
-          <PlayerTable players={data.players} />
+          <PlayerTable players={data.players} label="Player database results" />
         ) : (
           <Empty
             icon={Search}

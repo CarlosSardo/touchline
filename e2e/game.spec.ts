@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import type { PlayerPage } from "../shared/api.ts";
+import type { AcademyData, Bootstrap, PlayerPage, SquadData } from "../shared/api.ts";
 import {
   compactNumber,
   currencyCode,
@@ -12,7 +12,6 @@ import {
 test.describe.configure({ mode: "serial" });
 
 test.beforeAll(async ({ request }) => {
-  test.setTimeout(180000);
   const response = await request.get("/api/health/details");
   expect(response.status()).toBe(200);
   const health = await response.json();
@@ -23,20 +22,6 @@ test.beforeAll(async ({ request }) => {
   expect(health.schema).toMatch(/^touchline_e2e_[a-f0-9]{32}$/);
   expect(health.schema).toBe(process.env.TOUCHLINE_E2E_SCHEMA);
   expect(health.databaseName).toBe(process.env.SQL_DATABASE ?? "touchline");
-  const slots = await (await request.get("/api/saves")).json();
-  const baseline = slots.find(
-    (slot: { name: string }) => slot.name === "E2E baseline",
-  );
-  const result = baseline
-    ? await request.post("/api/saves/restore", {
-        data: { file: baseline.file },
-        timeout: 180000,
-      })
-    : await request.post("/api/saves", {
-        data: { name: "E2E baseline" },
-        timeout: 180000,
-      });
-  expect(result.status()).toBe(200);
 });
 
 async function noOverflow(page: Page) {
@@ -133,11 +118,15 @@ test("competition favorites and notification preferences persist with an accessi
     await page
       .getByRole("checkbox", { name: "Tables alerts", exact: true })
       .check();
+    await expect(
+      page.getByRole("checkbox", { name: "Tables alerts", exact: true }),
+    ).toBeEnabled();
     await expect
       .poll(async () => {
-        const saved = await (
-          await request.get("/api/competitions/favorites")
-        ).json();
+        const response = await request.get("/api/competitions/favorites");
+        if (response.status() === 409) return null;
+        expect(response.ok()).toBe(true);
+        const saved = await response.json();
         return saved.find(
           (entry: { leagueId: number }) =>
             entry.leagueId === before.club.league_id,
@@ -204,11 +193,12 @@ test("competition favorites and notification preferences persist with an accessi
       .getByRole("switch", { name: "Board, staff and club", exact: true })
       .click();
     await expect
-      .poll(
-        async () =>
-          (await (await request.get("/api/bootstrap")).json()).settings
-            .notifyClub,
-      )
+      .poll(async () => {
+        const response = await request.get("/api/bootstrap");
+        if (response.status() === 409) return undefined;
+        expect(response.ok()).toBe(true);
+        return (await response.json()).settings.notifyClub;
+      })
       .toBe(false);
     await page.goto("/#inbox");
     await page
@@ -1199,6 +1189,361 @@ test("player filters and complete faceless dossier work", async ({ page }) => {
   await dialog.getByRole("button", { name: "Close dialog" }).click();
   await expect(dialog).not.toBeVisible();
   await noOverflow(page);
+});
+
+test("database filter groups reset dependent fields, clear chips and restart pagination", async ({
+  page,
+}) => {
+  async function resultsAfter(
+    action: () => Promise<unknown>,
+    parameters: Record<string, string | null>,
+  ) {
+    const pending = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return url.pathname === "/api/players" && Object.entries(parameters).every(
+        ([key, value]) => url.searchParams.get(key) === value,
+      );
+    });
+    await action();
+    const response = await pending;
+    expect(response.ok()).toBe(true);
+    const result: PlayerPage = await response.json();
+    const rows = page.locator(".database-workspace .player-table tbody tr");
+    await expect(rows).toHaveCount(result.players.length);
+    await expect(rows.locator(".player-name strong")).toHaveText(
+      result.players.map((player) => player.name),
+    );
+    await expect(rows.locator(".position-tag")).toHaveText(
+      result.players.map((player) => player.position),
+    );
+    await expect(rows.locator("td:nth-child(3)")).toHaveText(
+      result.players.map((player) => String(player.age)),
+    );
+    await expect(rows.locator(".club-cell")).toHaveText(
+      result.players.map((player) => player.club_name ?? "Free agent"),
+    );
+    await expect(page.locator(".filter-summary")).toContainText("in your selection");
+    await expect(page.locator(".pagination-actions > span")).toHaveText(
+      `${result.page} / ${result.pages}`,
+    );
+    return result;
+  }
+
+  const initial = await resultsAfter(() => page.goto("/#database"), { page: "1" });
+  expect(initial.pages).toBeGreaterThan(1);
+  for (const name of [
+    "Identity & location",
+    "Position & ability",
+    "Contract & availability",
+  ]) {
+    await expect(page.getByRole("group", { name, exact: true })).toBeVisible();
+  }
+  const advanced = page.getByRole("button", { name: /^Advanced filters/ });
+  const attributes = page.getByRole("group", { name: "Attributes & physical profile", exact: true });
+  const personalityGroup = page.getByRole("group", { name: "Personality & traits", exact: true });
+  await expect(advanced).toHaveAttribute("aria-expanded", "false");
+  await expect(attributes).not.toBeVisible();
+  const next = page.getByRole("button", { name: "Next player page", exact: true });
+  await resultsAfter(() => next.click(), { page: "2" });
+  const position = initial.players[0].position;
+  const filtered = await resultsAfter(
+    () => page.getByRole("combobox", { name: "Position filter", exact: true }).selectOption(position),
+    { position, page: "1" },
+  );
+  expect(filtered.pages).toBeGreaterThan(1);
+  expect(filtered.players.every((player) => player.position === position)).toBe(true);
+  await expect(page.getByRole("button", { name: "Previous player page", exact: true })).toBeDisabled();
+
+  await advanced.click();
+  await expect(advanced).toHaveAttribute("aria-expanded", "true");
+  await expect(attributes).toBeVisible();
+  await expect(personalityGroup).toBeVisible();
+  await expect(page.getByRole("group", { name: "Match performance", exact: true })).toBeVisible();
+  const attribute = attributes.getByRole("combobox", { name: "Attribute", exact: true });
+  const attributeMin = attributes.getByRole("spinbutton", { name: "Attribute minimum", exact: true });
+  const personality = personalityGroup.getByRole("combobox", { name: "Personality", exact: true });
+  const personalityMin = personalityGroup.getByRole("spinbutton", { name: "Personality minimum", exact: true });
+  await expect(attributeMin).toBeDisabled();
+  await expect(personalityMin).toBeDisabled();
+  const attributeKey = await attribute.locator("option").nth(1).getAttribute("value");
+  const personalityKey = await personality.locator("option").nth(1).getAttribute("value");
+  expect(attributeKey).toBeTruthy();
+  expect(personalityKey).toBeTruthy();
+  await resultsAfter(() => attribute.selectOption(attributeKey!), { attribute: attributeKey, attributeMin: null });
+  await expect(attributeMin).toBeEnabled();
+  await resultsAfter(() => attributeMin.fill("60"), { attribute: attributeKey, attributeMin: "60" });
+  await resultsAfter(() => personality.selectOption(personalityKey!), { personality: personalityKey, personalityMin: null });
+  await expect(personalityMin).toBeEnabled();
+  await resultsAfter(() => personalityMin.fill("60"), { personality: personalityKey, personalityMin: "60" });
+  const chips = page.getByRole("group", { name: "Active player filters", exact: true });
+  await expect(chips.getByRole("button", { name: "Remove Attribute minimum", exact: true })).toBeVisible();
+  await expect(chips.getByRole("button", { name: "Remove Personality minimum", exact: true })).toBeVisible();
+  await noOverflow(page);
+  await page.screenshot({ path: "test-results/database-filter-groups-desktop.png", fullPage: true });
+  for (const width of [390, 320]) {
+    await page.setViewportSize({ width, height: 844 });
+    await expect(advanced).toBeVisible();
+    await expect(attribute).toBeVisible();
+    await expect(personality).toBeVisible();
+    await noOverflow(page);
+    await page.screenshot({ path: `test-results/database-filter-groups-mobile-${width}.png`, fullPage: true });
+  }
+
+  await advanced.click();
+  await expect(advanced).toHaveAttribute("aria-expanded", "false");
+  await expect(attributes).not.toBeVisible();
+  await resultsAfter(
+    () => chips.getByRole("button", { name: "Remove Attribute", exact: true }).click(),
+    { attribute: null, attributeMin: null, personality: personalityKey, personalityMin: "60", page: "1" },
+  );
+  await expect(chips.getByRole("button", { name: "Remove Attribute minimum", exact: true })).toHaveCount(0);
+  await advanced.click();
+  await expect(attribute).toHaveValue("");
+  await expect(attributeMin).toHaveValue("");
+  await expect(attributeMin).toBeDisabled();
+  await expect(personalityMin).toHaveValue("60");
+  await resultsAfter(
+    () => personality.selectOption(""),
+    { personality: null, personalityMin: null, position, page: "1" },
+  );
+  await expect(personalityMin).toHaveValue("");
+  await expect(personalityMin).toBeDisabled();
+  await expect(chips.getByRole("button", { name: "Remove Personality minimum", exact: true })).toHaveCount(0);
+  await resultsAfter(() => next.click(), { position, page: "2" });
+  const cleared = await resultsAfter(
+    () => chips.getByRole("button", { name: "Remove Position", exact: true }).click(),
+    { position: null, attributeMin: null, personalityMin: null, page: "1" },
+  );
+  expect(cleared.total).toBe(initial.total);
+  await expect(chips).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Previous player page", exact: true })).toBeDisabled();
+});
+
+test("academy cohort controls filter and sort the stored roster on desktop and mobile", async ({
+  page,
+  request,
+}) => {
+  const bootstrap: Bootstrap = await (await request.get("/api/bootstrap")).json();
+  const academy: AcademyData = await (await request.get("/api/academy")).json();
+  expect(academy.players.length).toBeGreaterThan(1);
+  await page.goto("/#academy");
+  const prospects = page.getByRole("region", { name: "Academy prospects", exact: true });
+  const rows = prospects.locator("tbody tr");
+  async function expectProspects(players: AcademyData["players"], total: number) {
+    await expect(prospects).toHaveAttribute("aria-busy", "false");
+    await expect(rows).toHaveCount(players.length);
+    await expect(rows.locator(".player-name strong")).toHaveText(players.map((player) => player.name));
+    await expect(rows.locator(".position-tag")).toHaveText(players.map((player) => player.position));
+    await expect(rows.locator("td:nth-child(3)")).toHaveText(players.map((player) => `${player.age_group} / ${player.age}`));
+    await expect(page.locator(".roster-result-count")).toHaveText(`${players.length} of ${total} players`);
+    if (!players.length) {
+      await expect(prospects.getByRole("heading", { name: "No players in this cohort", exact: true })).toBeVisible();
+    }
+  }
+
+  const cohorts = page.getByRole("group", { name: "Academy age group", exact: true });
+  for (const group of ["U19", "U17", "all"]) {
+    const radio = cohorts.getByRole("radio", {
+      name: group === "all" ? "All academy age groups" : `${group} academy`,
+      exact: true,
+    });
+    await radio.check();
+    await expect(radio).toBeChecked();
+    const players = academy.players
+      .filter((player) => group === "all" || player.age_group === group)
+      .sort((first, second) => second.potential - first.potential);
+    await expectProspects(players, players.length);
+  }
+  const sort = page.getByRole("combobox", { name: "Sort academy players", exact: true });
+  await sort.selectOption("name");
+  const byName = [...academy.players].sort((first, second) => first.name.localeCompare(second.name));
+  await expectProspects(byName, academy.players.length);
+  const target = byName[0];
+  const position = page.getByRole("combobox", { name: "Academy position", exact: true });
+  const coverage = page.getByRole("group", { name: "Academy position coverage", exact: true });
+  const matchingPosition = byName.filter((player) => player.position === target.position);
+  await position.selectOption(target.position);
+  await expectProspects(matchingPosition, academy.players.length);
+  const positionButton = coverage.getByRole("button", {
+    name: `${target.position}: ${matchingPosition.length} academy players`,
+    exact: true,
+  });
+  await expect(positionButton).toHaveAttribute("aria-pressed", "true");
+  await positionButton.click();
+  await expect(positionButton).toHaveAttribute("aria-pressed", "false");
+  await expect(position).toHaveValue("");
+  await expectProspects(byName, academy.players.length);
+
+  const review = page.getByRole("combobox", { name: "Academy review", exact: true });
+  for (const focus of ["age-out", "care", "mentor"]) {
+    await review.selectOption(focus);
+    const expected = byName.filter((player) => {
+      if (focus === "age-out") {
+        const cutoff = bootstrap.state.season + 1 - (player.age_group === "U17" ? 16 : 18);
+        return ["U17", "U19"].includes(player.age_group) && player.birth_date < `${cutoff}-01-01`;
+      }
+      if (focus === "care") {
+        return (!!player.injury_until && player.injury_until > bootstrap.state.date) ||
+          player.fitness < 60 || (player.details?.mentalHealth.burnout ?? 0) >= 60;
+      }
+      return player.details?.development.mentorId === null;
+    });
+    await expectProspects(expected, academy.players.length);
+  }
+  await review.selectOption("");
+  await position.selectOption(target.position);
+  const search = page.getByRole("textbox", { name: "Search academy players", exact: true });
+  await search.fill(target.name);
+  await expectProspects(
+    matchingPosition.filter((player) => `${player.name} ${player.nationality}`.toLowerCase().includes(target.name.toLowerCase())),
+    academy.players.length,
+  );
+  await page.getByRole("button", { name: "Clear academy filters", exact: true }).click();
+  await expect(search).toHaveValue("");
+  await expect(position).toHaveValue("");
+  await expect(review).toHaveValue("");
+  await expect(sort).toHaveValue("name");
+  await expectProspects(byName, academy.players.length);
+  for (const order of ["ability", "age"]) {
+    await sort.selectOption(order);
+    const expected = [...academy.players].sort((first, second) =>
+      order === "age" ? second.age - first.age : second.ability - first.ability,
+    );
+    await expectProspects(expected, academy.players.length);
+  }
+  await noOverflow(page);
+  await page.screenshot({ path: "test-results/academy-cohort-controls-desktop.png", fullPage: true });
+  for (const width of [390, 320]) {
+    await page.setViewportSize({ width, height: 844 });
+    await expect(position).toBeVisible();
+    await expect(review).toBeVisible();
+    await expect(sort).toBeVisible();
+    await expect(coverage.getByRole("button")).toHaveCount(
+      (await position.locator("option").count()) - 1,
+    );
+    for (const button of await coverage.getByRole("button").all()) {
+      await expect(button).toBeVisible();
+    }
+    await noOverflow(page);
+    await page.screenshot({ path: `test-results/academy-cohort-controls-mobile-${width}.png`, fullPage: true });
+  }
+});
+
+test("squad cohort controls filter readiness and sort within position groups", async ({
+  page,
+  request,
+}) => {
+  const bootstrap: Bootstrap = await (await request.get("/api/bootstrap")).json();
+  const senior: SquadData = await (await request.get("/api/squad?ageGroup=Senior")).json();
+  expect(senior.players.length).toBeGreaterThan(1);
+  await page.goto("/#squad");
+  const roster = page.getByRole("region", { name: "Squad players", exact: true });
+  const rows = roster.locator("tbody tr:not(.roster-group-row)");
+  const positionGroups = [["GK"], ["CB", "LB", "RB"], ["DM", "CM", "AM"], ["LW", "RW", "ST"]];
+  const isInjured = (player: SquadData["players"][number]) =>
+    !!player.injury_until && player.injury_until > bootstrap.state.date;
+  async function expectSquad(players: SquadData["players"], total: number) {
+    const grouped = positionGroups.flatMap((positions) =>
+      players.filter((player) => positions.includes(player.position)),
+    );
+    await expect(roster).toHaveAttribute("aria-busy", "false");
+    await expect(rows).toHaveCount(players.length);
+    await expect(rows.locator(".player-name strong")).toHaveText(grouped.map((player) => player.name));
+    await expect(rows.locator(".player-name small")).toHaveText(grouped.map((player) => `${player.nationality} / ${player.age}`));
+    await expect(rows.locator(".position-tag")).toHaveText(grouped.map((player) => player.position));
+    await expect(rows.locator(".roster-status > .badge:first-child")).toHaveText(
+      grouped.map((player) => isInjured(player) ? "Injured" : player.fitness < 60 ? "Low fitness" : "Fit"),
+    );
+    await expect(page.locator(".roster-result-count")).toHaveText(`${players.length} of ${total} players`);
+    if (!players.length) {
+      await expect(roster.getByRole("heading", { name: "No players in this selection", exact: true })).toBeVisible();
+    }
+  }
+
+  const byAbility = [...senior.players].sort((first, second) => second.ability - first.ability);
+  await expectSquad(byAbility, senior.players.length);
+  await expect(page.getByRole("combobox", { name: "Club squad", exact: true })).toHaveValue(String(senior.selectedClubId));
+  const ageGroup = page.getByRole("combobox", { name: "Squad age group", exact: true });
+  for (const group of ["U19", "U17"]) {
+    const squad: SquadData = await (await request.get(`/api/squad?ageGroup=${group}`)).json();
+    await ageGroup.selectOption(group);
+    await expect(ageGroup).toHaveValue(group);
+    await expectSquad(
+      [...squad.players].sort((first, second) => second.ability - first.ability),
+      squad.players.length,
+    );
+  }
+  await ageGroup.selectOption("Senior");
+  await expectSquad(byAbility, senior.players.length);
+  const sort = page.getByRole("combobox", { name: "Sort squad players", exact: true });
+  await sort.selectOption("name");
+  const byName = [...senior.players].sort((first, second) => first.name.localeCompare(second.name));
+  await expectSquad(byName, senior.players.length);
+  const target = byName[0];
+  const position = page.getByRole("combobox", { name: "Squad position", exact: true });
+  const coverage = page.getByRole("group", { name: "Squad position coverage", exact: true });
+  const matchingPosition = byName.filter((player) => player.position === target.position);
+  await position.selectOption(target.position);
+  await expectSquad(matchingPosition, senior.players.length);
+  const positionButton = coverage.getByRole("button", {
+    name: `${target.position}: ${matchingPosition.length} players`,
+    exact: true,
+  });
+  await expect(positionButton).toHaveAttribute("aria-pressed", "true");
+  await positionButton.click();
+  await expect(positionButton).toHaveAttribute("aria-pressed", "false");
+  await expect(position).toHaveValue("");
+  await expectSquad(byName, senior.players.length);
+
+  const readiness = page.getByRole("combobox", { name: "Squad readiness", exact: true });
+  for (const status of ["fit", "low", "injured"]) {
+    await readiness.selectOption(status);
+    const expected = byName.filter((player) =>
+      status === "injured" ? isInjured(player)
+        : !isInjured(player) && (status === "low" ? player.fitness < 60 : player.fitness >= 60),
+    );
+    await expectSquad(expected, senior.players.length);
+  }
+  await readiness.selectOption("");
+  await position.selectOption(target.position);
+  const search = page.getByRole("textbox", { name: "Search squad players", exact: true });
+  await search.fill(target.name);
+  await expectSquad(
+    matchingPosition.filter((player) => `${player.name} ${player.nationality} ${player.role}`.toLowerCase().includes(target.name.toLowerCase())),
+    senior.players.length,
+  );
+  await page.getByRole("button", { name: "Clear squad filters", exact: true }).click();
+  await expect(search).toHaveValue("");
+  await expect(position).toHaveValue("");
+  await expect(readiness).toHaveValue("");
+  await expect(sort).toHaveValue("name");
+  await expectSquad(byName, senior.players.length);
+  for (const order of ["potential", "fitness", "age"]) {
+    await sort.selectOption(order);
+    const expected = [...senior.players].sort((first, second) =>
+      order === "age" ? first.age - second.age
+        : order === "fitness" ? second.fitness - first.fitness
+          : second.potential - first.potential,
+    );
+    await expectSquad(expected, senior.players.length);
+  }
+  await noOverflow(page);
+  await page.screenshot({ path: "test-results/squad-cohort-controls-desktop.png", fullPage: true });
+  for (const width of [390, 320]) {
+    await page.setViewportSize({ width, height: 844 });
+    await expect(ageGroup).toBeVisible();
+    await expect(position).toBeVisible();
+    await expect(readiness).toBeVisible();
+    await expect(sort).toBeVisible();
+    await expect(coverage.getByRole("button")).toHaveCount(
+      (await position.locator("option").count()) - 1,
+    );
+    for (const button of await coverage.getByRole("button").all()) {
+      await expect(button).toBeVisible();
+    }
+    await noOverflow(page);
+    await page.screenshot({ path: `test-results/squad-cohort-controls-mobile-${width}.png`, fullPage: true });
+  }
 });
 
 test("appearance settings persist light and dark themes on desktop and mobile", async ({

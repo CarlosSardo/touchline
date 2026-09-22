@@ -10,16 +10,21 @@ import {
   displayAmount,
   money,
   transferPaymentPlan,
+  valuation,
 } from "../shared/rules.ts";
 import {
   acquirePlayerAsset,
   annualAmortization,
   assessFinances,
   assetAmortization,
+  clubValuation,
   closeFinancialYear,
+  estimateClubRevenue,
+  initialClubFinances,
   postWeeklyAccounts,
   recordFinancialItem,
   sellPlayerAsset,
+  type ClubEconomyInput,
 } from "./finance.ts";
 
 describe("currency presentation", () => {
@@ -64,6 +69,448 @@ describe("currency presentation", () => {
   });
 });
 
+describe("heuristic player valuation", () => {
+  const player: Parameters<typeof valuation>[0] = {
+    ability: 65,
+    potential: 70,
+    age: 26,
+    position: "CM",
+    contract_end: "2029-07-01",
+    form: 6.5,
+    injury_until: null,
+  };
+  const context: Parameters<typeof valuation>[1] = {
+    date: "2026-07-01",
+    leagueReputation: 65,
+    balance: 1_000_000,
+    philosophy: "Sustainable growth",
+    inflation: 0,
+    crisis: 0,
+    hype: 0,
+  };
+  function estimate(
+    changes: Partial<typeof player> = {},
+    market: Partial<typeof context> = {},
+  ) {
+    return valuation({ ...player, ...changes }, { ...context, ...market });
+  }
+
+  it.each([
+    {
+      label: "amateur-level players",
+      player: { ability: 25, potential: 30 },
+      reputation: 10,
+      minimum: 0,
+      maximum: 500,
+    },
+    {
+      label: "lower-division regulars",
+      player: { ability: 45, potential: 50 },
+      reputation: 25,
+      minimum: 1000,
+      maximum: 15_000,
+    },
+    {
+      label: "useful modest-league professionals",
+      player: { ability: 55, potential: 60 },
+      reputation: 45,
+      minimum: 25_000,
+      maximum: 90_000,
+    },
+    {
+      label: "established professionals",
+      player: { ability: 65, potential: 70 },
+      reputation: 65,
+      minimum: 250_000,
+      maximum: 900_000,
+    },
+    {
+      label: "strong top-division players",
+      player: { ability: 75, potential: 78 },
+      reputation: 80,
+      minimum: 2_000_000,
+      maximum: 8_000_000,
+    },
+    {
+      label: "proven elite young forwards",
+      player: { ability: 90, potential: 97, age: 22, position: "ST" },
+      reputation: 95,
+      minimum: 50_000_000,
+      maximum: 110_000_000,
+    },
+    {
+      label: "world-class prime forwards",
+      player: { ability: 95, potential: 97, position: "ST" },
+      reputation: 99,
+      minimum: 100_000_000,
+      maximum: 200_000_000,
+    },
+    {
+      label: "unproven academy prospects",
+      player: { ability: 45, potential: 99, age: 16 },
+      reputation: 85,
+      minimum: 2000,
+      maximum: 50_000,
+    },
+    {
+      label: "older useful professionals",
+      player: { ability: 65, potential: 70, age: 35 },
+      reputation: 65,
+      minimum: 20_000,
+      maximum: 140_000,
+    },
+  ] as const)("calibrates $label in GBP", (scenario) => {
+    const { value } = estimate(scenario.player, {
+      leagueReputation: scenario.reputation,
+    });
+    expect(value).toBeGreaterThanOrEqual(scenario.minimum);
+    expect(value).toBeLessThanOrEqual(scenario.maximum);
+  });
+
+  it("is monotonic in quality and league reputation, including band boundaries", () => {
+    let previous = 0;
+    for (let ability = 1; ability <= 99; ability++) {
+      const { value } = estimate({ ability, potential: 99, age: 20 });
+      expect(value).toBeGreaterThanOrEqual(previous);
+      previous = value;
+    }
+    previous = 0;
+    for (let reputation = 0; reputation <= 100; reputation++) {
+      const { value } = estimate({}, { leagueReputation: reputation });
+      expect(value).toBeGreaterThanOrEqual(previous);
+      previous = value;
+    }
+    expect(estimate({ ability: 1000 }).value).toBe(
+      estimate({ ability: 99 }).value,
+    );
+    expect(estimate({}, { leagueReputation: 1000 }).value).toBe(
+      estimate({}, { leagueReputation: 100 }).value,
+    );
+  });
+
+  it("prices prospects on demonstrated quality with bounded potential upside", () => {
+    const ordinary = estimate({ ability: 45, potential: 45, age: 16 });
+    const prospect = estimate({ ability: 45, potential: 99, age: 16 });
+    expect(prospect.value).toBeGreaterThan(ordinary.value);
+    expect(prospect.value).toBeLessThan(ordinary.value * 1.7);
+    expect(prospect.layers["Potential value"]).toBeCloseTo(1.65);
+    expect(prospect.value).toBeLessThan(estimate().value / 10);
+    expect(estimate({ potential: 99, age: 30 }).value).toBe(
+      estimate({ potential: 65, age: 30 }).value,
+    );
+  });
+
+  it("reduces older-player resale value while allowing later goalkeeper peaks", () => {
+    const prime = estimate({ age: 26 }).value;
+    const veteran = estimate({ age: 35 }).value;
+    expect(estimate({ age: 30 }).value).toBeLessThan(prime);
+    expect(veteran).toBeLessThan(prime * 0.25);
+    expect(estimate({ age: 40 }).value).toBeLessThan(veteran);
+    expect(estimate({ age: 18 }).value).toBeLessThan(prime);
+    const keeperRetention =
+      estimate({ position: "GK", age: 35 }).value /
+      estimate({ position: "GK", age: 26 }).value;
+    expect(keeperRetention).toBeGreaterThan(veteran / prime);
+  });
+
+  it("keeps position premiums modest for equally good prime-age players", () => {
+    const goalkeeper = estimate({ position: "GK" }).value;
+    const striker = estimate({ position: "ST" }).value;
+    expect(striker).toBeGreaterThan(goalkeeper);
+    expect(striker).toBeLessThan(goalkeeper * 1.5);
+  });
+
+  it("declines to zero at contract expiry without a large minimum fee", () => {
+    const contracted = estimate().value;
+    let previous = -1;
+    for (const months of [0, 1, 6, 12, 24, 36, 60]) {
+      const { value } = estimate({
+        contract_end: addMonths(context.date, months),
+      });
+      expect(value).toBeGreaterThan(previous);
+      previous = value;
+    }
+    expect(estimate({ contract_end: context.date }).value).toBe(0);
+    expect(estimate({ contract_end: "2026-01-01" }).value).toBe(0);
+    expect(
+      estimate(
+        {
+          ability: 99,
+          potential: 99,
+          position: "ST",
+          form: 10,
+          contract_end: context.date,
+        },
+        { leagueReputation: 100, hype: 10000, balance: 1_000_000_000 },
+      ).value,
+    ).toBe(0);
+    expect(
+      estimate({ contract_end: addMonths(context.date, 1) }).value,
+    ).toBeLessThan(contracted * 0.05);
+    expect(
+      estimate({ contract_end: addMonths(context.date, 6) }).value,
+    ).toBeLessThan(contracted * 0.25);
+    expect(
+      estimate({ contract_end: addMonths(context.date, 61) }).value,
+    ).toBe(estimate({ contract_end: addMonths(context.date, 120) }).value);
+    expect(estimate({ ability: 1, potential: 1, age: 40 }).value).toBe(0);
+  });
+
+  it("bounds hype, form, injuries and selling-club pressure", () => {
+    const baseline = estimate().value;
+    const inflated = estimate(
+      { form: 10000 },
+      {
+        hype: 10000,
+        crisis: -10000,
+        balance: 1_000_000_000,
+        philosophy: "Win now",
+      },
+    ).value;
+    const distressed = estimate(
+      { form: -10000, injury_until: "2099-07-01" },
+      {
+        hype: -10000,
+        crisis: 10000,
+        balance: -1_000_000_000,
+        philosophy: "Develop and sell",
+      },
+    ).value;
+    expect(inflated).toBeLessThan(baseline * 1.35);
+    expect(distressed).toBeGreaterThan(baseline * 0.35);
+    expect(distressed).toBeLessThan(baseline);
+    expect(estimate({ injury_until: "2025-07-01" }).value).toBe(baseline);
+    expect(estimate({ injury_until: "2026-07-08" }).value).toBeGreaterThan(
+      estimate({ injury_until: "2027-07-01" }).value,
+    );
+    expect(estimate({ injury_until: "2028-07-01" }).value).toBe(
+      estimate({ injury_until: "2099-07-01" }).value,
+    );
+  });
+
+  it("bounds long-career inflation and deflation", () => {
+    const future = { date: "2076-07-01" };
+    const contract = { contract_end: "2079-07-01" };
+    expect(
+      estimate(contract, { ...future, inflation: 10000 }).layers[
+        "Market context"
+      ],
+    ).toBe(1.75);
+    expect(
+      estimate(contract, { ...future, inflation: -10000 }).layers[
+        "Market context"
+      ],
+    ).toBe(0.75);
+  });
+
+  it("ignores identity and does not rewrite persisted wages or prior prices", () => {
+    const persisted = Object.freeze({
+      ...player,
+      country_id: 1,
+      name: "Player One",
+      wage: 1500,
+      value: 8_000_000,
+      profile: JSON.stringify({ identity: { nationalities: [1, 2] } }),
+    });
+    const alternate = {
+      ...persisted,
+      country_id: 243,
+      name: "Player Two",
+      profile: JSON.stringify({ identity: { nationalities: [242, 243] } }),
+    };
+    expect(valuation(persisted, context)).toEqual(valuation(alternate, context));
+    expect(persisted.wage).toBe(1500);
+    expect(persisted.value).toBe(8_000_000);
+  });
+});
+
+describe("club economic estimates", () => {
+  const economy: ClubEconomyInput = {
+    reputation: 65,
+    leagueReputation: 75,
+    tier: 1,
+    capacity: 15_000,
+    fanMood: 65,
+    homeMatches: 19,
+  };
+  const business = {
+    annualOperatingRevenue: 10_000_000,
+    reputation: 50,
+    cashBalance: 2_000_000,
+    financialDebt: 5_000_000,
+  };
+
+  it.each([
+    ["lower divisions", 18, 30, 7, 1500, 25_000, 300_000],
+    ["small top-flight markets", 35, 30, 1, 3500, 500_000, 3_000_000],
+    ["regional professionals", 48, 55, 3, 7500, 2_000_000, 7_000_000],
+    ["strong second divisions", 65, 80, 2, 25_000, 15_000_000, 75_000_000],
+    ["elite clubs", 95, 95, 1, 75_000, 350_000_000, 650_000_000],
+  ] as const)(
+    "calibrates annual operating revenue for %s",
+    (_label, reputation, leagueReputation, tier, capacity, minimum, maximum) => {
+      const revenue = estimateClubRevenue({
+        ...economy,
+        reputation,
+        leagueReputation,
+        tier,
+        capacity,
+      });
+      expect(revenue.currency).toBe("GBP");
+      expect(revenue.annualOperatingRevenue).toBeGreaterThanOrEqual(minimum);
+      expect(revenue.annualOperatingRevenue).toBeLessThanOrEqual(maximum);
+      expect(revenue.annualOperatingRevenue).toBe(
+        revenue.annualCommercial + revenue.annualMatchday,
+      );
+      expect(revenue.annualMatchday).toBe(revenue.matchdayPerHomeMatch * 19);
+    },
+  );
+
+  it("increases revenue with reputation and reduces it down the pyramid", () => {
+    const revenue = estimateClubRevenue(economy).annualOperatingRevenue;
+    expect(
+      estimateClubRevenue({ ...economy, reputation: 75 }).annualOperatingRevenue,
+    ).toBeGreaterThan(revenue);
+    expect(
+      estimateClubRevenue({ ...economy, leagueReputation: 85 })
+        .annualOperatingRevenue,
+    ).toBeGreaterThan(revenue);
+    expect(
+      estimateClubRevenue({ ...economy, tier: 2 }).annualOperatingRevenue,
+    ).toBeLessThan(revenue);
+    expect(estimateClubRevenue({ ...economy, homeMatches: 0 }).annualMatchday).toBe(
+      0,
+    );
+  });
+
+  it("seeds affordable budgets without mutating existing cash or commitments", () => {
+    const existing = Object.freeze({
+      ...economy,
+      balance: -500_000,
+      transfer_budget: 300_000,
+      wage_budget: 250_000,
+    });
+    const budgets = initialClubFinances(existing);
+    const revenue = estimateClubRevenue(economy).annualOperatingRevenue;
+    expect(budgets.balance).toBe(Math.round(revenue * 0.2));
+    expect(budgets.transfer_budget).toBe(Math.round(revenue * 0.08));
+    expect(budgets.wage_budget).toBe(Math.round((revenue * 0.55) / 52));
+    expect(budgets.transfer_budget).toBeLessThan(budgets.balance);
+    expect(existing.balance).toBe(-500_000);
+    expect(existing.transfer_budget).toBe(300_000);
+    expect(existing.wage_budget).toBe(250_000);
+  });
+
+  it("separates enterprise value from cash, transfer budget and squad value", () => {
+    const estimate = clubValuation(business);
+    expect(estimate).toEqual({
+      currency: "GBP",
+      revenueMultiple: 1.5,
+      enterpriseValue: 15_000_000,
+      netDebt: 3_000_000,
+      equityValue: 12_000_000,
+      fundingGap: 0,
+    });
+    const withOtherMetrics = {
+      ...business,
+      transfer_budget: 20_000_000,
+      wage_budget: 200_000,
+      squadValue: 500_000_000,
+    };
+    expect(clubValuation(withOtherMetrics)).toEqual(estimate);
+    expect(
+      clubValuation({ ...business, cashBalance: 20_000_000 }).enterpriseValue,
+    ).toBe(estimate.enterpriseValue);
+    expect(
+      clubValuation({ ...business, financialDebt: 30_000_000 }).enterpriseValue,
+    ).toBe(estimate.enterpriseValue);
+  });
+
+  it("values stronger businesses more highly without requiring player-value sums", () => {
+    const baseline = clubValuation(business).enterpriseValue;
+    expect(
+      clubValuation({ ...business, reputation: 75 }).enterpriseValue,
+    ).toBeGreaterThan(baseline);
+    expect(
+      clubValuation({ ...business, annualOperatingRevenue: 20_000_000 })
+        .enterpriseValue,
+    ).toBe(baseline * 2);
+    expect(clubValuation({ ...business, reputation: 1000 }).revenueMultiple).toBe(
+      4.5,
+    );
+    expect(clubValuation({ ...business, reputation: -1000 }).revenueMultiple).toBe(
+      0.5,
+    );
+  });
+
+  it("keeps lower-division enterprises modest and elite businesses in the billions", () => {
+    const local = {
+      ...economy,
+      reputation: 18,
+      leagueReputation: 30,
+      tier: 7,
+      capacity: 1500,
+    };
+    const elite = {
+      ...economy,
+      reputation: 95,
+      leagueReputation: 95,
+      capacity: 75_000,
+      homeMatches: 21,
+    };
+    const localValue = clubValuation({
+      ...business,
+      reputation: local.reputation,
+      annualOperatingRevenue: estimateClubRevenue(local).annualOperatingRevenue,
+    }).enterpriseValue;
+    const eliteValue = clubValuation({
+      ...business,
+      reputation: elite.reputation,
+      annualOperatingRevenue: estimateClubRevenue(elite).annualOperatingRevenue,
+    }).enterpriseValue;
+    expect(localValue).toBeGreaterThan(25_000);
+    expect(localValue).toBeLessThan(250_000);
+    expect(eliteValue).toBeGreaterThan(1_000_000_000);
+    expect(eliteValue).toBeLessThan(3_000_000_000);
+  });
+
+  it("handles net cash, overdrafts and debt exceeding the enterprise value", () => {
+    expect(clubValuation({ ...business, financialDebt: 0 })).toMatchObject({
+      netDebt: -2_000_000,
+      equityValue: 17_000_000,
+      fundingGap: 0,
+    });
+    expect(
+      clubValuation({ ...business, cashBalance: -2_000_000, financialDebt: 0 }),
+    ).toEqual(
+      clubValuation({ ...business, cashBalance: 0, financialDebt: 2_000_000 }),
+    );
+    expect(
+      clubValuation({ ...business, financialDebt: 30_000_000 }),
+    ).toMatchObject({ equityValue: 0, fundingGap: 13_000_000 });
+    expect(
+      clubValuation({
+        ...business,
+        cashBalance: business.cashBalance + 8_000_000,
+        financialDebt: business.financialDebt + 8_000_000,
+      }),
+    ).toEqual(clubValuation(business));
+    expect(
+      clubValuation({ ...business, annualOperatingRevenue: 0, cashBalance: 0 }),
+    ).toMatchObject({ enterpriseValue: 0, equityValue: 0, fundingGap: 5_000_000 });
+  });
+
+  it("rejects invalid estimates instead of creating non-finite money", () => {
+    expect(() => estimateClubRevenue({ ...economy, capacity: NaN })).toThrow();
+    expect(() => initialClubFinances({ ...economy, fanMood: Infinity })).toThrow();
+    expect(() => clubValuation({ ...business, financialDebt: -1 })).toThrow();
+    expect(() => clubValuation({ ...business, cashBalance: NaN })).toThrow();
+    expect(() =>
+      clubValuation({ ...business, annualOperatingRevenue: Infinity }),
+    ).toThrow();
+  });
+});
+
 describe("financial regulatory accounting", () => {
   let store: Store;
   beforeAll(async () => {
@@ -81,6 +528,29 @@ describe("financial regulatory accounting", () => {
     }),
   );
   afterAll(async () => await store?.close());
+  it("uses league size and the calibrated revenue model for live club projections", async () => {
+    const { projectedOperatingRevenue } = await import("./finance.ts");
+    const club = (await store.get<import("../shared/types.ts").Club>(
+      "SELECT * FROM clubs WHERE id = 1",
+    ))!;
+    const league = (await store.get<import("../shared/types.ts").League>(
+      "SELECT * FROM leagues WHERE id = ?", club.league_id,
+    ))!;
+    const size = (await store.get<{ total: number }>(
+      "SELECT count(*) AS total FROM standings WHERE league_id = ?", club.league_id,
+    ))!.total;
+    expect(await projectedOperatingRevenue(store, club)).toBe(
+      estimateClubRevenue({
+        reputation: club.reputation,
+        leagueReputation: league.reputation,
+        tier: league.tier,
+        capacity: club.capacity,
+        fanMood: club.fan_mood,
+        homeMatches: size + 1,
+      }).annualOperatingRevenue,
+    );
+  });
+
   it("caps player-registration amortization at five years and does not expense the cash price twice", async () => {
     expect(assetAmortization(50_000_000, "2026-07-01", "2034-07-01")).toBe(
       10_000_000,

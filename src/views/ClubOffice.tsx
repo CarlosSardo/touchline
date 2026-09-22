@@ -229,7 +229,7 @@ export function Finances() {
           detail={`${money(club.wage_budget - data.wages)} headroom`}
         />
         <Stat
-          label="Squad asset value"
+          label="Squad market value"
           value={money(data.squadValue)}
           icon={TrendingUp}
           detail="Includes players loaned out"
@@ -325,6 +325,9 @@ export function Finances() {
                 <h3 className="subsection-title">Season position</h3>
                 <DetailList
                   items={[
+                    ["Club enterprise estimate", money(data.valuation.enterpriseValue)],
+                    ["Operating revenue / year (estimate)", money(data.valuation.annualOperatingRevenue)],
+                    ["Revenue multiple", `${data.valuation.revenueMultiple.toFixed(2)}x`],
                     ["Operating income", money(club.income)],
                     ["Operating expenditure", money(club.spending)],
                     [

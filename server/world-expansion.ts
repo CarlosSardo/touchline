@@ -1,16 +1,12 @@
-import seedrandom from "seedrandom";
-import { Store } from "./db.ts";
-import { generateWorld, ensureClubRosters } from "./world.ts";
-import {
-  clubIdentity,
-  culturalPersonName,
-  playerBackground,
-} from "./world-names.ts";
+import type { Store } from "./db.ts";
+import { buildWorldStructure, ensureClubRosters } from "./world.ts";
+import { clubIdentity, localizedLegacyClubName } from "./world-names.ts";
 import { ensureClubSupport } from "./club-support.ts";
 import { scheduleDomesticLeagues } from "./calendar.ts";
 import {
   WORLD_VERSION,
   footballConfederation,
+  minimumReserveTier,
   reservePolicy,
   reserveTeamName,
   youthGroups,
@@ -20,7 +16,6 @@ import type {
   Country,
   GameState,
   League,
-  PlayerProfile,
   Staff,
 } from "../shared/types.ts";
 
@@ -48,20 +43,6 @@ async function insertRow(
   );
 }
 
-async function updateExpansionRows(
-  store: Store,
-  table: "players" | "clubs" | "staff",
-  rows: Record<string, string | number | null>[],
-  columns: string,
-  assignments: string,
-) {
-  for (let offset = 0; offset < rows.length; offset += 1000)
-    await store.run(
-      `UPDATE target SET ${assignments} FROM ${table} AS target JOIN OPENJSON(?) WITH (${columns}) AS source ON source.id = target.id`,
-      JSON.stringify(rows.slice(offset, offset + 1000)),
-    );
-}
-
 export async function expandWorld(store: Store) {
   const world = await store.meta<{
     version?: number;
@@ -71,43 +52,43 @@ export async function expandWorld(store: Store) {
   if ((world.version ?? 1) >= WORLD_VERSION)
     return { changed: false, clubsAdded: 0, leaguesAdded: 0, playersAdded: 0 };
   const state = await store.meta<GameState>("state");
-  const blueprint = await Store.createTest("world-expansion");
+  const countries = await store.all<Country>(
+    "SELECT * FROM countries ORDER BY id",
+  );
+  const blueprint = buildWorldStructure(
+    { expanded: true, structureOnly: true, seed: state.seed },
+    countries,
+  );
   const counts = {
     changed: true,
     clubsAdded: 0,
     leaguesAdded: 0,
     playersAdded: 0,
   };
-  try {
-    await blueprint.schema();
-    await generateWorld(blueprint, {
-      expanded: true,
-      structureOnly: true,
-      countryLimit: world.countries,
-      seed: state.seed,
-    });
+  return store.transaction(async () => {
+    const currentWorld = await store.meta<{ version?: number }>("world");
+    if ((currentWorld.version ?? 1) >= WORLD_VERSION)
+      return { changed: false, clubsAdded: 0, leaguesAdded: 0, playersAdded: 0 };
     const sourceCountries = new Map(
-      (await blueprint.all<Country>("SELECT * FROM countries")).map(
-        (country) => [country.code, country],
-      ),
+      blueprint.countryRows.map((country) => [country.code, country]),
     );
-    const blueprintClubs = await blueprint.all<Club>(
-      "SELECT * FROM clubs ORDER BY id",
-    );
-    const blueprintLeagues = await blueprint.all<League>(
-      "SELECT * FROM leagues ORDER BY tier,id",
-    );
+    const blueprintClubs = blueprint.rows.clubs as unknown as Club[];
+    const blueprintLeagues = blueprint.rows.leagues as unknown as League[];
     const sourceStaff = new Map<number, Staff[]>();
-    for (const staff of await blueprint.all<Staff>(
-      "SELECT * FROM staff WHERE club_id IS NOT NULL ORDER BY id",
-    )) {
+    for (const staff of blueprint.rows.staff as unknown as Staff[]) {
       const staffRows = sourceStaff.get(staff.club_id!) ?? [];
       staffRows.push(staff);
       sourceStaff.set(staff.club_id!, staffRows);
     }
     const newLeagues: number[] = [];
+    const calendarExists = await store.get(
+      "SELECT TOP (1) id FROM fixtures WHERE season = ?",
+      state.season,
+    );
     const activeFromSeason =
-      state.date < `${state.season}-08-01` ? state.season : state.season + 1;
+      !calendarExists && state.date === `${state.season}-07-01`
+        ? state.season
+        : state.season + 1;
     const addLeague = async (
       country: Country,
       name: string,
@@ -127,6 +108,15 @@ export async function expandWorld(store: Store) {
             Math.max(10, country.reputation - Math.max(0, tier - 1) * 10),
             JSON.stringify({
               ...data,
+              ...(activeFromSeason > state.season ? {
+                promotion: 0,
+                relegation: 0,
+                pendingStructure: {
+                  ...data,
+                  fromSeason: activeFromSeason,
+                  worldVersion: WORLD_VERSION,
+                },
+              } : {}),
               activeFromSeason,
               worldVersion: WORLD_VERSION,
             }),
@@ -137,10 +127,6 @@ export async function expandWorld(store: Store) {
       counts.leaguesAdded++;
       return id;
     };
-    await store.transaction(async () => {
-      const countries = await store.all<Country>(
-        "SELECT * FROM countries ORDER BY id",
-      );
       let nextStaffId = (await store.get<{ id: number }>(
         "SELECT coalesce(max(id),0) AS id FROM staff WITH (UPDLOCK,HOLDLOCK)",
       ))!.id;
@@ -179,77 +165,90 @@ export async function expandWorld(store: Store) {
           "SELECT * FROM clubs WHERE country_id = ? AND type = 'club' ORDER BY id",
           country.id,
         );
-        const sourceByKey = new Map(
-          sourceClubs.map((club) => [
-            JSON.parse(club.data).worldKey as string,
-            club,
-          ]),
-        );
-        const clubUpdates = currentClubs.map((club, index) => {
+        const originalNames = new Map(currentClubs.map((club) => [club.id, club.name]));
+        const usedNames = new Set(currentClubs.map((club) => club.name));
+        for (const [index, club] of currentClubs.entries()) {
           const data = JSON.parse(club.data);
-          const identity = clubIdentity(country, index);
-          return {
-            id: club.id,
-            name: club.id === state.clubId ? club.name : identity.name,
-            city: identity.city,
-            short_name: identity.shortName,
-            data: JSON.stringify({
+          let variant = index;
+          let name = localizedLegacyClubName(country, club.name, club.city, variant);
+          while (name !== club.name && usedNames.has(name))
+            name = localizedLegacyClubName(country, club.name, club.city, ++variant);
+          if (!data.worldKey || name !== club.name) {
+            const nextData = JSON.stringify({
               ...data,
-              worldKey: `${country.code}:club:${index}`,
+              worldKey: data.worldKey ?? `${country.code}:club:${index}`,
               worldVersion: WORLD_VERSION,
-              previousName: data.previousName ?? club.name,
-            }),
-          };
-        });
-        await updateExpansionRows(
-          store,
-          "clubs",
-          clubUpdates,
-          "id int,name nvarchar(max),city nvarchar(max),short_name nvarchar(max),data nvarchar(max)",
-          "name = source.name, city = source.city, short_name = source.short_name, data = source.data",
-        );
+              ...(name !== club.name ? { legacyName: data.legacyName ?? club.name } : {}),
+            });
+            await store.run(
+              "UPDATE clubs SET name = ?, data = ? WHERE id = ?",
+              name,
+              nextData,
+              club.id,
+            );
+            usedNames.delete(club.name);
+            usedNames.add(name);
+            club.name = name;
+            club.data = nextData;
+          }
+        }
         const divisions = await store.all<League>(
           "SELECT * FROM leagues WHERE country_id = ? AND kind = 'league' AND age_group = 'Senior' AND tier > 0 AND coalesce(JSON_VALUE(data,'$.reserveOnly'),'false') NOT IN ('true','1') ORDER BY tier",
           country.id,
-        );
-        const highestExistingTier = Math.max(
-          0,
-          ...divisions.map((league) => league.tier),
         );
         const sourceDivisions = blueprintLeagues.filter(
           (league) =>
             league.country_id === sourceCountry.id &&
             league.kind === "league" &&
             league.age_group === "Senior" &&
-            league.tier > highestExistingTier &&
+            league.tier > 0 &&
             !JSON.parse(league.data).reserveOnly,
         );
-        let ordinal = currentClubs.length;
+        let ordinal = Math.max(
+          currentClubs.length,
+          ...currentClubs.map((club) => {
+            const key = JSON.parse(club.data).worldKey;
+            const prefix = `${country.code}:club:`;
+            const index = typeof key === "string" && key.startsWith(prefix)
+              ? Number(key.slice(prefix.length))
+              : -1;
+            return Number.isSafeInteger(index) ? index + 1 : 0;
+          }),
+        );
         const copyClub = async (
           source: Club,
-          leagueId: number,
+          leagueId: number | null,
           parent: Club | null = null,
+          admission: Record<string, number> = {},
         ) => {
-          const identity = clubIdentity(country, ordinal);
+          let identity = clubIdentity(country, ordinal);
+          while (!parent && usedNames.has(identity.name))
+            identity = clubIdentity(country, ++ordinal);
           const worldKey = parent
             ? `${JSON.parse(parent.data).worldKey}:reserves`
             : `${country.code}:club:${ordinal++}`;
+          const name = parent
+            ? reserveTeamName(parent.name, country.code)
+            : identity.name;
+          usedNames.add(name);
           const id = await insertRow(store, "clubs", source, {
             country_id: country.id,
             league_id: leagueId,
             parent_id: parent?.id ?? null,
-            name: parent
-              ? reserveTeamName(parent.name, country.code)
-              : identity.name,
+            name,
             city: parent?.city ?? identity.city,
             short_name: parent ? `${parent.short_name}B` : identity.shortName,
             data: JSON.stringify({
               ...JSON.parse(source.data),
               worldKey,
               worldVersion: WORLD_VERSION,
+              activeFromSeason,
+              ...admission,
+              managerCareer: [{ season: state.season, club: name }],
             }),
           });
-          newStandings.push({ league_id: leagueId, club_id: id });
+          if (leagueId !== null)
+            newStandings.push({ league_id: leagueId, club_id: id });
           newClubPlans.push({ club_id: id });
           if (newClubPlans.length === 1000) await flushClubs();
           const staffRows = (sourceStaff.get(source.id) ?? []).map((staff) => ({
@@ -262,36 +261,47 @@ export async function expandWorld(store: Store) {
           return id;
         };
         for (const division of sourceDivisions) {
-          const id = await addLeague(
-            country,
-            division.name,
-            division.tier,
-            "Senior",
-            JSON.parse(division.data),
-          );
-          for (const source of sourceClubs.filter(
+          const templates = sourceClubs.filter(
             (club) => club.league_id === division.id,
-          )) {
-            await copyClub(
-              sourceByKey.get(`${country.code}:club:${ordinal}`) ?? source,
+          );
+          const existing = divisions.filter(
+            (league) => league.tier === division.tier,
+          );
+          const rules = JSON.parse(division.data);
+          const id = existing[0]?.id ?? await addLeague(
+            country, division.name, division.tier, "Senior", rules,
+          );
+          if (existing.length)
+            await store.run(
+              "UPDATE leagues SET data = ? WHERE id = ?",
+              JSON.stringify({
+                ...JSON.parse(existing[0].data),
+                pendingStructure: {
+                  name: division.name,
+                  promotion: rules.promotion,
+                  relegation: rules.relegation,
+                  targetFirstTeams: templates.length,
+                  fromSeason: activeFromSeason,
+                  worldVersion: WORLD_VERSION,
+                },
+              }),
               id,
             );
+          const existingIds = new Set(existing.map((league) => league.id));
+          const occupied = currentClubs.filter((club) =>
+            (club.league_id !== null && existingIds.has(club.league_id)) ||
+            existingIds.has(Number(JSON.parse(club.data).pendingSeniorLeague)),
+          ).length;
+          for (let index = occupied; index < templates.length; index++) {
+            await copyClub(
+              templates[index],
+              existing.length ? null : id,
+              null,
+              existing.length
+                ? { pendingSeniorLeague: id, admitFromSeason: activeFromSeason }
+                : {},
+            );
           }
-        }
-        if (sourceDivisions.length && divisions.length) {
-          const lowest = divisions.at(-1)!;
-          const data = JSON.parse(lowest.data);
-          await store.run(
-            "UPDATE leagues SET data = ? WHERE id = ?",
-            JSON.stringify({
-              ...data,
-              relegation: sourceDivisions[0]
-                ? JSON.parse(sourceDivisions[0].data).promotion
-                : 0,
-              movementFromSeason: activeFromSeason,
-            }),
-            lowest.id,
-          );
         }
         const policy = reservePolicy(country.code);
         const sourceReserves = blueprintClubs.filter(
@@ -303,15 +313,18 @@ export async function expandWorld(store: Store) {
           country.id,
         );
         for (const reserve of existingReserves) {
-          const parent = (await store.get<Club>(
-            "SELECT * FROM clubs WHERE id = ?",
-            reserve.parent_id!,
-          ))!;
+          const parent = currentClubs.find((club) => club.id === reserve.parent_id);
+          const originalParent = originalNames.get(reserve.parent_id ?? -1);
+          const name = parent && originalParent && parent.name !== originalParent &&
+            [reserveTeamName(originalParent, country.code), `${originalParent} B`].includes(reserve.name)
+            ? reserveTeamName(parent.name, country.code)
+            : reserve.name;
           await store.run(
-            "UPDATE clubs SET name = ?,data = ? WHERE id = ?",
-            reserveTeamName(parent.name, country.code),
+            "UPDATE clubs SET name = ?, data = ? WHERE id = ?",
+            name,
             JSON.stringify({
               ...JSON.parse(reserve.data),
+              ...(name !== reserve.name ? { legacyName: reserve.name } : {}),
               reservePolicy: policy,
               worldVersion: WORLD_VERSION,
             }),
@@ -330,31 +343,38 @@ export async function expandWorld(store: Store) {
               ),
           );
           if (missingParents.length) {
-            const leagueId = await addLeague(
+            const existingDevelopment = await store.get<League>(
+              "SELECT TOP (1) * FROM leagues WHERE country_id = ? AND kind = 'league' AND age_group = 'Senior' AND JSON_VALUE(data,'$.reserveOnly') IN ('true','1') ORDER BY id",
+              country.id,
+            );
+            const leagueId = existingDevelopment?.id ?? await addLeague(
               country,
               `${country.name} Development League`,
               policy.mode === "separate" ? (policy.entryTier ?? 0) : 0,
               "Senior",
               {
                 reserveOnly: true,
+                reserveCompetition: policy.competition,
                 promotion: 0,
                 relegation: 0,
                 reservePolicy: policy,
               },
             );
             for (const [index, parent] of missingParents.entries()) {
-              const id = await copyClub(
+              await copyClub(
                 sourceReserves[index % sourceReserves.length],
                 leagueId,
                 parent,
+                policy.mode === "pyramid"
+                  ? {
+                      pendingSeniorTier: Math.max(
+                        policy.entryTier!,
+                        minimumReserveTier(country.code, 1),
+                      ),
+                      admitFromSeason: activeFromSeason,
+                    }
+                  : {},
               );
-              if (policy.mode === "pyramid")
-                await store.run(
-                  "UPDATE clubs SET data = JSON_MODIFY(JSON_MODIFY(data,'$.pendingSeniorTier',?),'$.admitFromSeason',?) WHERE id = ?",
-                  policy.entryTier!,
-                  state.season + 1,
-                  id,
-                );
             }
           }
         }
@@ -364,10 +384,35 @@ export async function expandWorld(store: Store) {
             country.id,
             age,
           );
+          if (!missing.length) continue;
+          const existingGroups = await store.all<{ id: number; members: number }>(
+            "SELECT leagues.id,count(standings.club_id) AS members FROM leagues LEFT JOIN standings ON standings.league_id = leagues.id WHERE leagues.country_id = ? AND leagues.kind = 'league' AND leagues.age_group = ? GROUP BY leagues.id ORDER BY count(standings.club_id),leagues.id",
+            country.id,
+            age,
+          );
+          const deferYouthMembership = async (club: Club, leagueId: number) => {
+            const data = JSON.parse(club.data);
+            await store.run(
+              "UPDATE clubs SET data = ? WHERE id = ?",
+              JSON.stringify({
+                ...data,
+                admitFromSeason: Math.max(data.admitFromSeason ?? 0, activeFromSeason),
+                pendingYouthLeagues: { ...data.pendingYouthLeagues, [age]: leagueId },
+              }),
+              club.id,
+            );
+          };
+          if (missing.length === 1 && existingGroups.some((group) => group.members < 16)) {
+            await deferYouthMembership(
+              missing[0],
+              existingGroups.find((group) => group.members < 16)!.id,
+            );
+            continue;
+          }
           for (const [index, group] of youthGroups(missing).entries()) {
             const id = await addLeague(
               country,
-              `${country.name} ${age} Development - Group ${index + 1}`,
+              `${country.name} ${age} Development - Group ${existingGroups.length + index + 1}`,
               0,
               age,
               { youth: true, continental: 0, promotion: 0, relegation: 0 },
@@ -379,89 +424,19 @@ export async function expandWorld(store: Store) {
                 club_id: club.id,
               })),
             );
+            if (group.length === 1 && existingGroups.length) {
+              const companion = await store.get<Club>(
+                "SELECT TOP (1) clubs.* FROM clubs JOIN standings ON standings.club_id = clubs.id WHERE standings.league_id = ? ORDER BY clubs.id DESC",
+                existingGroups[0].id,
+              );
+              if (companion) await deferYouthMembership(companion, id);
+            }
           }
         }
-        let playerCursor = 0;
-        while (true) {
-          const players = await store.all<{ id: number; profile: string }>(
-            "SELECT TOP (1000) id,profile FROM players WHERE country_id = ? AND id > ? ORDER BY id",
-            country.id,
-            playerCursor,
-          );
-          if (!players.length) break;
-          const updates = players.map((player) => {
-            const profile = JSON.parse(player.profile) as PlayerProfile;
-            profile.identity = {
-              ...profile.identity,
-              ...playerBackground(
-                seedrandom(`${state.seed}:background:${player.id}`),
-                country,
-                countries,
-              ),
-            };
-            const namingCountry =
-              countries.find(
-                (entry) => entry.id === profile.identity.nameOriginCountryId,
-              ) ?? country;
-            return {
-              id: player.id,
-              name: culturalPersonName(
-                seedrandom(`${state.seed}:identity:${player.id}`),
-                namingCountry,
-              ),
-              profile: JSON.stringify(profile),
-            };
-          });
-          await updateExpansionRows(
-            store,
-            "players",
-            updates,
-            "id int,name nvarchar(max),profile nvarchar(max)",
-            "name = source.name, profile = source.profile",
-          );
-          playerCursor = players.at(-1)!.id;
-        }
-        const managers = (
-          await store.all<{ id: number }>(
-            "SELECT id FROM clubs WHERE country_id = ? ORDER BY id",
-            country.id,
-          )
-        ).map((club) => ({
-          id: club.id,
-          manager: culturalPersonName(
-            seedrandom(`${state.seed}:manager:${club.id}`),
-            country,
-          ),
-        }));
-        await updateExpansionRows(
-          store,
-          "clubs",
-          managers,
-          "id int,manager nvarchar(max)",
-          "manager = source.manager",
-        );
-        const staffNames = (
-          await store.all<{ id: number }>(
-            "SELECT staff.id FROM staff JOIN clubs ON clubs.id = staff.club_id WHERE clubs.country_id = ? ORDER BY staff.id",
-            country.id,
-          )
-        ).map((staff) => ({
-          id: staff.id,
-          name: culturalPersonName(
-            seedrandom(`${state.seed}:staff:${staff.id}`),
-            country,
-          ),
-        }));
-        await updateExpansionRows(
-          store,
-          "staff",
-          staffNames,
-          "id int,name nvarchar(max)",
-          "name = source.name",
-        );
       }
       await flushClubs();
       counts.playersAdded = await ensureClubRosters(store);
+      await ensureClubSupport(store);
       const addedLeagues = new Set(newLeagues);
       await scheduleDomesticLeagues(
         store,
@@ -469,7 +444,9 @@ export async function expandWorld(store: Store) {
           await store.all<League>(
             "SELECT * FROM leagues WHERE kind = 'league' ORDER BY id",
           )
-        ).filter((league) => addedLeagues.has(league.id)),
+        ).filter((league) =>
+          activeFromSeason === state.season || addedLeagues.has(league.id),
+        ),
         state.season,
         state.date,
       );
@@ -489,10 +466,6 @@ export async function expandWorld(store: Store) {
           "SELECT count(*) AS total FROM players WHERE age_group != 'Senior'",
         ))!.total,
       });
-    });
-    await ensureClubSupport(store);
     return { ...counts, activeFromSeason };
-  } finally {
-    await blueprint.close();
-  }
+  });
 }

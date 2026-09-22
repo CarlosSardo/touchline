@@ -36,6 +36,123 @@ export interface FinancialAssessment {
   source: string;
 }
 
+export interface ClubEconomyInput {
+  reputation: number;
+  leagueReputation: number;
+  tier: number;
+  capacity: number;
+  fanMood: number;
+  homeMatches?: number;
+}
+
+export interface ClubRevenueEstimate {
+  currency: "GBP";
+  annualCommercial: number;
+  matchdayPerHomeMatch: number;
+  annualMatchday: number;
+  annualOperatingRevenue: number;
+}
+
+export function estimateClubRevenue(
+  input: ClubEconomyInput,
+): ClubRevenueEstimate {
+  const homeMatches = input.homeMatches ?? 19;
+  if (
+    ![
+      input.reputation,
+      input.leagueReputation,
+      input.tier,
+      input.capacity,
+      input.fanMood,
+      homeMatches,
+    ].every(Number.isFinite)
+  )
+    throw new Error("Club revenue inputs must be finite.");
+  const reputation = clamp(input.reputation, 0, 100) / 100;
+  const league = clamp(input.leagueReputation, 0, 100) / 100;
+  const tier = clamp(input.tier, 1, 10);
+  const annualCommercial = Math.round(
+    Math.max(
+      2500,
+      500_000_000 * reputation ** 3 * league ** 3 * 0.45 ** (tier - 1),
+    ),
+  );
+  const attendance = clamp(
+    0.2 + reputation * 0.2 + clamp(input.fanMood, 0, 100) / 200,
+    0.2,
+    0.9,
+  );
+  const ticketPrice = 5 + (55 * reputation * league) / Math.sqrt(tier);
+  const matchdayPerHomeMatch = Math.round(
+    clamp(input.capacity, 0, 150_000) * attendance * ticketPrice,
+  );
+  const annualMatchday =
+    matchdayPerHomeMatch * Math.floor(clamp(homeMatches, 0, 40));
+  return {
+    currency: "GBP",
+    annualCommercial,
+    matchdayPerHomeMatch,
+    annualMatchday,
+    annualOperatingRevenue: annualCommercial + annualMatchday,
+  };
+}
+
+export function initialClubFinances(
+  input: ClubEconomyInput,
+): Pick<Club, "balance" | "transfer_budget" | "wage_budget"> {
+  const { annualOperatingRevenue } = estimateClubRevenue(input);
+  return {
+    balance: Math.round(annualOperatingRevenue * 0.2),
+    transfer_budget: Math.round(annualOperatingRevenue * 0.08),
+    wage_budget: Math.round((annualOperatingRevenue * 0.55) / 52),
+  };
+}
+
+export interface ClubValuationInput {
+  annualOperatingRevenue: number;
+  reputation: number;
+  cashBalance: number;
+  financialDebt: number;
+}
+
+export interface ClubValuation {
+  currency: "GBP";
+  revenueMultiple: number;
+  enterpriseValue: number;
+  netDebt: number;
+  equityValue: number;
+  fundingGap: number;
+}
+
+export function clubValuation(input: ClubValuationInput): ClubValuation {
+  if (
+    ![
+      input.annualOperatingRevenue,
+      input.reputation,
+      input.cashBalance,
+      input.financialDebt,
+    ].every(Number.isFinite) ||
+    input.annualOperatingRevenue < 0 ||
+    input.financialDebt < 0
+  )
+    throw new Error(
+      "Club valuation requires finite inputs and non-negative revenue and debt.",
+    );
+  const revenueMultiple = 0.5 + 4 * (clamp(input.reputation, 0, 100) / 100) ** 2;
+  const enterpriseValue = Math.round(
+    input.annualOperatingRevenue * revenueMultiple,
+  );
+  const netDebt = round(input.financialDebt - input.cashBalance, 2);
+  return {
+    currency: "GBP",
+    revenueMultiple,
+    enterpriseValue,
+    netDebt,
+    equityValue: Math.max(0, round(enterpriseValue - netDebt, 2)),
+    fundingGap: Math.max(0, round(netDebt - enterpriseValue, 2)),
+  };
+}
+
 export async function recordFinancialItem(
   store: Store,
   clubId: number,
@@ -155,18 +272,22 @@ export async function sellPlayerAsset(
 }
 
 export async function projectedOperatingRevenue(store: Store, club: Club) {
-  const annualCommercial = Math.round(club.reputation ** 3 * 0.9) * 52;
+  const league = await store.get<League>(
+    "SELECT * FROM leagues WHERE id = ?",
+    club.league_id,
+  );
   const size = (await store.get<{ total: number }>(
     "SELECT count(*) AS total FROM standings WHERE league_id = ?",
     club.league_id,
   ))!.total;
-  const homeMatches = Math.max(7, size - 1) + 2;
-  const gates =
-    homeMatches *
-    club.capacity *
-    (0.25 + club.fan_mood / 250) *
-    Math.max(5, club.reputation / 3);
-  return Math.round(annualCommercial + gates);
+  return estimateClubRevenue({
+    reputation: club.reputation,
+    leagueReputation: league?.reputation ?? club.reputation,
+    tier: league?.tier ?? 1,
+    capacity: club.capacity,
+    fanMood: club.fan_mood,
+    homeMatches: Math.max(0, size - 1) + 2,
+  }).annualOperatingRevenue;
 }
 
 export async function assessFinances(

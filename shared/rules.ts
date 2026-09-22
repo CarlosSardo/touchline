@@ -877,6 +877,19 @@ export const DEFAULT_SETTINGS: Settings = {
   ),
 };
 
+const PLAYER_QUALITY_VALUES: readonly (readonly [number, number])[] = [
+  [1, 100],
+  [25, 1000],
+  [35, 5000],
+  [45, 25_000],
+  [55, 125_000],
+  [65, 750_000],
+  [75, 5_000_000],
+  [85, 30_000_000],
+  [95, 110_000_000],
+  [99, 160_000_000],
+];
+
 export function valuation(
   player: Pick<
     Player,
@@ -898,64 +911,73 @@ export function valuation(
     hype: number;
   },
 ) {
-  const quality = 100_000_000 * (player.ability / 100) ** 5;
+  const ability = clamp(player.ability);
+  let quality = PLAYER_QUALITY_VALUES[0][1];
+  for (let index = 1; index < PLAYER_QUALITY_VALUES.length; index++) {
+    const [lowerAbility, lowerValue] = PLAYER_QUALITY_VALUES[index - 1];
+    const [upperAbility, upperValue] = PLAYER_QUALITY_VALUES[index];
+    if (ability <= upperAbility) {
+      const progress = (ability - lowerAbility) / (upperAbility - lowerAbility);
+      quality = lowerValue * (upperValue / lowerValue) ** progress;
+      break;
+    }
+  }
   const potential =
     1 +
-    (Math.max(0, player.potential - player.ability) / 60) *
-      (player.age < 25 ? 1 : 0.25);
+    clamp((clamp(player.potential) - ability) / 30, 0, 1) *
+      0.65 *
+      clamp((25 - player.age) / 9, 0, 1);
+  const resalePeakAge = player.position === "GK" ? 31 : 28;
   const age =
-    player.age <= 17
-      ? 0.65
-      : player.age <= 20
-        ? 0.9
-        : player.age <= 24
-          ? 1.2
-          : player.age <= 28
-            ? 1.1
-            : player.age <= 31
-              ? 0.75
-              : player.age <= 34
-                ? 0.42
-                : 0.2;
+    clamp((player.age - 12) / 10, 0.1, 1) *
+    clamp(Math.exp(-Math.max(0, player.age - resalePeakAge) / 4), 0.025, 1);
   const position = {
-    GK: 0.65,
-    CB: 0.85,
+    GK: 0.78,
+    CB: 0.9,
     LB: 0.9,
     RB: 0.9,
-    DM: 0.92,
+    DM: 0.95,
     CM: 1,
-    AM: 1.1,
-    LW: 1.17,
-    RW: 1.17,
-    ST: 1.22,
+    AM: 1.05,
+    LW: 1.1,
+    RW: 1.1,
+    ST: 1.12,
   }[player.position];
-  const league = 0.2 + context.leagueReputation / 125;
-  const months = Math.max(
-    0,
+  const league =
+    0.08 + 1.12 * (clamp(context.leagueReputation, 0, 100) / 100) ** 2;
+  const months = clamp(
     daysBetween(context.date, player.contract_end) / 30.44,
+    0,
+    60,
   );
-  const contract = months === 0 ? 0 : clamp(months / 36, 0.15, 1.2);
+  const contract =
+    months <= 12
+      ? (months / 12) * 0.45
+      : months <= 36
+        ? 0.45 + ((months - 12) / 24) * 0.55
+        : 1 + ((months - 36) / 24) * 0.1;
   const elapsed = Math.max(0, daysBetween(START_DATE, context.date) / 365.25);
-  const market = Math.max(
-    0.2,
-    (1 + context.inflation / 100) ** elapsed +
-      (player.form - 6.5) * 0.035 +
-      context.hype / 1000 -
-      (player.injury_until && player.injury_until > context.date ? 0.16 : 0),
+  const inflation = clamp(
+    (1 + clamp(context.inflation, -5, 10) / 100) ** Math.min(elapsed, 50),
+    0.75,
+    1.75,
   );
+  const form = clamp(1 + (player.form - 6.5) * 0.035, 0.85, 1.1);
+  const hype = 1 + clamp(context.hype, -100, 100) / 1000;
+  const injuryDays = player.injury_until
+    ? Math.max(0, daysBetween(context.date, player.injury_until))
+    : 0;
+  const injury = 1 - clamp(injuryDays / 365.25, 0, 1) * 0.3;
+  const market = inflation * form * hype * injury;
   const finances =
-    context.balance < 0 ? 0.78 : context.balance > 100_000_000 ? 1.1 : 1;
+    context.balance < 0 ? 0.9 : context.balance > 100_000_000 ? 1.05 : 1;
   const philosophy =
     context.philosophy === "Develop and sell"
-      ? 0.94
+      ? 0.97
       : context.philosophy === "Win now"
-        ? 1.08
+        ? 1.05
         : 1;
-  const standings = clamp(
-    1 + context.hype / 700 - context.crisis / 500,
-    0.65,
-    1.25,
-  );
+  const standings = 1 - clamp(context.crisis, 0, 100) / 500;
   const value =
     Math.round(
       (quality *
@@ -968,8 +990,8 @@ export function valuation(
         finances *
         philosophy *
         standings) /
-        1000,
-    ) * 1000;
+        100,
+      ) * 100;
   return {
     value,
     layers: {

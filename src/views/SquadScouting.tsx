@@ -1,5 +1,6 @@
 import { useState } from "react";
 import {
+  ArrowLeftRight,
   ArrowUpRight,
   Bookmark,
   CalendarClock,
@@ -12,6 +13,7 @@ import {
   Shield,
   Target,
   Users,
+  X,
 } from "lucide-react";
 import { useCurrency, useGame, useResource } from "../game-context.tsx";
 import {
@@ -39,7 +41,7 @@ import {
 } from "../ui.tsx";
 import { dateLabel, label, POSITIONS } from "../../shared/rules.ts";
 import type { ScoutingData, SquadData } from "../../shared/api.ts";
-import type { Staff } from "../../shared/types.ts";
+import type { Player, Staff } from "../../shared/types.ts";
 
 const roles = [
   "Captain",
@@ -55,24 +57,56 @@ export function Squad() {
   const { money } = useCurrency();
   const [squadClub, setSquadClub] = useState("");
   const [ageGroup, setAgeGroup] = useState("Senior");
-  const { data, error } = useResource<SquadData>(
+  const { data, error, loading } = useResource<SquadData>(
     `squad?ageGroup=${ageGroup}${squadClub ? `&club=${squadClub}` : ""}`,
+    { keepPreviousData: true },
   );
   const [tab, setTab] = useState("players");
   const [filter, setFilter] = useState("");
+  const [query, setQuery] = useState("");
+  const [readiness, setReadiness] = useState("");
+  const [sort, setSort] = useState("ability");
   if (error) return <ErrorState message={error} />;
   if (!data || !bootstrap) return <Loading />;
+  const selectedClub = data.clubs.find((club) => club.id === data.selectedClubId) ?? bootstrap.club;
+  const scopeLabel = data.ageGroup === "Senior"
+    ? selectedClub.type === "bteam" ? "Reserve team" : "First team"
+    : data.ageGroup;
+  const isInjured = (player: Player) =>
+    !!player.injury_until && player.injury_until > bootstrap.state.date;
+  const availableCount = data.players.filter((player) => !isInjured(player) && player.fitness >= 60).length;
+  const injuredCount = data.players.filter(isInjured).length;
+  const lowFitnessCount = data.players.filter((player) => !isInjured(player) && player.fitness < 60).length;
   const groups = [...new Set(data.matrix.map((player) => player.group))];
-  const filtered = data.players.filter(
-    (player) => !filter || player.position === filter,
+  const filtered = data.players.filter((player) =>
+    (!filter || player.position === filter) &&
+    (!query || `${player.name} ${player.nationality} ${player.role}`.toLowerCase().includes(query.trim().toLowerCase())) &&
+    (!readiness || (readiness === "injured" ? isInjured(player)
+      : readiness === "low" ? !isInjured(player) && player.fitness < 60
+        : !isInjured(player) && player.fitness >= 60)),
+  ).sort((first, second) =>
+    sort === "name" ? first.name.localeCompare(second.name)
+      : sort === "age" ? first.age - second.age
+        : sort === "potential" ? second.potential - first.potential
+          : sort === "fitness" ? second.fitness - first.fitness
+            : second.ability - first.ability,
   );
+  const sections = [
+    { label: "Goalkeepers", positions: ["GK"] },
+    { label: "Defenders", positions: ["CB", "LB", "RB"] },
+    { label: "Midfielders", positions: ["DM", "CM", "AM"] },
+    { label: "Forwards", positions: ["LW", "RW", "ST"] },
+  ].map((section) => ({
+    ...section,
+    players: filtered.filter((player) => section.positions.includes(player.position)),
+  })).filter((section) => section.players.length);
   const matrix = data.matrix.slice(0, 18);
   return (
     <div className="page">
       <PageHeading
-        eyebrow="FIRST TEAM"
+        eyebrow="SQUAD MANAGEMENT"
         title="The squad"
-        subtitle={`${bootstrap.club.name} / ${bootstrap.club.manager} / ${bootstrap.club.formation}`}
+        subtitle={`${selectedClub.name} / ${selectedClub.manager} / ${selectedClub.formation}`}
       >
         <Button
           variant="secondary"
@@ -82,12 +116,38 @@ export function Squad() {
           Find a player
         </Button>
       </PageHeading>
-      <div className="stat-strip">
+      <div className="squad-scope" role="group" aria-label="Squad scope">
+        <Field label="Club squad">
+          <select
+            aria-label="Club squad"
+            value={squadClub || data.selectedClubId}
+            onChange={(event) => setSquadClub(event.target.value)}
+          >
+            {data.clubs.map((club) => (
+              <option key={club.id} value={club.id}>
+                {club.type === "bteam" ? "Reserves" : "First team"} / {club.name}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label="Age group">
+          <select aria-label="Squad age group" value={ageGroup} onChange={(event) => setAgeGroup(event.target.value)}>
+            <option value="Senior">Senior</option>
+            <option value="U19">U19</option>
+            <option value="U17">U17</option>
+          </select>
+        </Field>
+        <div className="scope-context" role="status">
+          <strong>{loading ? "Updating squad" : `${scopeLabel} / ${data.players.length} players`}</strong>
+          <span>{selectedClub.tactical_style}</span>
+        </div>
+      </div>
+      <div className="stat-strip compact-stat-strip">
         <Stat
-          label={`${ageGroup === "Senior" ? "Senior" : ageGroup} players`}
+          label={`${scopeLabel} players`}
           value={data.players.length}
           icon={Users}
-          detail="Registered first-team group"
+          detail={`${availableCount} fit / ${injuredCount} injured`}
         />
         <Stat
           label="Average age"
@@ -104,22 +164,23 @@ export function Squad() {
             data.players.reduce((sum, player) => sum + player.value, 0),
           )}
           icon={Target}
-          detail="Updated every week"
+          detail="Selected squad"
         />
         <Stat
           label="Chemistry"
           value={
             <>
-              {Math.round(bootstrap.club.chemistry)}
+              {Math.round(selectedClub.chemistry)}
               <small>/100</small>
             </>
           }
           icon={Network}
-          detail={<Meter value={bootstrap.club.chemistry} />}
+          detail={<Meter value={selectedClub.chemistry} />}
         />
       </div>
       <Panel>
         <Tabs
+          label="Squad views"
           items={[
             { id: "players", label: "Players", count: data.players.length },
             { id: "chemistry", label: "Dressing room" },
@@ -137,35 +198,12 @@ export function Squad() {
         />
         {tab === "players" && (
           <>
-            <div className="filter-bar">
-              <Field label="Club squad">
-                <select
-                  aria-label="Club squad"
-                  value={squadClub || data.selectedClubId}
-                  onChange={(event) => setSquadClub(event.target.value)}
-                >
-                  {data.clubs.map((club) => (
-                    <option key={club.id} value={club.id}>
-                      {club.name}
-                    </option>
-                  ))}
-                </select>
-              </Field>
-              <Field label="Age group">
-                <select
-                  aria-label="Squad age group"
-                  value={ageGroup}
-                  onChange={(event) => setAgeGroup(event.target.value)}
-                >
-                  <option value="Senior">First / reserve team</option>
-                  <option value="U19">U19</option>
-                  <option value="U17">U17</option>
-                </select>
-              </Field>
-              <div className="inline-controls">
-                <span className="muted" style={{ fontSize: ".77rem" }}>
-                  Position
-                </span>
+            <div className="filter-bar roster-toolbar">
+              <div className="search-field">
+                <Search size={17} aria-hidden="true" />
+                <input aria-label="Search squad players" placeholder="Search squad" value={query} onChange={(event) => setQuery(event.target.value)} />
+              </div>
+              <Field label="Position">
                 <select
                   aria-label="Squad position"
                   value={filter}
@@ -176,20 +214,47 @@ export function Squad() {
                     <option key={position}>{position}</option>
                   ))}
                 </select>
-              </div>
-              <span
-                className="muted"
-                style={{ marginLeft: "auto", fontSize: ".72rem" }}
-              >
-                {bootstrap.club.tactical_style}
-              </span>
+              </Field>
+              <Field label="Readiness">
+                <select aria-label="Squad readiness" value={readiness} onChange={(event) => setReadiness(event.target.value)}>
+                  <option value="">All readiness</option>
+                  <option value="fit">Fit / fitness 60+ ({availableCount})</option>
+                  <option value="low">Fitness below 60 ({lowFitnessCount})</option>
+                  <option value="injured">Injured ({injuredCount})</option>
+                </select>
+              </Field>
+              <Field label="Sort by">
+                <select aria-label="Sort squad players" value={sort} onChange={(event) => setSort(event.target.value)}>
+                  <option value="ability">Ability</option>
+                  <option value="potential">Potential</option>
+                  <option value="fitness">Fitness</option>
+                  <option value="age">Age: youngest first</option>
+                  <option value="name">Name</option>
+                </select>
+              </Field>
+              {(query || filter || readiness) && (
+                <IconButton icon={X} label="Clear squad filters" onClick={() => { setQuery(""); setFilter(""); setReadiness(""); }} />
+              )}
             </div>
-            <div className="table-scroll">
-              <table className="data-table">
+            <div className="position-coverage" role="group" aria-label="Squad position coverage">
+              {POSITIONS.map((position) => {
+                const count = data.players.filter((player) => player.position === position).length;
+                return (
+                  <button type="button" key={position} aria-pressed={filter === position} aria-label={`${position}: ${count} players`} onClick={() => setFilter(filter === position ? "" : position)}>
+                    <span>{position}</span><strong>{count}</strong>
+                  </button>
+                );
+              })}
+            </div>
+            <div className="roster-result-count" role="status">{filtered.length} of {data.players.length} players</div>
+            <div className="table-scroll roster-table-scroll" role="region" aria-label="Squad players" tabIndex={0} aria-busy={loading}>
+              <table className="data-table roster-table">
+                <caption className="sr-only">{scopeLabel}: roles, readiness and availability</caption>
                 <thead>
                   <tr>
                     <th>Player</th>
                     <th>Pos</th>
+                    <th>Status</th>
                     <th>Ability</th>
                     <th>Potential</th>
                     <th>Squad role</th>
@@ -201,14 +266,28 @@ export function Squad() {
                     <th>Availability</th>
                   </tr>
                 </thead>
-                <tbody>
-                  {filtered.map((player) => (
+                {sections.map((section) => (
+                <tbody key={section.label}>
+                  <tr className="roster-group-row"><th scope="rowgroup" colSpan={12}>{section.label} <span>{section.players.length}</span></th></tr>
+                  {section.players.map((player) => (
                     <tr key={player.id}>
                       <td>
-                        <PlayerName player={player} compact />
+                        <div className="player-identity-actions">
+                          <PlayerName player={player} compact />
+                          <IconButton icon={ArrowLeftRight} label={`Squad assignment for ${player.name}`} onClick={() => setPlayer(player.id)} disabled={loading} />
+                        </div>
                       </td>
                       <td>
                         <span className="position-tag">{player.position}</span>
+                      </td>
+                      <td>
+                        <div className="roster-status">
+                          <Badge tone={isInjured(player) ? "red" : player.fitness < 60 ? "amber" : "green"}>
+                            {isInjured(player) ? "Injured" : player.fitness < 60 ? "Low fitness" : "Fit"}
+                          </Badge>
+                          {isInjured(player) && <small>Until {dateLabel(player.injury_until!)}</small>}
+                          {!!player.parent_club_id && <Badge tone="blue">On loan</Badge>}
+                        </div>
                       </td>
                       <td>
                         <Rating value={player.ability} />
@@ -220,6 +299,7 @@ export function Squad() {
                         <select
                           aria-label={`Role for ${player.name}`}
                           className="table-select"
+                          disabled={loading}
                           value={
                             roles.includes(player.role)
                               ? player.role
@@ -265,6 +345,7 @@ export function Squad() {
                         <select
                           aria-label={`Availability for ${player.name}`}
                           className="table-select"
+                          disabled={loading}
                           value={
                             player.listed
                               ? "transfer"
@@ -289,7 +370,9 @@ export function Squad() {
                     </tr>
                   ))}
                 </tbody>
+                ))}
               </table>
+              {!filtered.length && <Empty title="No players in this selection" />}
             </div>
           </>
         )}

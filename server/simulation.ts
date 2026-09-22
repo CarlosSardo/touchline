@@ -22,6 +22,7 @@ import {
   acquirePlayerAsset,
   assessFinances,
   closeFinancialYear,
+  estimateClubRevenue,
   postWeeklyAccounts,
 } from "./finance.ts";
 import { ensureClubRosters, generatePlayers, personName } from "./world.ts";
@@ -1246,11 +1247,14 @@ async function weeklyFinances(store: Store) {
   const gates = new Map(
     (
       await store.all<{ home_id: number; count: number }>(
-        "SELECT home_id, count(*) AS count FROM fixtures WHERE status = 'played' AND date > ? AND date <= ? GROUP BY home_id",
+        "SELECT fixtures.home_id, count(*) AS count FROM fixtures LEFT JOIN leagues ON leagues.id = fixtures.league_id WHERE fixtures.status = 'played' AND fixtures.date > ? AND fixtures.date <= ? AND (leagues.age_group = 'Senior' OR fixtures.league_id IS NULL) GROUP BY fixtures.home_id",
         addDays(state.date, -7),
         state.date,
       )
     ).map((row) => [row.home_id, row.count]),
+  );
+  const leagues = new Map(
+    (await store.all<League>("SELECT * FROM leagues")).map((league) => [league.id, league]),
   );
   const accountUpdates: Record<string, string | number | null>[] = [];
   const flushAccounts = async () => {
@@ -1270,13 +1274,17 @@ async function weeklyFinances(store: Store) {
     const running = Math.round(
       club.facilities ** 2 * 2.2 + club.academy ** 2 * 1.6,
     );
-    const sponsorship = Math.round(club.reputation ** 3 * 0.9);
-    const gate = Math.round(
-      (gates.get(club.id) ?? 0) *
-        club.capacity *
-        (0.25 + club.fan_mood / 250) *
-        Math.max(5, club.reputation / 3),
-    );
+    const league = leagues.get(club.league_id ?? -1);
+    const revenue = estimateClubRevenue({
+      reputation: club.reputation,
+      leagueReputation: league?.reputation ?? club.reputation,
+      tier: league?.tier ?? 1,
+      capacity: club.capacity,
+      fanMood: club.fan_mood,
+      homeMatches: gates.get(club.id) ?? 0,
+    });
+    const sponsorship = Math.round(revenue.annualCommercial / 52);
+    const gate = revenue.annualMatchday;
     const income = sponsorship + gate;
     const expenses = wages + running;
     const net = income - expenses;

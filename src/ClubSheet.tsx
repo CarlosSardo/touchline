@@ -128,6 +128,19 @@ export default function ClubSheet() {
                       ],
                     ]}
                   />
+                  {data.valuation && (
+                    <section className="section-space">
+                      <h3 className="subsection-title">Club finances</h3>
+                      <DetailList
+                        items={[
+                          ["Enterprise estimate", money(data.valuation.enterpriseValue)],
+                          ["Operating revenue / year (estimate)", money(data.valuation.annualOperatingRevenue)],
+                          ["Cash balance", money(data.club.balance)],
+                          ["Squad market value", money(data.summary.squadValue)],
+                        ]}
+                      />
+                    </section>
+                  )}
                   {data.parent && (
                     <div className="section-space">
                       <small className="muted">Parent club</small>

@@ -3,7 +3,15 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { Store } from "./db.ts";
 import { generateWorld } from "./world.ts";
-import { reservePolicy, SQUAD_MINIMUMS } from "../shared/world-rules.ts";
+import {
+  associationRuleAudit,
+  domesticPyramid,
+  minimumReserveTier,
+  reservePolicy,
+  SQUAD_MINIMUMS,
+  WORLD_VERSION,
+} from "../shared/world-rules.ts";
+import type { Club, Country, League } from "../shared/types.ts";
 
 export async function checkSqlConstraints(store: Store) {
   assert(
@@ -58,6 +66,7 @@ export async function checkWorld() {
     assert(totals.domesticLeagues >= 1200);
     assert(totals.clubs >= 3500);
     if (world.expanded) {
+      assert.equal(world.version, WORLD_VERSION);
       assert(totals.seniorPlayers >= totals.clubs * SQUAD_MINIMUMS.Senior);
       assert(
         totals.youthPlayers >=
@@ -65,7 +74,7 @@ export async function checkWorld() {
       );
       for (const [ageGroup, minimum] of Object.entries(SQUAD_MINIMUMS)) {
         const incomplete = await store.all(
-          "SELECT clubs.id FROM clubs LEFT JOIN players ON players.club_id = clubs.id AND players.age_group = ? WHERE clubs.type != 'national' GROUP BY clubs.id HAVING count(players.id) < ? OR sum(CASE WHEN players.position = 'GK' THEN 1 ELSE 0 END) < 2",
+          "SELECT clubs.id FROM clubs LEFT JOIN players ON players.club_id = clubs.id AND players.age_group = ? AND players.role != 'Retired' WHERE clubs.type != 'national' GROUP BY clubs.id HAVING count(players.id) < ? OR sum(CASE WHEN players.position = 'GK' THEN 1 ELSE 0 END) < 2",
           ageGroup,
           minimum,
         );
@@ -75,14 +84,14 @@ export async function checkWorld() {
           `${ageGroup} squads must be complete and include two goalkeepers`,
         );
       }
-      assert.equal(
-        (
-          await store.all(
-            "SELECT clubs.id FROM clubs WHERE clubs.type != 'national' AND (SELECT count(*) FROM standings JOIN leagues ON leagues.id = standings.league_id WHERE standings.club_id = clubs.id AND leagues.kind = 'league' AND leagues.age_group IN ('U19','U17')) != 2",
-          )
-        ).length,
-        0,
-      );
+      for (const age of ["U19", "U17"])
+        assert.equal((await store.all(
+          "SELECT clubs.id FROM clubs WHERE clubs.type != 'national' AND (SELECT count(*) FROM standings JOIN leagues ON leagues.id = standings.league_id WHERE standings.club_id = clubs.id AND leagues.kind = 'league' AND leagues.age_group = ?) != 1",
+          age,
+        )).length, 0, `${age}: every first team and B team needs one domestic league`);
+      assert.equal((await store.all(
+        "SELECT leagues.id FROM leagues JOIN standings ON standings.league_id = leagues.id WHERE leagues.kind = 'league' AND leagues.age_group IN ('U19','U17') GROUP BY leagues.id HAVING count(*) > 16 OR count(*) < 2",
+      )).length, 0, "Academy groups need opponents and bounded schedules");
     } else {
       assert(totals.seniorPlayers >= 120000);
       assert(totals.youthPlayers >= 40000);
@@ -95,13 +104,47 @@ export async function checkWorld() {
       0,
     );
     await checkSqlConstraints(store);
-    const reserveAudit = (
-      await store.all<{ code: string }>("SELECT code FROM countries")
-    ).reduce<Record<string, number>>((counts, country) => {
-      const evidence = reservePolicy(country.code).evidence;
+    const countries = await store.all<Country>("SELECT * FROM countries ORDER BY code");
+    const countryRules = countries.map(associationRuleAudit);
+    const reserveAudit = countryRules.reduce<Record<string, number>>((counts, country) => {
+      const evidence = country.reserve.evidence;
       counts[evidence] = (counts[evidence] ?? 0) + 1;
       return counts;
     }, {});
+    assert.equal(countryRules.length, totals.countries);
+    assert(countryRules.every((country) => country.scope === "partial" && country.reserve.verification));
+    if (world.expanded) {
+      const clubs = await store.all<Club>("SELECT * FROM clubs WHERE type != 'national'");
+      const clubById = new Map(clubs.map((club) => [club.id, club]));
+      const leagues = await store.all<League>("SELECT * FROM leagues WHERE kind = 'league'");
+      const leagueById = new Map(leagues.map((league) => [league.id, league]));
+      const countryById = new Map(countries.map((country) => [country.id, country]));
+      for (const country of countries) {
+        const divisions = leagues.filter((league) =>
+          league.country_id === country.id && league.age_group === "Senior" &&
+          !JSON.parse(league.data).reserveOnly,
+        ).sort((left, right) => left.tier - right.tier);
+        const expected = domesticPyramid(country);
+        assert.deepEqual(divisions.map((division) => division.tier), expected.map((division) => division.tier), country.code);
+        for (const [index, division] of divisions.entries()) {
+          const data = JSON.parse(division.data);
+          assert.equal(data.promotion, expected[index].promotion, `${country.code}: promotion`);
+          assert.equal(data.relegation, expected[index].relegation, `${country.code}: relegation`);
+        }
+      }
+      for (const reserve of clubs.filter((club) => club.type === 'bteam')) {
+        const country = countryById.get(reserve.country_id)!;
+        const policy = reservePolicy(country.code);
+        const parent = clubById.get(reserve.parent_id!);
+        const division = leagueById.get(reserve.league_id!)!;
+        assert(parent && parent.type === "club" && parent.country_id === country.id, `${country.code}: reserve parent`);
+        assert.notEqual(policy.mode, "unverified", `${country.code}: no invented reserve admission`);
+        if (policy.mode === "pyramid")
+          assert(division.tier >= minimumReserveTier(country.code, leagueById.get(parent.league_id!)!.tier), `${country.code}: reserve ceiling and parent gap`);
+        else
+          assert(JSON.parse(division.data).reserveOnly, `${country.code}: separate development competition`);
+      }
+    }
     const queryStart = performance.now();
     const prospects = await store.all(
       "SELECT TOP (25) id, name, position, age, ability, potential, value FROM players WHERE position = ? AND age <= ? AND potential >= ? ORDER BY potential DESC",
@@ -116,6 +159,8 @@ export async function checkWorld() {
           ...totals,
           worldVersion: world.version ?? 1,
           reserveAudit,
+          countryRuleAudit: countryRules,
+          rulebookStatus: "Partial evidence only; division sizes, regional paths and calendars are game models.",
           database: store.database,
           schemaName: store.schemaName,
           generationAndCheckSeconds:

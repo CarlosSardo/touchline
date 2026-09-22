@@ -2,6 +2,7 @@ import { countries as countryData } from "countries-list";
 import seedrandom from "seedrandom";
 import { Store } from "./db.ts";
 import { ensureClubSupport } from "./club-support.ts";
+import { initialClubFinances } from "./finance.ts";
 import {
   clubIdentity,
   culturalPersonName,
@@ -884,15 +885,14 @@ export function personName(
   return `${pool[0][Math.floor(random() * pool[0].length)]} ${pool[1][Math.floor(random() * pool[1].length)]}`;
 }
 
-export async function generateWorld(store: Store, options: WorldOptions = {}) {
-  if (await store.get("SELECT [key] FROM meta WHERE [key] = ?", "state"))
-    return;
+export function buildWorldStructure(
+  options: WorldOptions = {},
+  definitions = countryDefinitions(options.countryLimit),
+) {
   const seed = options.seed ?? "touchline-2026";
   const expanded =
     options.expanded ??
     (options.seniors === undefined && options.youth === undefined);
-  let seniorCount = options.seniors ?? WORLD_COUNTS.seniors;
-  let youthCount = options.youth ?? WORLD_COUNTS.youth;
   const random = seedrandom(seed);
   const integer = (min: number, max: number) =>
     Math.floor(random() * (max - min + 1)) + min;
@@ -957,12 +957,8 @@ export async function generateWorld(store: Store, options: WorldOptions = {}) {
     });
     return id;
   };
-  const insertRows = async (table: keyof typeof rows) => {
-    for (let offset = 0; offset < rows[table].length; offset += 1000)
-      await store.bulkInsert(table, rows[table].slice(offset, offset + 1000));
-  };
-  await store.transaction(async () => {
-    for (const definition of countryDefinitions(options.countryLimit)) {
+  const build = () => {
+    for (const definition of definitions) {
       const country: Country = {
         ...definition,
         id: countryRows.length + 1,
@@ -1000,6 +996,11 @@ export async function generateWorld(store: Store, options: WorldOptions = {}) {
             JSON.stringify({
               promotion: division?.promotion ?? (tier > 1 ? 2 : 0),
               relegation: division?.relegation ?? (tier < 3 ? 2 : 0),
+              ...(division ? {
+                targetFirstTeams: division.clubs,
+                structureEvidence: division.evidence,
+                movement: division.movement,
+              } : {}),
               worldVersion: expanded ? WORLD_VERSION : 1,
               continental: tier === 1 ? 4 : 0,
               tiebreakers: [
@@ -1201,6 +1202,7 @@ export async function generateWorld(store: Store, options: WorldOptions = {}) {
                   "Double round-robin",
                   JSON.stringify({
                     reserveOnly: true,
+                    reserveCompetition: reserves.competition,
                     promotion: 0,
                     relegation: 0,
                     worldVersion: WORLD_VERSION,
@@ -1365,6 +1367,52 @@ export async function generateWorld(store: Store, options: WorldOptions = {}) {
       expectations: 6,
     });
     clubRows[0] = { ...rows.clubs[0] } as unknown as Club;
+  };
+  build();
+  if (expanded) {
+    const leagues = new Map(rows.leagues.map((league) => [league.id, league]));
+    const leagueSizes = new Map<number, number>();
+    for (const standing of rows.standings) {
+      const leagueId = Number(standing.league_id);
+      leagueSizes.set(leagueId, (leagueSizes.get(leagueId) ?? 0) + 1);
+    }
+    const finances = new Map<number, ReturnType<typeof initialClubFinances>>();
+    for (const club of rows.clubs) {
+      if (club.type === "national") continue;
+      const league = leagues.get(club.league_id);
+      const budgets = initialClubFinances({
+        reputation: Number(club.reputation),
+        leagueReputation: Number(league?.reputation ?? club.reputation),
+        tier: Number(league?.tier ?? 1),
+        capacity: Number(club.capacity),
+        fanMood: Number(club.fan_mood),
+        homeMatches: Math.max(0, (leagueSizes.get(Number(club.league_id)) ?? 1) - 1) + 2,
+      });
+      finances.set(Number(club.id), budgets);
+      Object.assign(club, budgets);
+    }
+    for (const club of [...clubRows, ...academyClubs])
+      Object.assign(club, finances.get(club.id));
+  }
+  return { seed, expanded, random, countryRows, clubRows, academyClubs, rows };
+}
+
+export async function generateWorld(store: Store, options: WorldOptions = {}) {
+  if (await store.get("SELECT [key] FROM meta WHERE [key] = ?", "state"))
+    return;
+  const { seed, expanded, random, countryRows, clubRows, academyClubs, rows } =
+    buildWorldStructure(options);
+  let seniorCount = options.seniors ?? WORLD_COUNTS.seniors;
+  let youthCount = options.youth ?? WORLD_COUNTS.youth;
+  const integer = (min: number, max: number) =>
+    Math.floor(random() * (max - min + 1)) + min;
+  const pick = <Value>(values: Value[]) =>
+    values[integer(0, values.length - 1)];
+  const insertRows = async (table: keyof typeof rows) => {
+    for (let offset = 0; offset < rows[table].length; offset += 1000)
+      await store.bulkInsert(table, rows[table].slice(offset, offset + 1000));
+  };
+  await store.transaction(async () => {
     for (const table of [
       "countries",
       "leagues",
@@ -1407,26 +1455,27 @@ export async function generateWorld(store: Store, options: WorldOptions = {}) {
     for (let index = 0; index < 120; index++) {
       const role = STAFF_ROLES[index % STAFF_ROLES.length];
       const ability = integer(45, 95);
-      addStaff(
-        null,
-        personName(random, "en"),
+      rows.staff.push({
+        id: rows.staff.length + 1,
+        club_id: null,
+        name: personName(random, "en"),
         role,
         ability,
-        integer(30, 90),
-        integer(35, 95),
-        integer(35, 95),
-        pick(["Collaborative", "Ambitious", "Outspoken", "Methodical"]),
-        integer(30, 90),
-        65,
-        Math.round(ability ** 2 * 0.45),
-        JSON.stringify({
+        influence: integer(30, 90),
+        communication: integer(35, 95),
+        tactical_knowledge: integer(35, 95),
+        personality: pick(["Collaborative", "Ambitious", "Outspoken", "Methodical"]),
+        ambition: integer(30, 90),
+        morale: 65,
+        wage: Math.round(ability ** 2 * 0.45),
+        data: JSON.stringify({
           bias: pick(["Youth", "Technical", "Physical"]),
           accuracy: ability,
           detail: integer(50, 95),
           riskTolerance: integer(20, 90),
           development: 0,
         }),
-      );
+      });
     }
     const state: GameState = {
       date: START_DATE,
@@ -1703,10 +1752,10 @@ export async function ensureClubRosters(
   const state = await store.meta<GameState>("state");
   const date = options.date ?? state.date;
   const clubs =
-    options.clubs ??
+    (options.clubs ??
     (await store.all<Club>(
       "SELECT * FROM clubs WHERE type != 'national' ORDER BY id",
-    ));
+    ))).filter((club) => club.type !== "national");
   const countries = await store.all<Country>(
     "SELECT * FROM countries ORDER BY id",
   );
@@ -1717,7 +1766,8 @@ export async function ensureClubRosters(
     position: Position;
     count: number;
   }>(
-    "SELECT club_id,age_group,position,count(*) AS count FROM players WHERE club_id IS NOT NULL AND role != 'Retired' GROUP BY club_id,age_group,position",
+    "SELECT club_id,age_group,position,count(*) AS count FROM players WHERE club_id IS NOT NULL AND role != 'Retired' AND contract_end >= ? GROUP BY club_id,age_group,position",
+    date,
   )) {
     const key = `${row.club_id}:${row.age_group}`;
     const positions = counts.get(key) ?? new Map<Position, number>();

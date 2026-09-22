@@ -19,6 +19,7 @@ import { generateWorld } from "./world.ts";
 import { expandWorld } from "./world-expansion.ts";
 import { createCalendar } from "./calendar.ts";
 import { SETTING_DEFINITIONS } from "../shared/rules.ts";
+import { WORLD_VERSION } from "../shared/world-rules.ts";
 import type { SaveSlot } from "../shared/api.ts";
 import type { GameState, Settings } from "../shared/types.ts";
 import {
@@ -834,7 +835,10 @@ export class Saves {
   }
 
   async expandWorld() {
-    if ((await this.store.meta<{ version?: number }>("world")).version === 2)
+    if (
+      ((await this.store.meta<{ version?: number }>("world")).version ?? 1) >=
+      WORLD_VERSION
+    )
       return {
         changed: false,
         message: "This career already uses the expanded world.",

@@ -1,7 +1,7 @@
 import type { Country } from "./types.ts";
 
-export const WORLD_VERSION = 2;
-export const SQUAD_MINIMUMS = { Senior: 22, U19: 18, U17: 18 } as const;
+export const WORLD_VERSION = 3;
+export const SQUAD_MINIMUMS = { Senior: 22, U19: 22, U17: 22 } as const;
 export function footballConfederation(code: string, continent: string) {
   if (["AM", "AZ", "CY", "GE", "IL", "KZ", "RU", "TR", "XK"].includes(code))
     return "UEFA";
@@ -23,6 +23,9 @@ export function footballConfederation(code: string, continent: string) {
 export function associationNotes(code: string): string[] {
   const notes = [
     "Domestic formats, licensing, registration quotas and calendars are game models, not a complete federation rulebook.",
+    "Regional parallel groups are represented by a single division per level; club counts and lower-tier links are simulation targets, not certified access lists.",
+    "Every non-national club, including B teams, has its own U19 and U17 development squads in this simulation; this is not a universal federation obligation.",
+    "Reserve teams are excluded from modeled cups and continental events; development-only cup exceptions are not reproduced.",
   ];
   if (["LI", "MC", "VA"].includes(code))
     notes.push(
@@ -72,42 +75,42 @@ export function associationNotes(code: string): string[] {
 }
 
 const pyramidSizes: Record<string, number[]> = {
-  EN: [20, 24, 24, 24, 24, 22, 20, 20],
-  ES: [20, 22, 20, 20, 18, 18, 16],
-  DE: [18, 18, 20, 18, 18, 18, 16],
-  IT: [20, 20, 20, 20, 18, 18, 16],
-  FR: [18, 18, 18, 16, 16, 16, 14],
-  BR: [20, 20, 20, 20, 16, 16],
-  AR: [20, 20, 20, 18, 16, 16],
-  PT: [18, 18, 16, 16, 16, 14],
-  NL: [18, 20, 18, 16, 16, 14],
-  BE: [16, 16, 16, 16, 14, 14],
+  EN: [20, 24, 24, 24, 24, 22, 22, 20, 18, 18],
+  ES: [20, 22, 20, 20, 18, 18, 16, 16, 14],
+  DE: [18, 18, 20, 18, 18, 18, 16, 16, 14, 14],
+  IT: [20, 20, 20, 20, 18, 18, 16, 16, 14],
+  FR: [18, 18, 18, 16, 16, 16, 14, 14, 14, 12],
+  BR: [20, 20, 20, 20, 16, 16, 14, 14],
+  AR: [20, 20, 20, 18, 16, 16, 14],
+  PT: [18, 18, 16, 16, 16, 14, 14, 12],
+  NL: [18, 20, 18, 16, 16, 14, 14, 12],
+  BE: [16, 16, 16, 16, 14, 14, 14, 12, 12],
   US: [20, 20, 20, 18, 16, 16],
-  MX: [18, 18, 18, 16, 16],
-  JP: [20, 20, 20, 16, 16, 14],
-  KR: [12, 14, 16, 16, 14],
-  CN: [16, 16, 16, 16, 14],
-  IN: [14, 14, 14, 14, 12],
-  ID: [18, 18, 16, 16, 14],
-  TR: [18, 20, 18, 18, 16, 16],
-  RU: [16, 18, 18, 16, 16, 14],
-  PL: [18, 18, 18, 16, 16, 14],
-  SCO: [12, 10, 10, 10, 16, 16],
-  WAL: [12, 16, 16, 14, 12],
+  MX: [18, 18, 18, 16, 16, 14],
+  JP: [20, 20, 20, 16, 16, 14, 14, 12],
+  KR: [12, 14, 16, 16, 14, 12],
+  CN: [16, 16, 16, 16, 14, 12],
+  IN: [14, 14, 14, 14, 12, 12],
+  ID: [18, 18, 16, 16, 14, 12],
+  TR: [18, 20, 18, 18, 16, 16, 14, 14],
+  RU: [16, 18, 18, 16, 16, 14, 14],
+  PL: [18, 18, 18, 16, 16, 14, 14, 12],
+  SCO: [12, 10, 10, 10, 16, 16, 14, 14],
+  WAL: [12, 16, 16, 14, 12, 12],
   NIR: [12, 12, 12, 12, 10],
-  IE: [10, 10, 12, 12, 10],
-  AT: [12, 16, 16, 16, 14],
-  CH: [12, 10, 16, 16, 14],
-  DK: [12, 12, 12, 12, 12],
-  NO: [16, 16, 14, 14, 12],
-  SE: [16, 16, 16, 14, 14],
-  FI: [12, 12, 12, 12, 10],
-  CZ: [16, 16, 16, 14, 14],
+  IE: [10, 10, 12, 12, 10, 10],
+  AT: [12, 16, 16, 16, 14, 14, 12],
+  CH: [12, 10, 16, 16, 14, 14],
+  DK: [12, 12, 12, 12, 12, 12],
+  NO: [16, 16, 14, 14, 12, 12, 12],
+  SE: [16, 16, 16, 14, 14, 14, 12],
+  FI: [12, 12, 12, 12, 10, 10],
+  CZ: [16, 16, 16, 14, 14, 12],
   GR: [14, 16, 16, 14, 14],
-  HR: [10, 12, 16, 14, 12],
-  RS: [16, 16, 16, 14, 12],
-  RO: [16, 18, 16, 14, 14],
-  UA: [16, 16, 16, 14, 12],
+  HR: [10, 12, 16, 14, 12, 12],
+  RS: [16, 16, 16, 14, 12, 12],
+  RO: [16, 18, 16, 14, 14, 12],
+  UA: [16, 16, 16, 14, 12, 12],
   SA: [18, 18, 16, 16, 14],
   EG: [18, 18, 18, 16, 14],
   MA: [16, 16, 16, 14, 14],
@@ -125,10 +128,11 @@ const pyramidSizes: Record<string, number[]> = {
   PE: [18, 16, 14, 14, 12],
   EC: [16, 12, 14, 14, 12],
   PY: [12, 16, 14, 14, 12],
-  LU: [16, 16, 14, 12],
-  IS: [12, 12, 12, 10],
+  LU: [16, 16, 14, 12, 12],
+  IS: [12, 12, 12, 12, 10, 8],
+  FO: [10, 10, 10, 8],
   MT: [12, 12, 12, 10],
-  CY: [14, 16, 14, 12],
+  CY: [14, 16, 14, 12, 12],
 };
 
 const pyramidTitles: Record<string, string[]> = {
@@ -141,6 +145,8 @@ const pyramidTitles: Record<string, string[]> = {
     "National League Regional",
     "Regional Premier",
     "Regional Division",
+    "County Premier",
+    "County Division One",
   ],
   ES: [
     "Primera Division",
@@ -150,6 +156,8 @@ const pyramidTitles: Record<string, string[]> = {
     "Tercera Federacion",
     "Regional Preferente",
     "Primera Regional",
+    "Segunda Regional",
+    "Tercera Regional",
   ],
   DE: [
     "Bundesliga",
@@ -159,6 +167,9 @@ const pyramidTitles: Record<string, string[]> = {
     "Oberliga",
     "Landesliga",
     "Bezirksliga",
+    "Kreisliga",
+    "Kreisklasse A",
+    "Kreisklasse B",
   ],
   IT: [
     "Serie A",
@@ -168,6 +179,8 @@ const pyramidTitles: Record<string, string[]> = {
     "Eccellenza",
     "Promozione",
     "Prima Categoria",
+    "Seconda Categoria",
+    "Terza Categoria",
   ],
   FR: [
     "Ligue 1",
@@ -177,14 +190,19 @@ const pyramidTitles: Record<string, string[]> = {
     "National 2",
     "Regional 1",
     "Regional 2",
+    "Regional 3",
+    "Departemental 1",
+    "Departemental 2",
   ],
   PT: [
     "Primeira Liga",
     "Segunda Liga",
     "Liga 3",
-    "Campeonato Nacional",
-    "Divisao Distrital",
+    "Campeonato de Portugal",
+    "Primeira Distrital",
     "Segunda Distrital",
+    "Terceira Distrital",
+    "Liga Concelhia",
   ],
   BR: [
     "Serie A",
@@ -193,6 +211,8 @@ const pyramidTitles: Record<string, string[]> = {
     "Serie D",
     "Estadual Primeira",
     "Estadual Segunda",
+    "Estadual Terceira",
+    "Liga Municipal",
   ],
   AR: [
     "Primera Division",
@@ -201,6 +221,7 @@ const pyramidTitles: Record<string, string[]> = {
     "Primera C",
     "Regional Federal",
     "Liga Regional",
+    "Liga Local",
   ],
   NL: [
     "Eredivisie",
@@ -209,6 +230,8 @@ const pyramidTitles: Record<string, string[]> = {
     "Derde Divisie",
     "Vierde Divisie",
     "Eerste Klasse",
+    "Tweede Klasse",
+    "Derde Klasse",
   ],
   BE: [
     "Pro League",
@@ -216,7 +239,10 @@ const pyramidTitles: Record<string, string[]> = {
     "Nationale 1",
     "Nationale 2",
     "Nationale 3",
-    "Provinciale",
+    "Premiere Provinciale",
+    "Deuxieme Provinciale",
+    "Troisieme Provinciale",
+    "Quatrieme Provinciale",
   ],
   JP: [
     "J1 League",
@@ -225,21 +251,56 @@ const pyramidTitles: Record<string, string[]> = {
     "Football League",
     "Regional League",
     "Prefectural League",
+    "Prefectural Division Two",
+    "District League",
   ],
   LU: [
     "Division Nationale",
     "Promotion d'Honneur",
     "Premiere Division",
     "Deuxieme Division",
+    "Troisieme Division",
   ],
   SCO: [
     "Premiership",
     "Championship",
     "League One",
     "League Two",
-    "Regional League",
-    "Regional Division",
+    "Highland / Lowland League",
+    "Regional Premier",
+    "Regional First",
+    "Regional Second",
   ],
+  US: ["Major League", "Championship", "League One", "National Premier", "Regional League", "State League"],
+  CA: ["Premier League", "League1", "Provincial Premier", "Regional League", "District League"],
+  AU: ["A-League", "Australian Championship", "National Premier Leagues", "State League", "District League"],
+  MX: ["Liga MX", "Liga de Expansion", "Liga Premier", "Liga TDP", "Liga Estatal", "Liga Municipal"],
+  KR: ["K League 1", "K League 2", "K3 League", "K4 League", "K5 League", "K6 League"],
+  CN: ["Super League", "League One", "League Two", "Champions League", "Regional League", "City League"],
+  IN: ["Super League", "I-League", "I-League 2", "State Premier", "State First Division", "District League"],
+  ID: ["Liga 1", "Liga 2", "Liga Nusantara", "Liga 4", "Liga Provinsi", "Liga Kabupaten"],
+  TR: ["Super Lig", "1. Lig", "2. Lig", "3. Lig", "Bolgesel Amator", "Super Amator", "1. Amator", "2. Amator"],
+  RU: ["Premier Liga", "Pervaya Liga", "Vtoraya Liga A", "Vtoraya Liga B", "Amateur League", "Oblast League", "City League"],
+  PL: ["Ekstraklasa", "I Liga", "II Liga", "III Liga", "IV Liga", "Liga Okregowa", "Klasa A", "Klasa B"],
+  WAL: ["Cymru Premier", "Cymru North / South", "Ardal Leagues", "Regional Premier", "Regional First", "District League"],
+  NIR: ["Premiership", "Championship", "Premier Intermediate", "Regional Intermediate", "District League"],
+  IE: ["Premier Division", "First Division", "Regional Senior", "Regional Premier", "Regional First", "District League"],
+  AT: ["Bundesliga", "2. Liga", "Regionalliga", "Landesliga", "Oberliga", "Unterliga", "Gebietsliga"],
+  CH: ["Super League", "Challenge League", "Promotion League", "1. Liga", "2. Liga Interregional", "2. Liga Regional"],
+  DK: ["Superliga", "1. Division", "2. Division", "3. Division", "Danmarksserien", "Regionalserien"],
+  NO: ["Eliteserien", "1. Divisjon", "2. Divisjon", "3. Divisjon", "4. Divisjon", "5. Divisjon", "6. Divisjon"],
+  SE: ["Allsvenskan", "Superettan", "Ettan", "Division 2", "Division 3", "Division 4", "Division 5"],
+  FI: ["Veikkausliiga", "Ykkosliiga", "Ykkonen", "Kakkonen", "Kolmonen", "Nelonen"],
+  CZ: ["Prvni Liga", "Narodni Liga", "Ceska / Moravska Liga", "Divize", "Krajsky Prebor", "I. A Trida"],
+  GR: ["Super League", "Super League 2", "Gamma Ethniki", "Regional Premier", "Regional Division"],
+  HR: ["HNL", "Prva NL", "Druga NL", "Treca NL", "Medjuzupanijska Liga", "Zupanijska Liga"],
+  RS: ["SuperLiga", "Prva Liga", "Srpska Liga", "Zona Liga", "Podrucna Liga", "Opstinska Liga"],
+  RO: ["Liga I", "Liga II", "Liga III", "Liga IV", "Liga V", "Liga VI"],
+  UA: ["Premier Liha", "Persha Liha", "Druha Liha", "Amator League", "Oblast League", "Raion League"],
+  IS: ["Besta Deild", "1. Deild", "2. Deild", "3. Deild", "4. Deild", "5. Deild"],
+  FO: ["Betri Deildin", "1. Deild", "2. Deild", "3. Deild"],
+  CY: ["First Division", "Second Division", "Third Division", "STOK Elite", "Local League"],
+  MT: ["Premier League", "Challenge League", "National Amateur", "Regional Development"],
 };
 
 const smallAssociations = new Set(
@@ -263,6 +324,8 @@ export function domesticPyramid(
     tier: index + 1,
     clubs,
     name: `${country.name} ${pyramidTitles[country.code]?.[index] ?? ["Premier League", "First Division", "Second Division", "Regional Division", "District League"][index] ?? `Division ${index + 1}`}`,
+    evidence: "modeled" as const,
+    movement: closedPyramids.has(country.code) ? "closed" as const : "open" as const,
     promotion: index > 0 && !closedPyramids.has(country.code) ? 2 : 0,
     relegation:
       index < sizes.length - 1 && !closedPyramids.has(country.code) ? 2 : 0,
@@ -282,12 +345,14 @@ export function youthGroups<Value>(clubs: Value[], maximum = 16): Value[][] {
 
 export interface ReservePolicy {
   mode: "pyramid" | "separate" | "unverified";
+  competition: "senior-pyramid" | "reserve-league" | "closed-development" | "unknown";
   highestTier: number | null;
   entryTier: number | null;
   professional: boolean | null;
   gap: number;
   naming: "B" | "II" | "2" | "U23" | "Jong" | "Reserves";
   evidence: "documented" | "historical" | "unverified";
+  verification: "official-rule" | "official-participation" | "secondary" | "unverified";
   summary: string;
   source: string;
 }
@@ -302,8 +367,10 @@ const policy = (
   summary: string,
   professional: boolean | null = true,
   gap = 1,
+  verification: ReservePolicy["verification"] = "secondary",
 ): ReservePolicy => ({
   mode: "pyramid",
+  competition: "senior-pyramid",
   highestTier,
   entryTier,
   naming,
@@ -312,18 +379,21 @@ const policy = (
   professional,
   gap,
   evidence: "documented",
+  verification,
 });
 
 const reservePolicies: Record<string, ReservePolicy> = {
   EN: {
     mode: "separate",
+    competition: "reserve-league",
     highestTier: null,
     entryTier: 0,
     professional: false,
     gap: 1,
     naming: "Reserves",
     evidence: "documented",
-    source: reserveOverview,
+    verification: "official-participation",
+    source: "https://www.premierleague.com/news/58764",
     summary:
       "Professional clubs use separate development competitions; no B-team entry into the professional senior pyramid.",
   },
@@ -345,8 +415,11 @@ const reservePolicies: Record<string, ReservePolicy> = {
     3,
     3,
     "II",
-    "https://en.wikipedia.org/wiki/3._Liga",
+    "https://www.dfb.de/news/detail/wo-duerfen-zweite-mannschaften-spielen-das-ist-zu-beachten-144294/",
     "The third tier is the ceiling; a third-tier parent's reserves must drop to tier five.",
+    true,
+    1,
+    "official-rule",
   ),
   IT: policy(
     2,
@@ -368,6 +441,9 @@ const reservePolicies: Record<string, ReservePolicy> = {
     "Jong",
     "https://www.knvb.nl/competities/competitiezaken/competitiemodel/periodetitels-in-de-eerste-divisie",
     "Jong teams can play in the second tier; top-flight promotion is prohibited.",
+    true,
+    1,
+    "official-rule",
   ),
   AT: policy(
     2,
@@ -424,15 +500,31 @@ const reservePolicies: Record<string, ReservePolicy> = {
   ),
   US: {
     mode: "separate",
+    competition: "closed-development",
     highestTier: 3,
     entryTier: 3,
     professional: true,
     gap: 1,
     naming: "II",
     evidence: "documented",
-    source: "https://en.wikipedia.org/wiki/MLS_Next_Pro",
+    verification: "official-participation",
+    source: "https://www.mlsnextpro.com/about/",
     summary:
       "A separate professional tier-three development league has no promotion into its parents' competition.",
+  },
+  CA: {
+    mode: "separate",
+    competition: "closed-development",
+    highestTier: null,
+    entryTier: 0,
+    professional: true,
+    gap: 1,
+    naming: "II",
+    evidence: "documented",
+    verification: "official-participation",
+    source: "https://www.mlsnextpro.com/about/",
+    summary:
+      "Canadian MLS affiliates participate in cross-border MLS NEXT Pro, not automatic entry to the Canadian Premier League. A separate simulated group represents this closed development pathway.",
   },
 };
 
@@ -445,24 +537,28 @@ export function reservePolicy(code: string): ReservePolicy {
   if (historicalCountries.has(code))
     return {
       mode: "unverified",
+      competition: "unknown",
       highestTier: null,
       entryTier: null,
       professional: null,
       gap: 1,
       naming: "B",
       evidence: "historical",
+      verification: "secondary",
       source: historicalReserves,
       summary:
         "Senior-pyramid reserve participation is documented historically. Current entry and professional-tier permissions need federation verification; no automatic B-team admission.",
     };
   return {
     mode: "unverified",
+    competition: "unknown",
     highestTier: null,
     entryTier: null,
     professional: null,
     gap: 1,
     naming: "Reserves",
     evidence: "unverified",
+    verification: "unverified",
     source: "",
     summary:
       "Current reserve-team access has not been verified. No professional B-team permission is assumed; first-team, U19 and U17 squads are still provided.",
@@ -471,7 +567,12 @@ export function reservePolicy(code: string): ReservePolicy {
 
 export function minimumReserveTier(code: string, parentTier: number): number {
   const rules = reservePolicy(code);
-  if (rules.mode !== "pyramid" || rules.highestTier === null)
+  if (
+    rules.mode !== "pyramid" ||
+    rules.highestTier === null ||
+    !Number.isInteger(parentTier) ||
+    parentTier < 1
+  )
     return Number.POSITIVE_INFINITY;
   const gap =
     code === "NO"
@@ -482,6 +583,27 @@ export function minimumReserveTier(code: string, parentTier: number): number {
         ? 2
         : rules.gap;
   return Math.max(rules.highestTier, parentTier + gap);
+}
+
+export function associationRuleAudit(
+  country: Pick<Country, "code" | "name" | "reputation">,
+) {
+  return {
+    code: country.code,
+    name: country.name,
+    reviewedOn: "2026-09-22",
+    scope: "partial" as const,
+    reserve: reservePolicy(country.code),
+    pyramid: {
+      evidence: "modeled" as const,
+      tiers: domesticPyramid(country).length,
+      movement: closedPyramids.has(country.code) ? "closed" : "open",
+      labelSource: country.code === "FR"
+        ? "https://www.fff.fr/11-les-reglements/index.html"
+        : "",
+    },
+    notes: associationNotes(country.code),
+  };
 }
 
 export function reserveTeamName(parent: string, code: string): string {
@@ -528,7 +650,9 @@ export function planPyramidMoves(code: string, divisions: PyramidDivision[]) {
   for (let index = 0; index < ordered.length - 1; index++) {
     const upper = ordered[index];
     const lower = ordered[index + 1];
-    const maximum = Math.min(upper.relegation, lower.promotion);
+    const maximum = closedPyramids.has(code)
+      ? 0
+      : Math.min(upper.relegation, lower.promotion);
     if (!maximum || lower.tier !== upper.tier + 1) continue;
     const relegated = entries
       .filter(

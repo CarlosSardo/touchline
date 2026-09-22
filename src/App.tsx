@@ -131,29 +131,34 @@ const navigation: {
     ],
   },
   {
-    label: "Football",
+    label: "Squad & development",
     items: [
       { id: "squad", label: "Squad", icon: Users },
-      { id: "scouting", label: "Scouting", icon: Search },
-      { id: "transfers", label: "Transfers", icon: ArrowLeftRight },
-      { id: "loans", label: "Loans", icon: Handshake },
-      { id: "database", label: "Player database", icon: Database },
-      { id: "world", label: "World browser", icon: Globe2 },
-    ],
-  },
-  {
-    label: "Development",
-    items: [
       { id: "academy", label: "Academy", icon: GraduationCap },
       { id: "training", label: "Training", icon: Dumbbell },
       { id: "staff", label: "Staff", icon: BriefcaseBusiness },
     ],
   },
   {
-    label: "The bigger picture",
+    label: "Recruitment",
     items: [
+      { id: "database", label: "Player database", icon: Database },
+      { id: "scouting", label: "Scouting", icon: Search },
+      { id: "transfers", label: "Transfers", icon: ArrowLeftRight },
+      { id: "loans", label: "Loans", icon: Handshake },
+    ],
+  },
+  {
+    label: "World",
+    items: [
+      { id: "world", label: "World browser", icon: Globe2 },
       { id: "competitions", label: "Competitions", icon: Trophy },
       { id: "analytics", label: "Match centre", icon: ChartNoAxesCombined },
+    ],
+  },
+  {
+    label: "Club",
+    items: [
       { id: "finances", label: "Finances", icon: Wallet },
       { id: "board", label: "Boardroom", icon: Landmark },
       { id: "media", label: "Media & fans", icon: MessageSquare },
@@ -300,9 +305,19 @@ function Shell() {
     navigate(next);
     setMenu(false);
   };
-  const mobilePages: Page[] = ["office", "squad", "scouting", "transfers"];
+  const mobilePages: Page[] = ["office", "database", "squad", "academy"];
   return (
     <>
+      <a
+        className="skip-link"
+        href="#main-content"
+        onClick={(event) => {
+          event.preventDefault();
+          document.getElementById("main-content")?.focus();
+        }}
+      >
+        Skip to content
+      </a>
       <div className="app-shell">
         <aside className="sidebar">
           <a
@@ -331,7 +346,7 @@ function Shell() {
           </button>
           <nav className="nav-scroll" aria-label="Main navigation">
             {navigation.map((group) => (
-              <div className="nav-group" key={group.label}>
+              <div className="nav-group" key={group.label} role="group" aria-label={group.label}>
                 <div className="nav-label">{group.label}</div>
                 {group.items.map((item) => (
                   <button
@@ -357,6 +372,7 @@ function Shell() {
             </button>
             <button
               className={`nav-item ${page === "settings" ? "active" : ""}`}
+              aria-current={page === "settings" ? "page" : undefined}
               onClick={() => navClick("settings")}
             >
               <Settings2 size={17} strokeWidth={1.55} />
@@ -477,6 +493,7 @@ function Shell() {
           <main
             className="main-scroll"
             id="main-content"
+            tabIndex={-1}
             onTouchStart={(event) => {
               if (
                 (event.target as HTMLElement).closest(
@@ -532,12 +549,14 @@ function Shell() {
               onClick={() => navClick(id)}
             >
               <item.icon size={20} strokeWidth={1.7} />
-              <span>{item.label}</span>
+              <span>{id === "database" ? "Database" : item.label}</span>
             </button>
           );
         })}
         <button
           className={!mobilePages.includes(page) ? "active" : ""}
+          aria-haspopup="dialog"
+          aria-expanded={menu}
           onClick={() => setMenu(true)}
         >
           <Menu size={20} strokeWidth={1.7} />
@@ -585,18 +604,46 @@ function Shell() {
       )}
       {menu && (
         <Modal title="Your workspace" onClose={() => setMenu(false)}>
-          <div className="mobile-menu-grid">
-            {allItems.map((item) => (
-              <button
-                key={item.id}
-                className={`nav-item ${page === item.id ? "active" : ""}`}
-                onClick={() => navClick(item.id)}
-              >
-                <item.icon size={18} />
-                <span>{item.label}</span>
-              </button>
+          <nav className="mobile-menu-sections" aria-label="All pages">
+            {navigation.map((group) => (
+              <section className="mobile-menu-section" key={group.label} aria-label={group.label}>
+                <h3>{group.label}</h3>
+                <div className="mobile-menu-grid">
+                  {group.items.map((item) => (
+                    <button
+                      type="button"
+                      key={item.id}
+                      className={`nav-item ${page === item.id ? "active" : ""}`}
+                      aria-current={page === item.id ? "page" : undefined}
+                      onClick={() => navClick(item.id)}
+                    >
+                      <item.icon size={18} aria-hidden="true" />
+                      <span>{item.label}</span>
+                    </button>
+                  ))}
+                </div>
+              </section>
             ))}
-          </div>
+            <section className="mobile-menu-section" aria-label="Career & actions">
+              <h3>Career & actions</h3>
+              <div className="mobile-menu-grid">
+                <button type="button" className="nav-item" onClick={() => navClick("start")}>
+                  <BookOpen size={18} aria-hidden="true" /><span>Careers</span>
+                </button>
+                {allItems.filter((item) => ["settings", "offer", "contract"].includes(item.id)).map((item) => (
+                  <button
+                    type="button"
+                    key={item.id}
+                    className={`nav-item ${page === item.id ? "active" : ""}`}
+                    aria-current={page === item.id ? "page" : undefined}
+                    onClick={() => navClick(item.id)}
+                  >
+                    <item.icon size={18} aria-hidden="true" /><span>{item.label}</span>
+                  </button>
+                ))}
+              </div>
+            </section>
+          </nav>
         </Modal>
       )}
       {globalSearch && (

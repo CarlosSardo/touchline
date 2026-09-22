@@ -16,6 +16,7 @@ import {
   ArrowUpRight,
   Bookmark,
   Check,
+  ChevronLeft,
   ChevronRight,
   Inbox,
   LoaderCircle,
@@ -147,14 +148,14 @@ export function PageHeading({
   children?: ReactNode;
 }) {
   return (
-    <div className="page-heading">
+    <header className="page-heading">
       <div>
         {eyebrow && <div className="eyebrow">{eyebrow}</div>}
         <h1>{title}</h1>
         {subtitle && <p className="page-subtitle">{subtitle}</p>}
       </div>
       {children && <div className="heading-actions">{children}</div>}
-    </div>
+    </header>
   );
 }
 export function SectionHeading({
@@ -440,7 +441,7 @@ export function PlayerName({
 }) {
   const { setPlayer } = useGame();
   return (
-    <button className="player-name" onClick={() => setPlayer(player.id)}>
+    <button type="button" className="player-name" onClick={() => setPlayer(player.id)}>
       <Silhouette
         size={compact ? 30 : 38}
         color={player.club_color ?? "#087f6d"}
@@ -503,6 +504,7 @@ export function ShortlistButton({ player }: { player: Player }) {
     <IconButton
       icon={Bookmark}
       label={player.shortlisted ? "Remove from shortlist" : "Add to shortlist"}
+      aria-pressed={!!player.shortlisted}
       className={player.shortlisted ? "bookmarked" : ""}
       onClick={() =>
         void act({
@@ -520,16 +522,19 @@ export function PlayerTable({
   compact = false,
   wages = false,
   children,
+  label = "Player results",
 }: {
   players: Player[];
   compact?: boolean;
   wages?: boolean;
   children?: (player: Player) => ReactNode;
+  label?: string;
 }) {
   const { money } = useCurrency();
   return (
-    <div className="table-scroll" data-no-swipe>
+    <div className="table-scroll" data-no-swipe role="region" aria-label={label} tabIndex={0}>
       <table className="data-table player-table">
+      <caption className="sr-only">{label}</caption>
         <thead>
           <tr>
             <th>Player</th>
@@ -845,25 +850,90 @@ export function Tabs({
   items,
   value,
   onChange,
+  label = "Page sections",
 }: {
   items: { id: string; label: string; count?: number }[];
   value: string;
   onChange: (value: string) => void;
+  label?: string;
 }) {
+  const listRef = useRef<HTMLDivElement>(null);
+  const [overflow, setOverflow] = useState({ left: false, right: false });
+  useEffect(() => {
+    const list = listRef.current;
+    if (!list) return;
+    function updateOverflow() {
+      if (!list) return;
+      const left = list.scrollLeft > 1;
+      const right = list.scrollLeft + list.clientWidth < list.scrollWidth - 1;
+      setOverflow((current) => current.left === left && current.right === right
+        ? current : { left, right });
+    }
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(updateOverflow);
+    observer?.observe(list);
+    Array.from(list.children).forEach((child) => observer?.observe(child));
+    list.addEventListener("scroll", updateOverflow, { passive: true });
+    updateOverflow();
+    return () => {
+      observer?.disconnect();
+      list.removeEventListener("scroll", updateOverflow);
+    };
+  }, [items.length]);
+  useEffect(() => {
+    const list = listRef.current;
+    const selected = list?.querySelector<HTMLButtonElement>('[aria-selected="true"]');
+    if (!list || !selected) return;
+    const listBounds = list.getBoundingClientRect();
+    const selectedBounds = selected.getBoundingClientRect();
+    if (selectedBounds.left < listBounds.left)
+      list.scrollBy({ left: selectedBounds.left - listBounds.left });
+    else if (selectedBounds.right > listBounds.right)
+      list.scrollBy({ left: selectedBounds.right - listBounds.right });
+  }, [value]);
   return (
-    <div className="tabs" role="tablist">
-      {items.map((item) => (
+    <div className="tab-navigation" data-no-swipe>
+    <div className="tabs" role="tablist" aria-label={label} ref={listRef}>
+      {items.map((item, index) => (
         <button
+          type="button"
           role="tab"
           aria-selected={value === item.id}
+          tabIndex={value === item.id ? 0 : -1}
           className={value === item.id ? "active" : ""}
           key={item.id}
           onClick={() => onChange(item.id)}
+          onKeyDown={(event) => {
+            const nextIndex = event.key === "ArrowRight" ? (index + 1) % items.length
+              : event.key === "ArrowLeft" ? (index - 1 + items.length) % items.length
+                : event.key === "Home" ? 0
+                  : event.key === "End" ? items.length - 1 : null;
+            if (nextIndex === null) return;
+            event.preventDefault();
+            onChange(items[nextIndex].id);
+            listRef.current?.querySelectorAll<HTMLButtonElement>('[role="tab"]')[nextIndex]?.focus();
+          }}
         >
           {item.label}
           {item.count !== undefined && <span>{compactNumber(item.count)}</span>}
         </button>
       ))}
+    </div>
+    {(overflow.left || overflow.right) && (
+      <div className="tab-scroll-controls" role="group" aria-label={`${label} scrolling`}>
+        <IconButton
+          icon={ChevronLeft}
+          label={`Scroll ${label.toLowerCase()} left`}
+          disabled={!overflow.left}
+          onClick={() => listRef.current?.scrollBy({ left: -Math.max(120, listRef.current.clientWidth * 0.75) })}
+        />
+        <IconButton
+          icon={ChevronRight}
+          label={`Scroll ${label.toLowerCase()} right`}
+          disabled={!overflow.right}
+          onClick={() => listRef.current?.scrollBy({ left: Math.max(120, listRef.current.clientWidth * 0.75) })}
+        />
+      </div>
+    )}
     </div>
   );
 }

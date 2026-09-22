@@ -1217,7 +1217,7 @@ export function createApp(store: Store) {
   app.post(
     "/api/world/expand",
     mutation(async (_request, response) =>
-      response.json(await store.transaction(() => saves.expandWorld())),
+      response.json(await saves.expandWorld()),
     ),
   );
   app.get(

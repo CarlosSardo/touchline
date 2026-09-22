@@ -513,7 +513,7 @@ export async function processTransferPayments(store: Store) {
     );
     if (payment.sell_on_clause_id !== null) {
       await store.run(
-        "UPDATE sell_on_clauses SET paid = paid + ? WHERE id = ?",
+        "UPDATE sell_on_clauses SET paid = ROUND(paid + ?, 2) WHERE id = ?",
         payment.amount,
         payment.sell_on_clause_id,
       );

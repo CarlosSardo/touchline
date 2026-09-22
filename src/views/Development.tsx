@@ -1,5 +1,6 @@
 import { useState } from "react";
 import {
+  ArrowLeftRight,
   ArrowUp,
   Check,
   Dumbbell,
@@ -7,11 +8,12 @@ import {
   HeartPulse,
   Network,
   Save,
+  Search,
   ShieldCheck,
-  Sparkles,
   Target,
   TrendingUp,
   Users,
+  X,
 } from "lucide-react";
 import { useCurrency, useGame, useResource } from "../game-context.tsx";
 import {
@@ -22,6 +24,7 @@ import {
   ErrorState,
   Field,
   FixtureRow,
+  IconButton,
   Loading,
   Meter,
   Modal,
@@ -41,18 +44,24 @@ import { AssistantPanel } from "./ClubSupport.tsx";
 
 function MentorSheet({ player, close }: { player: Player; close: () => void }) {
   const { act } = useGame();
-  const { data } = useResource<TrainingData>("training");
+  const { data, error, loading } = useResource<TrainingData>("training");
   const [mentor, setMentor] = useState("");
+  const [pending, setPending] = useState(false);
+  const candidates = data?.mentors.filter((candidate) => candidate.id !== player.id) ?? [];
   return (
     <Modal title={`Mentorship / ${player.name}`} onClose={close}>
       <div className="sheet-body">
+        {loading && <Loading label="Loading mentors" />}
+        {error && <ErrorState message={error} />}
+        {data && !candidates.length && <Empty title="No senior mentors available" />}
         <Field label="Senior mentor">
           <select
             value={mentor}
+            disabled={loading || pending || !candidates.length}
             onChange={(event) => setMentor(event.target.value)}
           >
             <option value="">Select a mentor</option>
-            {data?.mentors.map((candidate) => (
+            {candidates.map((candidate) => (
               <option key={candidate.id} value={candidate.id}>
                 {candidate.name} / {candidate.position} / {candidate.age} years
               </option>
@@ -82,16 +91,17 @@ function MentorSheet({ player, close }: { player: Player; close: () => void }) {
         </Button>
         <Button
           icon={Network}
-          disabled={!mentor}
-          onClick={() =>
+          disabled={!mentor || pending || loading || !!error}
+          onClick={() => {
+            setPending(true);
             void act({
               type: "mentor",
               playerId: player.id,
               mentorId: Number(mentor),
             }).then((result) => {
               if (result) close();
-            })
-          }
+            }).finally(() => setPending(false));
+          }}
         >
           Confirm mentorship
         </Button>
@@ -102,14 +112,49 @@ function MentorSheet({ player, close }: { player: Player; close: () => void }) {
 
 export function Academy() {
   const { bootstrap, act, setPlayer, openLeague, confirm } = useGame();
-  const { data, error } = useResource<AcademyData>("academy");
+  const { data, error, loading } = useResource<AcademyData>("academy", { keepPreviousData: true });
   const [tab, setTab] = useState("prospects");
-  const [group, setGroup] = useState("all");
+  const [group, setGroup] = useState("U19");
+  const [query, setQuery] = useState("");
+  const [position, setPosition] = useState("");
+  const [focus, setFocus] = useState("");
+  const [sort, setSort] = useState("potential");
   const [mentee, setMentee] = useState<Player | null>(null);
   if (error) return <ErrorState message={error} />;
   if (!data || !bootstrap) return <Loading />;
   const cohort = data.players.filter(
     (player) => group === "all" || player.age_group === group,
+  );
+  const agesOut = (player: Player) =>
+    (player.age_group === "U17" || player.age_group === "U19") &&
+    player.birth_date < `${bootstrap.state.season + 1 - (player.age_group === "U17" ? 16 : 18)}-01-01`;
+  const isInjured = (player: Player) =>
+    !!player.injury_until && player.injury_until > bootstrap.state.date;
+  const needsCare = (player: Player) =>
+    isInjured(player) || player.fitness < 60 || (player.details?.mentalHealth.burnout ?? 0) >= 60;
+  const isUnpaired = (player: Player) => player.details?.development.mentorId === null;
+  const priorities = (player: Player) => [
+    ...(agesOut(player) ? ["Age-out review"] : []),
+    ...(isInjured(player) ? ["Injured"] : []),
+    ...(player.fitness < 60 ? ["Fitness below 60"] : []),
+    ...((player.details?.mentalHealth.burnout ?? 0) >= 60 ? ["Burnout 60+"] : []),
+    ...(isUnpaired(player) ? ["No mentor"] : []),
+  ];
+  const selected = cohort.filter((player) =>
+    (!position || player.position === position) &&
+    (!query || `${player.name} ${player.nationality}`.toLowerCase().includes(query.trim().toLowerCase())) &&
+    (!focus || (focus === "age-out" ? agesOut(player) : focus === "care" ? needsCare(player) : isUnpaired(player))),
+  ).sort((first, second) =>
+    sort === "name" ? first.name.localeCompare(second.name)
+      : sort === "age" ? second.age - first.age
+        : sort === "ability" ? second.ability - first.ability
+          : second.potential - first.potential,
+  );
+  const priorityPlayers = selected.filter((player) => priorities(player).length);
+  const cohortLeagues = data.leagues.filter((league) => group === "all" || league.age_group === group);
+  const leagueIds = new Set(cohortLeagues.map((league) => league.id));
+  const cohortFixtures = data.fixtures.filter(
+    (fixture) => group === "all" || (fixture.league_id !== null && leagueIds.has(fixture.league_id)),
   );
   return (
     <div className="page">
@@ -134,7 +179,26 @@ export function Academy() {
           Invest in academy
         </Button>
       </PageHeading>
-      <div className="stat-strip">
+      <fieldset className="cohort-switcher" data-no-swipe>
+        <legend className="sr-only">Academy age group</legend>
+        {["U19", "U17", "all"].map((ageGroup) => (
+          <label className="cohort-choice" key={ageGroup}>
+            <input
+              type="radio"
+              name="academy-cohort"
+              value={ageGroup}
+              checked={group === ageGroup}
+              aria-label={ageGroup === "all" ? "All academy age groups" : `${ageGroup} academy`}
+              onChange={() => setGroup(ageGroup)}
+            />
+            <span>
+              <strong>{ageGroup === "all" ? "All youth" : ageGroup}</strong>
+              <small>{data.players.filter((player) => ageGroup === "all" || player.age_group === ageGroup).length} players</small>
+            </span>
+          </label>
+        ))}
+      </fieldset>
+      <div className="stat-strip compact-stat-strip">
         <Stat
           label="Academy rating"
           value={
@@ -147,68 +211,99 @@ export function Academy() {
           detail={<Meter value={bootstrap.club.academy} max={99} />}
         />
         <Stat
-          label="Young players"
-          value={data.players.length}
+          label={group === "all" ? "Young players" : `${group} players`}
+          value={cohort.length}
           icon={Users}
-          detail={`${data.players.filter((player) => player.age_group === "U17").length} U17 / ${data.players.filter((player) => player.age_group === "U19").length} U19`}
+          detail={`${cohort.filter((player) => player.potential >= 80).length} with potential 80+`}
         />
         <Stat
-          label="High-potential prospects"
-          value={data.players.filter((player) => player.potential >= 80).length}
-          icon={Sparkles}
-          detail="Current potential of 80+"
+          label="Age-out review"
+          value={cohort.filter(agesOut).length}
+          icon={ArrowUp}
+          detail={`Next season / ${bootstrap.state.season + 1}`}
         />
         <Stat
-          label="Global annual intake"
-          value="15,000"
-          icon={TrendingUp}
-          detail={
-            data.intake
-              ? `Last intake ${dateLabel(data.intake.date)}`
-              : "Next intake: 1 July 2027"
-          }
+          label="With a mentor"
+          value={cohort.filter((player) => !!player.details?.development.mentorId).length}
+          icon={Network}
+          detail={`${cohort.filter(isUnpaired).length} unpaired`}
         />
       </div>
+      {data.intake && <div className="academy-intake">Last intake: {data.intake.count} players / {dateLabel(data.intake.date)}</div>}
       <Panel>
         <Tabs
+          label="Academy views"
           items={[
             { id: "prospects", label: "Prospects" },
-            { id: "mentorship", label: "Mentorship chains" },
+            { id: "priorities", label: "Development priorities", count: cohort.filter((player) => priorities(player).length).length },
+            { id: "mentorship", label: "Mentorship", count: cohort.filter(isUnpaired).length },
             { id: "calendar", label: "Youth competitions" },
           ]}
           value={tab}
           onChange={setTab}
         />
-        {(tab === "prospects" || tab === "mentorship") && (
+        {tab !== "calendar" && (
           <>
-            <div className="filter-bar">
-              <select
-                aria-label="Academy age group"
-                value={group}
-                onChange={(event) => setGroup(event.target.value)}
-              >
-                <option value="all">All age groups</option>
-                <option>U17</option>
-                <option>U19</option>
-              </select>
-              <Badge tone="blue">Youth DNA: {data.dna}</Badge>
+            <div className="filter-bar roster-toolbar">
+              <div className="search-field">
+                <Search size={17} aria-hidden="true" />
+                <input aria-label="Search academy players" placeholder="Search academy" value={query} onChange={(event) => setQuery(event.target.value)} />
+              </div>
+              <Field label="Position">
+                <select aria-label="Academy position" value={position} onChange={(event) => setPosition(event.target.value)}>
+                  <option value="">All positions</option>
+                  {POSITIONS.map((item) => <option key={item}>{item}</option>)}
+                </select>
+              </Field>
+              <Field label="Review">
+                <select aria-label="Academy review" value={focus} onChange={(event) => setFocus(event.target.value)}>
+                  <option value="">All players</option>
+                  <option value="age-out">Age-out next season</option>
+                  <option value="care">Injury / fitness / burnout</option>
+                  <option value="mentor">Without a mentor</option>
+                </select>
+              </Field>
+              <Field label="Sort by">
+                <select aria-label="Sort academy players" value={sort} onChange={(event) => setSort(event.target.value)}>
+                  <option value="potential">Potential</option>
+                  <option value="ability">Ability</option>
+                  <option value="age">Age: oldest first</option>
+                  <option value="name">Name</option>
+                </select>
+              </Field>
+              {(query || position || focus) && <IconButton icon={X} label="Clear academy filters" onClick={() => { setQuery(""); setPosition(""); setFocus(""); }} />}
             </div>
-            <div className="table-scroll">
-              <table className="data-table">
+            <div className="position-coverage" role="group" aria-label="Academy position coverage">
+              {POSITIONS.map((item) => {
+                const count = cohort.filter((player) => player.position === item).length;
+                return (
+                  <button type="button" key={item} aria-pressed={position === item} aria-label={`${item}: ${count} academy players`} onClick={() => setPosition(position === item ? "" : item)}>
+                    <span>{item}</span><strong>{count}</strong>
+                  </button>
+                );
+              })}
+            </div>
+            <div className="roster-result-count" role="status">{tab === "priorities" ? priorityPlayers.length : selected.length} of {cohort.length} players{loading ? " / Updating" : ""}</div>
+          </>
+        )}
+        {tab === "prospects" && (
+            <div className="table-scroll roster-table-scroll" role="region" aria-label="Academy prospects" tabIndex={0} aria-busy={loading}>
+              <table className="data-table academy-table">
+                <caption className="sr-only">{group === "all" ? "Academy" : group} prospects and pathways</caption>
                 <thead>
                   <tr>
                     <th>Player</th>
                     <th>Pos</th>
-                    <th>Group</th>
+                    <th>Group / age</th>
                     <th>Ability</th>
                     <th>Potential</th>
-                    <th>{tab === "mentorship" ? "Mentor" : "Development"}</th>
+                    <th>Development</th>
                     <th>Burnout</th>
                     <th>Pathway</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {cohort.map((player) => (
+                  {selected.map((player) => (
                     <tr key={player.id}>
                       <td>
                         <PlayerName player={player} compact />
@@ -216,7 +311,7 @@ export function Academy() {
                       <td>
                         <span className="position-tag">{player.position}</span>
                       </td>
-                      <td>{player.age_group}</td>
+                      <td>{player.age_group} / {player.age}</td>
                       <td>
                         <Rating value={player.ability} />
                       </td>
@@ -237,19 +332,7 @@ export function Academy() {
                         </span>
                       </td>
                       <td>
-                        {tab === "mentorship" ? (
-                          player.details?.development.mentorId ? (
-                            <TextLink
-                              onClick={() =>
-                                setPlayer(player.details!.development.mentorId)
-                              }
-                            >
-                              View mentor
-                            </TextLink>
-                          ) : (
-                            <span className="muted">Not paired</span>
-                          )
-                        ) : (
+                        <div className="roster-status">
                           <Badge
                             tone={
                               player.details?.development.growthSpurt
@@ -261,7 +344,10 @@ export function Academy() {
                               ? "Growth spurt"
                               : player.training}
                           </Badge>
-                        )}
+                          {agesOut(player) && <Badge tone="amber">Age-out review</Badge>}
+                          {isInjured(player) && <Badge tone="red">Injured</Badge>}
+                          {!!player.parent_club_id && <Badge tone="blue">On loan</Badge>}
+                        </div>
                       </td>
                       <td>
                         <div className="cell-meter">
@@ -285,11 +371,10 @@ export function Academy() {
                           >
                             Mentor
                           </Button>
-                          {tab === "prospects" && (
                             <Button
                               icon={ArrowUp}
                               variant="ghost"
-                              disabled={player.age < 16}
+                              disabled={player.age < 16 || loading}
                               onClick={() =>
                                 void act({
                                   type: "promote",
@@ -299,28 +384,77 @@ export function Academy() {
                             >
                               Promote
                             </Button>
-                          )}
+                          <IconButton icon={ArrowLeftRight} label={`Squad assignment for ${player.name}`} onClick={() => setPlayer(player.id)} />
                         </div>
                       </td>
                     </tr>
                   ))}
                 </tbody>
               </table>
-              {!cohort.length && (
+              {!selected.length && (
                 <Empty
                   title="No players in this cohort"
-                  detail="The next annual intake will refresh the academy."
                 />
               )}
             </div>
-          </>
+        )}
+        {tab === "priorities" && (
+          <div className="academy-priorities" aria-busy={loading}>
+            {priorityPlayers.length ? priorityPlayers.map((player) => (
+              <article className="academy-priority-row" key={player.id}>
+                <div className="academy-priority-identity">
+                  <PlayerName player={player} compact />
+                  <div className="academy-priority-tags">
+                    {priorities(player).map((priority) => <Badge key={priority} tone={priority === "Injured" ? "red" : "amber"}>{priority}</Badge>)}
+                  </div>
+                  <small>Fitness {Math.round(player.fitness)}% / Burnout {player.details ? Math.round(player.details.mentalHealth.burnout) : "Not recorded"}</small>
+                </div>
+                <Field label="Training focus">
+                  <select aria-label={`Training for ${player.name}`} value={player.training} disabled={loading} onChange={(event) => void act({ type: "training", playerId: player.id, focus: event.target.value, intensity: player.intensity })}>
+                    {TRAINING_TYPES.map((training) => <option key={training}>{training}</option>)}
+                  </select>
+                </Field>
+                <Field label="Intensity">
+                  <select aria-label={`Intensity for ${player.name}`} value={player.intensity} disabled={loading} onChange={(event) => void act({ type: "training", playerId: player.id, focus: player.training, intensity: Number(event.target.value) })}>
+                    {[...new Set([20, 35, 50, 65, 80, 95, player.intensity])].sort((first, second) => first - second).map((intensity) => <option key={intensity} value={intensity}>{intensity}%</option>)}
+                  </select>
+                </Field>
+                <div className="academy-priority-actions" role="group" aria-label={`Development actions for ${player.name}`}>
+                  <Button icon={Network} variant="secondary" onClick={() => setMentee(player)}>Mentor</Button>
+                  <IconButton icon={ArrowLeftRight} label={`Squad assignment for ${player.name}`} onClick={() => setPlayer(player.id)} />
+                </div>
+              </article>
+            )) : <Empty title="No development priorities in this selection" />}
+          </div>
+        )}
+        {tab === "mentorship" && (
+          <div className="table-scroll roster-table-scroll" role="region" aria-label="Academy mentorship" tabIndex={0} aria-busy={loading}>
+            <table className="data-table mentorship-table">
+              <caption className="sr-only">{group === "all" ? "Academy" : group} mentorship</caption>
+              <thead><tr><th>Player</th><th>Pos</th><th>Mentor</th><th>Development focus</th><th>Actions</th></tr></thead>
+              <tbody>
+                {selected.map((player) => (
+                  <tr key={player.id}>
+                    <td><PlayerName player={player} compact /></td>
+                    <td><span className="position-tag">{player.position}</span></td>
+                    <td>{player.details?.development.mentorId
+                      ? <TextLink onClick={() => setPlayer(player.details!.development.mentorId)}>View mentor</TextLink>
+                      : <Badge tone="amber">{player.details ? "Not paired" : "Not recorded"}</Badge>}</td>
+                    <td>{player.training}</td>
+                    <td><Button icon={Network} variant="secondary" onClick={() => setMentee(player)}>{player.details?.development.mentorId ? "Change mentor" : "Assign mentor"}</Button></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {!selected.length && <Empty title="No players in this selection" />}
+          </div>
         )}
         {tab === "calendar" && (
           <div className="padded">
             <div className="equal-columns">
               <div>
                 <h3 className="subsection-title">Competitions</h3>
-                {data.leagues.map((league) => (
+                {cohortLeagues.map((league) => (
                   <button
                     key={league.id}
                     className="competition-button"
@@ -332,12 +466,14 @@ export function Academy() {
                     </small>
                   </button>
                 ))}
+                {!cohortLeagues.length && <Empty title="No competitions for this cohort" />}
               </div>
               <div>
                 <h3 className="subsection-title">Next fixtures</h3>
-                {data.fixtures.map((fixture) => (
+                {cohortFixtures.map((fixture) => (
                   <FixtureRow fixture={fixture} key={fixture.id} />
                 ))}
+                {!cohortFixtures.length && <Empty title="No upcoming fixtures in this cohort" />}
               </div>
             </div>
           </div>
@@ -550,18 +686,26 @@ function SetPieceDesigner({
 
 export function Training() {
   const { bootstrap, act } = useGame();
-  const { data, error } = useResource<TrainingData>("training");
+  const { data, error, loading } = useResource<TrainingData>("training", { keepPreviousData: true });
   const [tab, setTab] = useState("programme");
+  const [group, setGroup] = useState("");
+  const [position, setPosition] = useState("");
+  const [query, setQuery] = useState("");
   if (error) return <ErrorState message={error} />;
   if (!data || !bootstrap) return <Loading />;
+  const players = data.players.filter((player) =>
+    (!group || player.age_group === group) &&
+    (!position || player.position === position) &&
+    (!query || player.name.toLowerCase().includes(query.trim().toLowerCase())),
+  );
   return (
     <div className="page">
       <PageHeading
         eyebrow="PERFORMANCE & CARE"
         title="Development centre"
-        subtitle="Give your people the environment to improve."
+        subtitle={`${bootstrap.club.name} / ${data.plan.focus}`}
       />
-      <div className="stat-strip">
+      <div className="stat-strip compact-stat-strip">
         <Stat
           label="Training facilities"
           value={bootstrap.club.facilities}
@@ -591,6 +735,7 @@ export function Training() {
       </div>
       <Panel>
         <Tabs
+          label="Training views"
           items={[
             { id: "programme", label: "Programme" },
             { id: "individual", label: "Individual plans" },
@@ -614,7 +759,30 @@ export function Training() {
           </>
         )}
         {tab === "individual" && (
-          <div className="table-scroll">
+          <>
+          <div className="filter-bar roster-toolbar">
+            <div className="search-field">
+              <Search size={17} aria-hidden="true" />
+              <input aria-label="Search training players" placeholder="Search players" value={query} onChange={(event) => setQuery(event.target.value)} />
+            </div>
+            <Field label="Age group">
+              <select aria-label="Training age group" value={group} onChange={(event) => setGroup(event.target.value)}>
+                <option value="">All age groups</option>
+                <option value="Senior">Senior</option>
+                <option>U19</option>
+                <option>U17</option>
+              </select>
+            </Field>
+            <Field label="Position">
+              <select aria-label="Training position" value={position} onChange={(event) => setPosition(event.target.value)}>
+                <option value="">All positions</option>
+                {POSITIONS.map((item) => <option key={item}>{item}</option>)}
+              </select>
+            </Field>
+            {(query || group || position) && <IconButton icon={X} label="Clear training filters" onClick={() => { setQuery(""); setGroup(""); setPosition(""); }} />}
+          </div>
+          <div className="roster-result-count" role="status">{players.length} of {data.players.length} players</div>
+          <div className="table-scroll roster-table-scroll" role="region" aria-label="Individual training plans" tabIndex={0} aria-busy={loading}>
             <table className="data-table">
               <thead>
                 <tr>
@@ -627,7 +795,7 @@ export function Training() {
                 </tr>
               </thead>
               <tbody>
-                {data.players.map((player) => (
+                {players.map((player) => (
                   <tr key={player.id}>
                     <td>
                       <PlayerName player={player} compact />
@@ -708,7 +876,9 @@ export function Training() {
                 ))}
               </tbody>
             </table>
+            {!players.length && <Empty title="No training plans in this selection" />}
           </div>
+          </>
         )}
         {tab === "medical" &&
           (data.injuries.length ? (

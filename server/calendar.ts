@@ -2,10 +2,12 @@ import roundrobin from "roundrobin";
 import { Store } from "./db.ts";
 import { addDays, daysBetween, internationalBreak } from "../shared/rules.ts";
 import {
+  clubCompetitionEligible,
   knockoutRules,
   knockoutWinner,
   type KnockoutTie,
 } from "../shared/competition-rules.ts";
+import { minimumReserveTier } from "../shared/world-rules.ts";
 import { drawLeaguePhase } from "./draw.ts";
 import { continentalEntries } from "./qualification.ts";
 import type {
@@ -800,12 +802,154 @@ export async function setupMainCompetition(
   });
 }
 
+export async function activateWorldStructure(store: Store, season: number) {
+  return store.transaction(async () => {
+    const pendingLeagues = await store.all<League>(
+      "SELECT * FROM leagues WHERE kind = 'league' AND JSON_QUERY(data,'$.pendingStructure') IS NOT NULL ORDER BY id",
+    );
+    const pendingClubs = await store.all<Club>(
+      "SELECT * FROM clubs WHERE type != 'national' AND (JSON_VALUE(data,'$.pendingSeniorLeague') IS NOT NULL OR JSON_VALUE(data,'$.pendingSeniorTier') IS NOT NULL OR JSON_QUERY(data,'$.pendingYouthLeagues') IS NOT NULL) ORDER BY CASE WHEN parent_id IS NULL THEN 0 ELSE 1 END,id",
+    );
+    if (!pendingLeagues.length && !pendingClubs.length)
+      return { leaguesActivated: 0, clubsAdmitted: 0 };
+    const scheduled = new Set(
+      (await store.all<{ league_id: number }>(
+        "SELECT DISTINCT league_id FROM fixtures WHERE season = ? AND league_id IS NOT NULL",
+        season,
+      )).map((fixture) => fixture.league_id),
+    );
+    let leaguesActivated = 0;
+    let clubsAdmitted = 0;
+    for (const league of pendingLeagues) {
+      const data = JSON.parse(league.data);
+      const pending = data.pendingStructure;
+      if (Number(pending.fromSeason) > season || scheduled.has(league.id))
+        continue;
+      delete data.pendingStructure;
+      await store.run(
+        "UPDATE leagues SET name = ?,data = ? WHERE id = ?",
+        pending.name ?? league.name,
+        JSON.stringify({
+          ...data,
+          promotion: pending.promotion,
+          relegation: pending.relegation,
+          targetFirstTeams: pending.targetFirstTeams,
+          worldVersion: pending.worldVersion,
+        }),
+        league.id,
+      );
+      leaguesActivated++;
+    }
+    const leagues = await store.all<League>(
+      "SELECT * FROM leagues WHERE kind = 'league' ORDER BY tier,id",
+    );
+    const countries = new Map(
+      (await store.all<Country>("SELECT * FROM countries")).map(
+        (country) => [country.id, country],
+      ),
+    );
+    for (const club of pendingClubs) {
+      const data = JSON.parse(club.data);
+      if (Number(data.admitFromSeason ?? data.activeFromSeason ?? season) > season)
+        continue;
+      let changed = false;
+      let target = leagues.find(
+        (league) => league.id === Number(data.pendingSeniorLeague),
+      );
+      if (club.parent_id !== null && data.pendingSeniorTier) {
+        const parent = await store.get<{ tier: number }>(
+          "SELECT leagues.tier FROM clubs JOIN leagues ON leagues.id = clubs.league_id WHERE clubs.id = ? AND leagues.kind = 'league' AND leagues.age_group = 'Senior' AND coalesce(JSON_VALUE(leagues.data,'$.reserveOnly'),'false') NOT IN ('true','1')",
+          club.parent_id,
+        );
+        const minimum = minimumReserveTier(
+          countries.get(club.country_id)!.code,
+          parent?.tier ?? 0,
+        );
+        target = leagues.find((league) =>
+          league.country_id === club.country_id &&
+          league.age_group === "Senior" &&
+          !JSON.parse(league.data).reserveOnly &&
+          league.tier >= Math.max(minimum, Number(data.pendingSeniorTier)),
+        );
+      }
+      if (
+        target &&
+        target.country_id === club.country_id &&
+        target.age_group === "Senior" &&
+        !JSON.parse(target.data).reserveOnly &&
+        Number(JSON.parse(target.data).activeFromSeason ?? season) <= season &&
+        !scheduled.has(target.id) &&
+        (club.league_id === null || !scheduled.has(club.league_id))
+      ) {
+        await store.run(
+          "DELETE FROM standings WHERE club_id = ? AND league_id IN (SELECT id FROM leagues WHERE kind = 'league' AND age_group = 'Senior')",
+          club.id,
+        );
+        await store.run(
+          "INSERT INTO standings(league_id,club_id) VALUES (?,?)",
+          target.id,
+          club.id,
+        );
+        await store.run(
+          "UPDATE clubs SET league_id = ? WHERE id = ?",
+          target.id,
+          club.id,
+        );
+        delete data.pendingSeniorLeague;
+        delete data.pendingSeniorTier;
+        changed = true;
+      }
+      for (const age of ["U19", "U17"] as const) {
+        const youthId = Number(data.pendingYouthLeagues?.[age]);
+        const youthLeague = leagues.find((league) =>
+          league.id === youthId && league.country_id === club.country_id &&
+          league.age_group === age,
+        );
+        if (!youthLeague || scheduled.has(youthId) ||
+          Number(JSON.parse(youthLeague.data).activeFromSeason ?? season) > season)
+          continue;
+        const existing = await store.all<{ league_id: number }>(
+          "SELECT standings.league_id FROM standings JOIN leagues ON leagues.id = standings.league_id WHERE standings.club_id = ? AND leagues.kind = 'league' AND leagues.age_group = ?",
+          club.id,
+          age,
+        );
+        if (existing.some((entry) => scheduled.has(entry.league_id))) continue;
+        for (const entry of existing)
+          await store.run(
+            "DELETE FROM standings WHERE club_id = ? AND league_id = ?",
+            club.id,
+            entry.league_id,
+          );
+        await store.run(
+          "INSERT INTO standings(league_id,club_id) VALUES (?,?)",
+          youthId,
+          club.id,
+        );
+        delete data.pendingYouthLeagues[age];
+        changed = true;
+      }
+      if (data.pendingYouthLeagues && !Object.keys(data.pendingYouthLeagues).length)
+        delete data.pendingYouthLeagues;
+      if (changed) {
+        await store.run(
+          "UPDATE clubs SET data = ? WHERE id = ?",
+          JSON.stringify(data),
+          club.id,
+        );
+        clubsAdmitted++;
+      }
+    }
+    return { leaguesActivated, clubsAdmitted };
+  });
+}
+
 export async function scheduleDomesticLeagues(
   store: Store,
   leagues: League[],
   season: number,
   fromDate?: string,
 ) {
+  await activateWorldStructure(store, season);
   return withFixtureBatch(store, season, async () => {
     for (const league of leagues)
       await scheduleDomesticLeague(store, league, season, fromDate);
@@ -823,11 +967,12 @@ export async function scheduleDomesticLeague(
       return;
     if (fixtureBatches.get(store)!.scheduledLeagues.has(league.id)) return;
     const entries = (
-      await store.all<{ club_id: number }>(
-        "SELECT club_id FROM standings WHERE league_id = ? ORDER BY club_id",
+      await store.all<Club>(
+        "SELECT clubs.* FROM standings JOIN clubs ON clubs.id = standings.club_id WHERE standings.league_id = ? ORDER BY clubs.id",
         league.id,
       )
-    ).map((entry) => entry.club_id);
+    ).filter((club) => clubCompetitionEligible(club, "league", season))
+      .map((club) => club.id);
     if (entries.length < 2) return;
     const firstLeg = roundrobin(entries.length, entries);
     const schedule = [
@@ -884,8 +1029,9 @@ export async function createCalendar(store: Store) {
     return;
   const season = state.season;
   const settings = await store.meta<Settings>("settings");
-  await store.transaction(() =>
-    withFixtureBatch(store, season, async () => {
+  await store.transaction(async () => {
+    await activateWorldStructure(store, season);
+    return withFixtureBatch(store, season, async () => {
       for (const league of await store.all<League>(
         "SELECT * FROM leagues WHERE kind = 'league' ORDER BY id",
       )) {
@@ -897,12 +1043,14 @@ export async function createCalendar(store: Store) {
       for (const country of countries) {
         for (const age of ["U17", "U19"] as AgeGroup[]) {
           const entries = (
-            await store.all<{ club_id: number }>(
-              "SELECT standings.club_id FROM standings JOIN leagues ON leagues.id = standings.league_id WHERE leagues.country_id = ? AND leagues.age_group = ? AND leagues.kind = 'league' ORDER BY leagues.id,standings.club_id",
+            await store.all<Club>(
+              "SELECT DISTINCT clubs.* FROM standings JOIN clubs ON clubs.id = standings.club_id JOIN leagues ON leagues.id = standings.league_id WHERE leagues.country_id = ? AND leagues.age_group = ? AND leagues.kind = 'league' AND (JSON_VALUE(leagues.data,'$.activeFromSeason') IS NULL OR TRY_CONVERT(int,JSON_VALUE(leagues.data,'$.activeFromSeason')) <= ?) ORDER BY clubs.id",
               country.id,
               age,
+              season,
             )
-          ).map((entry) => entry.club_id);
+          ).filter((club) => clubCompetitionEligible(club, "cup", season))
+            .map((club) => club.id);
           const spec: CompetitionSpec = {
             name: `${country.name} ${age} Cup`,
             confederation: country.confederation,
@@ -933,11 +1081,12 @@ export async function createCalendar(store: Store) {
           );
         }
         const seniorEntries = (
-          await store.all<{ id: number }>(
-            "SELECT TOP (32) id FROM clubs WHERE country_id = ? AND type = 'club' ORDER BY reputation DESC,id",
+          await store.all<Club>(
+            "SELECT * FROM clubs WHERE country_id = ? AND type = 'club' ORDER BY reputation DESC,id",
             country.id,
           )
-        ).map((club) => club.id);
+        ).filter((club) => clubCompetitionEligible(club, "cup", season))
+          .slice(0, 32).map((club) => club.id);
         const cupSpec: CompetitionSpec = {
           name: `${country.name} National Cup`,
           confederation: country.confederation,
@@ -999,6 +1148,10 @@ export async function createCalendar(store: Store) {
           ...(spec.national ? [spec.age] : []),
           ...(spec.confederation !== "FIFA" ? [spec.confederation] : []),
         );
+        if (!spec.national)
+          clubs = clubs.filter((club) =>
+            clubCompetitionEligible(club, spec.kind, season),
+          );
         if (spec.kind === "continental" && spec.age === "Senior")
           clubs = clubs.filter((club) => !usedSenior.has(club.id));
         const ranked = clubs
@@ -1031,11 +1184,13 @@ export async function createCalendar(store: Store) {
           spec.age === "Senior" &&
           spec.kind === "continental"
         ) {
-          qualification = await continentalEntries(
+          qualification = (await continentalEntries(
             store,
             spec.name,
             season,
             usedSenior,
+          )).filter((entry) =>
+            clubCompetitionEligible(entry.club, spec.kind, season),
           );
           candidates = qualification.map((entry) => entry.club);
         }
@@ -1156,8 +1311,8 @@ export async function createCalendar(store: Store) {
         }
       }
       await store.setMeta("calendarSeason", season);
-    }),
-  );
+    });
+  });
 }
 
 export async function progressCompetitions(store: Store, date: string) {

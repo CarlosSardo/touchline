@@ -23,6 +23,7 @@ import {
 } from "../ui.tsx";
 import type { WorldAudit, WorldClubPage } from "../../shared/api.ts";
 import { compactNumber, label } from "../../shared/rules.ts";
+import { WORLD_VERSION } from "../../shared/world-rules.ts";
 
 export default function World() {
   const { bootstrap, openLeague, confirm, notify, refresh } = useGame();
@@ -73,14 +74,14 @@ export default function World() {
         title="World browser"
         subtitle="Clubs, reserve teams and national sides."
       >
-        {bootstrap && bootstrap.world.version < 2 ? (
+        {bootstrap && bootstrap.world.version < WORLD_VERSION ? (
           <Button
             icon={Plus}
             disabled={expanding}
             onClick={() =>
               confirm(
                 "Expand this career?",
-                "A backup will be saved first. Existing contracts, results and fixtures stay intact. Club and player display names will be localized; new divisions and academy squads will be added. Mid-season competitions begin next season.",
+                "A backup will be saved first. Existing players, contracts, results and fixtures stay intact. Incompatible generated club names will be localized; new divisions and academy squads will be added. Mid-season competitions begin next season.",
                 () => {
                   setExpanding(true);
                   void api<{ message: string }>("world/expand", {

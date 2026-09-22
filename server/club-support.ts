@@ -178,7 +178,7 @@ export async function clubAffiliates(
   clubId: number,
 ): Promise<AffiliateLink[]> {
   return await store.all<AffiliateLink>(
-    "SELECT partnerships.*,clubs.id AS partner_id,clubs.name,clubs.color,clubs.reputation,countries.name AS country_name,leagues.name AS league_name FROM partnerships JOIN clubs ON clubs.id = CASE WHEN partnerships.club_id = ? THEN partnerships.partner_id ELSE partnerships.club_id END JOIN countries ON countries.id = clubs.country_id LEFT JOIN leagues ON leagues.id = clubs.league_id WHERE partnerships.club_id = ? OR partnerships.partner_id = ? ORDER BY partnerships.strength DESC,clubs.name",
+    "SELECT partnerships.id,partnerships.club_id,clubs.id AS partner_id,partnerships.type,partnerships.strength,partnerships.data,clubs.name,clubs.color,clubs.reputation,countries.name AS country_name,leagues.name AS league_name FROM partnerships JOIN clubs ON clubs.id = CASE WHEN partnerships.club_id = ? THEN partnerships.partner_id ELSE partnerships.club_id END JOIN countries ON countries.id = clubs.country_id LEFT JOIN leagues ON leagues.id = clubs.league_id WHERE partnerships.club_id = ? OR partnerships.partner_id = ? ORDER BY partnerships.strength DESC,clubs.name",
     clubId,
     clubId,
     clubId,

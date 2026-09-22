@@ -68,7 +68,7 @@ describe("director decisions and ownership boundaries", () => {
     const reserveId = Number(
       (
         await store.run(
-          "INSERT INTO clubs(name,short_name,city,country_id,league_id,type,parent_id,age_group,color,reputation,academy,facilities,balance,transfer_budget,wage_budget,philosophy,culture,formation,tactical_style,chemistry,manager,manager_trust,board_confidence,board_pressure,fan_mood,fan_loyalty,fan_patience,expectations,stadium,capacity) SELECT name || ' Reserves',short_name,city,country_id,league_id,'bteam',id,age_group,color,reputation,academy,facilities,balance,transfer_budget,wage_budget,philosophy,culture,formation,tactical_style,chemistry,manager,manager_trust,board_confidence,board_pressure,fan_mood,fan_loyalty,fan_patience,expectations,stadium,capacity FROM clubs WHERE id = 1",
+          "INSERT INTO clubs(name,short_name,city,country_id,league_id,type,parent_id,age_group,color,reputation,academy,facilities,balance,transfer_budget,wage_budget,philosophy,culture,formation,tactical_style,chemistry,manager,manager_trust,board_confidence,board_pressure,fan_mood,fan_loyalty,fan_patience,expectations,stadium,capacity) SELECT CONCAT(name, ' Reserves'),short_name,city,country_id,league_id,'bteam',id,age_group,color,reputation,academy,facilities,balance,transfer_budget,wage_budget,philosophy,culture,formation,tactical_style,chemistry,manager,manager_trust,board_confidence,board_pressure,fan_mood,fan_loyalty,fan_patience,expectations,stadium,capacity FROM clubs WHERE id = 1",
         )
       ).lastInsertRowid,
     );
@@ -171,7 +171,7 @@ describe("director decisions and ownership boundaries", () => {
 
   it("can decline personal terms despite a high wage when the sporting move is unacceptable", async () => {
     const target = (await store.get<Player>(
-      "SELECT TOP (1) * FROM players WHERE club_id = 2 AND age >= 18 AND age_group = 'Senior'",
+      "SELECT TOP (1) * FROM players WHERE club_id = 2 AND age >= 18 AND age_group = 'Senior' AND parent_club_id IS NULL ORDER BY id",
     ))!;
     const deal = await enquire(store, target.id, "Permanent transfer");
     await negotiationStep(store, deal.id, "formalize");
@@ -179,10 +179,10 @@ describe("director decisions and ownership boundaries", () => {
       fee: deal.asking_price,
       wage: 500000,
       years: 3,
-      role: "Key player",
+      role: "Fringe player",
       promises: [],
     };
-    await negotiate(store, deal.id, terms);
+    expect((await negotiate(store, deal.id, terms)).stage).toBe("Agent talks");
     const profile = JSON.parse(target.profile);
     profile.personality.ambition = 99;
     profile.personality.loyalty = 99;
@@ -190,7 +190,7 @@ describe("director decisions and ownership boundaries", () => {
     profile.identity.languages = [];
     profile.careerVision = ["Wants Champions League football"];
     await store.run(
-      "UPDATE players SET profile = ?,age = 25,role = '[key] player',morale = 99,contract_end = '2030-06-30' WHERE id = ?",
+      "UPDATE players SET profile = ?,age = 25,role = 'Key player',morale = 99,listed = 0,contract_end = '2030-06-30' WHERE id = ?",
       JSON.stringify(profile),
       target.id,
     );
@@ -198,6 +198,9 @@ describe("director decisions and ownership boundaries", () => {
       "UPDATE clubs SET reputation = 1,academy = 1,facilities = 1 WHERE id = 1",
     );
     await store.run("UPDATE clubs SET reputation = 99 WHERE id = 2");
+    await store.run(
+      "DELETE FROM standings WHERE club_id = 1 AND league_id IN (SELECT id FROM leagues WHERE kind = 'continental' AND age_group = 'Senior')",
+    );
     const result = await negotiate(store, deal.id, terms);
     expect(result.stage).toBe("Agent talks");
     expect(result.message).toContain("not ready");
@@ -207,6 +210,7 @@ describe("director decisions and ownership boundaries", () => {
         deal.id,
       ))!.data,
     );
+    expect(updated.interestDetails.expectedWage).toBeLessThan(terms.wage);
     expect(updated.interestDetails.score).toBeLessThan(35);
     expect(updated.interestDetails.concerns.length).toBeGreaterThan(0);
   });

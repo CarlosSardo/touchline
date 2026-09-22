@@ -211,7 +211,13 @@ export interface WorldClubPage {
   pageSize: number;
   pages: number;
 }
+export interface ClubWorth {
+  enterpriseValue: number;
+  annualOperatingRevenue: number;
+  revenueMultiple: number;
+}
 export interface ClubDetail {
+  valuation: ClubWorth | null;
   affiliates: AffiliateLink[];
   club: Club;
   country: Country;
@@ -460,6 +466,7 @@ export interface MatchDetail {
   awarded?: { home: number; away: number; reason: string } | null;
 }
 export interface FinanceData {
+  valuation: ClubWorth;
   futureTransferReserved: number;
   transferPayments: TransferPayment[];
   transferPayable: number;

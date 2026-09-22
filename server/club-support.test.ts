@@ -172,15 +172,53 @@ describe("sporting director assistant", () => {
     ).toBe(player.wage);
   });
 
+  it("returns scalar affiliate IDs and detects existing agreements from both clubs", async () => {
+    const agreement = (await store.get<{
+      id: number;
+      club_id: number;
+      partner_id: number;
+      data: string;
+    }>(
+      "SELECT TOP (1) id,club_id,partner_id,data FROM partnerships ORDER BY id",
+    ))!;
+    for (const clubId of [agreement.club_id, agreement.partner_id]) {
+      const partnerId =
+        clubId === agreement.club_id ? agreement.partner_id : agreement.club_id;
+      const link = (await clubAffiliates(store, clubId)).find(
+        (entry) => entry.id === agreement.id,
+      );
+      expect(link).toMatchObject({
+        id: agreement.id,
+        club_id: agreement.club_id,
+        partner_id: partnerId,
+        data: agreement.data,
+      });
+      expect(
+        await affiliateInterest(store, partnerId, "Development club", clubId),
+      ).toMatchObject({ willing: false, stance: "Already affiliated" });
+    }
+  });
+
   it("reviews affiliate requests before spending and exposes the agreement to both clubs", async () => {
-    const initial = (await affiliateDesk(store)).affiliates.length;
+    const initial = (await affiliateDesk(store)).affiliates;
     const balance = (await store.get<{ balance: number }>(
       "SELECT balance FROM clubs WHERE id = 1",
     ))!.balance;
     await requestAffiliate(store, { purpose: "Development club" });
+    const pending = await affiliateDesk(store);
+    expect(pending.requests[0]).toMatchObject({
+      requested_date: "2026-07-01",
+      due_date: "2026-07-04",
+      status: "pending",
+    });
+    expect(pending.nextRequestDate).toBe("2026-07-29");
     await expect(
       requestAffiliate(store, { purpose: "Scouting club" }),
     ).rejects.toThrow("already reviewing");
+    await store.setMeta("state", {
+      ...(await stateOf(store)),
+      date: "2026-07-03",
+    });
     await processAffiliateRequests(store);
     expect((await affiliateDesk(store)).requests[0].status).toBe("pending");
     expect(
@@ -194,8 +232,14 @@ describe("sporting director assistant", () => {
     });
     await processAffiliateRequests(store);
     const result = await affiliateDesk(store);
-    expect(result.requests[0].status).toBe("approved");
-    expect(result.affiliates).toHaveLength(initial + 1);
+    expect(result.requests[0].status, result.requests[0].reason).toBe(
+      "approved",
+    );
+    expect(result.requests[0].decision_date).toBe("2026-07-04");
+    expect(result.affiliates).toHaveLength(initial.length + 1);
+    expect(initial.map((link) => link.partner_id)).not.toContain(
+      result.requests[0].partner_id,
+    );
     expect(
       (await clubAffiliates(store, result.requests[0].partner_id!)).some(
         (link) => link.partner_id === 1,
@@ -211,9 +255,23 @@ describe("sporting director assistant", () => {
         "SELECT balance FROM clubs WHERE id = 1",
       ))!.balance,
     ).toBe(paidBalance);
+    await store.setMeta("state", {
+      ...(await stateOf(store)),
+      date: "2026-07-28",
+    });
     await expect(
       requestAffiliate(store, { purpose: "Scouting club" }),
     ).rejects.toThrow("consider another");
+    await store.setMeta("state", {
+      ...(await stateOf(store)),
+      date: "2026-07-29",
+    });
+    await requestAffiliate(store, { purpose: "Scouting club" });
+    expect((await affiliateDesk(store)).requests[0]).toMatchObject({
+      requested_date: "2026-07-29",
+      due_date: "2026-08-01",
+      status: "pending",
+    });
   });
 
   it("declines unsupported board requests without charging the club", async () => {
