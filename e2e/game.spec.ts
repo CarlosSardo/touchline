@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type APIResponse, type Page } from "@playwright/test";
 import type { AcademyData, Bootstrap, PlayerPage, SquadData } from "../shared/api.ts";
 import {
   compactNumber,
@@ -34,6 +34,20 @@ async function noOverflow(page: Page) {
   }));
   expect(dimensions.body).toBeLessThanOrEqual(dimensions.width + 1);
   expect(dimensions.errors).toEqual([]);
+}
+
+async function retryBusyResponse(operation: () => Promise<APIResponse>) {
+  const deadline = Date.now() + 30_000;
+  let response = await operation();
+  while (response.status() === 409 && Date.now() < deadline) {
+    await new Promise((resolve) =>
+      setTimeout(resolve, Math.min(250, deadline - Date.now())),
+    );
+    if (Date.now() >= deadline) break;
+    response = await operation();
+  }
+  expect(response.status(), await response.text()).toBe(200);
+  return response;
 }
 
 test("association rules expose documented and unverified coverage for every country", async ({
@@ -273,6 +287,7 @@ test("eligible players can move between age squads and the first team without ch
       timeout: checkpointTimeout,
     })
   ).json();
+  let primaryError: unknown;
   try {
     const before = await (await request.get("/api/bootstrap")).json();
     const squad = await (await request.get("/api/squad?ageGroup=U17")).json();
@@ -301,27 +316,41 @@ test("eligible players can move between age squads and the first team without ch
       await dossier
         .getByRole("combobox", { name: "Playing squad", exact: true })
         .selectOption(`${before.club.id}:${ageGroup}`);
-      await dossier
-        .getByRole("button", { name: "Move player", exact: true })
-        .click();
+      const [movement] = await Promise.all([
+        page.waitForResponse((response) => {
+          if (
+            new URL(response.url()).pathname !== "/api/action" ||
+            response.request().method() !== "POST"
+          ) return false;
+          const action = response.request().postDataJSON();
+          return action.type === "squad-move" &&
+            action.playerId === player.id &&
+            action.clubId === before.club.id &&
+            action.ageGroup === ageGroup;
+        }),
+        dossier.getByRole("button", { name: "Move player", exact: true }).click(),
+      ]);
+      expect(movement.status(), await movement.text()).toBe(200);
+      let current = player;
       await expect
-        .poll(
-          async () =>
-            (await (await request.get(`/api/players/${player.id}`)).json())
-              .player.age_group,
-        )
+        .poll(async () => {
+          const response = await request.get(`/api/players/${player.id}`);
+          if (response.status() === 409) return undefined;
+          expect(response.status(), await response.text()).toBe(200);
+          current = (await response.json()).player;
+          return current.age_group;
+        })
         .toBe(ageGroup);
       await expect(
         dossier.getByRole("button", { name: "Move player", exact: true }),
       ).toBeDisabled();
-      const current = (
-        await (await request.get(`/api/players/${player.id}`)).json()
-      ).player;
       expect(current.club_id).toBe(player.club_id);
       expect(current.wage).toBe(player.wage);
       expect(current.contract_end).toBe(player.contract_end);
     }
-    const after = await (await request.get("/api/bootstrap")).json();
+    const after = await (
+      await retryBusyResponse(() => request.get("/api/bootstrap"))
+    ).json();
     expect(after.club.balance).toBe(before.club.balance);
     expect(after.state.date).toBe(before.state.date);
     await page.screenshot({
@@ -338,16 +367,28 @@ test("eligible players can move between age squads and the first team without ch
       .getByRole("combobox", { name: "Squad age group", exact: true })
       .selectOption("U17");
     await expect(playerButton).toBeVisible();
+  } catch (error) {
+    primaryError = error;
   } finally {
-    expect(
-      (
-        await request.post("/api/saves/restore", {
+    try {
+      await retryBusyResponse(() =>
+        request.post("/api/saves/restore", {
           data: { file: checkpoint.file },
           timeout: checkpointTimeout,
-        })
-      ).ok(),
-    ).toBe(true);
+        }),
+      );
+    } catch (cleanupError) {
+      if (primaryError !== undefined) {
+        primaryError = new AggregateError(
+          [primaryError, cleanupError],
+          "Squad assignment failed and checkpoint restoration also failed",
+        );
+      } else {
+        primaryError = cleanupError;
+      }
+    }
   }
+  if (primaryError !== undefined) throw primaryError;
 });
 
 test("future transfer agreements keep young players at their clubs and reserve money until adulthood", async ({
