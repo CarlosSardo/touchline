@@ -189,7 +189,11 @@ export default function Start() {
     ? (saves?.filter((slot) => slot.career?.id === remove.career?.id).length ??
       0)
     : 1;
-  const careerTitle = state ? (state.careerName ?? club?.name ?? "") : "";
+  const careerTitle = state
+    ? state.careerName?.trim() || club?.name?.trim() || ""
+    : "";
+  const deleteConfirmed =
+    careerTitle !== "" && confirmText.trim() === careerTitle;
   const activeSnapshots =
     state?.careerId && saves
       ? saves.filter((slot) => slot.career?.id === state.careerId).length
@@ -909,7 +913,7 @@ export default function Start() {
             className="delete-career-form"
             onSubmit={(event) => {
               event.preventDefault();
-              if (confirmText.trim() === careerTitle) void deleteCurrentCareer();
+              if (deleteConfirmed) void deleteCurrentCareer();
             }}
           >
             <div className="sheet-body">
@@ -959,7 +963,7 @@ export default function Start() {
                 type="submit"
                 variant="danger"
                 icon={deleting ? LoaderCircle : Trash2}
-                disabled={deleting || confirmText.trim() !== careerTitle}
+                disabled={deleting || !deleteConfirmed}
               >
                 {deleting ? "Deleting..." : "Delete permanently"}
               </Button>

@@ -733,6 +733,38 @@ for (const width of [1440, 390, 320]) {
       expect(mutations(accountApi)).toEqual(["DELETE /api/careers/active"]);
     });
 
+    test("a blank career name still requires typing the club name before deleting", async ({
+      page, accountApi,
+    }) => {
+      accountApi.bootstrap = startedBootstrap();
+      accountApi.bootstrap.state.careerName = "";
+      accountApi.session.hasWorld = true;
+      accountApi.deleteActive = (route) => route.fulfill({
+        status: 409,
+        json: { error: "This career is protected and can't be deleted here.", code: "career_protected" },
+      });
+      await page.goto("/#start");
+      await page.getByRole("button", { name: "Delete career", exact: true }).click();
+      const dialog = page.getByRole("dialog", { name: "Delete your current career?", exact: true });
+      const confirmField = dialog.getByLabel('Type "Account Fixture FC" to confirm');
+      const confirmButton = dialog.getByRole("button", { name: "Delete permanently", exact: true });
+      await expect(dialog.getByRole("heading", { name: "Account Fixture FC", exact: true })).toBeVisible();
+      await expect(confirmField).toHaveValue("");
+      await expect(confirmButton).toBeDisabled();
+      await confirmField.press("Enter");
+      await confirmField.fill("Account Fixture");
+      await expect(confirmButton).toBeDisabled();
+      await confirmField.fill("account fixture fc");
+      await expect(confirmButton).toBeDisabled();
+      expect(mutations(accountApi)).toEqual([]);
+      await confirmField.fill("Account Fixture FC");
+      await expect(confirmButton).toBeEnabled();
+      await noOverflow(page);
+      await confirmButton.click();
+      await expect(dialog.locator(".error-state")).toContainText("This career is protected and can't be deleted here.");
+      expect(mutations(accountApi)).toEqual(["DELETE /api/careers/active"]);
+    });
+
     test("an inactive saved career can still be deleted from Load career", async ({
       page, accountApi,
     }) => {
