@@ -5,12 +5,14 @@ import {
   type AccountRecord, type AuthenticatedIdentity,
 } from "./accounts.ts";
 import { bindSql, sqlPoolConfig, Store } from "./db.ts";
+import { Saves } from "./saves.ts";
 import { readSqlSettings } from "./sql-config.ts";
 import { accountsTableSql, quoteIdentifier, schemaMigrations, sqlLiteral, STORE_TABLES, tableName, WORLD_TABLES } from "./sql-schema.ts";
 import {
   accountProvisioningPlan, LEGACY_EMAIL, LEGACY_OBJECT_ID, main as migrateAccounts, provisionAccounts,
 } from "../scripts/accounts-migrate.ts";
 import { runtimeGrants } from "../scripts/db-authorize.ts";
+import { careerDeleteOptions, main as deleteCareerMain, maskEmail, selectAccount } from "../scripts/career-delete.ts";
 
 const tenantId = "11111111-1111-4111-8111-111111111111";
 const ownerObjectId = "22222222-2222-4222-8222-222222222222";
@@ -260,6 +262,153 @@ describe("Account provisioning and grants (no database)", () => {
     await expect(migrateAccounts([...args, "--apply"])).rejects.toThrow(/--apply --yes/);
     await expect(migrateAccounts([...args, "--apply", "--yes", "--dry-run"])).rejects.toThrow(/not both/);
     expect(open).not.toHaveBeenCalled();
+  });
+});
+
+describe("Operator career deletion guards (no database)", () => {
+  const activeState = {
+    careerId: "career-to-delete", careerName: "Owner career", seed: "seed-to-delete", clubId: 7,
+    date: "2026-07-20", season: 2026, started: true, director: { name: "Owner Director" },
+  };
+  function harness(options: { records?: AccountRecord[]; state?: object | null } = {}) {
+    const records = options.records ?? [
+      { id: legacyAccountId, tenant_id: tenantId, object_id: LEGACY_OBJECT_ID,
+        display_name: "Legacy guest", email: "Legacy.Guest@Example.test", game_schema: "dbo" },
+      { id: ownerAccountId, tenant_id: tenantId, object_id: ownerObjectId,
+        display_name: "Owner", email: "Owner.Person@Example.test", game_schema: ownerSchema },
+    ];
+    const state = options.state === undefined ? activeState : options.state;
+    const registry = {
+      schemaName: "accounts", testMode: false,
+      all: vi.fn(async (sql: string): Promise<unknown[]> => {
+        if (sql.includes("FROM sys.tables")) return [{ name: "users" }];
+        if (sql.includes("FROM sys.indexes")) return registryIndexes;
+        if (sql.includes("SELECT TOP (0)")) return [];
+        if (sql.includes("[game_schema]")) return records.map((record) => ({ ...record }));
+        return [];
+      }),
+    };
+    const world = {
+      transaction: vi.fn(async (callback: () => Promise<unknown>) => callback()),
+      get: vi.fn(async (sql: string) => {
+        if (sql.includes("'state'")) return state ? { value: JSON.stringify(state) } : undefined;
+        if (sql.includes("'world'")) return { value: JSON.stringify({ expanded: true, version: 3 }) };
+        if (sql.includes("FROM clubs")) return { name: "Owner FC" };
+        if (sql.includes("COUNT_BIG")) return { total: "833976" };
+        if (sql.includes("HAS_PERMS_BY_NAME")) return { allowed: 0 };
+        return undefined;
+      }),
+      all: vi.fn(async () => [
+        { career_id: "career-to-delete", slots: 3, complete: 3, bytes: "3145728" },
+        { career_id: "kept-career", slots: 1, complete: 1, bytes: 1024 },
+      ]),
+    };
+    const root = {
+      database: "touchline",
+      forSchema: vi.fn((schema: string) => schema === "accounts" ? registry : { ...world, schemaName: schema }),
+      close: vi.fn(async () => {}),
+    };
+    const saves = {
+      currentState: vi.fn(async () => null),
+      list: vi.fn(async () => []),
+      deleteActiveCareer: vi.fn(async (confirmation: { careerId: string | null }) => ({
+        deleted: true as const, careerId: confirmation.careerId, snapshots: 3, message: "Career deleted.",
+      })),
+    };
+    const lines: string[] = [];
+    const dependencies = {
+      open: vi.fn(async () => root as unknown as Store),
+      saves: vi.fn(() => saves as unknown as Saves),
+      log: (line: string) => { lines.push(line); },
+    };
+    return { root, world, saves, dependencies, lines };
+  }
+
+  it("refuses ambiguous, unconfirmed and malformed requests before opening SQL", async () => {
+    const { dependencies } = harness();
+    for (const [args, message] of [
+      [[], /exactly one/],
+      [["--oid", ownerObjectId, "--email", "owner.person@example.test"], /exactly one/],
+      [["--oid", "not-a-uuid"], /UUID/],
+      [["--email", "owner.person"], /--email/],
+      [["--oid", ownerObjectId, "--apply"], /--apply --yes/],
+      [["--oid", ownerObjectId, "--yes", "--apply", "--dry-run"], /not both/],
+      [["--oid", ownerObjectId, "--account-schema", "dbo"], /separate/],
+    ] as const)
+      await expect(deleteCareerMain([...args], dependencies), args.join(" ")).rejects.toThrow(message);
+    expect(dependencies.open).not.toHaveBeenCalled();
+    expect(careerDeleteOptions(["--oid", ownerObjectId.toUpperCase()])).toEqual({
+      objectId: ownerObjectId, email: undefined, accountSchema: "accounts", apply: false,
+    });
+  });
+
+  it("refuses the legacy dbo world and unknown or ambiguous identifiers without opening a world", async () => {
+    for (const args of [["--oid", LEGACY_OBJECT_ID, "--apply", "--yes"], ["--email", "legacy.guest@example.TEST", "--apply", "--yes"]]) {
+      const { root, saves, dependencies, lines } = harness();
+      await expect(deleteCareerMain(args, dependencies)).rejects.toThrow(/dbo/);
+      expect(root.forSchema).toHaveBeenCalledExactlyOnceWith("accounts");
+      expect(saves.deleteActiveCareer).not.toHaveBeenCalled();
+      expect(root.close).toHaveBeenCalledOnce();
+      const inventory = JSON.parse(lines[0]).identifiers;
+      expect(inventory).toMatchObject({ accounts: 2, withStoredEmail: 2 });
+      expect(inventory.registered.map((account: { email: string }) => account.email)).toEqual(["L***t@Example.test", "O***n@Example.test"]);
+      expect(lines.join("\n")).not.toMatch(/Legacy\.Guest|Owner\.Person/);
+    }
+    const unknown = harness();
+    await expect(deleteCareerMain(["--oid", otherObjectId], unknown.dependencies)).rejects.toThrow(/No registered account/);
+    await expect(deleteCareerMain(["--email", "owner.person@example"], unknown.dependencies)).rejects.toThrow(/No registered account/);
+    const duplicate = harness({ records: [
+      { id: ownerAccountId, tenant_id: tenantId, object_id: ownerObjectId, display_name: "A", email: "same@example.test", game_schema: ownerSchema },
+      { id: legacyAccountId, tenant_id: tenantId, object_id: otherObjectId, display_name: "B", email: "SAME@example.test", game_schema: "touchline_user_other" },
+    ] });
+    await expect(deleteCareerMain(["--email", "same@example.test", "--apply", "--yes"], duplicate.dependencies)).rejects.toThrow(/matches 2 accounts/);
+    for (const { root, saves } of [unknown, duplicate]) {
+      expect(root.forSchema.mock.calls.every(([schema]) => schema === "accounts")).toBe(true);
+      expect(saves.deleteActiveCareer).not.toHaveBeenCalled();
+    }
+    expect(() => selectAccount([{ id: ownerAccountId, tenant_id: tenantId, object_id: ownerObjectId, display_name: "A",
+      email: "a@example.test", game_schema: "accounts" }], { objectId: ownerObjectId, accountSchema: "accounts", apply: false }))
+      .toThrow(/schema/);
+  });
+
+  it("prints a dry-run summary by default and deletes only with --apply --yes through Saves", async () => {
+    const dryRun = harness();
+    await deleteCareerMain(["--email", "OWNER.PERSON@example.test"], dryRun.dependencies);
+    const summary = JSON.parse(dryRun.lines[0]);
+    expect(summary).toMatchObject({
+      dryRun: true, database: "touchline", schema: ownerSchema,
+      account: { id: ownerAccountId, objectId: ownerObjectId, email: "O***n@Example.test", matchedBy: "email",
+        identifiers: { objectId: true, storedEmail: true } },
+      active: { careerId: "career-to-delete", club: "Owner FC", director: "Owner Director", date: "2026-07-20", seed: "seed-to-delete" },
+      world: { expanded: true, version: 3, players: 833976 },
+      snapshots: [
+        { careerId: "career-to-delete", slots: 3, bytes: 3145728, deletedWithActiveCareer: true },
+        { careerId: "kept-career", slots: 1, deletedWithActiveCareer: false },
+      ],
+      approximateSizeMB: expect.stringMatching(/unavailable/),
+    });
+    expect(dryRun.world.transaction).toHaveBeenCalledOnce();
+    expect(dryRun.saves.deleteActiveCareer).not.toHaveBeenCalled();
+    expect(dryRun.root.close).toHaveBeenCalledOnce();
+
+    const applied = harness();
+    await deleteCareerMain(["--oid", ownerObjectId.toUpperCase(), "--apply", "--yes"], applied.dependencies);
+    expect(applied.dependencies.saves).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ schemaName: ownerSchema }));
+    expect(applied.saves.deleteActiveCareer).toHaveBeenCalledExactlyOnceWith({ careerId: "career-to-delete", seed: "seed-to-delete" });
+    expect(JSON.parse(applied.lines.at(-1)!)).toMatchObject({
+      applied: true, schema: ownerSchema, result: { deleted: true, snapshots: 3 }, after: { hasWorld: false, remainingSnapshots: 0 },
+    });
+    expect(applied.root.close).toHaveBeenCalledOnce();
+  });
+
+  it("refuses to apply when the account has no active career", async () => {
+    const empty = harness({ state: null });
+    await expect(deleteCareerMain(["--oid", ownerObjectId, "--apply", "--yes"], empty.dependencies)).rejects.toThrow(/no active career/);
+    expect(empty.saves.deleteActiveCareer).not.toHaveBeenCalled();
+    await deleteCareerMain(["--oid", ownerObjectId], empty.dependencies);
+    expect(JSON.parse(empty.lines.at(-1)!)).toMatchObject({ dryRun: true, active: null, next: expect.stringMatching(/Nothing to delete/) });
+    expect(maskEmail("ab@example.test")).toBe("a***@example.test");
+    expect(maskEmail(null)).toBeNull();
   });
 });
 
@@ -602,6 +751,41 @@ if (process.env.SQL_INTEGRATION_TESTS === "true" &&
           expect(after.migrations).toEqual(before.migrations);
           expect(await readWorld(peer)).toEqual(peerBefore);
           expect(await readRegistry()).toEqual(registryAfterProfiles);
+          await assertLegacyUnchanged();
+        }
+        for (const [index, world] of userWorlds.entries()) {
+          const peer = userWorlds[1 - index];
+          const peerBefore = await readWorld(peer);
+          const keptId = randomUUID();
+          const keptBytes = Buffer.from(`kept ${world.schemaName}`);
+          await world.run(
+            `INSERT INTO save_slots
+              ([id], [name], [career_id], [career_metadata], [created_at], [automatic], [imported],
+               [format_version], [byte_length], [sha256], [complete]) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+            keptId, "Other career", "other-career", JSON.stringify({ account: world.schemaName }),
+            new Date("2026-07-21T12:00:00.000Z"), false, false, 1, keptBytes.length,
+            createHash("sha256").update(keptBytes).digest("hex"), true,
+          );
+          await world.run("INSERT INTO save_chunks ([save_id], [ordinal], [data]) VALUES (?,?,?)", keptId, 0, keptBytes);
+          await world.setMeta("appearanceIndexVersion", 1);
+          await world.setMeta("state", { careerId: world.schemaName, seed: `runtime-delete-${index}` });
+          const discard = vi.spyOn(world, "discardWorld");
+          await inRuntimeWorld(world, async () => {
+            expect(await new Saves(world).deleteActiveCareer({ careerId: world.schemaName, seed: `runtime-delete-${index}` }))
+              .toMatchObject({ deleted: true, careerId: world.schemaName, snapshots: 1 });
+            expect((await insertNews(world, "After deletion")).lastInsertRowid).toBe(1);
+          });
+          const { truncated, deleted } = await discard.mock.results[0].value;
+          expect([...deleted].sort()).toEqual(
+            ["clubs", "countries", "fixtures", "leagues", "loans", "negotiations", "players", "sell_on_clauses", "staff"],
+          );
+          expect(truncated).toEqual(expect.arrayContaining(["meta", "news", "player_match_appearances"]));
+          expect(truncated.length + deleted.length).toBe(WORLD_TABLES.length);
+          expect(await world.all("SELECT [key], [value] FROM meta")).toEqual([{ key: "appearanceIndexVersion", value: "1" }]);
+          expect((await world.all<{ id: string }>("SELECT [id] FROM save_slots")).map((slot) => slot.id.toLowerCase()))
+            .toEqual([keptId]);
+          expect(await world.all("SELECT [data] FROM save_chunks")).toEqual([{ data: keptBytes }]);
+          expect(await readWorld(peer)).toEqual(peerBefore);
           await assertLegacyUnchanged();
         }
         expect(await tableInventory()).toEqual(tablesBeforeRerun);

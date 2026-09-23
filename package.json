@@ -37,6 +37,7 @@
     "azure:deploy": "bash scripts/azure-deploy.sh",
     "azure:rollback": "bash scripts/azure-rollback.sh",
     "accounts:migrate": "tsx scripts/accounts-migrate.ts",
+    "career:delete": "tsx scripts/career-delete.ts",
     "db:migrate": "tsx scripts/db-migrate.ts",
     "db:seed": "tsx scripts/db-seed.ts",
     "data:migrate": "tsx scripts/data-migrate.ts",

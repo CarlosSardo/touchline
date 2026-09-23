@@ -283,10 +283,13 @@ if(process.env.AUTH_SMOKE_TOKEN) {
   });
   if(response.status!==200) throw new Error('Owner smoke token was rejected.');
   const session=await response.json();
+  const idle=typeof session.hasWorld==='boolean' && session.activity===null;
+  const busy=session.hasWorld===null && session.activity!==null && typeof session.activity==='object' &&
+    typeof session.activity.operation==='string' && typeof session.activity.startedAt==='string';
   if(!/^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i.test(session.user?.id ?? '') ||
      typeof session.user?.displayName!=='string' || !session.user.displayName.trim() ||
-     !(session.user.email===null || typeof session.user.email==='string') || typeof session.hasWorld!=='boolean')
-    throw new Error('Owner smoke did not return a provisioned human account profile; an empty world is valid.');
+     !(session.user.email===null || typeof session.user.email==='string') || !(idle || busy))
+    throw new Error('Owner smoke did not return a provisioned human account profile; an empty or busy world is valid.');
 }
 console.log(`PUBLIC_HEALTH_OK SIGN_IN_REQUIRED ownerSmokeVerified=${Boolean(process.env.AUTH_SMOKE_TOKEN)}`);
 NODE
