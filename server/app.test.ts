@@ -10,6 +10,7 @@ import { createCalendar } from "./calendar.ts";
 import { createApp, readApiConfiguration } from "./app.ts";
 import { initialInbox, stateOf } from "./systems.ts";
 import { Saves } from "./saves.ts";
+import { tableName, WORLD_TABLES } from "./sql-schema.ts";
 import { DEFAULT_ASSISTANT_DUTIES, groupCareerSaves } from "../shared/rules.ts";
 import type { AccountUser, SaveSlot } from "../shared/api.ts";
 import { createUnexpectedEvent } from "./events.ts";
@@ -212,6 +213,7 @@ describe("per-user HTTP isolation (two isolated SQL schemas)", () => {
     expect(session.body).toEqual({
       user: { id: "owner-account", displayName: "Owner Director", email: "shared@example.test" },
       hasWorld: false,
+      activity: null,
     });
     const empty = await access("get", "/api/bootstrap").query({ schema: root.schemaName });
     expect(empty.status).toBe(200);
@@ -226,6 +228,7 @@ describe("per-user HTTP isolation (two isolated SQL schemas)", () => {
     expect((await access("get", "/api/me", guest)).body).toEqual({
       user: { id: "guest-account", displayName: "Guest Director", email: "shared@example.test" },
       hasWorld: true,
+      activity: null,
     });
     expect((await access("get", "/api/bootstrap", guest)).body.state.director.name).toBe("Existing guest director");
     const renamed = await access("get", "/api/me")
@@ -276,8 +279,30 @@ describe("per-user HTTP isolation (two isolated SQL schemas)", () => {
       .send({ schema: root.schemaName, displayName: "Untrusted name" }).then((response) => response);
     try {
       await Promise.race([started, pending.then(() => { throw new Error("Preparation ended before generation"); })]);
-      expect((await access("post", "/api/careers/prepare").send({})).status).toBe(409);
+      const session = await access("get", "/api/me").timeout({ response: 20_000 });
+      expect(session.status).toBe(200);
+      expect(session.body).toEqual({
+        user: { id: "owner-account", displayName: "Owner Director", email: "shared@example.test" },
+        hasWorld: null,
+        activity: { operation: "prepare_world", startedAt: expect.any(String) },
+      });
+      const startedAt: string = session.body.activity.startedAt;
+      expect(new Date(startedAt).toISOString()).toBe(startedAt);
+      for (const busy of [
+        await access("get", "/api/bootstrap"),
+        await access("post", "/api/careers/prepare").send({}),
+      ]) {
+        expect(busy.status).toBe(409);
+        expect(busy.headers["retry-after"]).toBe("2");
+        expect(busy.body).toEqual({
+          error: "The game is saving or advancing. Please wait for that operation to finish.",
+          code: "world_busy",
+          operation: "prepare_world",
+          startedAt,
+        });
+      }
       expect((await access("get", "/api/bootstrap", guest).timeout({ response: 20_000 })).status).toBe(200);
+      expect((await access("get", "/api/me", guest)).body).toMatchObject({ hasWorld: true, activity: null });
     } finally {
       release();
       await pending;
@@ -285,7 +310,7 @@ describe("per-user HTTP isolation (two isolated SQL schemas)", () => {
     const prepared = await pending;
     expect(prepared.status).toBe(200);
     expect(prepared.body).toEqual({ created: true });
-    expect(generate).toHaveBeenCalledWith(ownerWorld, { seed: expect.stringMatching(/^touchline-/) });
+    expect(generate).toHaveBeenCalledWith(ownerWorld, { seed: expect.stringMatching(/^touchline-/), expanded: false });
     const state = await stateOf(ownerWorld);
     expect(state.started).toBe(false);
     expect(state.director.name).toBe("Owner Director");
@@ -331,10 +356,18 @@ describe("per-user HTTP isolation (two isolated SQL schemas)", () => {
     const pending = access("patch", "/api/settings").send({ currency: "EUR" }).then((response) => response);
     try {
       await Promise.race([started, pending.then(() => { throw new Error("Writer ended before settings update"); })]);
-      expect((await access("get", "/api/bootstrap")).status).toBe(409);
+      const busy = await access("get", "/api/bootstrap");
+      expect(busy.status).toBe(409);
+      expect(busy.headers["retry-after"]).toBe("2");
+      expect(busy.body).toMatchObject({ code: "world_busy", operation: "update_settings", startedAt: expect.any(String) });
+      expect((await access("get", "/api/me")).body).toMatchObject({
+        hasWorld: null,
+        activity: { operation: "update_settings", startedAt: busy.body.startedAt },
+      });
       expect((await access("patch", "/api/settings", guest).send({ currency: "USD" })
         .timeout({ response: 20_000 })).status).toBe(200);
       expect((await access("get", "/api/bootstrap", guest)).body.settings.currency).toBe("USD");
+      expect((await access("get", "/api/me", guest)).body).toMatchObject({ hasWorld: true, activity: null });
     } finally {
       release();
       await pending;
@@ -342,6 +375,178 @@ describe("per-user HTTP isolation (two isolated SQL schemas)", () => {
     expect((await pending).status).toBe(200);
     expect((await access("get", "/api/bootstrap")).body.settings.currency).toBe("EUR");
     expect((await access("get", "/api/bootstrap", guest)).body.settings.currency).toBe("USD");
+  }, 300_000);
+
+  it("answers /api/me from router state while busy and with one plain read when idle", async () => {
+    await generateWorld(ownerWorld, { ...fixture, seed: "session-owner-world" });
+    let release!: () => void;
+    let entered!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const setMeta = ownerWorld.setMeta.bind(ownerWorld);
+    vi.spyOn(ownerWorld, "setMeta").mockImplementation(async (key, value) => {
+      if (key === "settings") {
+        entered();
+        await gate;
+      }
+      await setMeta(key, value);
+    });
+    const get = vi.spyOn(ownerWorld, "get");
+    const all = vi.spyOn(ownerWorld, "all");
+    const transaction = vi.spyOn(ownerWorld, "transaction");
+    const pending = access("patch", "/api/settings").send({ currency: "EUR" }).then((response) => response);
+    try {
+      await Promise.race([started, pending.then(() => { throw new Error("Writer ended before settings update"); })]);
+      for (const spy of [get, all, transaction]) spy.mockClear();
+      for (let attempt = 0; attempt < 3; attempt++)
+        expect((await access("get", "/api/me").timeout({ response: 20_000 })).body)
+          .toMatchObject({ hasWorld: null, activity: { operation: "update_settings" } });
+      expect(get).not.toHaveBeenCalled();
+      expect(all).not.toHaveBeenCalled();
+      expect(transaction).not.toHaveBeenCalled();
+    } finally {
+      release();
+      await pending;
+    }
+    expect((await pending).status).toBe(200);
+    for (const spy of [get, all, transaction]) spy.mockClear();
+    expect((await access("get", "/api/me")).body).toMatchObject({ hasWorld: true, activity: null });
+    expect(get).toHaveBeenCalledOnce();
+    expect(transaction).not.toHaveBeenCalled();
+  }, 300_000);
+
+  it("deletes only the confirmed active career, its world and snapshots, and answers busy while it runs", async () => {
+    await generateWorld(ownerWorld, { ...fixture, seed: "deleted-owner-world" });
+    await ownerWorld.setMeta("appearanceIndexVersion", 1);
+    const ownerSaves = new Saves(ownerWorld);
+    const initial = await stateOf(ownerWorld);
+    await ownerWorld.setMeta("state", { ...initial, started: true, careerId: "kept-owner-career", careerName: "Kept career" });
+    const kept = await ownerSaves.create("Kept career snapshot");
+    await ownerWorld.setMeta("state", { ...initial, started: true, careerId: "deleted-owner-career", careerName: "Deleted career" });
+    const doomed = [await ownerSaves.create("Deleted career first"), await ownerSaves.create("Deleted career autosave", true)];
+    const active = await stateOf(ownerWorld);
+    const chunkQuery = "SELECT chunks.ordinal, chunks.data FROM save_chunks AS chunks JOIN save_slots AS slots ON slots.id = chunks.save_id WHERE slots.career_id = ? ORDER BY chunks.ordinal";
+    const keptChunks = await ownerWorld.all(chunkQuery, "kept-owner-career");
+    expect(keptChunks.length).toBeGreaterThan(0);
+    const guestState = await stateOf(root);
+    const guestSlots = await new Saves(root).list();
+    const confirm = { careerId: active.careerId, seed: active.seed };
+
+    expect((await access("delete", "/api/careers/active").send({})).status).toBe(400);
+    expect((await access("delete", "/api/careers/active").send({ seed: active.seed })).status).toBe(400);
+    for (const body of [{ ...confirm, careerId: "kept-owner-career" }, { ...confirm, careerId: null }, { ...confirm, seed: "other-seed" }]) {
+      const refused = await access("delete", "/api/careers/active").send(body);
+      expect(refused.status).toBe(409);
+      expect(refused.headers["retry-after"]).toBeUndefined();
+      expect(refused.body).toEqual({ error: "The active career changed. Reload it before deleting.", code: "career_mismatch" });
+    }
+    expect((await access("delete", "/api/careers").send({ file: doomed[0].file })).status).toBe(400);
+    expect(await stateOf(ownerWorld)).toEqual(active);
+    expect((await ownerSaves.list()).map((slot) => slot.file).sort()).toEqual([kept.file, ...doomed.map((slot) => slot.file)].sort());
+
+    let release!: () => void;
+    let entered!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const discard = ownerWorld.discardWorld.bind(ownerWorld);
+    vi.spyOn(ownerWorld, "discardWorld").mockImplementation(async () => {
+      entered();
+      await gate;
+      return discard();
+    });
+    const pending = access("delete", "/api/careers/active")
+      .send({ ...confirm, schema: root.schemaName, userId: guest }).then((response) => response);
+    try {
+      await Promise.race([started, pending.then(() => { throw new Error("Deletion ended before clearing the world"); })]);
+      const session = await access("get", "/api/me").timeout({ response: 20_000 });
+      expect(session.body).toMatchObject({ hasWorld: null, activity: { operation: "delete_career", startedAt: expect.any(String) } });
+      for (const busy of [
+        await access("get", "/api/bootstrap"),
+        await access("delete", "/api/careers/active").send(confirm),
+      ]) {
+        expect(busy.status).toBe(409);
+        expect(busy.headers["retry-after"]).toBe("2");
+        expect(busy.body).toMatchObject({ code: "world_busy", operation: "delete_career", startedAt: session.body.activity.startedAt });
+      }
+      expect((await access("get", "/api/bootstrap", guest).timeout({ response: 20_000 })).status).toBe(200);
+    } finally {
+      release();
+      await pending;
+    }
+    const deleted = await pending;
+    expect(deleted.status).toBe(200);
+    expect(deleted.body).toEqual({ deleted: true, careerId: "deleted-owner-career", snapshots: 2, message: expect.any(String) });
+    expect((await access("get", "/api/me")).body).toMatchObject({ hasWorld: false, activity: null });
+    expect((await access("get", "/api/bootstrap")).body).toBeNull();
+    expect((await access("get", "/api/saves")).body.map((slot: SaveSlot) => slot.file)).toEqual([kept.file]);
+    expect(await ownerWorld.all(chunkQuery, "kept-owner-career")).toEqual(keptChunks);
+    expect(await ownerWorld.all(chunkQuery, "deleted-owner-career")).toEqual([]);
+    expect(await ownerWorld.all("SELECT [key], [value] FROM meta")).toEqual([{ key: "appearanceIndexVersion", value: "1" }]);
+    const counts = await ownerWorld.all<{ rows: number }>(WORLD_TABLES.filter((table) => table !== "meta").map((table) =>
+      `SELECT COUNT(*) AS [rows] FROM ${tableName(ownerWorld.schemaName, table)}`).join(" UNION ALL "));
+    expect(counts).toHaveLength(WORLD_TABLES.length - 1);
+    expect(counts.every((count) => count.rows === 0)).toBe(true);
+    expect(await stateOf(root)).toEqual(guestState);
+    expect(await new Saves(root).list()).toEqual(guestSlots);
+    expect((await access("delete", "/api/careers/active").send(confirm)).status).toBe(404);
+
+    const world = await import("./world.ts");
+    const generateWorldFixture = world.generateWorld;
+    vi.spyOn(world, "generateWorld").mockImplementation((store, options) => generateWorldFixture(store, { ...options, ...fixture }));
+    expect((await access("post", "/api/careers/prepare").send({})).body).toEqual({ created: true });
+    expect((await access("get", "/api/me")).body).toMatchObject({ hasWorld: true, activity: null });
+    expect((await ownerSaves.list()).map((slot) => slot.file)).toEqual([kept.file]);
+  }, 300_000);
+
+  it("refuses to delete the protected legacy dbo career without reading or changing its world or snapshots", async () => {
+    await generateWorld(ownerWorld, { ...fixture, seed: "protected-legacy-world" });
+    const initial = await stateOf(ownerWorld);
+    await ownerWorld.setMeta("state", { ...initial, started: true, careerId: "legacy-career", careerName: "Legacy career" });
+    const snapshot = await new Saves(ownerWorld).create("Legacy snapshot");
+    // Test mode forbids a real dbo store, so the isolated world is presented under the legacy schema name.
+    const legacy = new Proxy(Object.create(ownerWorld) as Store, {
+      get(_target, property) {
+        if (property === "schemaName") return "dbo";
+        const value = Reflect.get(ownerWorld, property, ownerWorld);
+        return typeof value === "function" ? value.bind(ownerWorld) : value;
+      },
+    });
+    app = createApp(root, {
+      async resolve(identity: AuthenticatedIdentity) {
+        if (identity.tenantId !== tenant || identity.objectId !== secondGuest) throw new AccountNotProvisionedError();
+        return { user: { id: "legacy-account", displayName: identity.displayName, email: identity.email }, store: legacy };
+      },
+    });
+    const countsQuery = WORLD_TABLES.map((table) =>
+      `SELECT '${table}' AS [table], COUNT(*) AS [rows] FROM ${tableName(ownerWorld.schemaName, table)}`).join(" UNION ALL ");
+    const chunkQuery = "SELECT chunks.save_id, chunks.ordinal, chunks.data FROM save_chunks AS chunks ORDER BY chunks.save_id, chunks.ordinal";
+    const before = {
+      state: await stateOf(ownerWorld),
+      slots: await new Saves(ownerWorld).list(),
+      chunks: await ownerWorld.all(chunkQuery),
+      counts: await ownerWorld.all(countsQuery),
+      guest: await stateOf(root),
+    };
+    expect(before.slots.map((slot) => slot.file)).toEqual([snapshot.file]);
+    expect(before.chunks.length).toBeGreaterThan(0);
+    const spies = (["get", "all", "run", "exec", "transaction", "discardWorld"] as const)
+      .map((method) => vi.spyOn(ownerWorld, method).mockImplementation(() => {
+        throw new Error("A protected career must not reach SQL.");
+      }));
+
+    const refused = await access("delete", "/api/careers/active", secondGuest)
+      .send({ careerId: "legacy-career", seed: before.state.seed });
+    expect(refused.status).toBe(409);
+    expect(refused.headers["retry-after"]).toBeUndefined();
+    expect(refused.body).toEqual({ error: "This career is protected and can't be deleted here.", code: "career_protected" });
+    for (const spy of spies) expect(spy).not.toHaveBeenCalled();
+
+    vi.restoreAllMocks();
+    expect(await stateOf(ownerWorld)).toEqual(before.state);
+    expect(await new Saves(ownerWorld).list()).toEqual(before.slots);
+    expect(await ownerWorld.all(chunkQuery)).toEqual(before.chunks);
+    expect(await ownerWorld.all(countsQuery)).toEqual(before.counts);
+    expect(await stateOf(root)).toEqual(before.guest);
   }, 300_000);
 
   it("does not make another user's mutation wait for an in-flight reader", async () => {
@@ -407,7 +612,7 @@ describe("per-user HTTP isolation (two isolated SQL schemas)", () => {
     const local = createApp(ownerWorld, { resolve });
     const response = await request(local).get("/api/me").set("x-ms-client-principal", principal(guest));
     expect(response.status).toBe(200);
-    expect(response.body).toEqual({ user: { id: "local", displayName: "Local director", email: null }, hasWorld: false });
+    expect(response.body).toEqual({ user: { id: "local", displayName: "Local director", email: null }, hasWorld: false, activity: null });
     expect(resolve).not.toHaveBeenCalled();
     expect((await request(local).get("/api/me").set("Host", "untrusted.example")
       .set("x-ms-client-principal", principal(owner))).status).toBe(403);

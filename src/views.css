@@ -1068,9 +1068,31 @@
 .active-career-details strong {
   font-size: 1.02rem;
 }
+.active-career-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+.career-delete-current {
+  color: var(--red, #b3261e);
+}
+.delete-career-impact {
+  margin: 0 0 14px;
+  padding-left: 20px;
+  display: grid;
+  gap: 6px;
+  font-size: 0.86rem;
+}
+.delete-career-form .field input {
+  width: 100%;
+}
 .career-menu-actions {
   display: flex;
   flex-direction: column;
+}
+.career-menu-actions > .eyebrow {
+  padding: 0 12px 6px;
 }
 .career-menu-actions > button {
   display: flex;

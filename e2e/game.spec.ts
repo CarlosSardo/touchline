@@ -1189,8 +1189,11 @@ test("startup waits for a local engine that is still generating the world", asyn
     else await route.continue();
   });
   await page.goto("/");
+  // Order-independent: a fresh e2e world has no started career.
   await expect(
-    page.getByRole("button", { name: "Continue career", exact: true }),
+    page
+      .getByRole("button", { name: "Continue career", exact: true })
+      .or(page.getByText("Your private world is ready.", { exact: false })),
   ).toBeVisible();
   expect(attempts).toBeGreaterThan(2);
   await expect(page.locator(".error-state")).toHaveCount(0);

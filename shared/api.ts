@@ -30,9 +30,50 @@ export interface AccountUser {
   email: string | null;
 }
 
+export type WorldOperation =
+  | "prepare_world"
+  | "start_career"
+  | "load_career"
+  | "delete_career"
+  | "advance_days"
+  | "create_save"
+  | "restore_save"
+  | "export_save"
+  | "import_save"
+  | "expand_world"
+  | "game_action"
+  | "update_settings"
+  | "favorite_competition";
+
+export interface WorldActivity {
+  operation: WorldOperation;
+  startedAt: string;
+}
+
+/** Only 409 with this code is transient; retry after the Retry-After header. */
+export type WorldBusyResponse = {
+  error: string;
+  code: "world_busy";
+} & WorldActivity;
+
+/** hasWorld is null exactly when activity is set: the world is busy and was not read. */
 export interface AccountSession {
   user: AccountUser;
-  hasWorld: boolean;
+  hasWorld: boolean | null;
+  activity: WorldActivity | null;
+}
+
+/** Body of DELETE /api/careers/active, copied from the loaded GameState. */
+export interface DeleteActiveCareerRequest {
+  careerId: string | null;
+  seed: string;
+}
+
+export interface DeleteActiveCareerResult {
+  deleted: true;
+  careerId: string | null;
+  snapshots: number;
+  message: string;
 }
 
 export interface Health {

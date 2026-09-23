@@ -690,6 +690,86 @@ if (process.env.SQL_SAVE_TESTS === "true") {
       );
     }, 300_000);
 
+    it("deletes the confirmed active career atomically and keeps other careers' snapshots for a new career", async () => {
+      const { WORLD_TABLES, tableName } = await import("./sql-schema.ts");
+      const world = await import("./world.ts");
+      const generateWorldFixture = world.generateWorld;
+      const baselineId = baseline.file.replace(".touchline.gz", "");
+      const chunks = (id: string) =>
+        store.all<{ ordinal: number; data: Buffer }>("SELECT ordinal, data FROM save_chunks WHERE save_id = ? ORDER BY ordinal", id);
+      const baselineChunks = await chunks(baselineId);
+      const count = async (table: string) =>
+        Number((await store.get<{ total: number }>(`SELECT COUNT(*) AS total FROM ${tableName(store.schemaName, table)}`))!.total);
+      const original = await store.meta<GameState>("state");
+      await store.setMeta("state", { ...original, careerId: "active-delete-lifecycle", careerName: "Delete me" });
+      const doomed = [await saves.create("Delete me manual"), await saves.create("Delete me autosave", true)];
+      const doomedIds = doomed.map((slot) => slot.file.replace(".touchline.gz", ""));
+      const active = await store.meta<GameState>("state");
+      const before = await saves.list();
+      const kept = before.filter((slot) => !doomed.some((item) => item.file === slot.file));
+      expect(kept.map((slot) => slot.file)).toContain(baseline.file);
+      const players = await count("players");
+      expect(players).toBeGreaterThan(0);
+      const marker = await store.get<{ value: string }>("SELECT [value] FROM meta WHERE [key] = 'appearanceIndexVersion'");
+      expect(marker).toBeDefined();
+
+      await expect(saves.deleteActiveCareer({ careerId: "some-other-career", seed: active.seed }))
+        .rejects.toMatchObject({ status: 409, code: "career_mismatch" });
+      await expect(saves.deleteActiveCareer({ careerId: active.careerId!, seed: "some-other-seed" }))
+        .rejects.toMatchObject({ status: 409, code: "career_mismatch" });
+      await expect(store.discardWorld()).rejects.toThrow("writer lock");
+      const discard = store.discardWorld.bind(store);
+      vi.spyOn(store, "discardWorld").mockImplementationOnce(async () => {
+        await discard();
+        throw new Error("injected discard failure");
+      });
+      await expect(saves.deleteActiveCareer({ careerId: active.careerId!, seed: active.seed }))
+        .rejects.toThrow("injected discard failure");
+      expect(await store.meta("state")).toEqual(active);
+      expect(await saves.list()).toEqual(before);
+      expect(await count("players")).toBe(players);
+      for (const id of doomedIds) expect((await chunks(id)).length).toBeGreaterThan(0);
+
+      expect(await saves.deleteActiveCareer({ careerId: active.careerId!, seed: active.seed })).toEqual({
+        deleted: true,
+        careerId: "active-delete-lifecycle",
+        snapshots: 2,
+        message: "Career deleted. Start a new career or load another saved career.",
+      });
+      expect(await saves.currentState()).toBeNull();
+      expect(await saves.list()).toEqual(kept);
+      expect(await chunks(baselineId)).toEqual(baselineChunks);
+      for (const id of doomedIds) {
+        expect(await chunks(id)).toEqual([]);
+        expect(await store.get("SELECT id FROM save_slots WHERE id = ?", id)).toBeUndefined();
+      }
+      expect(await store.all("SELECT [key], [value] FROM meta")).toEqual([{ key: "appearanceIndexVersion", value: marker!.value }]);
+      for (const table of WORLD_TABLES.filter((name) => name !== "meta"))
+        expect(await count(table), table).toBe(0);
+      await expect(saves.deleteActiveCareer({ careerId: active.careerId!, seed: active.seed }))
+        .rejects.toMatchObject({ status: 404 });
+      expect((await store.run(
+        "INSERT INTO news ([date], [category], [title], [body]) VALUES (?,?,?,?)",
+        "2026-07-01", "Test", "Identity", "Reset after deletion",
+      )).lastInsertRowid).toBe(1);
+      await store.run("DELETE FROM news");
+
+      vi.spyOn(world, "generateWorld").mockImplementation((target, options) =>
+        generateWorldFixture(target, { ...options, countryLimit: 2, seniors: 1200, youth: 400, expanded: false }));
+      expect(await saves.prepareCareer("Next Director")).toEqual({ created: true });
+      expect(await saves.list()).toEqual(kept);
+      const prepared = (await saves.currentState())!;
+      expect(prepared).toMatchObject({ started: false, director: { name: "Next Director" } });
+      expect(prepared.careerId).toBeUndefined();
+      expect(await saves.deleteActiveCareer({ careerId: null, seed: prepared.seed })).toMatchObject({
+        deleted: true,
+        careerId: null,
+        snapshots: 0,
+      });
+      expect(await saves.currentState()).toBeNull();
+      expect(await saves.list()).toEqual(kept);
+    }, 300_000);
+
     it("validates before clearing and rolls back a structurally valid but relationally invalid restore", async () => {
       const exported = await saves.export();
       try {

@@ -1,4 +1,4 @@
-import { Fragment, useDeferredValue, useState } from "react";
+import { Fragment, useDeferredValue, useEffect, useState } from "react";
 import {
   ArrowLeft,
   ArrowRight,
@@ -10,6 +10,7 @@ import {
   LoaderCircle,
   Play,
   Plus,
+  RefreshCw,
   Search,
   Settings2,
   ShieldCheck,
@@ -17,6 +18,7 @@ import {
   UserRound,
 } from "lucide-react";
 import { api, useGame, useResource } from "../game-context.tsx";
+import { ApiError, isOutcomeUnknown, isWorldBusy } from "../api-error.ts";
 import {
   Badge,
   Button,
@@ -37,10 +39,62 @@ import {
 import SavedCareers from "../SavedCareers.tsx";
 import { CareerSheet } from "./Settings.tsx";
 import type { League } from "../../shared/types.ts";
-import type { SaveSlot, WorldClub, WorldClubPage } from "../../shared/api.ts";
+import type {
+  Bootstrap,
+  SaveSlot,
+  WorldClub,
+  WorldClubPage,
+  WorldOperation,
+} from "../../shared/api.ts";
+
+const OPERATION_COPY: Partial<Record<WorldOperation, [string, string]>> = {
+  prepare_world: [
+    "Your private world is still being built.",
+    "This can take several minutes. Keep this page open — Touchline reconnects automatically when it is ready.",
+  ],
+  start_career: [
+    "Starting your career.",
+    "Your new football world is being set up. This can take a few minutes. Keep this page open — Touchline reconnects automatically.",
+  ],
+  load_career: [
+    "Opening your career.",
+    "Your saved career is being restored. Keep this page open.",
+  ],
+  delete_career: [
+    "Deleting your career.",
+    "Your private world and this career's snapshots are being removed.",
+  ],
+};
+const OTHER_OPERATION: [string, string] = [
+  "Finishing another operation.",
+  "Touchline is finishing another operation for your account and will reconnect automatically.",
+];
+
+function elapsedLabel(milliseconds: number) {
+  const seconds = Math.max(0, Math.floor(milliseconds / 1000));
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+}
+
+function failureMessage(failure: unknown, fallback: string) {
+  return failure instanceof Error ? failure.message : fallback;
+}
+
+function aborted(failure: unknown) {
+  return failure instanceof Error && failure.name === "AbortError";
+}
 
 export default function Start() {
-  const { session, bootstrap, navigate, refresh } = useGame();
+  const {
+    session,
+    bootstrap,
+    navigate,
+    refresh,
+    worldActivity,
+    checkActivity,
+    waitForIdle,
+    deleteActiveCareer,
+    toast,
+  } = useGame();
   const {
     data: saves,
     loading: savesLoading,
@@ -70,7 +124,31 @@ export default function Start() {
   const [load, setLoad] = useState<SaveSlot | null>(null);
   const [remove, setRemove] = useState<SaveSlot | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [removeActive, setRemoveActive] = useState(false);
+  const [confirmText, setConfirmText] = useState("");
+  const [waiting, setWaiting] = useState(false);
+  const [operationStart, setOperationStart] = useState(0);
+  const [now, setNow] = useState(() => Date.now());
   const preparing = preparation === "pending";
+  const locked = pending || preparing || waiting || worldActivity !== null;
+  const localOperation: WorldOperation | null = preparing
+    ? "prepare_world"
+    : pending
+      ? view === "new"
+        ? "start_career"
+        : "load_career"
+      : deleting && removeActive
+        ? "delete_career"
+        : null;
+  const overlayOperation = worldActivity?.operation ?? localOperation;
+  const overlayStart = worldActivity
+    ? Date.parse(worldActivity.startedAt)
+    : operationStart;
+  useEffect(() => {
+    if (!overlayOperation) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [overlayOperation]);
   const deferredSearch = useDeferredValue(search);
   const filterKey = JSON.stringify([deferredSearch, country, tier]);
   const page = pagination.key === filterKey ? pagination.page : 1;
@@ -111,39 +189,74 @@ export default function Start() {
     ? (saves?.filter((slot) => slot.career?.id === remove.career?.id).length ??
       0)
     : 1;
+  const careerTitle = state ? (state.careerName ?? club?.name ?? "") : "";
+  const activeSnapshots =
+    state?.careerId && saves
+      ? saves.filter((slot) => slot.career?.id === state.careerId).length
+      : null;
+  function beginOperation() {
+    setError(null);
+    setOperationStart(Date.now());
+    setNow(Date.now());
+  }
+  async function settle(): Promise<Bootstrap | null | undefined> {
+    setWaiting(true);
+    try {
+      return await waitForIdle();
+    } finally {
+      setWaiting(false);
+    }
+  }
   async function newCareer() {
-    if (pending || preparing) return;
+    if (locked) return;
     setError(null);
     if (bootstrap) {
       setView("new");
       return;
     }
+    beginOperation();
     setPreparation("pending");
+    let prepared: Bootstrap | null | undefined;
     try {
       await api("careers/prepare", {
         method: "POST",
         body: JSON.stringify({}),
       });
-      const prepared = await refresh();
+      prepared = await refresh();
       if (!prepared)
         throw new Error("Your private world is not ready. Try preparing it again.");
-      setClubId(prepared.club.id);
-      setCountry(String(prepared.club.country_id ?? ""));
-      setView("new");
-      setPreparation("idle");
     } catch (failure) {
-      setPreparation("failed");
-      setError(
-        failure instanceof Error
-          ? failure.message
-          : "Your private world could not be prepared.",
-      );
+      if (!isOutcomeUnknown(failure)) {
+        setPreparation("failed");
+        setError(
+          failureMessage(failure, "Your private world could not be prepared."),
+        );
+        return;
+      }
+      try {
+        prepared = await settle();
+      } catch (waitFailure) {
+        if (aborted(waitFailure)) return;
+        setPreparation("failed");
+        setError(failureMessage(waitFailure, "Unable to reach your account."));
+        return;
+      }
+      if (!prepared) {
+        setPreparation("failed");
+        setError("Your private world was not finished. Try again.");
+        return;
+      }
     }
+    setClubId(prepared.club.id);
+    setCountry(String(prepared.club.country_id ?? ""));
+    setView("new");
+    setPreparation("idle");
   }
   async function createCareer() {
-    if (!bootstrap || clubId === null || pending) return;
+    if (!bootstrap || clubId === null || locked) return;
+    const before = bootstrap.state.careerId;
+    beginOperation();
     setPending(true);
-    setError(null);
     try {
       await api("careers", {
         method: "POST",
@@ -156,18 +269,62 @@ export default function Start() {
       });
       if (await refresh()) navigate("office");
     } catch (failure) {
-      setError(
-        failure instanceof Error
-          ? failure.message
-          : "Career could not be started.",
-      );
+      if (!isOutcomeUnknown(failure)) {
+        setError(failureMessage(failure, "Career could not be started."));
+        return;
+      }
+      try {
+        const after = await settle();
+        if (after?.state.started && after.state.careerId !== before) {
+          navigate("office");
+          return;
+        }
+        setError("Your career was not started. Check your choices and try again.");
+      } catch (waitFailure) {
+        if (!aborted(waitFailure))
+          setError(failureMessage(waitFailure, "Unable to reach your account."));
+      }
     } finally {
       setPending(false);
     }
   }
+  async function deleteCurrentCareer() {
+    if (!state || deleting || locked) return;
+    beginOperation();
+    setDeleting(true);
+    try {
+      await deleteActiveCareer({
+        careerId: state.careerId ?? null,
+        seed: state.seed,
+      });
+      setRemoveActive(false);
+    } catch (failure) {
+      if (aborted(failure)) return;
+      if (failure instanceof ApiError && failure.code === "career_mismatch") {
+        setConfirmText("");
+        const current = await refresh();
+        if (!current?.state.started) setRemoveActive(false);
+        setError(
+          "Your career changed since this page loaded. Check the details and confirm again.",
+        );
+      } else if (failure instanceof ApiError && failure.status === 404) {
+        await refresh();
+        setRemoveActive(false);
+      } else if (isWorldBusy(failure)) {
+        setError(
+          "Touchline is finishing another operation for your account. Try again when it has finished.",
+        );
+      } else {
+        setError(failureMessage(failure, "Career could not be deleted."));
+      }
+    } finally {
+      setDeleting(false);
+    }
+  }
   async function loadCareer(slot: SaveSlot) {
+    if (locked) return;
+    beginOperation();
     setPending(true);
-    setError(null);
     setLoad(null);
     try {
       await api("careers/load", {
@@ -243,7 +400,7 @@ export default function Start() {
           <IconButton
             icon={Settings2}
             label="Open settings"
-            disabled={!bootstrap || pending || preparing}
+            disabled={!bootstrap || locked}
             onClick={() => navigate("settings")}
           />
         </span>
@@ -256,7 +413,7 @@ export default function Start() {
                 variant="ghost"
                 icon={ArrowLeft}
                 onClick={() => setView("home")}
-                disabled={pending || preparing}
+                disabled={locked}
               >
                 Careers
               </Button>
@@ -274,8 +431,14 @@ export default function Start() {
             2026<span>/ 27</span>
           </span>
         </div>
-        {error && !remove && <ErrorState message={error} />}
-        {savesError && view !== "new" && (
+        {error && !remove && !removeActive && <ErrorState message={error} />}
+        {toast && toast.tone !== "error" && view === "home" && (
+          <p className="career-save-notice" role="status">
+            <ShieldCheck size={15} />
+            {toast.message}
+          </p>
+        )}
+        {savesError && view !== "new" && !worldActivity && (
           <div>
             <ErrorState message={savesError} />
             <Button variant="secondary" onClick={() => void refresh()}>
@@ -286,8 +449,8 @@ export default function Start() {
         {view === "home" && (
           <div className="career-home-grid">
             {state?.started && club ? (
-              <section className="active-career">
-                <div className="eyebrow">ACTIVE CAREER</div>
+              <section className="active-career" aria-label="Continue">
+                <div className="eyebrow">CONTINUE / ACTIVE CAREER</div>
                 <div className="active-career-club">
                   <Crest name={club.name} color={club.color} size={76} />
                   <div>
@@ -317,27 +480,50 @@ export default function Start() {
                     </strong>
                   </span>
                 </div>
-                <Button icon={Play} onClick={() => navigate("office")}>
-                  Continue career
-                </Button>
+                <div className="active-career-actions">
+                  <Button
+                    icon={Play}
+                    disabled={locked}
+                    onClick={() => navigate("office")}
+                  >
+                    Continue career
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    icon={Trash2}
+                    className="career-delete-current"
+                    disabled={locked || deleting}
+                    onClick={() => {
+                      setError(null);
+                      setConfirmText("");
+                      setRemoveActive(true);
+                    }}
+                  >
+                    Delete career
+                  </Button>
+                </div>
               </section>
             ) : (
-              <section className="active-career">
-                <div className="eyebrow">PRIVATE CAREER</div>
+              <section className="active-career" aria-label="Continue">
+                <div className="eyebrow">CONTINUE</div>
                 <Empty
                   icon={Plus}
                   title="No career started"
                   detail={
-                    bootstrap ? "Your private world is ready." : "Summer 2026"
+                    bootstrap
+                      ? "Your private world is ready. Choose a club to begin."
+                      : "Start a new career or load a saved one."
                   }
                 />
               </section>
             )}
-            <div className="career-menu-actions">
-              <button
-                onClick={() => void newCareer()}
-                disabled={pending || preparing}
-              >
+            <div
+              className="career-menu-actions"
+              role="group"
+              aria-label="New or saved career"
+            >
+              <div className="eyebrow">NEW OR SAVED CAREER</div>
+              <button onClick={() => void newCareer()} disabled={locked}>
                 {preparing ? (
                   <LoaderCircle size={23} className="spin" />
                 ) : (
@@ -351,19 +537,20 @@ export default function Start() {
                         ? "Retry preparation"
                         : "New career"}
                   </strong>
-                  <small>Summer 2026</small>
+                  <small>
+                    {bootstrap && !state?.started
+                      ? "Choose your club / Summer 2026"
+                      : "Private world / Summer 2026"}
+                  </small>
                 </span>
                 <ArrowRight size={18} />
               </button>
-              <button
-                onClick={() => setView("load")}
-                disabled={pending || preparing}
-              >
+              <button onClick={() => setView("load")} disabled={locked}>
                 <FolderOpen size={23} />
                 <span>
                   <strong>Load career</strong>
                   <small>
-                    {savesLoading
+                    {savesLoading || worldActivity
                       ? "Loading saved careers..."
                       : savesError
                         ? "Saved careers unavailable"
@@ -431,7 +618,7 @@ export default function Start() {
                 type="submit"
                 icon={pending ? LoaderCircle : Play}
                 disabled={
-                  pending || clubId === null || !name.trim() || !careerName.trim()
+                  locked || clubId === null || !name.trim() || !careerName.trim()
                 }
               >
                 {pending ? "Creating world..." : "Start career"}
@@ -607,7 +794,7 @@ export default function Start() {
                 slots={saves ?? []}
                 search={saveSearch}
                 activeCareerId={state?.started ? state.careerId : undefined}
-                pending={pending || deleting}
+                pending={locked || deleting}
                 onLoad={setLoad}
                 onDelete={(slot) => {
                   setError(null);
@@ -622,7 +809,7 @@ export default function Start() {
               >
                 <Button
                   icon={preparing ? LoaderCircle : Plus}
-                  disabled={pending || preparing}
+                  disabled={locked}
                   onClick={() => void newCareer()}
                 >
                   {preparing
@@ -711,20 +898,95 @@ export default function Start() {
           </footer>
         </Modal>
       )}
-      {(pending || preparing) && (
+      {removeActive && state && club && (
+        <Modal
+          title="Delete your current career?"
+          onClose={() => {
+            if (!deleting) setRemoveActive(false);
+          }}
+        >
+          <form
+            className="delete-career-form"
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (confirmText.trim() === careerTitle) void deleteCurrentCareer();
+            }}
+          >
+            <div className="sheet-body">
+              <h3>{careerTitle}</h3>
+              <p className="sheet-description">
+                {state.director.name} / {club.name} / {dateLabel(state.date)}
+              </p>
+              <p className="sheet-description">
+                This permanently removes, and cannot be undone:
+              </p>
+              <ul className="delete-career-impact">
+                <li>
+                  This career&apos;s private world: its clubs, players,
+                  fixtures, results and inbox.
+                </li>
+                <li>
+                  {activeSnapshots === null
+                    ? "Every saved snapshot of this career."
+                    : `${activeSnapshots} saved ${activeSnapshots === 1 ? "snapshot" : "snapshots"} of this career.`}
+                </li>
+              </ul>
+              <p className="sheet-description">
+                Other saved careers stay available under Load career.
+              </p>
+              <Field label={`Type "${careerTitle}" to confirm`}>
+                <input
+                  value={confirmText}
+                  autoComplete="off"
+                  spellCheck={false}
+                  maxLength={80}
+                  disabled={deleting}
+                  onChange={(event) => setConfirmText(event.target.value)}
+                />
+              </Field>
+              {error && <ErrorState message={error} />}
+            </div>
+            <footer className="sheet-footer">
+              <Button
+                type="button"
+                variant="secondary"
+                disabled={deleting}
+                onClick={() => setRemoveActive(false)}
+              >
+                Cancel
+              </Button>
+              <Button
+                type="submit"
+                variant="danger"
+                icon={deleting ? LoaderCircle : Trash2}
+                disabled={deleting || confirmText.trim() !== careerTitle}
+              >
+                {deleting ? "Deleting..." : "Delete permanently"}
+              </Button>
+            </footer>
+          </form>
+        </Modal>
+      )}
+      {overlayOperation && (
         <div className="simulation-overlay" role="status" aria-live="polite">
           <LoaderCircle className="spin" size={32} />
           <h2>
-            {preparing
-              ? "Preparing your private world."
-              : view === "new"
-                ? "A new football world."
-                : "Opening your career."}
+            {!worldActivity && overlayOperation === "prepare_world"
+              ? "Building your private world."
+              : (OPERATION_COPY[overlayOperation] ?? OTHER_OPERATION)[0]}
           </h2>
-          <p>Preparing your career.</p>
+          <p>{(OPERATION_COPY[overlayOperation] ?? OTHER_OPERATION)[1]}</p>
+          {Number.isFinite(overlayStart) && overlayStart > 0 && (
+            <small>Elapsed {elapsedLabel(now - overlayStart)}</small>
+          )}
           <div className="simulation-track">
             <span />
           </div>
+          {(worldActivity || waiting) && (
+            <Button variant="secondary" icon={RefreshCw} onClick={checkActivity}>
+              Check now
+            </Button>
+          )}
         </div>
       )}
     </main>

@@ -52,6 +52,7 @@ import type {
 
 export class GameError extends Error {
   status = 400;
+  code?: string;
 }
 
 export const transferTermsSchema = z

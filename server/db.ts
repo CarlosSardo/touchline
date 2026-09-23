@@ -16,6 +16,8 @@ import {
 
 export { WORLD_TABLES } from "./sql-schema.ts";
 
+const DISCARD_BATCH_ROWS = 10_000;
+
 export type SqlParameter =
   string | number | bigint | boolean | Date | Buffer | null | undefined;
 export interface RunResult {
@@ -1073,6 +1075,66 @@ export class Store {
           table,
         );
     }
+  }
+
+  /** clearWorld() that TRUNCATEs unreferenced tables (deallocation-only logging) and range-deletes referenced ones. */
+  async discardWorld(): Promise<{ truncated: string[]; deleted: string[] }> {
+    this.assertOpen();
+    const context = this.context.getStore();
+    if (!context?.active || !context.locked)
+      throw new Error(
+        "discardWorld() requires an active Store.transaction() writer lock.",
+      );
+    const tables = await this.worldTables();
+    const metadata = new Map(
+      (
+        await this.all<{ name: string; referenced: number; self_referenced: number; can_alter: number | null }>(
+          `SELECT table_row.[name],
+            CASE WHEN EXISTS (SELECT 1 FROM sys.foreign_keys AS foreign_key
+              WHERE foreign_key.[referenced_object_id] = table_row.[object_id]
+                AND foreign_key.[parent_object_id] <> table_row.[object_id]) THEN 1 ELSE 0 END AS [referenced],
+            CASE WHEN EXISTS (SELECT 1 FROM sys.foreign_keys AS foreign_key
+              WHERE foreign_key.[referenced_object_id] = table_row.[object_id]
+                AND foreign_key.[parent_object_id] = table_row.[object_id]) THEN 1 ELSE 0 END AS [self_referenced],
+            HAS_PERMS_BY_NAME(QUOTENAME(SCHEMA_NAME(table_row.[schema_id])) + N'.' + QUOTENAME(table_row.[name]),
+              N'OBJECT', N'ALTER') AS [can_alter]
+          FROM sys.tables AS table_row WHERE table_row.[schema_id] = SCHEMA_ID(?)`,
+          this.schemaName,
+        )
+      ).map((row) => [row.name, row]),
+    );
+    const truncated: string[] = [];
+    const deleted: string[] = [];
+    for (const table of tables) {
+      const row = metadata.get(table);
+      if (!row || row.referenced || row.can_alter !== 1) continue;
+      await this.exec(`TRUNCATE TABLE ${tableName(this.schemaName, table)};`);
+      truncated.push(table);
+    }
+    for (const table of [...tables].reverse()) {
+      if (truncated.includes(table)) continue;
+      const target = tableName(this.schemaName, table);
+      // A self-referencing table must be emptied in one statement so no range deletes a parent before its child.
+      if (IDENTITY_TABLES.has(table) && !metadata.get(table)?.self_referenced) {
+        const range = await this.get<{ low: number | null; high: number | null }>(
+          `SELECT MIN([id]) AS [low], MAX([id]) AS [high] FROM ${target};`,
+        );
+        if (range && range.low !== null && range.high !== null)
+          for (let low = range.low; low <= range.high; low += DISCARD_BATCH_ROWS)
+            await this.exec(
+              `DELETE FROM ${target} WHERE [id] >= ? AND [id] < ?;`,
+              low,
+              low + DISCARD_BATCH_ROWS,
+            );
+      } else await this.exec(`DELETE FROM ${target};`);
+      if (IDENTITY_TABLES.has(table))
+        await this.exec(
+          `EXEC ${tableName(this.schemaName, "reseed_world_identity")} @table = ?;`,
+          table,
+        );
+      deleted.push(table);
+    }
+    return { truncated, deleted };
   }
 
   private async dropTestSchema(): Promise<void> {

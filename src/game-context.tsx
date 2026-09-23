@@ -7,7 +7,15 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import type { AccountSession, Bootstrap } from "../shared/api.ts";
+import type {
+  AccountSession,
+  Bootstrap,
+  DeleteActiveCareerRequest,
+  DeleteActiveCareerResult,
+  WorldActivity,
+  WorldBusyResponse,
+} from "../shared/api.ts";
+import { ApiError, isOutcomeUnknown, isWorldBusy } from "./api-error.ts";
 import type { Settings } from "../shared/types.ts";
 import {
   accountingAmount,
@@ -50,6 +58,10 @@ interface GameContextValue {
   accountGeneration: number;
   bootstrap: Bootstrap | null;
   error: string | null;
+  worldActivity: WorldActivity | null;
+  checkActivity: () => void;
+  waitForIdle: () => Promise<Bootstrap | null | undefined>;
+  deleteActiveCareer: (request: DeleteActiveCareerRequest) => Promise<void>;
   revision: number;
   page: Page;
   busy: boolean;
@@ -85,16 +97,9 @@ interface GameContextValue {
 
 const GameContext = createContext<GameContextValue | null>(null);
 const sessionFailureEvent = "touchline:session-failure";
+const worldBusyEvent = "touchline:world-busy";
 let requestGeneration = 0;
-
-class ApiError extends Error {
-  readonly status: number;
-
-  constructor(message: string, status: number) {
-    super(message);
-    this.status = status;
-  }
-}
+let mutationsInFlight = 0;
 
 export async function api<Data>(
   path: string,
@@ -105,6 +110,20 @@ export async function api<Data>(
     if (generation !== requestGeneration)
       throw new DOMException("The signed-in account changed.", "AbortError");
   };
+  const mutating = (init?.method ?? "GET").toUpperCase() !== "GET";
+  if (mutating) mutationsInFlight++;
+  try {
+    return await request<Data>(path, init, checkGeneration);
+  } finally {
+    if (mutating) mutationsInFlight--;
+  }
+}
+
+async function request<Data>(
+  path: string,
+  init: RequestInit | undefined,
+  checkGeneration: () => void,
+): Promise<Data> {
   const response = await fetch(`/api/${path}`, {
     cache: "no-store",
     credentials: "same-origin",
@@ -122,16 +141,32 @@ export async function api<Data>(
       .json()
       .catch(() => ({ error: `Request failed (${response.status})` }));
     checkGeneration();
+    const busy =
+      !response.redirected &&
+      response.status === 409 &&
+      body?.code === "world_busy"
+        ? (body as WorldBusyResponse)
+        : null;
+    const retryAfter = Number(response.headers.get("Retry-After"));
     const failure = new ApiError(
       response.redirected
         ? "Your session has expired. Sign in again to continue."
         : body?.error ?? "The game could not complete that action.",
       response.redirected ? 401 : response.status,
+      {
+        code: typeof body?.code === "string" ? body.code : undefined,
+        retryAfter: retryAfter > 0 ? retryAfter : undefined,
+        activity: busy
+          ? { operation: busy.operation, startedAt: busy.startedAt }
+          : undefined,
+      },
     );
     if (failure.status === 401 || failure.status === 403)
       window.dispatchEvent(
         new CustomEvent(sessionFailureEvent, { detail: failure }),
       );
+    if (busy)
+      window.dispatchEvent(new CustomEvent(worldBusyEvent, { detail: failure }));
     throw failure;
   }
   const result = await response.json();
@@ -161,7 +196,9 @@ export function useResource<Data>(
   path: string | null,
   options: { keepPreviousData?: boolean } = {},
 ) {
-  const { revision, accountGeneration, session, loading, bootstrap } = useGame();
+  const { revision, accountGeneration, session, loading, bootstrap, worldActivity } =
+    useGame();
+  const paused = worldActivity !== null;
   const requestPath =
     session && !loading && (bootstrap || path === "saves") ? path : null;
   const [resource, setResource] = useState<{
@@ -175,7 +212,7 @@ export function useResource<Data>(
   const sequence = useRef(0);
   useEffect(() => {
     const current = ++sequence.current;
-    if (!requestPath) return;
+    if (!requestPath || paused) return;
     const controller = new AbortController();
     api<Data>(requestPath, { signal: controller.signal })
       .then((result) => {
@@ -190,7 +227,11 @@ export function useResource<Data>(
         }
       })
       .catch((failure: Error) => {
-        if (failure.name !== "AbortError" && current === sequence.current) {
+        if (
+          failure.name !== "AbortError" &&
+          !isWorldBusy(failure) &&
+          current === sequence.current
+        ) {
           setResource({
             key,
             path: requestPath,
@@ -201,7 +242,7 @@ export function useResource<Data>(
         }
       });
     return () => controller.abort();
-  }, [requestPath, accountGeneration, key]);
+  }, [requestPath, accountGeneration, key, paused]);
   return {
     data:
       requestPath &&
@@ -272,9 +313,118 @@ export function GameProvider({ children }: { children: ReactNode }) {
   const accountHasWorld = useRef(false);
   const sessionRequest = useRef(0);
   const sessionPending = useRef(false);
+  const [worldActivity, setWorldActivity] = useState<WorldActivity | null>(
+    null,
+  );
+  const bootstrapRef = useRef<Bootstrap | null>(null);
+  const lifetime = useRef<AbortController | null>(null);
+  const busyPoll = useRef<{
+    timer?: number;
+    attempt: number;
+    running: boolean;
+    waiters: {
+      resolve: (result: Bootstrap | null | undefined) => void;
+      reject: (failure: unknown) => void;
+    }[];
+  }>({ attempt: 0, running: false, waiters: [] });
+
+  function stopBusyPoll() {
+    const poll = busyPoll.current;
+    if (poll.timer !== undefined) clearTimeout(poll.timer);
+    poll.timer = undefined;
+    poll.attempt = 0;
+    setWorldActivity(null);
+  }
+  function settleWaiters(
+    outcome: { result: Bootstrap | null | undefined } | { failure: unknown },
+  ) {
+    const waiters = busyPoll.current.waiters.splice(0);
+    for (const waiter of waiters)
+      if ("failure" in outcome) waiter.reject(outcome.failure);
+      else waiter.resolve(outcome.result);
+  }
+  function scheduleBusyPoll(delay?: number) {
+    const poll = busyPoll.current;
+    if (poll.timer !== undefined || poll.running) return;
+    // Keeps polling while the tab is hidden: after an ingress cut this may be the only traffic keeping the replica up.
+    const wait =
+      delay ??
+      (poll.attempt < 3
+        ? [2000, 4000, 8000][poll.attempt]
+        : 10000 + Math.random() * 1000);
+    poll.attempt++;
+    poll.timer = window.setTimeout(() => {
+      poll.timer = undefined;
+      void pollActivity();
+    }, wait);
+  }
+  function enterBusy(activity: WorldActivity, retryAfter?: number) {
+    setWorldActivity(activity);
+    scheduleBusyPoll(
+      busyPoll.current.attempt === 0 && retryAfter
+        ? retryAfter * 1000
+        : undefined,
+    );
+  }
+  async function pollActivity() {
+    const poll = busyPoll.current;
+    if (poll.running) return;
+    poll.running = true;
+    const signal = lifetime.current?.signal;
+    try {
+      const next = await api<AccountSession>("me", { signal });
+      if (signal?.aborted) return;
+      if (next.activity && next.user.id === accountIdentity.current) {
+        setWorldActivity(next.activity);
+        poll.running = false;
+        scheduleBusyPoll();
+        return;
+      }
+      poll.attempt = 0;
+      setWorldActivity(null);
+      poll.running = false;
+      const result = await loadSession(signal);
+      if (busyPoll.current.timer === undefined && !busyPoll.current.running)
+        settleWaiters({ result });
+    } catch (failure) {
+      if (signal?.aborted || (failure as Error).name === "AbortError") return;
+      poll.running = false;
+      if (isOutcomeUnknown(failure)) {
+        scheduleBusyPoll();
+        return;
+      }
+      settleWaiters({ failure });
+      if (
+        failure instanceof ApiError &&
+        (failure.status === 401 || failure.status === 403)
+      )
+        return;
+      resetAccount();
+      setLoading(false);
+      setError(
+        failure instanceof Error ? failure.message : "Unable to load your account.",
+      );
+    } finally {
+      poll.running = false;
+    }
+  }
+  function waitForIdle() {
+    return new Promise<Bootstrap | null | undefined>((resolve, reject) => {
+      busyPoll.current.waiters.push({ resolve, reject });
+      scheduleBusyPoll(2000);
+    });
+  }
+  function checkActivity() {
+    const poll = busyPoll.current;
+    if (poll.running) return;
+    if (poll.timer !== undefined) clearTimeout(poll.timer);
+    poll.timer = undefined;
+    void pollActivity();
+  }
 
   function resetAccount() {
     generation.current = ++requestGeneration;
+    stopBusyPoll();
     accountIdentity.current = null;
     accountHasWorld.current = false;
     advanceLock.current = false;
@@ -282,6 +432,7 @@ export function GameProvider({ children }: { children: ReactNode }) {
     setAccountGeneration(generation.current);
     setSession(null);
     setBootstrap(null);
+    bootstrapRef.current = null;
     setRevision(0);
     setBusy(false);
     setToast(null);
@@ -311,11 +462,29 @@ export function GameProvider({ children }: { children: ReactNode }) {
         accountIdentity.current &&
         accountIdentity.current !== nextSession.user.id
       ) {
+        settleWaiters({
+          failure: new DOMException("The signed-in account changed.", "AbortError"),
+        });
         resetAccount();
         setLoading(true);
       }
       accountIdentity.current = nextSession.user.id;
-      const result = await api<Bootstrap | null>("bootstrap", { signal });
+      const busy = (activity: WorldActivity, retryAfter?: number) => {
+        setSession(nextSession);
+        setError(null);
+        setLoading(false);
+        enterBusy(activity, retryAfter);
+        return bootstrapRef.current;
+      };
+      if (nextSession.activity) return busy(nextSession.activity);
+      let result: Bootstrap | null;
+      try {
+        result = await api<Bootstrap | null>("bootstrap", { signal });
+      } catch (failure) {
+        if (isWorldBusy(failure) && failure.activity && !signal?.aborted)
+          return busy(failure.activity, failure.retryAfter);
+        throw failure;
+      }
       if (signal?.aborted || request !== sessionRequest.current) return;
       const verifiedSession = await api<AccountSession>("me", { signal });
       if (signal?.aborted || request !== sessionRequest.current) return;
@@ -326,6 +495,7 @@ export function GameProvider({ children }: { children: ReactNode }) {
       accountHasWorld.current = result !== null;
       setSession(verifiedSession);
       setBootstrap(result);
+      bootstrapRef.current = result;
       setError(null);
       setLoading(false);
       setRevision((value) => value + 1);
@@ -360,6 +530,8 @@ export function GameProvider({ children }: { children: ReactNode }) {
   }
   useEffect(() => {
     const controller = new AbortController();
+    const poll = busyPoll.current;
+    lifetime.current = controller;
     let retryTimer: number | undefined;
     let attempts = 0;
     const connect = () => {
@@ -378,19 +550,34 @@ export function GameProvider({ children }: { children: ReactNode }) {
       });
     };
     const recheck = () => {
-      if (document.visibilityState === "hidden" || sessionPending.current) return;
+      const poll = busyPoll.current;
+      if (
+        document.visibilityState === "hidden" ||
+        sessionPending.current ||
+        mutationsInFlight > 0 ||
+        poll.timer !== undefined ||
+        poll.running
+      )
+        return;
       if (retryTimer !== undefined) clearTimeout(retryTimer);
       void loadSession(controller.signal).catch(() => undefined);
+    };
+    const worldBusy = (event: Event) => {
+      const failure = (event as CustomEvent<ApiError>).detail;
+      if (failure.activity && accountIdentity.current)
+        enterBusy(failure.activity, failure.retryAfter);
     };
     const authenticationFailed = (event: Event) => {
       sessionRequest.current++;
       sessionPending.current = false;
       if (retryTimer !== undefined) clearTimeout(retryTimer);
+      settleWaiters({ failure: (event as CustomEvent<ApiError>).detail });
       resetAccount();
       setLoading(false);
       setError((event as CustomEvent<ApiError>).detail.message);
     };
     window.addEventListener(sessionFailureEvent, authenticationFailed);
+    window.addEventListener(worldBusyEvent, worldBusy);
     window.addEventListener("focus", recheck);
     document.addEventListener("visibilitychange", recheck);
     connect();
@@ -399,7 +586,13 @@ export function GameProvider({ children }: { children: ReactNode }) {
       sessionPending.current = false;
       controller.abort();
       if (retryTimer !== undefined) clearTimeout(retryTimer);
+      if (poll.timer !== undefined) clearTimeout(poll.timer);
+      poll.timer = undefined;
+      poll.attempt = 0;
+      poll.running = false;
+      poll.waiters.length = 0;
       window.removeEventListener(sessionFailureEvent, authenticationFailed);
+      window.removeEventListener(worldBusyEvent, worldBusy);
       window.removeEventListener("focus", recheck);
       document.removeEventListener("visibilitychange", recheck);
     };
@@ -584,6 +777,32 @@ export function GameProvider({ children }: { children: ReactNode }) {
       );
     }
   }
+  async function deleteActiveCareer(request: DeleteActiveCareerRequest) {
+    if (!currentAccount()) return;
+    let message =
+      "Career deleted. Start a new career or load another saved career.";
+    try {
+      message = (
+        await api<DeleteActiveCareerResult>("careers/active", {
+          method: "DELETE",
+          body: JSON.stringify(request),
+        })
+      ).message;
+      await loadSession();
+    } catch (failure) {
+      if (!isOutcomeUnknown(failure) || isWorldBusy(failure)) throw failure;
+      const after = await waitForIdle();
+      if (
+        after &&
+        (after.state.careerId ?? null) === request.careerId &&
+        after.state.seed === request.seed
+      )
+        throw new Error("Your career was not deleted. Try again.", {
+          cause: failure,
+        });
+    }
+    setToast({ message, tone: "success" });
+  }
   return (
     <GameContext
       value={{
@@ -592,6 +811,10 @@ export function GameProvider({ children }: { children: ReactNode }) {
         accountGeneration,
         bootstrap,
         error,
+        worldActivity,
+        checkActivity,
+        waitForIdle,
+        deleteActiveCareer,
         revision,
         page,
         busy,

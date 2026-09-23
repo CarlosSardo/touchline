@@ -20,7 +20,7 @@ import { expandWorld } from "./world-expansion.ts";
 import { createCalendar } from "./calendar.ts";
 import { SETTING_DEFINITIONS } from "../shared/rules.ts";
 import { WORLD_VERSION } from "../shared/world-rules.ts";
-import type { SaveSlot } from "../shared/api.ts";
+import type { DeleteActiveCareerRequest, DeleteActiveCareerResult, SaveSlot } from "../shared/api.ts";
 import type { GameState, Settings } from "../shared/types.ts";
 import {
   SAVE_FORMAT_VERSION,
@@ -46,6 +46,7 @@ import {
 
 const UUID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
 const PAGE_ROWS = 1000;
+const CHUNK_DELETE_BATCH = 64;
 
 type CheckpointProgress = (table: string, rows: number, total: number) => void;
 
@@ -643,14 +644,15 @@ export class Saves {
   async prepareCareer(displayName: string) {
     return this.store.transaction(async () => {
       if (await this.currentState()) return { created: false };
-      for (const table of [...WORLD_TABLES, "save_slots", "save_chunks"]) {
+      // Snapshots of other careers may remain after the active career is deleted; only world tables must be empty.
+      for (const table of WORLD_TABLES) {
         const existing = await this.store.get(
           `SELECT TOP (1) 1 AS present FROM ${tableName(this.store, table)}${table === "meta" ? " WHERE [key] <> 'appearanceIndexVersion' OR [value] <> '1'" : ""}`,
         );
         if (existing)
           throw Object.assign(new GameError("This world contains existing data and cannot be prepared as a new career."), { status: 409 });
       }
-      await generateWorld(this.store, { seed: `touchline-${randomUUID()}` });
+      await generateWorld(this.store, { seed: `touchline-${randomUUID()}`, expanded: false });
       const state = await stateOf(this.store);
       state.director.name = displayName.trim().slice(0, 50) || "Sporting director";
       await this.store.setMeta("state", state);
@@ -696,6 +698,67 @@ export class Saves {
         message: selected.career_id
           ? "Career and its saved snapshots deleted."
           : "Save deleted.",
+      };
+    });
+  }
+
+  async deleteActiveCareer(confirmation: DeleteActiveCareerRequest): Promise<DeleteActiveCareerResult> {
+    // The legacy dbo world is the migrated live career; refuse before any read or lock.
+    if (this.store.schemaName.toLowerCase() === "dbo")
+      throw Object.assign(
+        new GameError("This career is protected and can't be deleted here."),
+        { status: 409, code: "career_protected" },
+      );
+    return this.store.transaction(async () => {
+      const state = await this.currentState();
+      if (!state)
+        throw Object.assign(new GameError("There is no active career to delete."), { status: 404 });
+      const careerId = state.careerId ?? null;
+      if (confirmation.careerId !== careerId || confirmation.seed !== state.seed)
+        throw Object.assign(
+          new GameError("The active career changed. Reload it before deleting."),
+          { status: 409, code: "career_mismatch" },
+        );
+      const slots = careerId
+        ? await this.store.all<{ id: string }>(
+            `SELECT id FROM ${tableName(this.store, "save_slots")} WITH (UPDLOCK,HOLDLOCK)
+             WHERE career_id COLLATE Latin1_General_100_BIN2 = ? AND DATALENGTH(career_id) = DATALENGTH(?)`,
+            careerId,
+            careerId,
+          )
+        : [];
+      for (const slot of slots) {
+        const lastOrdinal = (await this.store.get<{ ordinal: number | null }>(
+          `SELECT MAX(ordinal) AS ordinal FROM ${tableName(this.store, "save_chunks")} WHERE save_id = ?`,
+          slot.id,
+        ))?.ordinal ?? -1;
+        for (let low = 0; low <= lastOrdinal; low += CHUNK_DELETE_BATCH)
+          await this.store.run(
+            `DELETE FROM ${tableName(this.store, "save_chunks")} WHERE save_id = ? AND ordinal >= ? AND ordinal < ?`,
+            slot.id,
+            low,
+            low + CHUNK_DELETE_BATCH,
+          );
+        await this.store.run(
+          `DELETE FROM ${tableName(this.store, "save_slots")} WHERE id = ?`,
+          slot.id,
+        );
+      }
+      const marker = await this.store.get<{ value: string }>(
+        "SELECT [value] FROM meta WHERE [key] = 'appearanceIndexVersion'",
+      );
+      await this.store.discardWorld();
+      if (marker)
+        await this.store.run(
+          "INSERT INTO meta ([key], [value]) VALUES (?, ?)",
+          "appearanceIndexVersion",
+          marker.value,
+        );
+      return {
+        deleted: true,
+        careerId,
+        snapshots: slots.length,
+        message: "Career deleted. Start a new career or load another saved career.",
       };
     });
   }

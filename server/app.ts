@@ -70,7 +70,16 @@ import {
   TRAINING_TYPES,
 } from "../shared/rules.ts";
 import type { Club, Negotiation, PlayerProfile } from "../shared/types.ts";
-import type { AccountSession, AccountUser, Health, HealthDetails } from "../shared/api.ts";
+import type {
+  AccountSession,
+  AccountUser,
+  DeleteActiveCareerResult,
+  Health,
+  HealthDetails,
+  WorldActivity,
+  WorldBusyResponse,
+  WorldOperation,
+} from "../shared/api.ts";
 
 const idSchema = z.coerce.number().int().positive();
 const saveFileSchema = z
@@ -1025,7 +1034,9 @@ export function createApp(store: Store, accounts?: Pick<Accounts, "resolve">) {
         error.status >= 400 &&
         error.status < 500
       )
-        return response.status(error.status).json({ error: error.message });
+        return response
+          .status(error.status)
+          .json(error.code ? { error: error.message, code: error.code } : { error: error.message });
       if (error && typeof error === "object" && "type" in error) {
         if (error.type === "entity.too.large")
           return response
@@ -1058,18 +1069,21 @@ function createWorldRouter(
 ) {
   const app = express.Router();
   const saves = new Saves(store);
-  let busy = false;
+  let activity: WorldActivity | null = null;
   let readers = 0;
   let finishReads: (() => void) | undefined;
-  const conflict = (response: Response) =>
-    response.status(409).json({
+  const conflict = (response: Response, current: WorldActivity) =>
+    response.set("Retry-After", "2").status(409).json({
       error:
         "The game is saving or advancing. Please wait for that operation to finish.",
-    });
+      code: "world_busy",
+      operation: current.operation,
+      startedAt: current.startedAt,
+    } satisfies WorldBusyResponse);
   const read =
     (handler: (request: Request, response: Response) => unknown | Promise<unknown>) =>
     async (request: Request, response: Response, next: NextFunction) => {
-      if (busy) return conflict(response);
+      if (activity) return conflict(response, activity);
       readers++;
       try {
         const result = await store.transaction(async () => handler(request, response));
@@ -1086,14 +1100,15 @@ function createWorldRouter(
     };
   const mutation =
     (
+      operation: WorldOperation,
       handler: (
         request: Request,
         response: Response,
       ) => unknown | Promise<unknown>,
     ) =>
     async (request: Request, response: Response, next: NextFunction) => {
-      if (busy) return conflict(response);
-      busy = true;
+      if (activity) return conflict(response, activity);
+      activity = { operation, startedAt: new Date().toISOString() };
       try {
         if (readers > 0)
           await new Promise<void>((resolveReads) => {
@@ -1104,7 +1119,7 @@ function createWorldRouter(
       } catch (error) {
         next(error);
       } finally {
-        busy = false;
+        activity = null;
       }
     };
   app.get(
@@ -1122,13 +1137,20 @@ function createWorldRouter(
         }) satisfies HealthDetails,
     ),
   );
-  app.get(
-    "/api/me",
-    read(async (_request, response) => ({
-      user: response.locals.user as AccountUser,
-      hasWorld: Boolean(await saves.currentState()),
-    } satisfies AccountSession)),
-  );
+  // Never gated, locked or counted as a reader: it must answer while the account's world is busy.
+  app.get("/api/me", async (_request, response, next) => {
+    try {
+      const user = response.locals.user as AccountUser;
+      const current = activity;
+      response.json(
+        (current
+          ? { user, hasWorld: null, activity: current }
+          : { user, hasWorld: Boolean(await saves.currentState()), activity: null }) satisfies AccountSession,
+      );
+    } catch (error) {
+      next(error);
+    }
+  });
   app.get(
     "/api/bootstrap",
     read(async () => await saves.currentState() ? query.bootstrap(store) : null),
@@ -1294,7 +1316,7 @@ function createWorldRouter(
   );
   app.put(
     "/api/competitions/:id/favorite",
-    mutation(async (request, response) =>
+    mutation("favorite_competition", async (request, response) =>
       response.json(
         await store.transaction(() =>
           favoriteCompetition(
@@ -1334,7 +1356,7 @@ function createWorldRouter(
   );
   app.post(
     "/api/world/expand",
-    mutation(async (_request, response) =>
+    mutation("expand_world", async (_request, response) =>
       response.json(await saves.expandWorld()),
     ),
   );
@@ -1421,7 +1443,7 @@ function createWorldRouter(
   );
   app.post(
     "/api/action",
-    mutation(async (request, response) => {
+    mutation("game_action", async (request, response) => {
       const result = await store.transaction(() =>
         dispatchAction(store, request.body),
       );
@@ -1430,7 +1452,7 @@ function createWorldRouter(
   );
   app.patch(
     "/api/settings",
-    mutation(async (request, response) =>
+    mutation("update_settings", async (request, response) =>
       response.json(
         await store.transaction(() => updateSettings(store, request.body)),
       ),
@@ -1438,7 +1460,7 @@ function createWorldRouter(
   );
   app.post(
     "/api/advance",
-    mutation(async (request, response) => {
+    mutation("advance_days", async (request, response) => {
       const { days } = z
         .object({ days: z.number().int().min(1).max(28) })
         .parse(request.body);
@@ -1480,20 +1502,32 @@ function createWorldRouter(
   );
   app.delete(
     "/api/careers",
-    mutation(async (request, response) => {
+    mutation("delete_career", async (request, response) => {
       const { file } = z.object({ file: saveFileSchema }).parse(request.body);
       response.json(await saves.deleteCareer(file));
     }),
   );
+  app.delete(
+    "/api/careers/active",
+    mutation("delete_career", async (request, response) => {
+      const confirmation = z
+        .object({
+          careerId: z.string().min(1).max(100).nullable(),
+          seed: z.string().min(1).max(100),
+        })
+        .parse(request.body);
+      response.json((await saves.deleteActiveCareer(confirmation)) satisfies DeleteActiveCareerResult);
+    }),
+  );
   app.post(
     "/api/careers/prepare",
-    mutation(async (_request, response) => {
+    mutation("prepare_world", async (_request, response) => {
       response.json(await saves.prepareCareer((response.locals.user as AccountUser).displayName));
     }),
   );
   app.post(
     "/api/careers",
-    mutation(async (request, response) => {
+    mutation("start_career", async (request, response) => {
       const input = z
         .object({
           name: z.string().trim().min(2).max(50)
@@ -1514,7 +1548,7 @@ function createWorldRouter(
   );
   app.post(
     "/api/careers/load",
-    mutation(async (request, response) => {
+    mutation("load_career", async (request, response) => {
       const { file } = z.object({ file: saveFileSchema }).parse(request.body);
       const archived = await store.transaction(async () => {
         if (!(await saves.list()).some((slot) => slot.file === file))
@@ -1531,7 +1565,7 @@ function createWorldRouter(
   );
   app.post(
     "/api/saves",
-    mutation(async (request, response) =>
+    mutation("create_save", async (request, response) =>
       response.json(
         await saves.create(
           z.object({ name: z.string().min(1).max(60) }).parse(request.body)
@@ -1542,7 +1576,7 @@ function createWorldRouter(
   );
   app.post(
     "/api/saves/restore",
-    mutation(async (request, response) => {
+    mutation("restore_save", async (request, response) => {
       await saves.restore(
         z.object({ file: saveFileSchema }).parse(request.body).file,
       );
@@ -1551,7 +1585,7 @@ function createWorldRouter(
   );
   app.get(
     "/api/saves/export",
-    mutation(async (request, response) => {
+    mutation("export_save", async (request, response) => {
       const { file } = z.object({ file: saveFileSchema.optional() }).parse(request.query);
       const result = await saves.export(file);
       try {
@@ -1565,7 +1599,7 @@ function createWorldRouter(
   );
   app.post(
     "/api/saves/import",
-    mutation(async (request, response) => {
+    mutation("import_save", async (request, response) => {
       if (!request.is(["application/octet-stream", "application/gzip"]))
         throw new GameError("Upload a portable .touchline.gz save file.");
       await saves.import(request);
