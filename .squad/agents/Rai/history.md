@@ -16,3 +16,4 @@ Rai reviews Touchline for high-signal privacy, security, bias, and harmful-conte
 ## Learnings
 
 - Pay particular attention to credentials, authenticated user data, PII in logs, and demographic simulation inputs.
+- 2026-09-23 (e80e867): Account isolation lives in the per-account world router (`worlds` keyed by resolved store schema, app.ts ~990) — verify new routes stay on it and never take account/schema from the client. Operator scripts are the likelier PII leak: watch "diagnostic" dumps on lookup failure that list every account's identifiers.
