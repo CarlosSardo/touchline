@@ -12,7 +12,7 @@ import {
   accountProvisioningPlan, LEGACY_EMAIL, LEGACY_OBJECT_ID, main as migrateAccounts, provisionAccounts,
 } from "../scripts/accounts-migrate.ts";
 import { runtimeGrants } from "../scripts/db-authorize.ts";
-import { careerDeleteOptions, main as deleteCareerMain, maskEmail, selectAccount } from "../scripts/career-delete.ts";
+import { careerDeleteOptions, main as deleteCareerMain, maskEmail, maskIdentifier, maskSchema, selectAccount } from "../scripts/career-delete.ts";
 
 const tenantId = "11111111-1111-4111-8111-111111111111";
 const ownerObjectId = "22222222-2222-4222-8222-222222222222";
@@ -334,11 +334,13 @@ describe("Operator career deletion guards (no database)", () => {
       [["--oid", ownerObjectId, "--apply"], /--apply --yes/],
       [["--oid", ownerObjectId, "--yes", "--apply", "--dry-run"], /not both/],
       [["--oid", ownerObjectId, "--account-schema", "dbo"], /separate/],
+      [["--list", "--oid", ownerObjectId], /--list/],
+      [["--list", "--apply", "--yes"], /--list/],
     ] as const)
       await expect(deleteCareerMain([...args], dependencies), args.join(" ")).rejects.toThrow(message);
     expect(dependencies.open).not.toHaveBeenCalled();
     expect(careerDeleteOptions(["--oid", ownerObjectId.toUpperCase()])).toEqual({
-      objectId: ownerObjectId, email: undefined, accountSchema: "accounts", apply: false,
+      objectId: ownerObjectId, email: undefined, accountSchema: "accounts", apply: false, list: false,
     });
   });
 
@@ -349,13 +351,15 @@ describe("Operator career deletion guards (no database)", () => {
       expect(root.forSchema).toHaveBeenCalledExactlyOnceWith("accounts");
       expect(saves.deleteActiveCareer).not.toHaveBeenCalled();
       expect(root.close).toHaveBeenCalledOnce();
-      const inventory = JSON.parse(lines[0]).identifiers;
-      expect(inventory).toMatchObject({ accounts: 2, withStoredEmail: 2 });
-      expect(inventory.registered.map((account: { email: string }) => account.email)).toEqual(["L***t@Example.test", "O***n@Example.test"]);
-      expect(lines.join("\n")).not.toMatch(/Legacy\.Guest|Owner\.Person/);
+      const inventory = JSON.parse(lines[0]).registry;
+      expect(inventory).toEqual({ accounts: 2, withStoredEmail: 2 });
+      expect(lines.join("\n")).not.toMatch(/Legacy\.Guest|Owner\.Person|L\*\*\*t|O\*\*\*n/);
+      for (const raw of [ownerObjectId, LEGACY_OBJECT_ID, ownerAccountId, legacyAccountId, ownerSchema])
+        expect(lines.join("\n")).not.toContain(raw);
     }
     const unknown = harness();
     await expect(deleteCareerMain(["--oid", otherObjectId], unknown.dependencies)).rejects.toThrow(/No registered account/);
+    expect(JSON.parse(unknown.lines[0])).toEqual({ registry: { accounts: 2, withStoredEmail: 2 }, hint: expect.stringMatching(/--list/) });
     await expect(deleteCareerMain(["--email", "owner.person@example"], unknown.dependencies)).rejects.toThrow(/No registered account/);
     const duplicate = harness({ records: [
       { id: ownerAccountId, tenant_id: tenantId, object_id: ownerObjectId, display_name: "A", email: "same@example.test", game_schema: ownerSchema },
@@ -367,8 +371,25 @@ describe("Operator career deletion guards (no database)", () => {
       expect(saves.deleteActiveCareer).not.toHaveBeenCalled();
     }
     expect(() => selectAccount([{ id: ownerAccountId, tenant_id: tenantId, object_id: ownerObjectId, display_name: "A",
-      email: "a@example.test", game_schema: "accounts" }], { objectId: ownerObjectId, accountSchema: "accounts", apply: false }))
+      email: "a@example.test", game_schema: "accounts" }], { objectId: ownerObjectId, accountSchema: "accounts", apply: false, list: false }))
       .toThrow(/schema/);
+  });
+
+  it("lists the registry masked only with --list and opens no world", async () => {
+    const listed = harness();
+    await deleteCareerMain(["--list"], listed.dependencies);
+    expect(listed.root.forSchema).toHaveBeenCalledExactlyOnceWith("accounts");
+    expect(listed.saves.deleteActiveCareer).not.toHaveBeenCalled();
+    expect(listed.root.close).toHaveBeenCalledOnce();
+    expect(JSON.parse(listed.lines[0]).registry).toEqual({
+      accounts: 2, withStoredEmail: 2,
+      registered: [
+        { accountId: "aaaa***aaaa", objectId: maskIdentifier(LEGACY_OBJECT_ID), schema: "dbo", email: "L***t@Example.test" },
+        { accountId: "bbbb***bbbb", objectId: "2222***2222", schema: "touchline_user_bbbb***bbbb", email: "O***n@Example.test" },
+      ],
+    });
+    for (const raw of [ownerObjectId, LEGACY_OBJECT_ID, ownerAccountId, legacyAccountId, ownerSchema])
+      expect(listed.lines.join("\n")).not.toContain(raw);
   });
 
   it("prints a dry-run summary by default and deletes only with --apply --yes through Saves", async () => {
@@ -376,9 +397,9 @@ describe("Operator career deletion guards (no database)", () => {
     await deleteCareerMain(["--email", "OWNER.PERSON@example.test"], dryRun.dependencies);
     const summary = JSON.parse(dryRun.lines[0]);
     expect(summary).toMatchObject({
-      dryRun: true, database: "touchline", schema: ownerSchema,
-      account: { id: ownerAccountId, objectId: ownerObjectId, email: "O***n@Example.test", matchedBy: "email",
-        identifiers: { objectId: true, storedEmail: true } },
+      dryRun: true, database: "touchline", schema: maskSchema(ownerSchema),
+      account: { id: "bbbb***bbbb", tenantId: "1111***1111", objectId: "2222***2222", displayName: "O***r",
+        email: "O***n@Example.test", matchedBy: "email", identifiers: { objectId: true, storedEmail: true } },
       active: { careerId: "career-to-delete", club: "Owner FC", director: "Owner Director", date: "2026-07-20", seed: "seed-to-delete" },
       world: { expanded: true, version: 3, players: 833976 },
       snapshots: [
@@ -390,14 +411,18 @@ describe("Operator career deletion guards (no database)", () => {
     expect(dryRun.world.transaction).toHaveBeenCalledOnce();
     expect(dryRun.saves.deleteActiveCareer).not.toHaveBeenCalled();
     expect(dryRun.root.close).toHaveBeenCalledOnce();
+    for (const raw of [ownerObjectId, ownerAccountId, tenantId, ownerSchema, "\"Owner\""])
+      expect(dryRun.lines.join("\n")).not.toContain(raw);
 
     const applied = harness();
     await deleteCareerMain(["--oid", ownerObjectId.toUpperCase(), "--apply", "--yes"], applied.dependencies);
     expect(applied.dependencies.saves).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ schemaName: ownerSchema }));
     expect(applied.saves.deleteActiveCareer).toHaveBeenCalledExactlyOnceWith({ careerId: "career-to-delete", seed: "seed-to-delete" });
     expect(JSON.parse(applied.lines.at(-1)!)).toMatchObject({
-      applied: true, schema: ownerSchema, result: { deleted: true, snapshots: 3 }, after: { hasWorld: false, remainingSnapshots: 0 },
+      applied: true, schema: maskSchema(ownerSchema), result: { deleted: true, snapshots: 3 }, after: { hasWorld: false, remainingSnapshots: 0 },
     });
+    for (const raw of [ownerObjectId, ownerAccountId, tenantId, ownerSchema])
+      expect(applied.lines.join("\n")).not.toContain(raw);
     expect(applied.root.close).toHaveBeenCalledOnce();
   });
 
