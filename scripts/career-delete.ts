@@ -17,6 +17,7 @@ export interface CareerDeleteOptions {
   email?: string;
   accountSchema: string;
   apply: boolean;
+  list: boolean;
 }
 
 type SavesLike = Pick<Saves, "currentState" | "list" | "deleteActiveCareer">;
@@ -27,10 +28,11 @@ export interface CareerDeleteDependencies {
   log: (line: string) => void;
 }
 
-const USAGE = `Usage: tsx scripts/career-delete.ts (--oid OBJECT_ID | --email ADDRESS) [--account-schema accounts] [--apply --yes]
+const USAGE = `Usage: tsx scripts/career-delete.ts (--oid OBJECT_ID | --email ADDRESS | --list) [--account-schema accounts] [--apply --yes]
 Resolves exactly one account in the account registry by Entra object ID or by its exact stored email/UPN claim,
 prints a dry-run summary of its active career by default, and deletes that career's world and snapshots only
 with --apply --yes, through Saves.deleteActiveCareer under the account's world lock. The legacy dbo world is refused.
+--list prints a masked registry listing and opens no world. Identifiers are always masked in the output.
 Run it through scripts/azure-sql.sh; large worlds need SQL_REQUEST_TIMEOUT_MS=900000.`;
 
 export function careerDeleteOptions(args: string[]): CareerDeleteOptions | undefined {
@@ -44,9 +46,15 @@ export function careerDeleteOptions(args: string[]): CareerDeleteOptions | undef
       "dry-run": { type: "boolean" },
       apply: { type: "boolean" },
       yes: { type: "boolean" },
+      list: { type: "boolean" },
     },
   });
   if (values.help) return undefined;
+  if (values.list) {
+    if (values.oid !== undefined || values.email !== undefined || values.apply || values.yes || values["dry-run"])
+      throw new Error("--list takes no account identifier and never deletes.");
+    return { accountSchema: validateAccountSchema(values["account-schema"] ?? "accounts"), apply: false, list: true };
+  }
   if ((values.oid === undefined) === (values.email === undefined))
     throw new Error("Choose exactly one account identifier: --oid or --email.");
   if (values.apply && !values.yes)
@@ -61,25 +69,42 @@ export function careerDeleteOptions(args: string[]): CareerDeleteOptions | undef
     email,
     accountSchema: validateAccountSchema(values["account-schema"] ?? "accounts"),
     apply: Boolean(values.apply),
+    list: false,
   };
+}
+
+export function maskText(value: string, keep = 1): string {
+  return value.length > keep * 2 ? `${value.slice(0, keep)}***${value.slice(-keep)}` : `${value.slice(0, 1)}***`;
 }
 
 export function maskEmail(email: string | null): string | null {
   if (!email) return null;
   const at = email.lastIndexOf("@");
-  const local = at > 0 ? email.slice(0, at) : email;
-  const visible = local.length > 2 ? `${local[0]}***${local.at(-1)}` : `${local[0] ?? ""}***`;
+  const visible = maskText(at > 0 ? email.slice(0, at) : email);
   return at > 0 ? `${visible}${email.slice(at)}` : visible;
 }
 
-export function registryIdentifiers(records: AccountRecord[]) {
+export function maskIdentifier(value: string): string {
+  return maskText(value.toLowerCase(), 4);
+}
+
+// Per-user world schemas embed the account UUID.
+export function maskSchema(schema: string): string {
+  const match = /^(touchline_user_)(.+)$/i.exec(schema);
+  return match ? `${match[1]}${maskIdentifier(match[2])}` : schema;
+}
+
+export function registryCounts(records: AccountRecord[]) {
+  return { accounts: records.length, withStoredEmail: records.filter((record) => record.email).length };
+}
+
+export function maskedRegistry(records: AccountRecord[]) {
   return {
-    accounts: records.length,
-    withStoredEmail: records.filter((record) => record.email).length,
+    ...registryCounts(records),
     registered: records.map((record) => ({
-      accountId: record.id.toLowerCase(),
-      objectId: record.object_id.toLowerCase(),
-      schema: record.game_schema,
+      accountId: maskIdentifier(record.id),
+      objectId: maskIdentifier(record.object_id),
+      schema: maskSchema(record.game_schema),
       email: maskEmail(record.email),
     })),
   };
@@ -178,24 +203,28 @@ export async function main(
       `SELECT [id], [tenant_id], [object_id], [display_name], [email], [game_schema]
        FROM ${tableName(options.accountSchema, "users")} ORDER BY [created_at], [id]`,
     );
+    if (options.list) {
+      dependencies.log(JSON.stringify({ registry: maskedRegistry(records) }, null, 2));
+      return;
+    }
     let selected: ReturnType<typeof selectAccount>;
     try {
       selected = selectAccount(records, options);
     } catch (error) {
-      dependencies.log(JSON.stringify({ identifiers: registryIdentifiers(records) }, null, 2));
+      dependencies.log(JSON.stringify({ registry: registryCounts(records), hint: "Re-run with --list for a masked listing." }, null, 2));
       throw error;
     }
     const { account, matchedBy } = selected;
     const world = root.forSchema(account.game_schema);
     const summary = {
       database: root.database,
-      schema: world.schemaName,
+      schema: maskSchema(world.schemaName),
       requestTimeoutMs: Number(process.env.SQL_REQUEST_TIMEOUT_MS ?? 120000),
       account: {
-        id: account.id.toLowerCase(),
-        tenantId: account.tenant_id.toLowerCase(),
-        objectId: account.object_id.toLowerCase(),
-        displayName: account.display_name,
+        id: maskIdentifier(account.id),
+        tenantId: maskIdentifier(account.tenant_id),
+        objectId: maskIdentifier(account.object_id),
+        displayName: maskText(account.display_name),
         email: maskEmail(account.email),
         matchedBy,
         identifiers: { objectId: true, storedEmail: Boolean(account.email) },
@@ -227,7 +256,7 @@ export async function main(
     }
     dependencies.log(JSON.stringify({
       applied: true,
-      schema: world.schemaName,
+      schema: summary.schema,
       seconds: elapsed(),
       result,
       after: { hasWorld: Boolean(await saves.currentState()), remainingSnapshots: (await saves.list()).length },
