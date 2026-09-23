@@ -13,3 +13,5 @@ Product owns the playable React experience, responsive organization, accessibili
 
 - Squad, academy, database, and transfer workflows must support dense scanning without sacrificing mobile usability.
 - Player and club names should lead naturally to inspectable profiles and histories.
+
+📌 Team update (2026-09-23T09:15:46+0200): Focused account-release verification gate for the per-user isolation release is now in decisions.md — known checkpoint busy-response race must be fixed and pass before production; full 38-scenario browser suite is not certified (initial run 7 passed, 1 failed, 30 unrun) — decided by Squad Coordinator

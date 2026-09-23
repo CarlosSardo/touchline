@@ -1,1 +1,22 @@
-[]
+[
+  {
+    "id": "0473dd28-a22d-4674-b35c-c0c56b678c08",
+    "class": "DECISION",
+    "loadGuidance": "ALWAYS",
+    "title": "Proactive release progress updates",
+    "path": ".squad/decisions.md",
+    "status": "active",
+    "createdAt": "2026-09-22T14:39:36.072Z",
+    "updatedAt": "2026-09-23T07:15:46.000Z"
+  },
+  {
+    "id": "2459093d-50e9-4480-9679-e490b8d098bd",
+    "class": "DECISION",
+    "loadGuidance": "ALWAYS",
+    "title": "Focused account-release verification gate",
+    "path": ".squad/decisions.md",
+    "status": "active",
+    "createdAt": "2026-09-22T15:58:10.064Z",
+    "updatedAt": "2026-09-23T07:15:46.000Z"
+  }
+]
