@@ -1,0 +1,262 @@
+name: Verify
+
+# Full verification against throwaway SQL Server containers. No push trigger and no secrets; Azure is never contacted.
+on:
+  workflow_dispatch:
+    inputs:
+      suites:
+        description: "all, or a comma list of: static,backend,world,e2e"
+        type: string
+        default: all
+      seasons:
+        description: "Seasons for npm run simulation:check (1-20)"
+        type: number
+        default: 3
+      full_world:
+        description: "Run the season soak on the full world instead of the two-country world (much slower)"
+        type: boolean
+        default: false
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths-ignore:
+      - "**/*.md"
+      - ".squad/**"
+      - ".github/agents/**"
+      - ".github/skills/**"
+      - "LICENSE"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name }}-${{ inputs.suites }}-${{ inputs.seasons }}-${{ inputs.full_world }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  # Matches the dev workstation's default V8 heap limit; an 8 GB hosted runner would default to about 2 GiB.
+  NODE_OPTIONS: --max-old-space-size=4096
+
+jobs:
+  plan:
+    name: Plan
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      static: ${{ steps.plan.outputs.static }}
+      backend: ${{ steps.plan.outputs.backend }}
+      world: ${{ steps.plan.outputs.world }}
+      e2e: ${{ steps.plan.outputs.e2e }}
+      seasons: ${{ steps.plan.outputs.seasons }}
+      full_world: ${{ steps.plan.outputs.full_world }}
+    steps:
+      - name: Validate inputs
+        id: plan
+        env:
+          SUITES: ${{ inputs.suites }}
+          SEASONS: ${{ inputs.seasons }}
+          FULL_WORLD: ${{ inputs.full_world == true }}
+        run: |
+          suites="${SUITES:-all}"
+          suites="${suites//[[:space:]]/}"
+          SEASONS="${SEASONS:-3}"
+          if [[ "$suites" == all ]]; then suites=static,backend,world,e2e; fi
+          IFS=, read -ra selected <<< "$suites"
+          if (( ${#selected[@]} == 0 )); then echo "::error::No suites selected."; exit 1; fi
+          for suite in "${selected[@]}"; do
+            case "$suite" in
+              static|backend|world|e2e) ;;
+              *) echo "::error::Unknown suite '${suite}'. Use all or a comma list of static,backend,world,e2e."; exit 1 ;;
+            esac
+          done
+          if ! [[ "$SEASONS" =~ ^[0-9]+$ ]] || (( SEASONS < 1 || SEASONS > 20 )); then
+            echo "::error::seasons must be a whole number from 1 to 20."
+            exit 1
+          fi
+          for suite in static backend world e2e; do
+            if [[ ",${suites}," == *",${suite},"* ]]; then echo "${suite}=true"; else echo "${suite}=false"; fi
+          done >> "$GITHUB_OUTPUT"
+          { echo "seasons=${SEASONS}"; echo "full_world=${FULL_WORLD}"; } >> "$GITHUB_OUTPUT"
+          echo "Suites: ${suites} | simulation seasons: ${SEASONS} | full world: ${FULL_WORLD}" >> "$GITHUB_STEP_SUMMARY"
+
+  static:
+    name: Lint, build and pure tests
+    needs: plan
+    if: needs.plan.outputs.static == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Node.js from .nvmrc
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - name: Install dependencies
+        id: install
+        run: mkdir -p ci-logs && npm ci
+      - name: Lint
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: npm run lint 2>&1 | tee ci-logs/lint.log
+      - name: Build
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: npm run build 2>&1 | tee ci-logs/build.log
+      - name: Pure tests (no SQL)
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: |
+          # Files that never open a SQL store; the backend job runs the complete suite, these included.
+          mapfile -t files < <(git ls-files -- {server,shared,src}/'*.'{test,spec}.{ts,tsx} |
+            xargs --no-run-if-empty grep -L -E '\bStore\b|createApp\(' || true)
+          if (( ${#files[@]} == 0 )); then echo "::notice::No SQL-free test files found."; exit 0; fi
+          printf 'Pure test files:\n'; printf '  %s\n' "${files[@]}"
+          npx vitest run "${files[@]}" 2>&1 | tee ci-logs/pure-tests.log
+      - name: Upload logs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: static-logs-${{ github.run_attempt }}
+          path: ci-logs/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  backend:
+    name: SQL-backed backend tests
+    needs: [plan, static]
+    if: ${{ !cancelled() && needs.plan.outputs.backend == 'true' && needs.static.result != 'failure' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Node.js from .nvmrc
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - name: Install dependencies
+        run: mkdir -p ci-logs && npm ci
+      - name: Start disposable SQL Server (test-local equivalent)
+        uses: ./.github/actions/disposable-sql
+      - name: Backend tests (npm test)
+        run: npm test 2>&1 | tee ci-logs/backend-tests.log
+      - name: Collect SQL Server log
+        if: failure()
+        run: docker logs touchline-sql > ci-logs/sql-server.log 2>&1 || true
+      - name: Redact the throwaway SQL password from logs
+        if: failure()
+        run: find ci-logs -type f -exec sed -i "s/${SQL_PASSWORD:-__unset__}/[redacted]/g" {} +
+      - name: Upload logs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: backend-logs-${{ github.run_attempt }}
+          path: ci-logs/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  world:
+    name: World and multi-season simulation checks
+    needs: [plan, static]
+    if: ${{ !cancelled() && needs.plan.outputs.world == 'true' && needs.static.result != 'failure' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Node.js from .nvmrc
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - name: Install dependencies
+        run: mkdir -p ci-logs && npm ci
+      - name: Start disposable SQL Server (test-local equivalent)
+        id: sql
+        uses: ./.github/actions/disposable-sql
+      - name: World check (npm run world:check)
+        timeout-minutes: 150
+        run: npm run world:check 2>&1 | tee ci-logs/world-check.log
+      - name: Simulation check (npm run simulation:check)
+        if: ${{ !cancelled() && steps.sql.outcome == 'success' }}
+        env:
+          SEASONS: ${{ needs.plan.outputs.seasons }}
+          FULL_WORLD: ${{ needs.plan.outputs.full_world }}
+        run: |
+          args=("--seasons=${SEASONS}")
+          if [[ "$FULL_WORLD" == true ]]; then args+=(--full-world); fi
+          npm run simulation:check -- "${args[@]}" 2>&1 | tee ci-logs/simulation-check.log
+      - name: Collect SQL Server log
+        if: failure()
+        run: docker logs touchline-sql > ci-logs/sql-server.log 2>&1 || true
+      - name: Redact the throwaway SQL password from logs
+        if: ${{ !cancelled() }}
+        run: find ci-logs -type f -exec sed -i "s/${SQL_PASSWORD:-__unset__}/[redacted]/g" {} +
+      - name: Upload world and simulation reports
+        # Uploaded on success too: the JSON reports are the multi-season evidence.
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: world-simulation-reports-${{ github.run_attempt }}
+          path: ci-logs/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  e2e:
+    name: Playwright e2e
+    needs: [plan, static]
+    if: ${{ !cancelled() && needs.plan.outputs.e2e == 'true' && needs.static.result != 'failure' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    env:
+      PLAYWRIGHT_HTML_OPEN: never
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Node.js from .nvmrc
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - name: Install dependencies
+        run: mkdir -p ci-logs && npm ci
+      - name: Install Chromium for Playwright
+        run: npx playwright install --with-deps chromium
+      - name: Start disposable SQL Server (test-local equivalent)
+        uses: ./.github/actions/disposable-sql
+      - name: Use a fresh E2E schema
+        run: |
+          schema="touchline_e2e_$(openssl rand -hex 16)"
+          { echo "TOUCHLINE_E2E_SCHEMA=${schema}"; echo "SQL_SCHEMA=${schema}"; } >> "$GITHUB_ENV"
+      - name: Playwright e2e (npm run test:e2e)
+        run: npm run test:e2e -- --reporter=list,html 2>&1 | tee ci-logs/e2e.log
+      - name: Collect SQL Server log
+        if: failure()
+        run: docker logs touchline-sql > ci-logs/sql-server.log 2>&1 || true
+      - name: Redact the throwaway SQL password from logs
+        if: failure()
+        run: find ci-logs -type f -exec sed -i "s/${SQL_PASSWORD:-__unset__}/[redacted]/g" {} +
+      - name: Upload Playwright report and logs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-report-${{ github.run_attempt }}
+          path: |
+            playwright-report/
+            test-results/
+            ci-logs/
+          if-no-files-found: ignore
+          retention-days: 7
