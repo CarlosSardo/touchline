@@ -243,7 +243,7 @@ export function AffiliatesPanel() {
         </div>
       ) : null}
       {data.affiliates.length ? (
-        <div className="table-scroll">
+        <div className="table-scroll" role="region" aria-label="Affiliate clubs" tabIndex={0}>
           <table className="data-table affiliate-table">
             <thead>
               <tr>

@@ -39,6 +39,8 @@ import {
   type SortState,
 } from "./sort.ts";
 import { useSortableRows } from "./useSortableRows.ts";
+import { rememberOrigin, useSheetOrigin } from "./sheet-trail.ts";
+import { ZONE_LABELS, zoneAt, zoneLegend, type TableZone, type ZoneSpec } from "./table-zones.ts";
 import {
   bodyLabel,
   bodyOf,
@@ -462,8 +464,16 @@ export function PlayerName({
   detail?: ReactNode;
 }) {
   const { setPlayer } = useGame();
+  const origin = useSheetOrigin();
   return (
-    <button type="button" className="player-name" onClick={() => setPlayer(player.id)}>
+    <button
+      type="button"
+      className="player-name"
+      onClick={() => {
+        rememberOrigin(origin);
+        setPlayer(player.id);
+      }}
+    >
       <Silhouette
         size={compact ? 30 : 38}
         color={player.club_color ?? "#087f6d"}
@@ -512,12 +522,16 @@ export function Nationalities({ player }: { player: Player }) {
 
 export function PlayerLink({ id, name }: { id: number; name: string }) {
   const { setPlayer } = useGame();
+  const origin = useSheetOrigin();
   return (
     <button
       type="button"
       className="profile-link"
       title={`View ${name}'s profile`}
-      onClick={() => setPlayer(id)}
+      onClick={() => {
+        rememberOrigin(origin);
+        setPlayer(id);
+      }}
     >
       {name}
     </button>
@@ -850,17 +864,61 @@ export function FormDots({ form }: { form: string }) {
     </span>
   );
 }
+const LEGEND_LINES: Record<TableZone, string> = {
+  promoted: "",
+  "promotion-playoff": "playoff",
+  "title-playoff": "playoff",
+  "relegation-playoff": "playoff-down",
+  relegated: "bottom",
+};
+
+/** Legend for the zones a table shows; nothing when the league has no movement rules. */
+export function ZoneLegend({ zones, size }: { zones: ZoneSpec | null; size: number }) {
+  const items = zoneLegend(zones, size);
+  if (!items.length) return null;
+  return (
+    <div className="pressure-zones">
+      {items.map((zone) => (
+        <span key={zone}>
+          <i className={clsx("zone-line", LEGEND_LINES[zone])} />
+          {ZONE_LABELS[zone]}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+const ZONE_CLASSES: Record<TableZone, string> = {
+  promoted: "zone-top",
+  "promotion-playoff": "zone-playoff",
+  "title-playoff": "zone-playoff",
+  "relegation-playoff": "zone-playoff-down",
+  relegated: "zone-bottom",
+};
+
 export function StandingsTable({
   entries,
   ownId,
   compact = false,
+  zones = null,
+  positionOffset = 0,
+  tableSize,
+  label = "League table",
 }: {
   entries: Standing[];
   ownId?: number;
   compact?: boolean;
+  /** Movement zones from the league's rules; null shows no zones. */
+  zones?: ZoneSpec | null;
+  /** Split-league groups: the group's first overall position minus one. */
+  positionOffset?: number;
+  /** Full table size when `entries` is a slice (compact view) or a split group. */
+  tableSize?: number;
+  label?: string;
 }) {
+  const size = tableSize ?? entries.length;
   return (
-    <div className="table-scroll" data-no-swipe>
+    <div className="table-scroll" data-no-swipe role="region" aria-label={label} tabIndex={0}>
       <table className="data-table standings-table">
         <thead>
           <tr>
@@ -891,19 +949,15 @@ export function StandingsTable({
           </tr>
         </thead>
         <tbody>
-          {entries.map((entry, index) => (
+          {entries.map((entry, index) => {
+            const zone = zoneAt(zones, positionOffset + index + 1, size);
+            return (
             <tr
               key={entry.club_id}
               className={entry.club_id === ownId ? "own-row" : ""}
             >
               <td>
-                <span
-                  className={clsx(
-                    "table-position",
-                    index < 4 && "zone-top",
-                    index >= entries.length - 3 && !compact && "zone-bottom",
-                  )}
-                >
+                <span className={clsx("table-position", zone && ZONE_CLASSES[zone])}>
                   {index + 1}
                 </span>
               </td>
@@ -943,7 +997,8 @@ export function StandingsTable({
                 </>
               )}
             </tr>
-          ))}
+            );
+          })}
         </tbody>
       </table>
     </div>
@@ -1000,7 +1055,13 @@ export function FixtureRow({ fixture }: { fixture: Fixture }) {
                 : fixture.stage
               : fixture.age_group}
           </small>
-          <span>15:00</span>
+          {/* No kickoff times are simulated: show the weekday instead of an invented time. */}
+          <span>
+            {new Date(`${fixture.date}T12:00:00Z`).toLocaleDateString("en-GB", {
+              weekday: "short",
+              timeZone: "UTC",
+            })}
+          </span>
         </span>
       )}
       <IconButton

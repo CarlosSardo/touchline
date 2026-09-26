@@ -401,7 +401,7 @@ export function Finances() {
         )}
         {tab === "ledger" &&
           (data.ledger.length ? (
-            <div className="table-scroll">
+            <div className="table-scroll" role="region" aria-label="Finance ledger" tabIndex={0}>
               <table className="data-table">
                 <thead>
                   <tr>
@@ -453,7 +453,7 @@ export function Finances() {
                           ? "Closed accounts under review"
                           : data.compliance.status === "monitoring"
                             ? "Forecast requires attention"
-                            : "Within modeled limits"}
+                            : "Within modelled limits"}
                     </h3>
                     <p>{data.compliance.policy}</p>
                   </div>

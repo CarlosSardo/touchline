@@ -1,4 +1,4 @@
-import { useDeferredValue, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Bookmark,
   ChevronLeft,
@@ -38,6 +38,22 @@ import {
   type SortDirection,
   type SortState,
 } from "../sort.ts";
+import { createDebouncer, totalLabel } from "../resource-cache.ts";
+import { plural } from "../format.ts";
+
+const TYPING_DELAY_MS = 300;
+
+/** Follows `value` after a pause in typing; clearing applies at once. */
+function useTypedValue(value: string) {
+  const [typed, setTyped] = useState(value);
+  if (value === "" && typed !== "") setTyped("");
+  useEffect(() => {
+    if (value === "") return;
+    const timer = setTimeout(() => setTyped(value), TYPING_DELAY_MS);
+    return () => clearTimeout(timer);
+  }, [value]);
+  return value === "" ? "" : typed;
+}
 
 type DatabaseSortKey = PlayerSortKey | "minutes";
 const SORT_OPTIONS: [DatabaseSortKey, string][] = [
@@ -186,6 +202,13 @@ export default function Database() {
   const { bootstrap, search, setSearch, notify } = useGame();
   const { money } = useCurrency();
   const [filters, setFilters] = useState<Filters>(defaultFilters);
+  // Query filters: selects and chips apply at once, typed numbers after a pause.
+  const [appliedFilters, setAppliedFilters] = useState<Filters>(defaultFilters);
+  const typing = useRef(createDebouncer(TYPING_DELAY_MS));
+  useEffect(() => {
+    const debouncer = typing.current;
+    return () => debouncer.cancel();
+  }, []);
   const [advanced, setAdvanced] = useState(false);
   const [shortlisted, setShortlisted] = useState(false);
   const [sorting, setSorting] = useState<SortState<DatabaseSortKey>>({
@@ -195,8 +218,8 @@ export default function Database() {
   const { key: sort, direction } = sorting;
   const [pagination, setPagination] = useState({ key: "", page: 1 });
   const [pageSize, setPageSize] = useState(30);
-  const deferredSearch = useDeferredValue(search);
-  const deferredFilters = useDeferredValue(filters);
+  const deferredSearch = useTypedValue(search);
+  const deferredFilters = appliedFilters;
   const filterKey = JSON.stringify([
     deferredSearch,
     deferredFilters,
@@ -218,9 +241,22 @@ export default function Database() {
   for (const [key, value] of Object.entries(deferredFilters))
     if (value !== "") params.set(key, value);
   if (shortlisted) params.set("shortlisted", "1");
-  const { data, loading, error } = useResource<PlayerPage>(`players?${params}`, {
-    keepPreviousData: true,
-  });
+  const next = new URLSearchParams(params);
+  next.set("page", String(page + 1));
+  const [knownPages, setKnownPages] = useState(0);
+  const { data, loading, error } = useResource<PlayerPage & { totalCapped?: boolean }>(
+    `players?${params}`,
+    {
+      keepPreviousData: true,
+      cache: true,
+      prefetch: page < knownPages ? `players?${next}` : null,
+    },
+  );
+  const settledPages = data && !loading ? data.pages : knownPages;
+  if (settledPages !== knownPages) setKnownPages(settledPages);
+  const totalText = data
+    ? totalLabel(data.total, data.totalCapped === true)
+    : "...";
   const activeFilters =
     Object.values(filters).filter(Boolean).length + (shortlisted ? 1 : 0);
   const advancedCount = [
@@ -232,23 +268,31 @@ export default function Database() {
       return bootstrap?.countries.find((country) => String(country.id) === value)?.name ?? value;
     if (key === "valueMax" || key === "wageMax") return money(Number(value), true);
     if (key === "injured") return value === "1" ? "Injured" : "Fit";
-    if (key === "contractMonths") return `${value} months`;
+    if (key === "contractMonths") return plural(Number(value), "month");
     if (key === "heightMin" || key === "heightMax") return `${value} cm`;
     if (key === "contractStatus")
       return value === "amateur" ? "Non-professional" : "Protected";
     if (["listed", "availableLoan", "freeAgent"].includes(key)) return "";
     return ["attribute", "personality", "lifestyle"].includes(key) ? label(value) : value;
   }
-  function update(key: string, value: string) {
-    setFilters((current) => ({
+  function change(transform: (current: Filters) => Filters, typed = false) {
+    const nextFilters = transform(filters);
+    setFilters(nextFilters);
+    const applyFilters = () => setAppliedFilters(nextFilters);
+    if (typed) typing.current.schedule(applyFilters);
+    else typing.current.now(applyFilters);
+  }
+  function update(key: string, value: string, typed = false) {
+    change((current) => ({
       ...current,
       [key]: value,
       ...(key === "attribute" && !value ? { attributeMin: "" } : {}),
       ...(key === "personality" && !value ? { personalityMin: "" } : {}),
-    }));
+    }), typed);
   }
+  const typeFilter = (key: string, value: string) => update(key, value, true);
   function reset() {
-    setFilters(defaultFilters);
+    change(() => defaultFilters);
     setSearch("");
     setShortlisted(false);
     setPage(1);
@@ -360,7 +404,7 @@ export default function Database() {
                 type="button"
                 className="filter-chip"
                 aria-label={`Remove ${filterLabels[key]}`}
-                onClick={() => setFilters((current) => ({
+                onClick={() => change((current) => ({
                   ...current,
                   [key]: "",
                   ...(key === "attribute" ? { attributeMin: "" } : {}),
@@ -434,7 +478,7 @@ export default function Database() {
                 max="99"
                 placeholder="1-99"
                 value={filters.abilityMin}
-                onChange={(event) => update("abilityMin", event.target.value)}
+                onChange={(event) => typeFilter("abilityMin", event.target.value)}
               />
             </Field>
             <Field label="Minimum potential">
@@ -444,7 +488,7 @@ export default function Database() {
                 max="99"
                 placeholder="1-99"
                 value={filters.potentialMin}
-                onChange={(event) => update("potentialMin", event.target.value)}
+                onChange={(event) => typeFilter("potentialMin", event.target.value)}
               />
             </Field>
             <Field label="Fitness status">
@@ -462,8 +506,8 @@ export default function Database() {
           <fieldset className="filter-group">
             <legend>Contract & availability</legend>
             <div className="filter-fields">
-            <MoneyFilter title="Maximum value" value={filters.valueMax} onChange={(value) => update("valueMax", value)} />
-            <MoneyFilter title="Maximum wage / week" value={filters.wageMax} onChange={(value) => update("wageMax", value)} />
+            <MoneyFilter title="Maximum value" value={filters.valueMax} onChange={(value) => typeFilter("valueMax", value)} />
+            <MoneyFilter title="Maximum wage / week" value={filters.wageMax} onChange={(value) => typeFilter("wageMax", value)} />
             <Field label="Contract status">
               <select
                 value={filters.contractStatus}
@@ -492,7 +536,7 @@ export default function Database() {
             <Field label="Availability">
               <select
                 value={filters.freeAgent ? "freeAgent" : filters.availableLoan ? "availableLoan" : filters.listed ? "listed" : ""}
-                onChange={(event) => setFilters((current) => ({
+                onChange={(event) => change((current) => ({
                   ...current,
                   freeAgent: event.target.value === "freeAgent" ? "1" : "",
                   availableLoan: event.target.value === "availableLoan" ? "1" : "",
@@ -537,7 +581,7 @@ export default function Database() {
                 min="1"
                 max="99"
                 value={filters.attributeMin}
-                onChange={(event) => update("attributeMin", event.target.value)}
+                onChange={(event) => typeFilter("attributeMin", event.target.value)}
                 placeholder="1-99"
               />
             </Field>
@@ -550,7 +594,7 @@ export default function Database() {
               </select>
             </Field>
             <Field label="Height minimum (cm)">
-              <input type="number" min="140" max="220" placeholder="Any" value={filters.heightMin} onChange={(event) => update("heightMin", event.target.value)} />
+              <input type="number" min="140" max="220" placeholder="Any" value={filters.heightMin} onChange={(event) => typeFilter("heightMin", event.target.value)} />
             </Field>
             </div>
           </fieldset>
@@ -578,7 +622,7 @@ export default function Database() {
                 max="99"
                 value={filters.personalityMin}
                 onChange={(event) =>
-                  update("personalityMin", event.target.value)
+                  typeFilter("personalityMin", event.target.value)
                 }
                 placeholder="1-99"
               />
@@ -643,7 +687,7 @@ export default function Database() {
                 step=".1"
                 placeholder="0-10"
                 value={filters.formMin}
-                onChange={(event) => update("formMin", event.target.value)}
+                onChange={(event) => typeFilter("formMin", event.target.value)}
               />
             </Field>
             <Field label="Minimum minutes">
@@ -653,7 +697,7 @@ export default function Database() {
                 step="90"
                 placeholder="Any"
                 value={filters.minutesMin}
-                onChange={(event) => update("minutesMin", event.target.value)}
+                onChange={(event) => typeFilter("minutesMin", event.target.value)}
               />
             </Field>
             <Field label="Minimum goals">
@@ -662,7 +706,7 @@ export default function Database() {
                 min="0"
                 placeholder="Any"
                 value={filters.goalsMin}
-                onChange={(event) => update("goalsMin", event.target.value)}
+                onChange={(event) => typeFilter("goalsMin", event.target.value)}
               />
             </Field>
             </div>
@@ -671,10 +715,11 @@ export default function Database() {
         <div className="filter-summary" role="status" aria-live="polite">
           <DatabaseIcon size={13} aria-hidden="true" />
           <span className="filter-total">
-            {data ? compactNumber(data.total) : "..."} players
+            {totalText} players
           </span>
           <span>{loading ? "Updating results" : "in your selection"}</span>
         </div>
+        <div className={`database-results${loading && data ? " is-stale" : ""}`} aria-busy={loading}>
         {error ? (
           <ErrorState message={error} />
         ) : !data ? (
@@ -698,12 +743,16 @@ export default function Database() {
             </Button>
           </Empty>
         )}
+        </div>
         {data && (
           <div className="pagination">
             <span>
               {data.total
-                ? `${((data.page - 1) * data.pageSize + 1).toLocaleString()}-${Math.min(data.page * data.pageSize, data.total).toLocaleString()} of ${compactNumber(data.total)}`
+                ? `${((data.page - 1) * data.pageSize + 1).toLocaleString("en-GB")}-${Math.min(data.page * data.pageSize, data.total).toLocaleString("en-GB")} of ${totalText}`
                 : "0 results"}
+              {data.totalCapped && data.page >= data.pages && (
+                <span className="muted"> / refine the filters to see more</span>
+              )}
             </span>
             <div className="pagination-actions">
               <select
@@ -722,7 +771,7 @@ export default function Database() {
                 disabled={data.page <= 1 || loading}
                 onClick={() => setPage(data.page - 1)}
               />
-              <span>
+              <span title={data.totalCapped ? "More players match than are paged; refine the filters" : undefined}>
                 {data.page} / {data.pages}
               </span>
               <IconButton

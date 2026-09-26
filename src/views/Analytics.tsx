@@ -831,7 +831,7 @@ export default function Analytics() {
                         {visibleActions.length} actions / up to minute {minute}
                       </span>
                     </div>
-                    <div className="table-scroll action-log">
+                    <div className="table-scroll action-log" role="region" aria-label="Match actions" tabIndex={0}>
                       <table className="data-table">
                         <thead>
                           <tr>

@@ -47,6 +47,7 @@ import {
 import { PORTABLE_SAVE_EXTENSION } from "../../shared/api.ts";
 import type { Club, SettingValue } from "../../shared/types.ts";
 import SavedCareers from "../SavedCareers.tsx";
+import { plural } from "../format.ts";
 import { SaveReplacementWarning } from "../SaveReplacement.tsx";
 import {
   oldestPhrase,
@@ -426,7 +427,7 @@ function DirectorSkills() {
       <div className="unframed-heading">
         <h2>Director skills</h2>
         <Badge tone="green">
-          {bootstrap.state.director.skillPoints} points available
+          {plural(bootstrap.state.director.skillPoints, "point")} available
         </Badge>
       </div>
       <div className="skill-grid">

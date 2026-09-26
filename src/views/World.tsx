@@ -190,7 +190,7 @@ export default function World() {
           <Loading label="Opening the football world" />
         ) : (
           <>
-            <div className="table-scroll">
+            <div className="table-scroll" role="region" aria-label="Teams" tabIndex={0}>
               <table className="data-table world-table">
                 <thead>
                   <tr>
@@ -292,7 +292,7 @@ export default function World() {
             {auditedCountries?.length ?? 0} associations
           </span>
         </summary>
-        <div className="table-scroll" data-no-swipe>
+        <div className="table-scroll" data-no-swipe role="region" aria-label="Association rules" tabIndex={0}>
           <table className="data-table association-audit-table">
             <thead>
               <tr>

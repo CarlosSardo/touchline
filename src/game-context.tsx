@@ -16,6 +16,9 @@ import type {
   WorldBusyResponse,
 } from "../shared/api.ts";
 import { ApiError, isOutcomeUnknown, isWorldBusy } from "./api-error.ts";
+import { localizeServerText } from "./money-text.ts";
+import { createLruCache } from "./resource-cache.ts";
+import { plural } from "./format.ts";
 import type { Settings } from "../shared/types.ts";
 import {
   accountingAmount,
@@ -189,15 +192,38 @@ export function useCurrency() {
       formatMoney(value, precise, currency),
     displayAmount: (value: number) => displayAmount(value, currency),
     accountingAmount: (value: number) => accountingAmount(value, currency),
+    text: (value: string) => localizeServerText(value, currency),
   };
+}
+
+interface CachedResource {
+  data: unknown;
+  elapsed: number;
+}
+// Keys carry accountGeneration + revision, so any game-state change misses naturally.
+const resourceCache = createLruCache<CachedResource>(24);
+const prefetches = new Map<string, Promise<CachedResource>>();
+const PREFETCH_BUDGET_MS = 800;
+
+async function timedGet(path: string, signal?: AbortSignal) {
+  const started = performance.now();
+  const data = await api<unknown>(path, { signal });
+  return { data, elapsed: performance.now() - started };
 }
 
 export function useResource<Data>(
   path: string | null,
-  options: { keepPreviousData?: boolean } = {},
+  options: {
+    keepPreviousData?: boolean;
+    /** Serve repeat requests for the same path from a small in-memory LRU. */
+    cache?: boolean;
+    /** Path to warm into the cache when idle, only if this response was fast. */
+    prefetch?: string | null;
+  } = {},
 ) {
   const { revision, accountGeneration, session, loading, bootstrap, worldActivity } =
     useGame();
+  const { keepPreviousData = false, cache = false, prefetch = null } = options;
   const paused = worldActivity !== null;
   const requestPath =
     session && !loading && (bootstrap || path === "saves") ? path : null;
@@ -207,22 +233,41 @@ export function useResource<Data>(
     accountGeneration: number;
     data: Data | null;
     error: string | null;
+    elapsed: number;
   } | null>(null);
-  const key = `${accountGeneration}:${revision}:${requestPath}`;
+  const scope = `${accountGeneration}:${revision}:`;
+  const key = `${scope}${requestPath}`;
+  const cached = cache && requestPath ? resourceCache.peek(key) : undefined;
+  if (cached && requestPath && resource?.key !== key)
+    setResource({
+      key,
+      path: requestPath,
+      accountGeneration,
+      data: cached.data as Data,
+      error: null,
+      elapsed: cached.elapsed,
+    });
   const sequence = useRef(0);
   useEffect(() => {
     const current = ++sequence.current;
     if (!requestPath || paused) return;
+    if (cache && resourceCache.get(key)) return;
     const controller = new AbortController();
-    api<Data>(requestPath, { signal: controller.signal })
+    const warming = cache ? prefetches.get(key) : undefined;
+    (warming
+      ? warming.catch(() => timedGet(requestPath, controller.signal))
+      : timedGet(requestPath, controller.signal)
+    )
       .then((result) => {
+        if (cache) resourceCache.set(key, result);
         if (current === sequence.current) {
           setResource({
             key,
             path: requestPath,
             accountGeneration,
-            data: result,
+            data: result.data as Data,
             error: null,
+            elapsed: result.elapsed,
           });
         }
       })
@@ -238,16 +283,46 @@ export function useResource<Data>(
             accountGeneration,
             data: null,
             error: failure.message,
+            elapsed: 0,
           });
         }
       });
     return () => controller.abort();
-  }, [requestPath, accountGeneration, key, paused]);
+  }, [requestPath, accountGeneration, key, paused, cache]);
+  const settled = !!requestPath && !paused &&
+    (cached !== undefined || (resource?.key === key && resource.error === null));
+  const cheap =
+    (cached?.elapsed ?? (resource?.key === key ? resource.elapsed : Infinity)) <=
+    PREFETCH_BUDGET_MS;
+  const prefetchKey = prefetch ? `${scope}${prefetch}` : null;
+  useEffect(() => {
+    if (!cache || !settled || !cheap || !prefetch || !prefetchKey) return;
+    if (resourceCache.has(prefetchKey) || prefetches.has(prefetchKey)) return;
+    const warm = () => {
+      const promise = timedGet(prefetch);
+      prefetches.set(prefetchKey, promise);
+      promise
+        .then((result) => {
+          if (prefetches.get(prefetchKey) === promise)
+            resourceCache.set(prefetchKey, result);
+        })
+        .catch(() => undefined)
+        .finally(() => {
+          if (prefetches.get(prefetchKey) === promise) prefetches.delete(prefetchKey);
+        });
+    };
+    if (typeof window.requestIdleCallback === "function") {
+      const handle = window.requestIdleCallback(warm, { timeout: 2000 });
+      return () => window.cancelIdleCallback(handle);
+    }
+    const handle = window.setTimeout(warm, 300);
+    return () => clearTimeout(handle);
+  }, [cache, settled, cheap, prefetch, prefetchKey]);
   return {
     data:
       requestPath &&
       resource?.accountGeneration === accountGeneration &&
-      (resource.path === requestPath || options.keepPreviousData)
+      (resource.path === requestPath || keepPreviousData)
         ? (resource?.data ?? null)
         : null,
     loading: !!requestPath && resource?.key !== key,
@@ -424,6 +499,8 @@ export function GameProvider({ children }: { children: ReactNode }) {
 
   function resetAccount() {
     generation.current = ++requestGeneration;
+    resourceCache.clear();
+    prefetches.clear();
     stopBusyPoll();
     accountIdentity.current = null;
     accountHasWorld.current = false;
@@ -448,7 +525,10 @@ export function GameProvider({ children }: { children: ReactNode }) {
     location.hash = "start";
   }
 
-  async function loadSession(signal?: AbortSignal) {
+  async function loadSession(
+    signal?: AbortSignal,
+    { keepAccountOnFailure = false } = {},
+  ) {
     const request = ++sessionRequest.current;
     sessionPending.current = true;
     if (!accountIdentity.current) {
@@ -456,6 +536,13 @@ export function GameProvider({ children }: { children: ReactNode }) {
       setError(null);
     }
     try {
+      // Sent together, both requests carry the same cookie, so the bootstrap belongs to this identity.
+      const loadBootstrap = () => {
+        const pending = api<Bootstrap | null>("bootstrap", { signal });
+        pending.catch(() => undefined);
+        return pending;
+      };
+      let bootstrapRequest = loadBootstrap();
       const nextSession = await api<AccountSession>("me", { signal });
       if (signal?.aborted || request !== sessionRequest.current) return;
       if (
@@ -467,6 +554,7 @@ export function GameProvider({ children }: { children: ReactNode }) {
         });
         resetAccount();
         setLoading(true);
+        bootstrapRequest = loadBootstrap();
       }
       accountIdentity.current = nextSession.user.id;
       const busy = (activity: WorldActivity, retryAfter?: number) => {
@@ -479,21 +567,17 @@ export function GameProvider({ children }: { children: ReactNode }) {
       if (nextSession.activity) return busy(nextSession.activity);
       let result: Bootstrap | null;
       try {
-        result = await api<Bootstrap | null>("bootstrap", { signal });
+        result = await bootstrapRequest;
       } catch (failure) {
         if (isWorldBusy(failure) && failure.activity && !signal?.aborted)
           return busy(failure.activity, failure.retryAfter);
         throw failure;
       }
       if (signal?.aborted || request !== sessionRequest.current) return;
-      const verifiedSession = await api<AccountSession>("me", { signal });
-      if (signal?.aborted || request !== sessionRequest.current) return;
-      if (verifiedSession.user.id !== nextSession.user.id)
-        throw new Error("Your signed-in account changed. Reconnect to continue.");
       if (!result && accountHasWorld.current) resetAccount();
-      accountIdentity.current = verifiedSession.user.id;
+      accountIdentity.current = nextSession.user.id;
       accountHasWorld.current = result !== null;
-      setSession(verifiedSession);
+      setSession(nextSession);
       setBootstrap(result);
       bootstrapRef.current = result;
       setError(null);
@@ -507,6 +591,8 @@ export function GameProvider({ children }: { children: ReactNode }) {
       return result;
     } catch (failure) {
       if (signal?.aborted || request !== sessionRequest.current) return;
+      // 401/403 still sign out through the session failure event.
+      if (keepAccountOnFailure && accountIdentity.current) throw failure;
       resetAccount();
       setLoading(false);
       setError(
@@ -526,6 +612,15 @@ export function GameProvider({ children }: { children: ReactNode }) {
       return await loadSession();
     } catch {
       return undefined;
+    }
+  }
+  async function refreshAfterAction() {
+    if (accountGeneration !== generation.current) return false;
+    try {
+      await loadSession(undefined, { keepAccountOnFailure: true });
+      return true;
+    } catch {
+      return false;
     }
   }
   useEffect(() => {
@@ -611,7 +706,7 @@ export function GameProvider({ children }: { children: ReactNode }) {
     if (!toast) return;
     const timeout = window.setTimeout(
       () => setToast(null),
-      toast.tone === "error" ? 8000 : 5000,
+      toast.tone === "success" ? 5000 : 8000,
     );
     return () => clearTimeout(timeout);
   }, [toast]);
@@ -694,8 +789,23 @@ export function GameProvider({ children }: { children: ReactNode }) {
         method: "POST",
         body: JSON.stringify(body),
       });
-      if (!(await refresh()) || !currentAccount()) return;
-      notify(message ?? result.message ?? "Updated.");
+      // The action already ran: a failed refresh must not read as a failed action or the user repeats it.
+      const refreshed = await refreshAfterAction();
+      if (!currentAccount()) return;
+      const text =
+        message ??
+        localizeServerText(
+          result.message ?? "Updated.",
+          currencyCode(bootstrap.settings.currency),
+        );
+      // Only a counterpart's decision returns stage Rejected; the director's own reject returns no stage.
+      if (result.stage === "Rejected") notify(text, "error");
+      else if (!refreshed)
+        notify(
+          `${text} Couldn't refresh the latest data; it will update on your next action or a reload.`,
+          "warning",
+        );
+      else notify(text, "success");
       return result;
     } catch (failure) {
       notify(
@@ -715,7 +825,7 @@ export function GameProvider({ children }: { children: ReactNode }) {
       );
       if (!(await refresh()) || !currentAccount()) return;
       notify(
-        `${result.days} days advanced. ${result.matches.toLocaleString()} matches simulated.`,
+        `${plural(result.days, "day")} advanced. ${plural(result.matches, "match", "matches")} simulated.`,
       );
     } catch (failure) {
       notify(

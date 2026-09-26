@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
+  ArrowLeft,
   ArrowLeftRight,
   ArrowUpRight,
   Bookmark,
@@ -7,8 +8,10 @@ import {
   CalendarDays,
   ChevronLeft,
   ChevronRight,
+  GraduationCap,
   HeartHandshake,
   ScanLine,
+  Undo2,
   UserX,
 } from "lucide-react";
 import {
@@ -27,6 +30,22 @@ import {
 } from "recharts";
 import { useCurrency, useGame, useResource } from "./game-context.tsx";
 import InterestSummary from "./InterestSummary.tsx";
+import PlayerHistory from "./PlayerHistory.tsx";
+import { PlayerCapsBlock } from "./NationalTeam.tsx";
+import { clearOrigin, peekOrigin } from "./sheet-trail.ts";
+import {
+  CALL_UPS_PATH,
+  DURATION_OPTIONS,
+  MAX_CALL_UP_DAYS,
+  buildDuration,
+  defaultDurationForm,
+  developmentStatusText,
+  shortTeamLabel,
+  untilText,
+  type DurationKind,
+} from "./callups.ts";
+import { CALL_UP_RULES, type CallUpDesk } from "../shared/features/callups.ts";
+import { seasonText, showsGbe } from "./format.ts";
 import {
   Badge,
   Button,
@@ -44,8 +63,9 @@ import {
   Tabs,
 } from "./ui.tsx";
 import {
-  clamp,
+  addDays,
   compactNumber,
+  currentAttributes,
   dateLabel,
   label,
   transferWindow,
@@ -58,6 +78,14 @@ import {
   isHomeBased,
   isMissingPlayer,
 } from "./players.ts";
+
+/** One control for squad moves: permanent first, then the temporary call-up durations. */
+const MOVE_OPTIONS: [DurationKind, string][] = [
+  ["permanent", "Permanent squad move"],
+  ...DURATION_OPTIONS.filter(([id]) => id !== "permanent").map(
+    ([id, text]): [DurationKind, string] => [id, `Call-up: ${text.toLowerCase()}`],
+  ),
+];
 
 interface ReportDetails {
   strengths: string[];
@@ -89,8 +117,8 @@ function CareerMatches({ playerId }: { playerId: number }) {
     return (
       <Empty
         icon={CalendarDays}
-        title="No simulated appearances yet"
-        detail="Every competitive match and friendly played in this career will be recorded here."
+        title="No detailed matches recorded"
+        detail="Only matches played with the full match engine are listed here. Fast-simulated matches count towards the season totals in the History tab."
       />
     );
   const summary = data.seasons.find(
@@ -112,7 +140,7 @@ function CareerMatches({ playerId }: { playerId: number }) {
           >
             {data.seasons.map((entry) => (
               <option key={entry.season} value={entry.season}>
-                {entry.season}/{String(entry.season + 1).slice(-2)}
+                {seasonText(entry.season)}
               </option>
             ))}
           </select>
@@ -160,6 +188,10 @@ function CareerMatches({ playerId }: { playerId: number }) {
           <strong>{summary?.rating.toFixed(2) ?? "-"}</strong>
         </span>
       </div>
+      <p className="muted career-coverage-note">
+        Full-engine matches only. Fast-simulated matches are not listed; their appearances and minutes appear in the
+        History tab.
+      </p>
       <div className="career-team-links">
         {data.teams.map((team) => (
           <span key={team.id}>
@@ -170,7 +202,7 @@ function CareerMatches({ playerId }: { playerId: number }) {
           </span>
         ))}
       </div>
-      <div className="table-scroll">
+      <div className="table-scroll" data-no-swipe role="region" aria-label="Career matches" tabIndex={0}>
         <table className="data-table career-matches-table">
           <thead>
             <tr>
@@ -296,22 +328,39 @@ function CareerMatches({ playerId }: { playerId: number }) {
 }
 
 export default function PlayerSheet() {
-  const { playerId, setPlayer, bootstrap, act, navigate, notify, openOffer } =
+  const { playerId, setPlayer, setClub, bootstrap, act, navigate, notify, openOffer, openContract } =
     useGame();
   const { money } = useCurrency();
   const { data, error } = useResource<PlayerDetail>(
     playerId ? `players/${playerId}` : null,
   );
   const { data: staff } = useResource<StaffDesk>("staff");
+  const { data: desk } = useResource<CallUpDesk>(
+    data?.canManage ? CALL_UPS_PATH : null,
+    { keepPreviousData: true },
+  );
+  const [origin] = useState(peekOrigin);
+  useEffect(() => clearOrigin(), []);
+  const today = bootstrap?.state.date ?? "";
   const [tab, setTab] = useState("overview");
   const [scoutId, setScoutId] = useState("");
   const [pending, setPending] = useState(false);
+  const [moveKind, setMoveKind] = useState<DurationKind>("permanent");
+  const [moveForm, setMoveForm] = useState(() => defaultDurationForm(today));
+  const [moveProblem, setMoveProblem] = useState<string | null>(null);
   const [squadChoice, setSquadChoice] = useState<{
     playerId: number;
     value: string;
   } | null>(null);
   if (!playerId) return null;
   const own = data?.canManage ?? false;
+  const activeCallUp = desk?.active.find((entry) => entry.playerId === playerId) ?? null;
+  const developmentRequest = desk?.requests?.find((entry) => entry.playerId === playerId) ?? null;
+  const firstTeamRegular =
+    data?.player.age_group === "Senior" && !data.player.squad_club_id && !activeCallUp;
+  const requestsFull =
+    !developmentRequest &&
+    (desk?.requests?.length ?? 0) >= CALL_UP_RULES.development.maxRequests;
   const currentSquad = data?.squadDestinations.find((entry) => entry.current);
   const squadValue =
     squadChoice?.playerId === playerId
@@ -323,6 +372,45 @@ export default function PlayerSheet() {
     (entry) => `${entry.clubId}:${entry.ageGroup}` === squadValue,
   );
   const body = data ? bodyOf(data.player, data.profile) : null;
+  const endsCallUp =
+    !!activeCallUp &&
+    !!targetSquad &&
+    activeCallUp.from.clubId === targetSquad.clubId &&
+    activeCallUp.from.ageGroup === targetSquad.ageGroup;
+  function run(body: Record<string, unknown>) {
+    setPending(true);
+    void act(body).finally(() => setPending(false));
+  }
+  function movePlayer() {
+    if (!targetSquad) return;
+    if (endsCallUp) {
+      run({ type: "call-up-end", playerId });
+      return;
+    }
+    if (moveKind === "permanent") {
+      setMoveProblem(null);
+      run({
+        type: "squad-move",
+        playerId,
+        clubId: targetSquad.clubId,
+        ageGroup: targetSquad.ageGroup,
+      });
+      return;
+    }
+    const built = buildDuration(moveKind, moveForm, today);
+    if ("error" in built) {
+      setMoveProblem(built.error);
+      return;
+    }
+    setMoveProblem(null);
+    run({
+      type: "call-up",
+      playerId,
+      clubId: targetSquad.clubId,
+      ageGroup: targetSquad.ageGroup,
+      duration: built.duration,
+    });
+  }
   async function requestReport() {
     if (!data) return;
     const scout = Number(
@@ -345,6 +433,7 @@ export default function PlayerSheet() {
   const tabs = [
     { id: "overview", label: "Overview" },
     { id: "career", label: "Career & matches" },
+    { id: "history", label: "History" },
     { id: "attributes", label: "Attributes" },
     { id: "development", label: "Development" },
     { id: "scout", label: "Scout report" },
@@ -352,6 +441,13 @@ export default function PlayerSheet() {
   ];
   return (
     <Modal title="Player dossier" onClose={() => setPlayer(null)} wide>
+      {origin && (
+        <div className="sheet-back">
+          <Button variant="ghost" icon={ArrowLeft} onClick={() => setClub(origin.clubId)}>
+            Back to {origin.clubName}
+          </Button>
+        </div>
+      )}
       {isMissingPlayer(error) ? (
         <div className="sheet-body">
           <Empty
@@ -375,6 +471,8 @@ export default function PlayerSheet() {
                 <Badge tone="green">{data.player.position}</Badge>
                 <Badge>{data.player.age_group}</Badge>
                 {data.player.injury_until && <Badge tone="red">Injured</Badge>}
+                {activeCallUp && <Badge tone="violet">Call-up</Badge>}
+                {developmentRequest && <Badge tone="blue">Development request</Badge>}
                 {isHomeBased(data.player, data.profile) && (
                   <Badge tone="blue">Home-based pool</Badge>
                 )}
@@ -430,6 +528,7 @@ export default function PlayerSheet() {
           <Tabs items={tabs} value={tab} onChange={setTab} />
           <div className="profile-body">
             {tab === "career" && <CareerMatches playerId={playerId} />}
+            {tab === "history" && <PlayerHistory playerId={playerId} />}
             {tab === "overview" && (
               <div className="profile-columns">
                 <div>
@@ -493,9 +592,20 @@ export default function PlayerSheet() {
                       ))}
                     </ul>
                   </section>
+                  <section className="profile-section">
+                    <h3>International career</h3>
+                    <PlayerCapsBlock playerId={playerId} />
+                  </section>
                   {own && (
                     <section className="profile-section">
                       <h3>Squad assignment</h3>
+                      {activeCallUp && (
+                        <p className="callup-current">
+                          On a call-up from{" "}
+                          <strong>{shortTeamLabel(activeCallUp.fromLabel)}</strong> ·{" "}
+                          {untilText(activeCallUp, today)}
+                        </p>
+                      )}
                       <div className="form-grid">
                         <Field label="Playing squad" className="span-2">
                           <select
@@ -523,7 +633,63 @@ export default function PlayerSheet() {
                             ))}
                           </select>
                         </Field>
+                        {!endsCallUp && (
+                          <Field label="Duration" className="span-2">
+                            <select
+                              aria-label="Move duration"
+                              value={moveKind}
+                              onChange={(event) => {
+                                setMoveKind(event.target.value as DurationKind);
+                                setMoveProblem(null);
+                              }}
+                            >
+                              {MOVE_OPTIONS.map(([id, text]) => (
+                                <option key={id} value={id}>
+                                  {text}
+                                </option>
+                              ))}
+                            </select>
+                          </Field>
+                        )}
+                        {!endsCallUp && moveKind === "days" && (
+                          <Field label="Days">
+                            <input
+                              type="number"
+                              aria-label="Call-up days"
+                              min={1}
+                              max={MAX_CALL_UP_DAYS}
+                              value={Number.isNaN(moveForm.days) ? "" : moveForm.days}
+                              onChange={(event) =>
+                                setMoveForm({ ...moveForm, days: event.target.valueAsNumber })
+                              }
+                            />
+                          </Field>
+                        )}
+                        {!endsCallUp && moveKind === "until" && (
+                          <Field label="Last day">
+                            <input
+                              type="date"
+                              aria-label="Call-up end date"
+                              min={today ? addDays(today, 1) : undefined}
+                              max={today ? addDays(today, MAX_CALL_UP_DAYS) : undefined}
+                              value={moveForm.date}
+                              onChange={(event) => setMoveForm({ ...moveForm, date: event.target.value })}
+                            />
+                          </Field>
+                        )}
                       </div>
+                      <p className="muted callup-hint">
+                        {endsCallUp
+                          ? "Choosing his original team ends the call-up."
+                          : moveKind === "permanent"
+                            ? "He stays in the chosen squad until you move him again."
+                            : "He keeps his contract and wage and returns automatically; every call-up ends at the end of the season."}
+                      </p>
+                      {moveProblem && (
+                        <p className="callup-problem" role="alert">
+                          {moveProblem}
+                        </p>
+                      )}
                       {data.squadDestinations.some((entry) => entry.reason) && (
                         <ul className="squad-move-notes" aria-label="Unavailable squads">
                           {data.squadDestinations
@@ -535,27 +701,55 @@ export default function PlayerSheet() {
                             ))}
                         </ul>
                       )}
-                      <Button
-                        icon={ArrowLeftRight}
-                        variant="secondary"
-                        disabled={
-                          pending ||
-                          !targetSquad?.eligible ||
-                          targetSquad.current
-                        }
-                        onClick={() => {
-                          if (!targetSquad) return;
-                          setPending(true);
-                          void act({
-                            type: "squad-move",
-                            playerId,
-                            clubId: targetSquad.clubId,
-                            ageGroup: targetSquad.ageGroup,
-                          }).finally(() => setPending(false));
-                        }}
-                      >
-                        Move player
-                      </Button>
+                      <div className="inline-controls">
+                        <Button
+                          icon={ArrowLeftRight}
+                          variant="secondary"
+                          disabled={
+                            pending ||
+                            !targetSquad?.eligible ||
+                            targetSquad.current
+                          }
+                          onClick={movePlayer}
+                        >
+                          Move player
+                        </Button>
+                        {activeCallUp && !endsCallUp && (
+                          <Button
+                            icon={Undo2}
+                            variant="secondary"
+                            disabled={pending}
+                            onClick={() => run({ type: "call-up-end", playerId })}
+                          >
+                            Send back now
+                          </Button>
+                        )}
+                        {!firstTeamRegular && desk && (
+                          <Button
+                            icon={GraduationCap}
+                            variant="secondary"
+                            aria-pressed={!!developmentRequest}
+                            disabled={pending || requestsFull}
+                            title={
+                              requestsFull
+                                ? `The coaches follow at most ${CALL_UP_RULES.development.maxRequests} development requests at once.`
+                                : "Ask the coaches to look for chances with a higher team"
+                            }
+                            onClick={() =>
+                              run({
+                                type: "call-up-development",
+                                playerId,
+                                active: !developmentRequest,
+                              })
+                            }
+                          >
+                            {developmentRequest ? "Withdraw development request" : "Request development"}
+                          </Button>
+                        )}
+                      </div>
+                      {developmentRequest && (
+                        <p className="muted callup-hint">{developmentStatusText(developmentRequest)}</p>
+                      )}
                     </section>
                   )}
                   {!!data.profile.identity.biography?.length && (
@@ -671,18 +865,14 @@ export default function PlayerSheet() {
             {tab === "attributes" && (
               <>
                 <div className="attribute-grid">
-                  {Object.entries(data.profile.attributes).map(
+                  {Object.entries(
+                    currentAttributes(data.profile, data.player.ability),
+                  ).map(
                     ([group, attributes]) => (
                       <section className="profile-section" key={group}>
                         <h3>{label(group)}</h3>
                         {Object.entries(attributes).map(([key, value]) => {
-                          const adjusted = Math.round(
-                            clamp(
-                              value +
-                                data.player.ability -
-                                data.profile.baseAbility,
-                            ),
-                          );
+                          const adjusted = Math.round(value);
                           return (
                             <div className="attribute-row" key={key}>
                               <span className="attribute-label">
@@ -1135,15 +1325,19 @@ export default function PlayerSheet() {
                         {data.registration.status}
                       </Badge>
                       <DetailList
-                        items={[
-                          [
-                            "GBE points",
-                            `${data.registration.points}/${data.registration.threshold}`,
-                          ],
-                          ...Object.entries(data.registration.breakdown).map(
-                            ([key, value]) => [key, value] as [string, number],
-                          ),
-                        ]}
+                        items={
+                          showsGbe(data.registration)
+                            ? [
+                                [
+                                  "GBE points",
+                                  `${data.registration.points}/${data.registration.threshold}`,
+                                ],
+                                ...Object.entries(data.registration.breakdown).map(
+                                  ([key, value]) => [key, value] as [string, number],
+                                ),
+                              ]
+                            : []
+                        }
                       />
                     </section>
                   )}
@@ -1211,7 +1405,9 @@ export default function PlayerSheet() {
               <>
                 <Button
                   icon={own ? ClipboardCheck : ArrowLeftRight}
-                  onClick={() => openOffer(data.player.id)}
+                  onClick={() =>
+                    own ? openContract(data.player.id) : openOffer(data.player.id)
+                  }
                   disabled={pending || !!data.player.parent_club_id}
                 >
                   {own ? "Renew contract" : "Make an offer"}

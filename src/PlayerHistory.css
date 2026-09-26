@@ -1,0 +1,22 @@
+.player-history-table td {
+  vertical-align: top;
+}
+.player-history-number {
+  font-variant-numeric: tabular-nums;
+}
+.player-history-note,
+.player-history-empty {
+  font-size: 0.72rem;
+  line-height: 1.6;
+  margin-top: 12px;
+}
+@media (max-width: 520px) {
+  .data-table.player-history-table {
+    font-size: 0.74rem;
+  }
+  .data-table.player-history-table th,
+  .data-table.player-history-table td {
+    padding-inline: 9px;
+    height: auto;
+  }
+}

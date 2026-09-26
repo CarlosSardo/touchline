@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { useCurrency, useGame, useResource } from "../game-context.tsx";
 import InterestSummary from "../InterestSummary.tsx";
+import RivalPanel from "../RivalPanel.tsx";
 import {
   Badge,
   Button,
@@ -49,6 +50,7 @@ import {
   TRANSFER_STAGES,
   ACTIVE_TRANSFER_STAGES,
 } from "../../shared/rules.ts";
+import { plural } from "../format.ts";
 import type { PlayerDetail, TransferDesk } from "../../shared/api.ts";
 import type {
   BuyBackClause,
@@ -110,6 +112,10 @@ const MARKET_COLUMNS: SortColumn<
   { key: "date", value: (event) => dateValue(event.date), defaultDirection: "desc" },
 ];
 const ID_TIE_BREAKER = [{ value: (row: { id: number }) => row.id }];
+const CLOSED_STAGES = ["Rejected", "Expired", "Withdrawn", "Hijacked"];
+const RIVAL_ACTIVE = ["monitoring", "bid", "fee-agreed"];
+const stageTone = (stage: string, open = "green") =>
+  CLOSED_STAGES.includes(stage) ? "red" : stage === "Completed" ? "green" : open;
 
 export function OfferBuilder() {
   const { offerPlayerId } = useGame();
@@ -126,11 +132,11 @@ function OfferPage() {
     openOffer,
     openContract,
   } = useGame();
-  const { money } = useCurrency();
+  const { money, text } = useCurrency();
   const { data, error } = useResource<PlayerDetail>(
     offerPlayerId ? `players/${offerPlayerId}` : null,
   );
-  const { data: desk } = useResource<TransferDesk>(
+  const { data: desk, error: deskError } = useResource<TransferDesk>(
     offerPlayerId ? "transfers" : null,
   );
   const [category, setCategory] = useState("transfer");
@@ -166,7 +172,9 @@ function OfferPage() {
       </div>
     );
   if (error) return <ErrorState message={error} />;
-  if (!data || !bootstrap) return <Loading />;
+  if (deskError) return <ErrorState message={deskError} />;
+  // Without the desk an open deal would look like a fresh offer and invite duplicate enquiries.
+  if (!data || !bootstrap || !desk) return <Loading />;
   const player = data.player;
   const own = player.club_id === bootstrap.club.id;
   const canLoan = !own && player.club_id !== null && !player.parent_club_id;
@@ -191,6 +199,18 @@ function OfferPage() {
         ACTIVE_TRANSFER_STAGES.includes(entry.stage),
     );
   const contractPage = page === "contract";
+  const closed = !!negotiation && CLOSED_STAGES.includes(negotiation.stage);
+  const previous = negotiation
+    ? undefined
+    : desk?.negotiations.find(
+        (entry) =>
+          entry.player_id === player.id &&
+          entry.buying_club_id === bootstrap.club.id &&
+          CLOSED_STAGES.includes(entry.stage),
+      );
+  const previousResponse = previous
+    ? (JSON.parse(previous.data) as NegotiationData).log.at(-1)
+    : undefined;
   const clubAgreed =
     negotiation &&
     [
@@ -235,10 +255,14 @@ function OfferPage() {
           contractPage
             ? "Player contract"
             : negotiation
-              ? "Club offer"
-              : "Make an offer"
+              ? own
+                ? "Contract talks"
+                : "Club offer"
+              : own
+                ? "Renew contract"
+                : "Make an offer"
         }
-        eyebrow="RECRUITMENT"
+        eyebrow={own ? "CONTRACTS" : "RECRUITMENT"}
       >
         <Button
           variant="secondary"
@@ -254,7 +278,7 @@ function OfferPage() {
             <PlayerLink id={player.id} name={player.name} />
           </h2>
           <p>
-            {player.position} / {player.age} years /{" "}
+            {player.position} / {plural(player.age, "year")} /{" "}
             <ClubLink
               id={player.club_id}
               name={clubLabel(player, data.profile)}
@@ -302,7 +326,28 @@ function OfferPage() {
       ) : (
         data.youthTransfer.minor && <YouthEligibility data={data} />
       )}
+      {previous && (
+        <div className="information-note section-space" role="status">
+          <MessageSquare size={16} />
+          <span>
+            Previous talks ({previous.type}) ended: {previous.stage}
+            {previousResponse
+              ? ` on ${dateLabel(previousResponse.date)}. ${text(previousResponse.message)}`
+              : "."}
+          </span>
+        </div>
+      )}
       {!negotiation && <InterestSummary assessment={data.interest} />}
+      {!negotiation &&
+        (previous?.stage === "Hijacked" ? (
+          <RivalPanel
+            rivals={previous.rivals}
+            battle={previous.battle}
+            stage="Hijacked"
+          />
+        ) : (
+          !own && <RivalPanel rivals={data.interest.rivals} />
+        ))}
       {!negotiation && (
         <section className="offer-choices">
           <SectionHeading title="1. Offer category" />
@@ -411,6 +456,7 @@ function OfferPage() {
           key={`${negotiation.id}:${page}`}
           negotiation={negotiation}
           fullPage
+          onAction={() => setSelected(negotiation.id)}
           initialTransferTerms={
             transferType === "instalments"
               ? {
@@ -422,6 +468,13 @@ function OfferPage() {
           }
           close={() => navigate("transfers")}
         />
+      )}
+      {closed && (
+        <div className="offer-page-actions">
+          <Button icon={ArrowUpRight} onClick={() => setSelected(null)}>
+            Start new talks
+          </Button>
+        </div>
       )}
     </div>
   );
@@ -745,6 +798,26 @@ export function TransferPaymentTable({
   );
 }
 
+// Mirrors MIN_LOAN_SALARY_SPLIT / MAX_LOAN_SELL_ON in server/systems.ts.
+const MIN_LOAN_SALARY_SPLIT = 25;
+const MAX_LOAN_SELL_ON = 50;
+const DEFAULT_LOAN_SALARY_SPLIT = 70;
+
+function withLoanLimits(terms: LoanTerms): LoanTerms {
+  const split = Number(terms.salarySplit);
+  const sellOn = Number(terms.sellOn);
+  return {
+    ...terms,
+    salarySplit:
+      Number.isFinite(split) && split >= MIN_LOAN_SALARY_SPLIT
+        ? Math.min(100, split)
+        : DEFAULT_LOAN_SALARY_SPLIT,
+    sellOn: Number.isFinite(sellOn)
+      ? Math.min(MAX_LOAN_SELL_ON, Math.max(0, sellOn))
+      : 0,
+  };
+}
+
 export function LoanTermsForm({
   terms,
   setTerms,
@@ -773,14 +846,22 @@ export function LoanTermsForm({
             }
           />
         </Field>
-        <Field label={`Borrowing club salary share / ${terms.salarySplit}%`}>
+        <Field
+          label={`Borrowing club salary share (${MIN_LOAN_SALARY_SPLIT}-100%) / ${terms.salarySplit}%`}
+        >
           <input
             type="range"
-            min="0"
+            min={MIN_LOAN_SALARY_SPLIT}
             max="100"
             value={terms.salarySplit}
             onChange={(event) =>
-              update("salarySplit", Number(event.target.value))
+              update(
+                "salarySplit",
+                Math.min(
+                  100,
+                  Math.max(MIN_LOAN_SALARY_SPLIT, Number(event.target.value)),
+                ),
+              )
             }
           />
         </Field>
@@ -924,13 +1005,23 @@ export function LoanTermsForm({
           </Field>
         )}
         {type === "Loan with sell-on" && (
-          <Field label={`Sell-on clause / ${terms.sellOn}%`}>
+          <Field
+            label={`Sell-on clause (0-${MAX_LOAN_SELL_ON}%) / ${terms.sellOn}%`}
+          >
             <input
               type="range"
               min="0"
-              max="50"
+              max={MAX_LOAN_SELL_ON}
               value={terms.sellOn}
-              onChange={(event) => update("sellOn", Number(event.target.value))}
+              onChange={(event) =>
+                update(
+                  "sellOn",
+                  Math.min(
+                    MAX_LOAN_SELL_ON,
+                    Math.max(0, Number(event.target.value)),
+                  ),
+                )
+              }
             />
           </Field>
         )}
@@ -982,14 +1073,17 @@ function NegotiationSheet({
   close,
   fullPage = false,
   initialTransferTerms,
+  onAction,
 }: {
   negotiation: Negotiation;
   close: () => void;
   fullPage?: boolean;
   initialTransferTerms?: TransferTerms;
+  /** Runs before a response is requested, so the page keeps showing this deal if it closes. */
+  onAction?: () => void;
 }) {
   const { act, bootstrap, confirm, page, openContract, openOffer } = useGame();
-  const { money } = useCurrency();
+  const { money, text } = useCurrency();
   const details = JSON.parse(negotiation.data) as NegotiationData;
   const [fee, setFee] = useState(
     Math.round(negotiation.offer || negotiation.asking_price),
@@ -1003,7 +1097,9 @@ function NegotiationSheet({
   const [years, setYears] = useState(details.years || 4);
   const [role, setRole] = useState(details.role || "Regular starter");
   const [promises, setPromises] = useState(details.promises);
-  const [terms, setTerms] = useState<LoanTerms>(details.terms);
+  const [terms, setTerms] = useState<LoanTerms>(() =>
+    withLoanLimits(details.terms),
+  );
   const [transferTerms, setTransferTerms] = useState<TransferTerms>({
     ...DEFAULT_TRANSFER_TERMS,
     ...initialTransferTerms,
@@ -1065,6 +1161,7 @@ function NegotiationSheet({
       ? Math.round(previewFee * shownTerms.upfrontPercent) / 100
       : previewFee;
   async function step(action: "formalize" | "sign" | "revise") {
+    onAction?.();
     setPending(true);
     const result = await act({
       type: "negotiation",
@@ -1077,6 +1174,7 @@ function NegotiationSheet({
     if (result?.stage === "Medical" && !fullPage) close();
   }
   async function submit() {
+    onAction?.();
     setPending(true);
     const result = await act({
       type: "offer",
@@ -1097,13 +1195,11 @@ function NegotiationSheet({
       result?.stage === "Agent talks"
     )
       openContract(negotiation.player_id);
-    if (
-      !fullPage &&
-      (result?.stage === "Medical" || result?.stage === "Rejected")
-    )
-      close();
+    // A rejection stays open so its reason remains readable after the toast.
+    if (!fullPage && result?.stage === "Medical") close();
   }
   async function counterOffer() {
+    onAction?.();
     setPending(true);
     const result = await act({
       type: "counter-transfer",
@@ -1119,7 +1215,7 @@ function NegotiationSheet({
       <div className="sheet-body">
         <div className="negotiation-sheet-top">
           <div>
-            <Badge tone={negotiation.stage === "Rejected" ? "red" : "green"}>
+            <Badge tone={stageTone(negotiation.stage)}>
               {negotiation.stage}
             </Badge>
             <h3>
@@ -1147,6 +1243,11 @@ function NegotiationSheet({
           stage={negotiation.stage}
           future={!!details.futureArrivalDate}
         />
+        <RivalPanel
+          rivals={negotiation.rivals}
+          battle={negotiation.battle}
+          stage={negotiation.stage}
+        />
         {details.futureArrivalDate && (
           <div className="future-transfer-details">
             <DetailList
@@ -1167,8 +1268,11 @@ function NegotiationSheet({
           />
         )}
         {details.log.length > 0 && (
-          <p className="negotiation-latest" role="status">
-            {details.log.at(-1)!.message}
+          <p
+            className={`negotiation-latest${CLOSED_STAGES.includes(negotiation.stage) ? " is-rejected" : ""}`}
+            role="status"
+          >
+            {text(details.log.at(-1)!.message)}
           </p>
         )}
         {details.preparedBy && (
@@ -1185,7 +1289,7 @@ function NegotiationSheet({
           <div className="information-note section-space">
             <FileSignature size={16} />
             <span>
-              No club transfer fee. Modeled training compensation:{" "}
+              No club transfer fee. Modelled training compensation:{" "}
               {money(details.trainingCompensation ?? 0)}. Youth clearance and
               contract approval are separate requirements.
             </span>
@@ -1209,7 +1313,7 @@ function NegotiationSheet({
                 <small>
                   {dateLabel(entry.date)} / {entry.type}
                 </small>
-                <p>{entry.message}</p>
+                <p>{text(entry.message)}</p>
               </div>
             ))}
           </div>
@@ -1244,13 +1348,13 @@ function NegotiationSheet({
                 [
                   "Payment schedule",
                   shownTerms.installments
-                    ? `${shownTerms.installments} instalments / every ${shownTerms.intervalMonths} months`
+                    ? `${plural(shownTerms.installments, "instalment")} / every ${plural(shownTerms.intervalMonths, "month")}`
                     : "Paid at registration",
                 ],
                 [
                   "Selling club buy-back",
                   shownTerms.buyBackFee
-                    ? `${money(shownTerms.buyBackFee)} / ${shownTerms.buyBackYears} years`
+                    ? `${money(shownTerms.buyBackFee)} / ${plural(shownTerms.buyBackYears, "year")}`
                     : "None",
                 ],
                 ["Next-sale percentage", `${shownTerms.sellOnPercent}%`],
@@ -1297,7 +1401,7 @@ function NegotiationSheet({
                         )
                         .map((year) => (
                           <option key={year} value={year}>
-                            {year} years
+                            {plural(year, "year")}
                           </option>
                         ))}
                     </select>
@@ -1371,9 +1475,33 @@ function NegotiationSheet({
               </>
             )}
             <div className="negotiation-budget">
-              <span>
-                Asking price <strong>{money(negotiation.asking_price)}</strong>
-              </span>
+              {contractPage ? (
+                <>
+                  {details.requiredWage !== undefined && (
+                    <span>
+                      Agent wage request{" "}
+                      <strong>{money(details.requiredWage)} / week</strong>
+                    </span>
+                  )}
+                  <span>
+                    Agreed fee <strong>{money(negotiation.offer)}</strong>
+                  </span>
+                </>
+              ) : (
+                <>
+                  <span>
+                    Asking price{" "}
+                    <strong>{money(negotiation.asking_price)}</strong>
+                  </span>
+                  {negotiation.stage === "Club talks" &&
+                    details.counter !== undefined && (
+                      <span>
+                        Club counter-offer{" "}
+                        <strong>{money(details.counter)}</strong>
+                      </span>
+                    )}
+                </>
+              )}
               <span>
                 Your available budget{" "}
                 <strong>{money(bootstrap?.club.transfer_budget ?? 0)}</strong>
@@ -1385,6 +1513,14 @@ function NegotiationSheet({
           <DetailList
             items={[
               ["Fee", money(negotiation.offer)],
+              ...(incoming && details.counter !== undefined
+                ? [
+                    ["Buyer's maximum fee", money(details.counter)] as [
+                      string,
+                      string,
+                    ],
+                  ]
+                : []),
               ["Wage", `${money(negotiation.wage)} / week`],
               ["Status", negotiation.stage],
               ...(review ||
@@ -1392,7 +1528,7 @@ function NegotiationSheet({
                 negotiation.stage,
               )
                 ? [
-                    ["Contract length", `${details.years} years`] as [
+                    ["Contract length", plural(details.years, "year")] as [
                       string,
                       string,
                     ],
@@ -1568,7 +1704,9 @@ function NegotiationSheet({
                         type: "negotiation",
                         id: negotiation.id,
                         action: "withdraw",
-                      }).then(close);
+                      }).then((result) => {
+                        if (result) close();
+                      });
                     },
                   )
                 }
@@ -1627,7 +1765,9 @@ function NegotiationSheet({
                   type: "negotiation",
                   id: negotiation.id,
                   action: "reject",
-                }).then(close)
+                }).then((result) => {
+                  if (result) close();
+                })
               }
             >
               Reject
@@ -1637,7 +1777,7 @@ function NegotiationSheet({
               disabled={
                 pending ||
                 (permanent &&
-                  (fee !== negotiation.offer ||
+                  (Math.round(fee) !== Math.round(negotiation.offer) ||
                     JSON.stringify(transferTerms) !==
                       JSON.stringify({
                         ...DEFAULT_TRANSFER_TERMS,
@@ -1649,7 +1789,9 @@ function NegotiationSheet({
                   type: "negotiation",
                   id: negotiation.id,
                   action: "accept",
-                }).then(close)
+                }).then((result) => {
+                  if (result) close();
+                })
               }
             >
               Accept offer
@@ -1816,19 +1958,13 @@ export default function Transfers() {
                       ]
                     : TRANSFER_STAGES;
                   const stageIndex = stages.indexOf(negotiation.stage);
+                  const rivalCount = (negotiation.rivals ?? []).filter(
+                    (rival) => RIVAL_ACTIVE.includes(rival.status),
+                  ).length;
                   return (
                     <article className="entity-card" key={negotiation.id}>
                       <div className="entity-card-top">
-                        <Badge
-                          tone={
-                            negotiation.stage === "Completed"
-                              ? "green"
-                              : negotiation.stage === "Rejected" ||
-                                  negotiation.stage === "Hijacked"
-                                ? "red"
-                                : "blue"
-                          }
-                        >
+                        <Badge tone={stageTone(negotiation.stage, "blue")}>
                           {negotiation.stage}
                         </Badge>
                         <Rating value={negotiation.ability ?? 0} />
@@ -1873,6 +2009,20 @@ export default function Transfers() {
                           ["Asking price", money(negotiation.asking_price)],
                           ["Your offer", money(negotiation.offer)],
                           ["Interest", `${Math.round(negotiation.interest)}%`],
+                          ...(rivalCount ||
+                          negotiation.battle?.status === "final-offers" ||
+                          negotiation.battle?.status === "decision"
+                            ? ([
+                                [
+                                  "Rival interest",
+                                  negotiation.battle?.status === "final-offers"
+                                    ? "Best and final offers"
+                                    : negotiation.battle?.status === "decision"
+                                      ? "Player deciding"
+                                      : `${rivalCount} rival club${rivalCount === 1 ? "" : "s"}`,
+                                ],
+                              ] as [string, string][])
+                            : []),
                           ...(details.futureArrivalDate
                             ? ([
                                 [

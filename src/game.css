@@ -1076,6 +1076,12 @@ table {
 .table-position.zone-bottom:before {
   background: var(--red);
 }
+.table-position.zone-playoff:before {
+  background: var(--blue);
+}
+.table-position.zone-playoff-down:before {
+  background: var(--amber);
+}
 .form-dots {
   display: flex;
   align-items: center;
@@ -2306,6 +2312,19 @@ table {
 }
 .zone-line.bottom {
   background: var(--red);
+}
+.zone-line.playoff {
+  background: var(--blue);
+}
+.zone-line.playoff-down {
+  background: var(--amber);
+}
+.sheet-back {
+  padding: 4px 21px 0;
+}
+.career-coverage-note {
+  margin: 4px 0 10px;
+  font-size: 0.72rem;
 }
 .competition-browser {
   display: grid;
