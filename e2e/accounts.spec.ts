@@ -175,6 +175,9 @@ const test = base.extend<{ accountApi: AccountApi }>({
         }
         case "GET /api/saves":
           return route.fulfill({ json: accountApi.saves });
+        case "GET /api/news":
+          // The shell's unread badge; account fixtures have no news.
+          return route.fulfill({ json: [] });
         case "GET /api/leagues":
           return route.fulfill({ json: [] });
         case "GET /api/world/clubs": {
@@ -703,7 +706,7 @@ for (const width of [1440, 390, 320]) {
       await expect(page.getByRole("heading", { name: "No career started", exact: true })).toBeVisible();
       await expect(page.getByRole("status").filter({ hasText: "Career deleted." })).toBeVisible();
       await expect(page.getByRole("button", { name: "Continue career", exact: true })).toHaveCount(0);
-      await expect(page.getByRole("button", { name: /^Load career/ })).toContainText("1 saved careers");
+      await expect(page.getByRole("button", { name: /^Load career/ })).toContainText(/1 saved career$/);
       await expectNoFatalScreen(page);
       await noOverflow(page);
       expect(mutations(accountApi)).toEqual(["DELETE /api/careers/active", "DELETE /api/careers/active"]);

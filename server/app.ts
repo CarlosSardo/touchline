@@ -20,8 +20,11 @@ import {
 } from "./club-support.ts";
 import { Saves } from "./saves.ts";
 import * as query from "./queries.ts";
+import { playerHistory } from "./player-history.ts";
+import { clubTransfers, clubTransfersChanged } from "./club-transfers.ts";
 import { advance } from "./simulation.ts";
 import { assessPlayerInterest, submitMinorApplication } from "./recruitment.ts";
+import { withRivals } from "./transfer-battles.ts";
 import { mediaFeed } from "./media.ts";
 import {
   competitionFavorites,
@@ -29,6 +32,9 @@ import {
   notificationFeed,
 } from "./notifications.ts";
 import { resolveUnexpectedEvent, unexpectedEvents } from "./events.ts";
+import { answerCallUpProposal, callUpDesk, callUpPlayer, endCallUp, setDevelopmentRequest } from "./callups.ts";
+import { internationalsDesk, nationalTeamView, playerCaps } from "./internationals.ts";
+import { CALL_UP_RULES } from "../shared/features/callups.ts";
 import {
   assignScout,
   clubOf,
@@ -58,6 +64,9 @@ import {
   stateOf,
   transferTermsSchema,
   weeklyWages,
+  MAX_INTERNATIONAL_LOAN_DAYS,
+  MAX_LOAN_SELL_ON,
+  MIN_LOAN_SALARY_SPLIT,
 } from "./systems.ts";
 import {
   addDays,
@@ -190,7 +199,7 @@ const loanTerms = z.object({
   developmentPlan: z.enum(TRAINING_TYPES),
   recall: z.boolean(),
   injuryRecall: z.boolean(),
-  salarySplit: z.number().min(0).max(100),
+  salarySplit: z.number().min(MIN_LOAN_SALARY_SPLIT).max(100),
   fee: positive,
   bonus: positive.max(100_000_000),
   mandatoryMinutes: z.number().int().min(0).max(6000),
@@ -198,7 +207,7 @@ const loanTerms = z.object({
   managerTrust: z.number().min(0).max(100),
   relationship: z.number().min(0).max(100),
   optionFee: positive.max(1_000_000_000),
-  sellOn: z.number().min(0).max(100),
+  sellOn: z.number().min(0).max(MAX_LOAN_SELL_ON),
   duration: z.number().int().min(30).max(730),
   obligationCondition: z.enum([
     "Unconditional",
@@ -206,6 +215,33 @@ const loanTerms = z.object({
     "Avoid relegation",
   ]),
 });
+
+/** A real calendar date as YYYY-MM-DD (2026-13-45 or 2027-02-29 are refused). */
+export const isCalendarDate = (value: string) => {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const date = new Date(`${value}T00:00:00Z`);
+  return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
+};
+const calendarDate = z.string().refine(isCalendarDate, "Choose a valid date.");
+
+/** FIFA RSTP Art. 10: a loan between clubs of different associations lasts at most one season (systems.ts rule). */
+export const MAX_LOAN_DAYS = { domestic: 730, international: MAX_INTERNATIONAL_LOAN_DAYS } as const;
+export function loanDurationError(input: { type: string; duration?: number; crossBorder: boolean }) {
+  if (!input.crossBorder) return null;
+  if (input.type === "Two-year loan" || (input.duration ?? 0) > MAX_LOAN_DAYS.international)
+    return `A loan between clubs in different countries lasts at most one season (${MAX_LOAN_DAYS.international} days). Choose a shorter loan.`;
+  return null;
+}
+/** true when the two clubs belong to different countries (football associations). */
+async function loanCrossesBorder(store: Store, buyingClubId: number, sellingClubId: number | null) {
+  if (sellingClubId === null) return false;
+  const row = await store.get<{ crosses: number }>(
+    "SELECT CASE WHEN buyer.country_id <> seller.country_id THEN 1 ELSE 0 END AS crosses FROM clubs AS buyer JOIN clubs AS seller ON seller.id = ? WHERE buyer.id = ?",
+    sellingClubId,
+    buyingClubId,
+  );
+  return !!row?.crosses;
+}
 
 export async function updateSettings(store: Store, input: unknown) {
   const values = z
@@ -400,6 +436,14 @@ export async function dispatchAction(
           guardianConsent: z.boolean().default(false),
         })
         .parse(body);
+      if (LOAN_TYPES.includes(data.dealType)) {
+        const player = await store.get<{ club_id: number | null }>("SELECT club_id FROM players WHERE id = ?", data.playerId);
+        const error = loanDurationError({
+          type: data.dealType,
+          crossBorder: !!player && (await loanCrossesBorder(store, data.destinationId ?? state.clubId, player.club_id)),
+        });
+        if (error) throw new GameError(error);
+      }
       return enquire(
         store,
         data.playerId,
@@ -432,6 +476,21 @@ export async function dispatchAction(
           transferTerms: transferTermsSchema.optional(),
         })
         .parse(body);
+      if (data.terms) {
+        const negotiation = await store.get<Pick<Negotiation, "type" | "buying_club_id" | "selling_club_id">>(
+          "SELECT type,buying_club_id,selling_club_id FROM negotiations WHERE id = ?",
+          data.id,
+        );
+        const error =
+          negotiation &&
+          LOAN_TYPES.includes(negotiation.type) &&
+          loanDurationError({
+            type: negotiation.type,
+            duration: data.terms.duration,
+            crossBorder: await loanCrossesBorder(store, negotiation.buying_club_id, negotiation.selling_club_id),
+          });
+        if (error) throw new GameError(error);
+      }
       return negotiate(store, data.id, data);
     }
     case "buy-back": {
@@ -625,6 +684,38 @@ export async function dispatchAction(
         input.ageGroup,
       );
     }
+    case "call-up": {
+      const input = z
+        .object({
+          playerId: idSchema,
+          clubId: idSchema,
+          ageGroup: z.enum(["Senior", "U19", "U17"]),
+          duration: z.discriminatedUnion("kind", [
+            z.object({ kind: z.literal("match") }),
+            z.object({ kind: z.literal("days"), days: z.number().int().min(1).max(CALL_UP_RULES.maxDays) }),
+            z.object({ kind: z.literal("until"), date: calendarDate }),
+            z.object({ kind: z.literal("permanent") }),
+          ]),
+        })
+        .parse(body);
+      if (input.duration.kind === "until" && daysBetween(state.date, input.duration.date) > CALL_UP_RULES.maxDays)
+        throw new GameError(
+          `A temporary call-up lasts at most ${CALL_UP_RULES.maxDays} days; use a permanent move instead.`,
+        );
+      return callUpPlayer(store, input);
+    }
+    case "call-up-end":
+      return endCallUp(store, idSchema.parse(body.playerId));
+    case "call-up-development": {
+      const input = z.object({ playerId: idSchema, active: z.boolean() }).parse(body);
+      return setDevelopmentRequest(store, input.playerId, input.active);
+    }
+    case "call-up-proposal": {
+      const input = z
+        .object({ id: z.string().min(1).max(80), accept: z.boolean() })
+        .parse(body);
+      return answerCallUpProposal(store, input.id, input.accept);
+    }
     case "promote":
       await promoteYouth(store, idSchema.parse(body.playerId));
       return { message: "Player promoted to the senior squad." };
@@ -799,8 +890,9 @@ export async function dispatchAction(
         throw new GameError(
           "The revised budgets must cover current wages and keep the transfer allocation non-negative.",
         );
+      // Pin the operating reference first, so a slider move never lowers running costs or survives the rollover.
       await store.run(
-        "UPDATE clubs SET transfer_budget = transfer_budget - ?, wage_budget = wage_budget + ? WHERE id = ?",
+        "UPDATE clubs SET transfer_budget = transfer_budget - ?, wage_budget = wage_budget + ?, data = JSON_MODIFY(coalesce(data,'{}'),'$.operatingWageBudget',coalesce(TRY_CONVERT(float,JSON_VALUE(coalesce(data,'{}'),'$.operatingWageBudget')),wage_budget)) WHERE id = ?",
         amount,
         amount / 52,
         club.id,
@@ -1084,6 +1176,15 @@ export function createApp(
   return app;
 }
 
+const WORLD_REPLACING = new Set<WorldOperation>([
+  "prepare_world",
+  "start_career",
+  "load_career",
+  "delete_career",
+  "restore_save",
+  "import_save",
+]);
+
 function createWorldRouter(
   store: Store,
   configuration: ReturnType<typeof readApiConfiguration>,
@@ -1101,13 +1202,14 @@ function createWorldRouter(
       operation: current.operation,
       startedAt: current.startedAt,
     } satisfies WorldBusyResponse);
-  const read =
+  const reader =
+    (transact: (callback: () => Promise<unknown>) => Promise<unknown>) =>
     (handler: (request: Request, response: Response) => unknown | Promise<unknown>) =>
     async (request: Request, response: Response, next: NextFunction) => {
       if (activity) return conflict(response, activity);
       readers++;
       try {
-        const result = await store.transaction(async () => handler(request, response));
+        const result = await transact(async () => handler(request, response));
         response.json(result);
       } catch (error) {
         next(error);
@@ -1119,6 +1221,8 @@ function createWorldRouter(
         }
       }
     };
+  // Read handlers must be write-free: they share the world lock, so they run side by side (writes throw).
+  const read = reader((callback) => store.readTransaction(callback));
   const mutation =
     (
       operation: WorldOperation,
@@ -1140,6 +1244,9 @@ function createWorldRouter(
       } catch (error) {
         next(error);
       } finally {
+        // Before readers are let back in: cached player-search matches may no longer hold.
+        query.playerSearchChanged(store, WORLD_REPLACING.has(operation));
+        if (WORLD_REPLACING.has(operation)) clubTransfersChanged(store);
         activity = null;
       }
     };
@@ -1241,19 +1348,23 @@ function createWorldRouter(
           .max(5)
           .parse(decoded);
       }
-      return assessPlayerInterest(
+      return withRivals(
         store,
-        player,
-        await clubOf(store, negotiation?.buying_club_id),
-        {
-          loan,
-          role: loan ? data?.terms.role : input.role,
-          wage: input.wage,
-          years: input.years,
-          promises,
-          playingTime: loan ? data?.terms.playingTime : undefined,
-          tension: negotiation?.tension,
-        },
+        player.id,
+        await assessPlayerInterest(
+          store,
+          player,
+          await clubOf(store, negotiation?.buying_club_id),
+          {
+            loan,
+            role: loan ? data?.terms.role : input.role,
+            wage: input.wage,
+            years: input.years,
+            promises,
+            playingTime: loan ? data?.terms.playingTime : undefined,
+            tension: negotiation?.tension,
+          },
+        ),
       );
     }),
   );
@@ -1268,8 +1379,28 @@ function createWorldRouter(
     ),
   );
   app.get(
+    "/api/players/:id/history",
+    read((request) => playerHistory(store, idSchema.parse(request.params.id))),
+  );
+  app.get(
     "/api/squad",
     read((request) => query.squad(store, request.query)),
+  );
+  app.get(
+    "/api/call-ups",
+    read(() => callUpDesk(store)),
+  );
+  app.get(
+    "/api/internationals",
+    read(() => internationalsDesk(store)),
+  );
+  app.get(
+    "/api/internationals/teams/:id",
+    read((request) => nationalTeamView(store, idSchema.parse(request.params.id))),
+  );
+  app.get(
+    "/api/players/:id/caps",
+    read((request) => playerCaps(store, idSchema.parse(request.params.id))),
   );
   app.get(
     "/api/scouting",
@@ -1380,6 +1511,10 @@ function createWorldRouter(
     read((request) =>
       query.clubDetail(store, idSchema.parse(request.params.id)),
     ),
+  );
+  app.get(
+    "/api/clubs/:id/transfers",
+    read((request) => clubTransfers(store, idSchema.parse(request.params.id), request.query)),
   );
   app.get(
     "/api/leagues",
@@ -1576,19 +1711,8 @@ function createWorldRouter(
     "/api/careers/load",
     mutation("load_career", async (request, response) => {
       const { file } = z.object({ file: saveFileSchema }).parse(request.body);
-      const archived = await store.transaction(async () => {
-        if (!(await saves.list()).some((slot) => slot.file === file))
-          throw Object.assign(new GameError("Save slot not found."), { status: 404 });
-        const state = await saves.currentState();
-        const snapshot = state && state.started !== false ? await saves.create(
-          `${state.careerName ?? state.director.name} before load`,
-          false,
-          file,
-        ) : undefined;
-        await saves.restore(file);
-        return snapshot;
-      });
-      response.json({ message: "Career loaded.", archived: archived?.file ?? null });
+      const { archived } = await saves.loadCareer(file);
+      response.json({ message: "Career loaded.", archived });
     }),
   );
   app.post(

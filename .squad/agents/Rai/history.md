@@ -21,3 +21,4 @@ Rai reviews Touchline for high-signal privacy, security, bias, and harmful-conte
 ### 2026-09-24T09:22:15+0200 — PR #6 RAI review
 
 - Green verdict for the VS Code test-discovery change: no safety, credential, privacy, or responsible-AI findings. The `vitest.explorer` and `ms-playwright.playwright` extension identifiers were confirmed as established.
+📌 Team update (2026-09-26T23:30:00+02:00): Scribe replaced the owner email, subscription and tenant/object IDs with placeholders in .squad (decisions, archive, memory, histories, logs); rai/audit-trail.md held no raw values — decided by Scribe per Rai's advisory

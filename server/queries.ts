@@ -50,6 +50,7 @@ import type {
   League,
   Loan,
   MatchSnapshot,
+  Negotiation,
   Player,
   PlayerProfile,
   ScoutReport,
@@ -71,6 +72,7 @@ import { describeIdentity, peopleContext } from "./people.ts";
 import { marketValueFactor } from "../shared/world-catalog/market.ts";
 import { associationNotes, reservePolicy } from "../shared/world-rules.ts";
 import { notificationFeed, notificationVisibility } from "./notifications.ts";
+import { withBattleViews } from "./transfer-battles.ts";
 
 const playerSelect = `SELECT players.*, clubs.name AS club_name, clubs.color AS club_color, countries.name AS country_name, countries.code AS country_code FROM players LEFT JOIN clubs ON clubs.id = players.club_id JOIN countries ON countries.id = players.country_id`;
 const fixtureSelect = `SELECT fixtures.*, home.name AS home_name, away.name AS away_name, home.color AS home_color, away.color AS away_color, leagues.name AS competition_name, coalesce(leagues.age_group,'Senior') AS age_group FROM fixtures JOIN clubs AS home ON home.id = fixtures.home_id JOIN clubs AS away ON away.id = fixtures.away_id LEFT JOIN leagues ON leagues.id = fixtures.league_id`;
@@ -86,6 +88,7 @@ async function transferPayments(store: Store, clubId: number) {
     clubId,
   );
 }
+const worldTotals = new WeakMap<Store, { key: string; totals: WorldTotals }>();
 const withoutProfile = (player: Player): Player => ({
   ...player,
   nationalities: (
@@ -200,9 +203,11 @@ export async function clubDetail(
         ? 19
         : club.age_group === "U20"
           ? 20
-          : 100;
+          : club.age_group === "U21"
+            ? 23
+            : 100;
   const roster = await store.all<Player>(
-    `${playerSelect} WHERE ${club.type === "national" ? "players.country_id" : "coalesce(players.squad_club_id,players.club_id)"} = ? AND players.role != 'Retired' ${club.type === "national" ? "AND players.age < ?" : ""} ORDER BY players.ability DESC,players.id ${club.type === "national" ? "OFFSET 0 ROWS FETCH NEXT 30 ROWS ONLY" : ""}`,
+    `${playerSelect} WHERE ${club.type === "national" ? "players.country_id" : "players.playing_club_id"} = ? AND players.role != 'Retired' ${club.type === "national" ? "AND players.age < ?" : ""} ORDER BY players.ability DESC,players.id ${club.type === "national" ? "OFFSET 0 ROWS FETCH NEXT 30 ROWS ONLY" : ""}`,
     club.type === "national" ? club.country_id : id,
     ...(club.type === "national" ? [age] : []),
   );
@@ -271,11 +276,25 @@ export async function bootstrap(store: Store): Promise<Bootstrap> {
     "SELECT clubs.*, countries.name AS country_name, countries.code AS country_code, leagues.name AS league_name FROM clubs JOIN countries ON countries.id = clubs.country_id LEFT JOIN leagues ON leagues.id = clubs.league_id WHERE clubs.id = ?",
     state.clubId,
   ))!;
-  const world = (await store.get<WorldTotals>(
-    `SELECT (SELECT count(*) FROM countries) AS countries, (SELECT count(*) FROM leagues WHERE kind = 'league') AS leagues, (SELECT count(*) FROM clubs WHERE type != 'national') AS clubs, (SELECT count(*) FROM players) AS players, (SELECT count(*) FROM players WHERE age_group = 'Senior') AS seniors, (SELECT count(*) FROM players WHERE age_group != 'Senior') AS youth, (SELECT count(*) FROM staff) AS staff`,
+  // Counting a full world reads every player row; the totals only change when the world does (new date or new ids).
+  const identity = (await store.get<{ players: number | null; staff: number | null }>(
+    "SELECT (SELECT max(id) FROM players) AS players, (SELECT max(id) FROM staff) AS staff",
   ))!;
-  world.version =
-    (await store.meta<{ version?: number }>("world")).version ?? 1;
+  const key = JSON.stringify([state.careerId, state.seed, state.date, identity.players, identity.staff]);
+  let cached = worldTotals.get(store);
+  if (cached?.key !== key) {
+    cached = {
+      key,
+      totals: (await store.get<WorldTotals>(
+        `SELECT (SELECT count(*) FROM countries) AS countries, (SELECT count(*) FROM leagues WHERE kind = 'league') AS leagues, (SELECT count(*) FROM clubs WHERE type != 'national') AS clubs, people.players, people.seniors, people.youth, (SELECT count(*) FROM staff) AS staff FROM (SELECT count(*) AS players, coalesce(sum(CASE WHEN age_group = 'Senior' THEN 1 ELSE 0 END),0) AS seniors, coalesce(sum(CASE WHEN age_group != 'Senior' THEN 1 ELSE 0 END),0) AS youth FROM players) AS people`,
+      ))!,
+    };
+    worldTotals.set(store, cached);
+  }
+  const world = {
+    ...cached.totals,
+    version: (await store.meta<{ version?: number }>("world")).version ?? 1,
+  };
   return {
     state,
     club,
@@ -375,7 +394,7 @@ export const playerFilter = z.object({
   valueMin: z.coerce.number().min(0).default(0),
   valueMax: z.coerce.number().min(0).default(1_000_000_000),
   wageMax: z.coerce.number().min(0).default(1_000_000_000),
-  ageGroup: z.enum(["Senior", "U19", "U17", "U20"]).optional(),
+  ageGroup: z.enum(["Senior", "U19", "U17", "U20", "U21"]).optional(),
   contractStatus: z.enum(["professional", "amateur"]).optional(),
   foot: z.enum(["Right", "Left", "Both"]).optional(),
   lifestyle: z.string().max(40).optional(),
@@ -423,41 +442,364 @@ export const playerFilter = z.object({
   pageSize: z.coerce.number().int().min(10).max(100).default(30),
 });
 
+type PlayerFilter = z.infer<typeof playerFilter>;
+/** Player searches count at most this many matches; larger results report `totalCapped`. */
+export const PLAYER_SEARCH_CAP = 10_000;
+/** The zod default of valueMax/wageMax, i.e. "no limit". */
+const NO_MONEY_LIMIT = 1_000_000_000;
 const sortName = "COLLATE Latin1_General_100_CI_AI";
+
+// Each alias is a self-join on players.id that SQL Server can read from one nonclustered index:
+// players = player_filter, squad = player_market_squad, named = player_name, nation = player_nationality.
+const SEARCH_ALIASES = ["players", "squad", "named", "nation"] as const;
+type SearchAlias = (typeof SEARCH_ALIASES)[number];
+const INDEXED_COLUMNS: Record<string, SearchAlias> = {
+  position: "players",
+  age: "players",
+  ability: "players",
+  potential: "players",
+  value: "players",
+  role: "squad",
+  wage: "squad",
+  club_id: "squad",
+  age_group: "squad",
+  name: "named",
+  country_id: "nation",
+};
+type SearchColumn = (name: string) => string;
+type SearchClause = (column: SearchColumn) => string;
+type SearchOrder = (column: SearchColumn) => { order: string; joins: string[] };
+
+export interface PlayerSearch {
+  /** Id column of the base alias. */
+  id: string;
+  /** FROM clause with the index self-joins. */
+  from: string;
+  /** Extra joins only ORDER BY needs. */
+  joins: string;
+  where: string;
+  order: string;
+  params: (string | number)[];
+  /** Every column comes from a nonclustered index, so the wide clustered rows (profile JSON) are never scanned. */
+  indexOnly: boolean;
+  /** Anything beyond "not retired". */
+  filtered: boolean;
+}
+
+function compileSearch(
+  clauses: SearchClause[],
+  params: (string | number)[],
+  orderOf: SearchOrder,
+  single = false,
+): PlayerSearch {
+  const used = new Set<string>();
+  const probe: SearchColumn = (name) => {
+    used.add(name);
+    return name;
+  };
+  for (const clause of clauses) clause(probe);
+  orderOf(probe);
+  const indexOnly = [...used].every(
+    (name) => name === "id" || Object.hasOwn(INDEXED_COLUMNS, name),
+  );
+  const aliases =
+    indexOnly && !single
+      ? SEARCH_ALIASES.filter((alias) =>
+          [...used].some((name) => INDEXED_COLUMNS[name] === alias),
+        )
+      : [];
+  const base: SearchAlias = aliases[0] ?? "players";
+  const column: SearchColumn = (name) =>
+    `${aliases.length && name !== "id" ? INDEXED_COLUMNS[name] : base}.${name}`;
+  const ordered = orderOf(column);
+  return {
+    id: `${base}.id`,
+    from: `FROM players AS ${base}${aliases
+      .slice(1)
+      .map((alias) => ` JOIN players AS ${alias} ON ${alias}.id = ${base}.id`)
+      .join("")}`,
+    joins: ordered.joins.join(" "),
+    where: clauses.map((clause) => clause(column)).join(" AND "),
+    order: ordered.order,
+    params,
+    indexOnly,
+    filtered: clauses.length > 1,
+  };
+}
+
 /** ORDER BY for the player search: missing values last in both directions, ties by name then id. */
 function playerOrder(
-  sort: z.infer<typeof playerFilter>["sort"],
+  sort: PlayerFilter["sort"],
   direction: "asc" | "desc",
-) {
-  const order = direction === "asc" ? "ASC" : "DESC";
-  const reverse = direction === "asc" ? "DESC" : "ASC";
-  const missingLast = (value: string, sql = value) =>
-    `CASE WHEN ${value} IS NULL THEN 1 ELSE 0 END,${sql} ${order}`;
-  const height = "TRY_CONVERT(float, JSON_VALUE(players.profile,'$.identity.height'))";
-  const weight = "TRY_CONVERT(float, JSON_VALUE(players.profile,'$.identity.weight'))";
-  const contract = `CASE WHEN players.club_id IS NULL THEN 1 ELSE 0 END,players.contract_end ${order}`;
-  const keys: Record<typeof sort, string> = {
-    name: `players.name ${sortName} ${order}`,
-    position: `CASE players.position ${POSITIONS.map((position, index) => `WHEN '${position}' THEN ${index}`).join(" ")} ELSE ${POSITIONS.length} END ${order}`,
-    age: `players.age ${order},players.birth_date ${reverse}`,
-    nationality: `players.nationality ${sortName} ${order}`,
-    club: missingLast("clubs.name", `clubs.name ${sortName}`),
-    ability: `players.ability ${order}`,
-    potential: `players.potential ${order}`,
-    value: `players.value ${order}`,
-    wage: `players.wage ${order}`,
-    form: `players.form ${order}`,
-    fitness: `players.fitness ${order}`,
-    morale: `players.morale ${order}`,
-    appearances: `players.appearances ${order}`,
-    goals: `players.goals ${order},players.assists ${order}`,
-    minutes: `players.minutes ${order}`,
-    contract,
-    contract_end: contract,
-    height: missingLast(height),
-    weight: missingLast(weight),
+): SearchOrder {
+  return (column) => {
+    const order = direction === "asc" ? "ASC" : "DESC";
+    const reverse = direction === "asc" ? "DESC" : "ASC";
+    const joins: string[] = [];
+    const missingLast = (value: string, sql = value) =>
+      `CASE WHEN ${value} IS NULL THEN 1 ELSE 0 END,${sql} ${order}`;
+    const json = (path: string) =>
+      `TRY_CONVERT(float, JSON_VALUE(${column("profile")},'${path}'))`;
+    const contract = () =>
+      `CASE WHEN ${column("club_id")} IS NULL THEN 1 ELSE 0 END,${column("contract_end")} ${order}`;
+    // Only the chosen key may touch `column`: it records which indexes the query needs.
+    const keys: Record<typeof sort, () => string> = {
+      name: () => `${column("name")} ${sortName} ${order}`,
+      position: () =>
+        `CASE ${column("position")} ${POSITIONS.map((position, index) => `WHEN '${position}' THEN ${index}`).join(" ")} ELSE ${POSITIONS.length} END ${order}`,
+      age: () => `${column("age")} ${order},${column("birth_date")} ${reverse}`,
+      // players.nationality is always the name of players.country_id (people.ts; never updated).
+      nationality: () => {
+        joins.push(`JOIN countries AS nationality ON nationality.id = ${column("country_id")}`);
+        return `nationality.name ${sortName} ${order}`;
+      },
+      club: () => {
+        joins.push(`LEFT JOIN clubs ON clubs.id = ${column("club_id")}`);
+        return missingLast("clubs.name", `clubs.name ${sortName}`);
+      },
+      ability: () => `${column("ability")} ${order}`,
+      potential: () => `${column("potential")} ${order}`,
+      value: () => `${column("value")} ${order}`,
+      wage: () => `${column("wage")} ${order}`,
+      form: () => `${column("form")} ${order}`,
+      fitness: () => `${column("fitness")} ${order}`,
+      morale: () => `${column("morale")} ${order}`,
+      appearances: () => `${column("appearances")} ${order}`,
+      goals: () => `${column("goals")} ${order},${column("assists")} ${order}`,
+      minutes: () => `${column("minutes")} ${order}`,
+      contract,
+      contract_end: contract,
+      height: () => missingLast(json("$.identity.height")),
+      weight: () => missingLast(json("$.identity.weight")),
+    };
+    return {
+      order: `${keys[sort]()},${column("name")} ${sortName} ASC,${column("id")} ASC`,
+      joins,
+    };
   };
-  return `${keys[sort]},players.name ${sortName} ASC,players.id ASC`;
+}
+
+/**
+ * The player-search WHERE/ORDER BY. Default ranges are omitted so they cannot force the clustered index;
+ * `secondaryNationals` are the ids holding `filter.country` as a second nationality.
+ */
+export function playerSearch(
+  filter: PlayerFilter,
+  context: { contractBefore?: string; secondaryNationals?: readonly number[] } = {},
+): PlayerSearch {
+  const clauses: SearchClause[] = [(column) => `${column("role")} <> N'Retired'`];
+  const params: (string | number)[] = [];
+  const where = (clause: SearchClause, ...values: (string | number)[]) => {
+    clauses.push(clause);
+    params.push(...values);
+  };
+  // age is an integer column: integer bounds keep the parameter from converting the column to float.
+  if (filter.ageMin > 0) where((column) => `${column("age")} >= ?`, Math.ceil(filter.ageMin));
+  if (filter.ageMax < 100) where((column) => `${column("age")} <= ?`, Math.floor(filter.ageMax));
+  if (filter.abilityMin > 1) where((column) => `${column("ability")} >= ?`, filter.abilityMin);
+  if (filter.abilityMax < 99) where((column) => `${column("ability")} <= ?`, filter.abilityMax);
+  if (filter.potentialMin > 1) where((column) => `${column("potential")} >= ?`, filter.potentialMin);
+  if (filter.potentialMax < 99) where((column) => `${column("potential")} <= ?`, filter.potentialMax);
+  if (filter.valueMin > 0) where((column) => `${column("value")} >= ?`, filter.valueMin);
+  if (filter.valueMax < NO_MONEY_LIMIT) where((column) => `${column("value")} <= ?`, filter.valueMax);
+  if (filter.wageMax < NO_MONEY_LIMIT) where((column) => `${column("wage")} <= ?`, filter.wageMax);
+  if (filter.formMin > 0) where((column) => `${column("form")} >= ?`, filter.formMin);
+  if (filter.goalsMin > 0) where((column) => `${column("goals")} >= ?`, filter.goalsMin);
+  if (filter.minutesMin > 0) where((column) => `${column("minutes")} >= ?`, filter.minutesMin);
+  if (filter.q) {
+    const search = `%${filter.q.replace(/[!%_[]/g, "!$&")}%`;
+    where(
+      (column) =>
+        `(${column("name")} LIKE ? ESCAPE '!' OR ${column("country_id")} IN (SELECT countries.id FROM countries WHERE countries.name LIKE ? ESCAPE '!') OR ${column("club_id")} IN (SELECT clubs.id FROM clubs WHERE clubs.name LIKE ? ESCAPE '!'))`,
+      search,
+      search,
+      search,
+    );
+  }
+  // Typed like the columns: the driver sends strings as nvarchar(max).
+  if (filter.position)
+    where((column) => `${column("position")} = CAST(? AS nvarchar(16))`, filter.position);
+  if (filter.country) {
+    const secondary = context.secondaryNationals ?? [];
+    if (secondary.length)
+      where(
+        (column) =>
+          `(${column("country_id")} = ? OR ${column("id")} IN (SELECT CAST([value] AS int) FROM OPENJSON(?)))`,
+        filter.country,
+        JSON.stringify(secondary),
+      );
+    else where((column) => `${column("country_id")} = ?`, filter.country);
+  }
+  if (filter.club) where((column) => `${column("club_id")} = ?`, filter.club);
+  if (filter.ageGroup)
+    where((column) => `${column("age_group")} = CAST(? AS nvarchar(32))`, filter.ageGroup);
+  if (filter.contractStatus)
+    where(
+      (column) =>
+        `coalesce(JSON_VALUE(${column("profile")},'$.contract.status'),'professional') = ?`,
+      filter.contractStatus,
+    );
+  if (filter.foot) where((column) => `${column("foot")} = ?`, filter.foot);
+  if (filter.lifestyle)
+    where((column) => `JSON_VALUE(${column("profile")},'$.lifestyle') = ?`, filter.lifestyle);
+  if (filter.trait)
+    where(
+      (column) =>
+        `EXISTS(SELECT 1 FROM OPENJSON(${column("profile")},'$.traits') AS trait WHERE trait.[value] = ?)`,
+      filter.trait,
+    );
+  if (filter.attribute) {
+    const group = Object.entries(ATTRIBUTE_GROUPS).find(([, keys]) =>
+      keys.includes(filter.attribute!),
+    )?.[0];
+    if (!group) throw new GameError("Unknown player attribute.");
+    // SQL mirror of shared `currentAttribute` (a missing baseAbility means no change since generation).
+    where(
+      (column) =>
+        `TRY_CONVERT(float, JSON_VALUE(${column("profile")}, ?)) + (${column("ability")} - coalesce(TRY_CONVERT(float, JSON_VALUE(${column("profile")},'$.baseAbility')),${column("ability")})) >= ?`,
+      `$.attributes.${group}.${filter.attribute}`,
+      filter.attributeMin,
+    );
+  }
+  if (filter.personality) {
+    if (!PERSONALITY_KEYS.includes(filter.personality))
+      throw new GameError("Unknown personality attribute.");
+    where(
+      (column) => `TRY_CONVERT(float, JSON_VALUE(${column("profile")}, ?)) >= ?`,
+      `$.personality.${filter.personality}`,
+      filter.personalityMin,
+    );
+  }
+  if (filter.heightMin > 0)
+    where(
+      (column) => `TRY_CONVERT(float, JSON_VALUE(${column("profile")},'$.identity.height')) >= ?`,
+      filter.heightMin,
+    );
+  if (filter.heightMax < 230)
+    where(
+      (column) => `TRY_CONVERT(float, JSON_VALUE(${column("profile")},'$.identity.height')) <= ?`,
+      filter.heightMax,
+    );
+  if (context.contractBefore !== undefined)
+    where((column) => `${column("contract_end")} <= ?`, context.contractBefore);
+  // The filtered index player_shortlist holds exactly the shortlisted ids.
+  if (filter.shortlisted === "1")
+    where(
+      (column) =>
+        `${column("id")} IN (SELECT shortlist.id FROM players AS shortlist WHERE shortlist.shortlisted = 1)`,
+    );
+  if (filter.shortlisted === "0") where((column) => `${column("shortlisted")} = 0`);
+  if (filter.listed) where((column) => `${column("listed")} = ?`, Number(filter.listed));
+  if (filter.availableLoan)
+    where((column) => `${column("available_loan")} = ?`, Number(filter.availableLoan));
+  if (filter.freeAgent === "1") where((column) => `${column("club_id")} IS NULL`);
+  if (filter.injured === "1") where((column) => `${column("injury_until")} IS NOT NULL`);
+  if (filter.injured === "0") where((column) => `${column("injury_until")} IS NULL`);
+  return compileSearch(clauses, params, playerOrder(filter.sort, filter.direction));
+}
+
+/** Ranks a known id set (JSON array parameter) by the search sort: one clustered seek per id, no scan. */
+export function playerRanking(filter: Pick<PlayerFilter, "sort" | "direction">): PlayerSearch {
+  return compileSearch(
+    [(column) => `${column("id")} IN (SELECT CAST([value] AS int) FROM OPENJSON(?))`],
+    [],
+    playerOrder(filter.sort, filter.direction),
+    true,
+  );
+}
+
+type SearchMatches = { at: number; count: number; ids?: number[]; json?: string };
+interface SearchCounts {
+  generation: number;
+  matches: Map<string, SearchMatches>;
+  active?: { key: string; total: number };
+  nationals?: { key: string; maxId: number; byCountry: Map<number, number[]> };
+}
+const searchCounts = new WeakMap<Store, SearchCounts>();
+const MATCH_CACHE_SIZE = 32;
+const MATCH_CACHE_MS = 10 * 60_000;
+function searchCountsOf(store: Store) {
+  let counts = searchCounts.get(store);
+  if (!counts) {
+    counts = { generation: 0, matches: new Map() };
+    searchCounts.set(store, counts);
+  }
+  return counts;
+}
+
+/** Called after every world mutation: cached player-search matches belong to one revision of the world. */
+export function playerSearchChanged(store: Store, worldReplaced = false) {
+  const counts = searchCountsOf(store);
+  counts.matches.clear();
+  if (worldReplaced) {
+    counts.generation++;
+    counts.active = undefined;
+    counts.nationals = undefined;
+    worldTotals.delete(store);
+  }
+}
+
+/** Pure: `byCountry` plus the new (id, second nationality) rows; one array copy per country, the input is not mutated. */
+export function addNationals(byCountry: ReadonlyMap<number, number[]>, rows: Iterable<{ id: number; country: number }>) {
+  const added = new Map<number, number[]>();
+  for (const row of rows) {
+    const ids = added.get(row.country);
+    if (ids) ids.push(row.id);
+    else added.set(row.country, [row.id]);
+  }
+  const next = new Map(byCountry);
+  for (const [country, ids] of added) next.set(country, [...(byCountry.get(country) ?? []), ...ids]);
+  return next;
+}
+const NATIONALS_BATCH_IDS = 25_000;
+
+/** Ids holding `countryId` as a second nationality. Nationalities are set when a player is created, so only new ids are read. */
+async function secondaryNationals(
+  store: Store,
+  state: { careerId?: string; seed: string },
+  countryId: number,
+) {
+  const counts = searchCountsOf(store);
+  const key = JSON.stringify([state.careerId, state.seed, counts.generation]);
+  const maxId =
+    (await store.get<{ id: number | null }>("SELECT max(id) AS id FROM players"))!.id ?? 0;
+  let known = counts.nationals;
+  if (known?.key !== key || maxId < known.maxId)
+    known = { key, maxId: 0, byCountry: new Map() };
+  if (maxId > known.maxId) {
+    const rows: { id: number; country: number }[] = [];
+    // Id-range batches (clustered seeks), yielding between them so a cold build on a full world never blocks other accounts.
+    for (let from = known.maxId; from < maxId; from += NATIONALS_BATCH_IDS) {
+      for (const row of await store.all<{ id: number; country: number }>(
+        "SELECT players.id, TRY_CONVERT(int, JSON_VALUE(nationality.[value],'$.countryId')) AS country FROM players CROSS APPLY OPENJSON(players.profile,'$.identity.nationalities') AS nationality WHERE players.id > ? AND players.id <= ? AND TRY_CONVERT(int, JSON_VALUE(nationality.[value],'$.countryId')) <> players.country_id",
+        from,
+        Math.min(maxId, from + NATIONALS_BATCH_IDS),
+      ))
+        rows.push(row);
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    known = { key, maxId, byCountry: addNationals(known.byCountry, rows) };
+  }
+  counts.nationals = known;
+  return known.byCountry.get(countryId) ?? [];
+}
+
+/** Exact count of non-retired players for the unfiltered search (retirements and new players only happen on new days/ids). */
+async function activePlayers(
+  store: Store,
+  state: { careerId?: string; seed: string; date: string },
+) {
+  const counts = searchCountsOf(store);
+  const maxId = (await store.get<{ id: number | null }>("SELECT max(id) AS id FROM players"))!.id;
+  const key = JSON.stringify([state.careerId, state.seed, state.date, counts.generation, maxId]);
+  if (counts.active?.key !== key)
+    counts.active = {
+      key,
+      total: (await store.get<{ count: number }>(
+        "SELECT count(*) AS count FROM players WHERE role <> N'Retired'",
+      ))!.count,
+    };
+  return counts.active.total;
 }
 
 /** Search rows also carry the current body and whether a club-less player belongs to a home-based pool. */
@@ -476,132 +818,87 @@ export async function players(
   query: unknown,
 ): Promise<PlayerPage> {
   const filter = playerFilter.parse(query);
-  const conditions = [
-    "players.role != 'Retired'",
-    "players.age BETWEEN ? AND ?",
-    "players.ability BETWEEN ? AND ?",
-    "players.potential BETWEEN ? AND ?",
-    "players.value BETWEEN ? AND ?",
-    "players.wage <= ?",
-    "players.form >= ?",
-    "players.goals >= ?",
-    "players.minutes >= ?",
-  ];
-  const params: (string | number)[] = [
-    filter.ageMin,
-    filter.ageMax,
-    filter.abilityMin,
-    filter.abilityMax,
-    filter.potentialMin,
-    filter.potentialMax,
-    filter.valueMin,
-    filter.valueMax,
-    filter.wageMax,
-    filter.formMin,
-    filter.goalsMin,
-    filter.minutesMin,
-  ];
-  const add = (sql: string, value: string | number) => {
-    conditions.push(sql);
-    params.push(value);
-  };
-  if (filter.q) {
-    const search = `%${filter.q.replace(/[!%_[]/g, "!$&")}%`;
-    conditions.push(
-      "(players.name LIKE ? ESCAPE '!' OR players.nationality LIKE ? ESCAPE '!' OR clubs.name LIKE ? ESCAPE '!')",
-    );
-    params.push(search, search, search);
-  }
-  if (filter.position) add("players.position = ?", filter.position);
-  if (filter.country) {
-    conditions.push(
-      "(players.country_id = ? OR EXISTS(SELECT 1 FROM OPENJSON(players.profile,'$.identity.nationalities') AS nationality WHERE TRY_CONVERT(int, JSON_VALUE(nationality.[value],'$.countryId')) = ?))",
-    );
-    params.push(filter.country, filter.country);
-  }
-  if (filter.club) add("players.club_id = ?", filter.club);
-  if (filter.ageGroup) add("players.age_group = ?", filter.ageGroup);
-  if (filter.contractStatus)
-    add(
-      "coalesce(JSON_VALUE(players.profile,'$.contract.status'),'professional') = ?",
-      filter.contractStatus,
-    );
-  if (filter.foot) add("players.foot = ?", filter.foot);
-  if (filter.lifestyle)
-    add("JSON_VALUE(profile,'$.lifestyle') = ?", filter.lifestyle);
-  if (filter.trait)
-    add(
-      "EXISTS(SELECT 1 FROM OPENJSON(profile,'$.traits') AS trait WHERE trait.[value] = ?)",
-      filter.trait,
-    );
-  if (filter.attribute) {
-    const group = Object.entries(ATTRIBUTE_GROUPS).find(([, keys]) =>
-      keys.includes(filter.attribute!),
-    )?.[0];
-    if (!group) throw new GameError("Unknown player attribute.");
-    conditions.push(
-      "TRY_CONVERT(float, JSON_VALUE(profile, ?)) + (players.ability - TRY_CONVERT(float, JSON_VALUE(profile,'$.baseAbility'))) >= ?",
-    );
-    params.push(
-      `$.attributes.${group}.${filter.attribute}`,
-      filter.attributeMin,
-    );
-  }
-  if (filter.personality) {
-    if (!PERSONALITY_KEYS.includes(filter.personality))
-      throw new GameError("Unknown personality attribute.");
-    conditions.push("TRY_CONVERT(float, JSON_VALUE(profile, ?)) >= ?");
-    params.push(`$.personality.${filter.personality}`, filter.personalityMin);
-  }
-  if (filter.heightMin > 0)
-    add(
-      "TRY_CONVERT(float, JSON_VALUE(profile,'$.identity.height')) >= ?",
-      filter.heightMin,
-    );
-  if (filter.heightMax < 230)
-    add(
-      "TRY_CONVERT(float, JSON_VALUE(profile,'$.identity.height')) <= ?",
-      filter.heightMax,
-    );
-  if (filter.contractMonths !== undefined)
-    add(
-      "players.contract_end <= ?",
-      addDays(
-        (await stateOf(store)).date,
-        Math.floor(filter.contractMonths * 30.44),
-      ),
-    );
-  if (filter.shortlisted)
-    add("players.shortlisted = ?", Number(filter.shortlisted));
-  if (filter.listed) add("players.listed = ?", Number(filter.listed));
-  if (filter.availableLoan)
-    add("players.available_loan = ?", Number(filter.availableLoan));
-  if (filter.freeAgent === "1") conditions.push("players.club_id IS NULL");
-  if (filter.injured === "1")
-    conditions.push("players.injury_until IS NOT NULL");
-  if (filter.injured === "0") conditions.push("players.injury_until IS NULL");
-  const where = conditions.join(" AND ");
-  const total = (await store.get<{ count: number }>(
-    `SELECT count(*) AS count FROM players LEFT JOIN clubs ON clubs.id = players.club_id WHERE ${where}`,
-    ...params,
-  ))!.count;
-  const page = Math.min(
-    filter.page,
-    Math.max(1, Math.ceil(total / filter.pageSize)),
-  );
-  return {
-    players: (
-      await store.all<Player>(
-        `${playerSelect} WHERE ${where} ORDER BY ${playerOrder(filter.sort, filter.direction)} OFFSET ? ROWS FETCH NEXT ? ROWS ONLY`,
+  const state = await stateOf(store);
+  const search = playerSearch(filter, {
+    contractBefore:
+      filter.contractMonths === undefined
+        ? undefined
+        : addDays(state.date, Math.floor(filter.contractMonths * 30.44)),
+    secondaryNationals: filter.country
+      ? await secondaryNationals(store, state, filter.country)
+      : [],
+  });
+  // The match set ignores sort and paging, so changing either reuses it until the world changes.
+  const counts = searchCountsOf(store);
+  const key = JSON.stringify([
+    state.careerId,
+    state.seed,
+    state.date,
+    { ...filter, sort: undefined, direction: undefined, page: undefined, pageSize: undefined },
+  ]);
+  const cached = counts.matches.get(key);
+  const top = `SELECT TOP (${PLAYER_SEARCH_CAP + 1}) ${search.id} AS id ${search.from} WHERE ${search.where}`;
+  const matches: SearchMatches =
+    cached && Date.now() - cached.at <= MATCH_CACHE_MS
+      ? cached
+      : search.indexOnly
+        ? {
+            at: Date.now(),
+            count: (await store.get<{ count: number }>(
+              `SELECT count(*) AS count FROM (${top}) AS matches`,
+              ...search.params,
+            ))!.count,
+          }
+        : // A JSON-filtered search reads the wide rows; keep its ids so ranking and paging don't scan again.
+          await store
+            .all<{ id: number }>(top, ...search.params)
+            .then((rows) => ({ at: Date.now(), count: rows.length, ids: rows.map((row) => row.id) }));
+  counts.matches.delete(key);
+  counts.matches.set(key, matches);
+  while (counts.matches.size > MATCH_CACHE_SIZE)
+    counts.matches.delete(counts.matches.keys().next().value!);
+  const capped = matches.count > PLAYER_SEARCH_CAP;
+  const total = !capped
+    ? matches.count
+    : search.filtered
+      ? PLAYER_SEARCH_CAP
+      : await activePlayers(store, state);
+  const pages = Math.max(1, Math.ceil(total / filter.pageSize));
+  const page = Math.min(filter.page, pages);
+  let ids: number[] = [];
+  if (total > 0) {
+    const known = !capped ? matches.ids : undefined;
+    const ranked = known ? playerRanking(filter) : search;
+    const params = known ? [(matches.json ??= JSON.stringify(known))] : search.params;
+    ids = (
+      await store.all<{ id: number }>(
+        `SELECT ${ranked.id} AS id ${ranked.from} ${ranked.joins} WHERE ${ranked.where} ORDER BY ${ranked.order} OFFSET ? ROWS FETCH NEXT ? ROWS ONLY`,
         ...params,
         (page - 1) * filter.pageSize,
         filter.pageSize,
       )
-    ).map(searchRow),
+    ).map((row) => row.id);
+  }
+  // Display columns and joins only for the page.
+  const rows = new Map(
+    (ids.length
+      ? await store.all<Player>(
+          `${playerSelect} WHERE players.id IN (SELECT CAST([value] AS int) FROM OPENJSON(?))`,
+          JSON.stringify(ids),
+        )
+      : []
+    ).map((player) => [player.id, player]),
+  );
+  return {
+    players: ids.flatMap((id) => {
+      const player = rows.get(id);
+      return player ? [searchRow(player)] : [];
+    }),
     total,
+    totalCapped: capped && search.filtered,
     page,
     pageSize: filter.pageSize,
-    pages: Math.max(1, Math.ceil(total / filter.pageSize)),
+    pages,
   };
 }
 
@@ -813,7 +1110,7 @@ export async function squad(
   if (!clubs.some((club) => club.id === filter.club))
     throw new GameError("Choose one of your club's squads.");
   const all = await store.all<Player>(
-    `${playerSelect} WHERE coalesce(players.squad_club_id,players.club_id) = ? AND players.role != 'Retired' ORDER BY players.ability DESC`,
+    `${playerSelect} WHERE players.playing_club_id = ? AND players.role != 'Retired' ORDER BY players.ability DESC`,
     filter.club,
   );
   const senior = all.filter((player) => player.age_group === filter.ageGroup);
@@ -890,10 +1187,13 @@ export async function transfers(store: Store): Promise<TransferDesk> {
       id,
       id,
     ),
-    negotiations: await store.all(
-      "SELECT negotiations.*, players.name AS player_name, players.position, players.age, players.ability, players.potential, buyer.name AS buyer_name, seller.name AS seller_name FROM negotiations JOIN players ON players.id = negotiations.player_id JOIN clubs AS buyer ON buyer.id = negotiations.buying_club_id LEFT JOIN clubs AS seller ON seller.id = negotiations.selling_club_id WHERE buying_club_id = ? OR selling_club_id = ? ORDER BY negotiations.id DESC",
-      id,
-      id,
+    negotiations: await withBattleViews(
+      store,
+      await store.all<Negotiation>(
+        "SELECT negotiations.*, players.name AS player_name, players.position, players.age, players.ability, players.potential, buyer.name AS buyer_name, seller.name AS seller_name FROM negotiations JOIN players ON players.id = negotiations.player_id JOIN clubs AS buyer ON buyer.id = negotiations.buying_club_id LEFT JOIN clubs AS seller ON seller.id = negotiations.selling_club_id WHERE buying_club_id = ? OR selling_club_id = ? ORDER BY negotiations.id DESC",
+        id,
+        id,
+      ),
     ),
     targets: (
       await store.all<Player>(
@@ -938,7 +1238,7 @@ export async function staff(store: Store): Promise<StaffDesk> {
       id,
     ),
     candidates: await store.all<Staff>(
-      "SELECT TOP (40) * FROM staff WHERE club_id IS NULL ORDER BY ability DESC,id",
+      "SELECT TOP (40) * FROM staff WHERE club_id IS NULL AND coalesce(JSON_VALUE(coalesce(data,'{}'),'$.retired'),'false') <> 'true' ORDER BY ability DESC,id",
     ),
     relationships: await store.all(
       "SELECT relationships.*, source.name AS source_name, target.name AS target_name FROM relationships JOIN staff AS source ON source.id = source_id JOIN staff AS target ON target.id = target_id WHERE relationships.club_id = ? AND source_type = 'staff' AND source.club_id = ? AND target.club_id = ?",

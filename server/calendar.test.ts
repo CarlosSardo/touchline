@@ -14,6 +14,7 @@ import type { Fixture, League } from "../shared/types.ts";
 import { drawLeaguePhase } from "./draw.ts";
 import { clubCompetitionEligible } from "../shared/competition-rules.ts";
 import { CONTINENTAL } from "../shared/world-catalog/index.ts";
+import { YOUTH_TOURNAMENTS } from "../shared/features/youth-internationals.ts";
 import {
   baseMatchdays,
   leagueDates,
@@ -205,8 +206,7 @@ describe("football calendar", () => {
   it("contains all required continental, national youth and invitational competitions", () => {
     for (const name of [
       ...CONTINENTAL.competitions.map((competition) => competition.name),
-      "FIFA U17 World Cup",
-      "FIFA U20 World Cup",
+      ...YOUTH_TOURNAMENTS.map((tournament) => tournament.name),
       "MIC",
       "Viareggio",
       "Copinha",
@@ -215,9 +215,7 @@ describe("football calendar", () => {
       "Generation Adidas Cup",
     ])
       expect(COMPETITIONS.some((spec) => spec.name === name)).toBe(true);
-    expect(
-      COMPETITIONS.filter((spec) => spec.name.endsWith("Championship")),
-    ).toHaveLength(12);
+    expect(COMPETITIONS.filter((spec) => spec.youth)).toHaveLength(YOUTH_TOURNAMENTS.length);
     expect(COMPETITIONS.some((spec) => spec.confederation === "OFC" && spec.kind === "continental")).toBe(false);
   });
 

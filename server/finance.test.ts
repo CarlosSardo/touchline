@@ -717,7 +717,14 @@ describe("weekly operating costs", () => {
         const weekIncome =
           expected.annualCommercial / 52 + (week < 42 && week % 2 === 0 ? expected.matchdayPerHomeMatch : 0);
         const operating = options.upkeepOnly
-          ? Math.round(facilities ** 2 * 2.2) + Math.round(academy ** 2 * 1.6)
+          ? weeklyOperatingCosts({
+              annualRevenue: revenue,
+              wageShare: 10,
+              spendRatio: 0.9,
+              facilities,
+              academy,
+              balance,
+            }).total
           : weeklyOperatingCosts({
               annualRevenue: revenue,
               wageShare: (budgeted * 52) / revenue,

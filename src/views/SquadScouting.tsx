@@ -1,6 +1,6 @@
 import { useState } from "react";
 import {
-  ArrowLeftRight,
+  ArrowUpDown,
   ArrowUpRight,
   Bookmark,
   CalendarClock,
@@ -53,6 +53,11 @@ import {
 import { useSortableRows } from "../useSortableRows.ts";
 import { POSITION_LINES } from "../players.ts";
 import Shortlist from "./Shortlist.tsx";
+import { CallUpDialog, CallUpsPanel } from "../CallUps.tsx";
+import { CALL_UPS_PATH, callUpBadge } from "../callups.ts";
+import type { CallUpDesk } from "../../shared/features/callups.ts";
+import type { InternationalsDesk } from "../../shared/features/youth-internationals.ts";
+import { INTERNATIONALS_PATH, dutyByPlayer, dutyText } from "../internationals.ts";
 
 const roles = [
   "Captain",
@@ -147,6 +152,10 @@ export function Squad() {
     { keepPreviousData: true },
   );
   const [tab, setTab] = useState("players");
+  const { data: callUps } = useResource<CallUpDesk>(CALL_UPS_PATH, { keepPreviousData: true });
+  const { data: internationals } = useResource<InternationalsDesk>(INTERNATIONALS_PATH, { keepPreviousData: true });
+  const duty = dutyByPlayer(internationals?.clubPlayers);
+  const [moving, setMoving] = useState<{ id: number; name: string } | null>(null);
   const [filter, setFilter] = useState("");
   const [query, setQuery] = useState("");
   const [readiness, setReadiness] = useState("");
@@ -231,7 +240,7 @@ export function Squad() {
           >
             {data.clubs.map((club) => (
               <option key={club.id} value={club.id}>
-                {club.type === "bteam" ? "Reserves" : "First team"} / {club.name}
+                {club.type === "bteam" ? "Reserve team" : "First team"} / {club.name}
               </option>
             ))}
           </select>
@@ -289,6 +298,11 @@ export function Squad() {
           label="Squad views"
           items={[
             { id: "players", label: "Players", count: data.players.length },
+            {
+              id: "callups",
+              label: "Call-ups",
+              count: callUps ? callUps.active.length + callUps.proposals.length : undefined,
+            },
             { id: "chemistry", label: "Dressing room" },
             { id: "succession", label: "Succession plan" },
             {
@@ -394,7 +408,9 @@ export function Squad() {
                       <td>
                         <div className="player-identity-actions">
                           <PlayerName player={player} compact />
-                          <IconButton icon={ArrowLeftRight} label={`Squad assignment for ${player.name}`} onClick={() => setPlayer(player.id)} disabled={loading} />
+                          {!player.parent_club_id && (
+                            <IconButton icon={ArrowUpDown} label={`Move ${player.name} up or down`} onClick={() => setMoving({ id: player.id, name: player.name })} disabled={loading} />
+                          )}
                         </div>
                       </td>
                       <td>
@@ -407,6 +423,26 @@ export function Squad() {
                           </Badge>
                           {isInjured(player) && <small>Until {dateLabel(player.injury_until!)}</small>}
                           {!!player.parent_club_id && <Badge tone="blue">On loan</Badge>}
+                          {(() => {
+                            const callUp = callUps?.active.find((entry) => entry.playerId === player.id);
+                            return callUp ? (
+                              <>
+                                <Badge tone="violet">Call-up</Badge>
+                                <small className="callup-flag">{callUpBadge(callUp, today)}</small>
+                              </>
+                            ) : null;
+                          })()}
+                          {(() => {
+                            const away = duty.get(player.id);
+                            return away ? (
+                              <>
+                                <Badge tone={away.status === "withheld" ? "amber" : "blue"}>
+                                  {away.status === "withheld" ? "Kept back" : "International duty"}
+                                </Badge>
+                                <small className="callup-flag">{dutyText(away)}</small>
+                              </>
+                            ) : null;
+                          })()}
                         </div>
                       </td>
                       <td>
@@ -496,6 +532,7 @@ export function Squad() {
             </div>
           </>
         )}
+        {tab === "callups" && <CallUpsPanel />}
         {tab === "chemistry" && (
           <>
             <SectionHeading
@@ -526,7 +563,7 @@ export function Squad() {
                 </div>
               ))}
             </div>
-            <div className="table-scroll">
+            <div className="table-scroll" role="region" aria-label="Dressing room relationships" tabIndex={0}>
               <div
                 className="matrix-grid"
                 style={{
@@ -703,6 +740,7 @@ export function Squad() {
             />
           ))}
       </Panel>
+      {moving && <CallUpDialog playerId={moving.id} playerName={moving.name} onClose={() => setMoving(null)} />}
     </div>
   );
 }

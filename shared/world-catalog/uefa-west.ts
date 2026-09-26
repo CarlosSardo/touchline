@@ -582,7 +582,7 @@ Olot|town|Cataluña|1
     ],
     cups: [
       // Semi-finals are two-legged in reality; filiales cannot enter.
-      { kind: "national", name: "Copa del Rey", seededEntry: true, legs: 1, neutralFinal: true, continental: true },
+      { kind: "national", name: "Copa del Rey", seededEntry: true, legs: 1, neutralFinal: true, continental: true, lowerTierHome: 1 },
       { kind: "super", name: "Supercopa de España", shortName: "Supercopa", participants: ["champion", "runner-up", "cup-winner", "cup-runner-up"], legs: 1, neutralFinal: true, start: "01-07" },
     ],
     youth: {

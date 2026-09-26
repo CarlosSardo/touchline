@@ -292,6 +292,18 @@
 .database-workspace .filter-summary {
   flex-wrap: wrap;
 }
+.database-results {
+  min-width: 0;
+  transition: opacity 0.15s ease;
+}
+.database-results.is-stale {
+  opacity: 0.6;
+}
+@media (prefers-reduced-motion: reduce) {
+  .database-results {
+    transition: none;
+  }
+}
 @media (max-width: 1100px) {
   .database-filter-groups {
     grid-template-columns: minmax(0, 1fr);
@@ -754,6 +766,10 @@
   padding: 15px 0;
   font-size: 0.81rem;
   line-height: 1.75;
+}
+.negotiation-latest.is-rejected {
+  color: var(--red);
+  font-weight: 600;
 }
 .youth-eligibility {
   padding: 14px 0;

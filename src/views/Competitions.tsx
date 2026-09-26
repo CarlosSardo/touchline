@@ -26,7 +26,10 @@ import {
   StandingsTable,
   Tabs,
   TextLink,
+  ZoneLegend,
 } from "../ui.tsx";
+import { leagueZones } from "../table-zones.ts";
+import { seasonText } from "../format.ts";
 import {
   compactNumber,
   label,
@@ -100,6 +103,7 @@ export default function Competitions() {
   const selected = leagueId ?? bootstrap?.club.league_id;
   const { data, error } = useResource<CompetitionDetail>(
     selected ? `leagues/${selected}` : null,
+    { cache: true },
   );
   const favorite = favorites?.find((entry) => entry.leagueId === selected);
   const favoriteEvents = favorite
@@ -148,6 +152,20 @@ export default function Competitions() {
       ? ownGroup
       : groups[0];
   const competitionData = data ? JSON.parse(data.league.data) : {};
+  const zones =
+    data?.league.kind === "league" ? leagueZones(competitionData) : null;
+  const shownTable =
+    data?.table.filter(
+      (entry) => groups.length <= 1 || entry.group_name === currentGroup,
+    ) ?? [];
+  // Split leagues rank each group from its first overall position (e.g. a relegation round from 7th).
+  const splitGroup = (
+    competitionData.split?.groups as
+      | { name: string; positions: [number, number] }[]
+      | undefined
+  )?.find((entry) => entry.name === currentGroup);
+  const positionOffset = splitGroup ? splitGroup.positions[0] - 1 : 0;
+  const tableSize = splitGroup ? (data?.table.length ?? 0) : shownTable.length;
   const fixtures =
     data?.fixtures.filter((fixture) =>
       schedule === "results"
@@ -163,8 +181,7 @@ export default function Competitions() {
       >
         <Badge tone="blue">
           <Globe2 size={12} />
-          {bootstrap.state.season}/
-          {String(bootstrap.state.season + 1).slice(-2)}
+          {seasonText(bootstrap.state.season)}
         </Badge>
       </PageHeading>
       <div className="organized-filters" aria-label="Competition filters">
@@ -213,6 +230,7 @@ export default function Competitions() {
           >
             <option value="">All age groups</option>
             <option>Senior</option>
+            <option>U21</option>
             <option>U20</option>
             <option>U19</option>
             <option>U17</option>
@@ -403,12 +421,12 @@ export default function Competitions() {
                     )}
                     {data.table.length ? (
                       <StandingsTable
-                        entries={data.table.filter(
-                          (entry) =>
-                            groups.length <= 1 ||
-                            entry.group_name === currentGroup,
-                        )}
+                        entries={shownTable}
                         ownId={bootstrap.club.id}
+                        zones={zones}
+                        positionOffset={positionOffset}
+                        tableSize={tableSize}
+                        label={`${data.league.name} table`}
                       />
                     ) : data.fixtures.length ? (
                       <Empty
@@ -423,21 +441,8 @@ export default function Competitions() {
                         detail="Qualifying rounds will determine the competition field."
                       />
                     )}
-                    {data.league.kind === "league" && (
-                      <div className="pressure-zones">
-                        <span>
-                          <i className="zone-line" />
-                          Top: title & qualification
-                        </span>
-                        <span>
-                          <i className="zone-line middle" />
-                          Middle: stability
-                        </span>
-                        <span>
-                          <i className="zone-line bottom" />
-                          Bottom: relegation pressure
-                        </span>
-                      </div>
+                    {data.table.length > 0 && (
+                      <ZoneLegend zones={zones} size={tableSize} />
                     )}
                   </>
                 )}
@@ -461,7 +466,9 @@ export default function Competitions() {
                         {fixtures.slice(0, 100).map((fixture) => (
                           <div key={fixture.id} className="competition-fixture">
                             <span className="fixture-round">
-                              {fixture.stage} / Round {fixture.round}
+                              {fixture.stage} /{" "}
+                              {data.league.kind === "league" ? "Matchday" : "Round"}{" "}
+                              {fixture.round}
                               {fixture.group_name
                                 ? ` / ${fixture.group_name}`
                                 : ""}
@@ -641,9 +648,7 @@ export default function Competitions() {
                           key={`${item.season}-${index}`}
                         >
                           <span>
-                            <strong>
-                              {item.season}/{String(item.season + 1).slice(-2)}
-                            </strong>
+                            <strong>{seasonText(item.season)}</strong>
                             <p>{record.competition ?? record.name}</p>
                           </span>
                           <Badge tone="green">
@@ -665,8 +670,8 @@ export default function Competitions() {
               <div className="information-note">
                 <CalendarDays size={16} />
                 <span>
-                  International windows: September, October, November, March and
-                  June. Current world trend:{" "}
+                  International windows: late September to early October,
+                  November, March and June. Current world trend:{" "}
                   <strong>{bootstrap.state.worldTrend}</strong>.
                 </span>
               </div>

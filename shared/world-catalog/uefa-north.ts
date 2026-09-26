@@ -479,7 +479,8 @@ Leek|town|WM|1
     cups: [
       { kind: "national", name: "FA Cup", maxEntrants: 124, seededEntry: true, legs: 1, neutralFinal: true, continental: true },
       { kind: "league", name: "EFL Cup", tiers: [1, 2, 3, 4], seededEntry: true, legs: 1, neutralFinal: true, continental: true },
-      { kind: "super", name: "FA Community Shield", participants: ["champion", "cup-winner"], neutralFinal: true, start: "08-09" },
+      // 2026 Shield on 16 August, before the Premier League opens (21 August).
+      { kind: "super", name: "FA Community Shield", participants: ["champion", "cup-winner"], neutralFinal: true, start: "08-16" },
     ],
     youth: {
       U19: {

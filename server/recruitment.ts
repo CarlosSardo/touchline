@@ -3,6 +3,7 @@ import {
   addDays,
   clamp,
   daysBetween,
+  INTEREST_BANDS,
   money,
   tacticalFit,
 } from "../shared/rules.ts";
@@ -25,7 +26,7 @@ import {
   type MinorRoute,
   type MinorRouteResult,
 } from "./registration.ts";
-import { baseWage, wageScale } from "./finance.ts";
+import { marketWage, wageScale } from "./finance.ts";
 
 /**
  * Weekly wage a club-less player expects: the buyer's going rate for his level, but at least a share of what
@@ -40,6 +41,171 @@ export const YOUTH_TRANSFER_SOURCE =
   "FIFA RSTP January 2025, articles 2, 18, 19 and 20, Annexe 4; simplified game implementation";
 export const YOUTH_TRANSFER_URL =
   "https://digitalhub.fifa.com/m/696d877ea35ca761/original/Regulations-on-the-Status-and-Transfer-of-Players-January-2025-edition.pdf";
+/** Overall interest (wages included) a player needs before agreeing personal terms. */
+export const PERSONAL_TERMS_THRESHOLD = INTEREST_BANDS.agree;
+/**
+ * Most a wage offer can add to interest. A player at the refusal floor (50) reaches the acceptance threshold (85)
+ * on wages alone only with a ~66% premium over his expectation and fresh talks; a credible role, promises and
+ * contract security reduce the premium needed.
+ */
+export const WAGE_INTEREST_CAP = 35;
+/** Most a below-expectation wage can subtract from interest. */
+export const WAGE_INTEREST_FLOOR = -24;
+/** Interest points per doubling of the wage above (premium) and below (shortfall) the expectation. */
+const WAGE_PREMIUM_SLOPE = 48;
+const WAGE_SHORTFALL_SLOPE = 24;
+/** Below this interest in the move itself (wages excluded) the player will not negotiate. */
+export const MOVE_REFUSAL_THRESHOLD = INTEREST_BANDS.refuse;
+/** AI clubs pay at most this multiple of the player's wage expectation to win him over. */
+export const MARKET_WAGE_PREMIUM_CAP = 1.5;
+
+/** Interest impact of a weekly wage offer against the player's expectation. */
+export function wageInterest(wage: number, expected: number) {
+  const doublings = Math.log2(Math.max(1, wage) / Math.max(1, expected));
+  return doublings >= 0
+    ? Math.min(WAGE_INTEREST_CAP, doublings * WAGE_PREMIUM_SLOPE)
+    : Math.max(WAGE_INTEREST_FLOOR, doublings * WAGE_SHORTFALL_SLOPE);
+}
+
+/** Lowest weekly wage (whole tens, never below `expected`) adding `needed` interest; null when above the cap. */
+export function wageForInterest(expected: number, needed: number) {
+  if (needed > WAGE_INTEREST_CAP) return null;
+  const floor = Math.max(1, Math.round(expected));
+  if (needed <= 0) return floor;
+  return Math.max(floor, Math.ceil((floor * 2 ** (needed / WAGE_PREMIUM_SLOPE)) / 10) * 10);
+}
+
+/** Interest in the move itself: the score with the personal-terms (wage) factor removed. */
+export function moveInterest(factors: PlayerInterest["factors"]) {
+  return Math.round(
+    clamp(
+      60 +
+        factors.reduce(
+          (total, entry) => total + (entry.id === "wages" ? 0 : entry.impact),
+          0,
+        ),
+      1,
+      99,
+    ),
+  );
+}
+
+export type PersonalTermsOutcome = "refused" | "hesitant" | "wage" | "agreed";
+
+/** The player's answer to personal terms; `wageMet` is whether the offered wage meets the agent's demand. */
+export function personalTermsOutcome(
+  interest: Pick<PlayerInterest, "score" | "factors">,
+  wageMet: boolean,
+): PersonalTermsOutcome {
+  if (moveInterest(interest.factors) < MOVE_REFUSAL_THRESHOLD) return "refused";
+  if (interest.score < PERSONAL_TERMS_THRESHOLD) return "hesitant";
+  return wageMet ? "agreed" : "wage";
+}
+
+/** Stance label for the interest bands (see INTEREST_BANDS). */
+export function interestStance(score: number, refuses: boolean) {
+  return refuses
+    ? "Not interested"
+    : score >= INTEREST_BANDS.agree
+      ? "Very interested"
+      : score >= INTEREST_BANDS.interested
+        ? "Interested"
+        : score >= INTEREST_BANDS.refuse
+          ? "Open to talks"
+          : "Needs convincing";
+}
+
+function ambitionImpact(buyerReputation: number, sellerReputation: number, ambition: number) {
+  return clamp((buyerReputation - sellerReputation) * (0.45 + ambition / 150), -35, 22);
+}
+
+function developmentImpact(
+  age: number,
+  buyer: Pick<Club, "facilities" | "academy">,
+  seller: Pick<Club, "facilities" | "academy"> | undefined,
+  loan: boolean,
+) {
+  const development =
+    age < 24 ? (buyer.facilities + buyer.academy - ((seller?.facilities ?? 40) + (seller?.academy ?? 40))) / 16 : 0;
+  return clamp(development + (loan && age < 23 ? 5 : 0), -10, 12);
+}
+
+function settledAtClub(player: Pick<Player, "listed" | "morale" | "contract_end">, date: string) {
+  return !player.listed && player.morale >= 65 && daysBetween(date, player.contract_end) > 365;
+}
+
+function situationImpact(player: Pick<Player, "listed" | "morale" | "contract_end">, date: string, loyalty: number) {
+  return player.listed ? 8 : player.morale < 50 ? 6 : settledAtClub(player, date) ? -loyalty / 9 : 0;
+}
+
+/**
+ * Query-free estimate of a player's interest in an AI club's move (wages excluded), for daily market loops:
+ * the same ambition, development, situation and tactical-fit formulas as assessPlayerInterest, with the club's
+ * credible role (no minutes factor), no continental factor and relocation judged on country alone.
+ */
+export function marketMoveInterest(
+  player: Player,
+  profile: PlayerProfile,
+  buyer: Club,
+  seller: Club | undefined,
+  date: string,
+) {
+  const factors = [
+    ambitionImpact(
+      buyer.reputation,
+      seller?.reputation ?? Math.max(20, player.ability - 8),
+      profile.personality.ambition ?? 50,
+    ),
+    developmentImpact(player.age, buyer, seller, false),
+    seller?.country_id === buyer.country_id || player.country_id === buyer.country_id
+      ? 4
+      : -(3 + (100 - (profile.personality.adaptability ?? 50)) / 16),
+    situationImpact(player, date, profile.personality.loyalty ?? 50),
+    clamp((tacticalFit(player, buyer) - 65) / 5, -9, 7),
+  ];
+  return Math.round(clamp(60 + factors.reduce((total, impact) => total + Math.round(impact), 0), 1, 99));
+}
+
+/**
+ * Weekly wage an AI club offers to bring `moveScore` up to the acceptance threshold, from an expectation of the
+ * current wage plus 10% or the buyer's going rate for the player (`goingRate`, its payroll scale), whichever is
+ * higher; null when the player refuses or the premium needed exceeds MARKET_WAGE_PREMIUM_CAP.
+ */
+export function marketWageOffer(currentWage: number, moveScore: number, goingRate = 0) {
+  if (moveScore < MOVE_REFUSAL_THRESHOLD) return null;
+  const expected = Math.max(50, Math.round(currentWage * 1.1), Math.round(goingRate));
+  const wage = wageForInterest(expected, PERSONAL_TERMS_THRESHOLD - moveScore);
+  return wage === null || wage > expected * MARKET_WAGE_PREMIUM_CAP ? null : wage;
+}
+
+/** What `buyer` pays a player of this level on its own payroll scale (the AI's wage anchor for a move). */
+export async function buyerGoingRate(store: Store, player: Pick<Player, "ability" | "age" | "age_group">, buyer: Pick<Club, "id">) {
+  return marketWage({ ...player, wage: 0 }, await wageScale(store, buyer.id));
+}
+
+/** Interest a renewal adds for a player who is settled at his club (continuity, no relocation or new-role risk). */
+export function renewalContinuity(player: Pick<Player, "listed" | "morale">) {
+  return player.listed ? -10 : player.morale < 50 ? -6 : 12;
+}
+
+/** FIFA training-compensation rates per year (EUR 90k/60k/30k/10k at the game's EUR 1 = GBP 0.86), by academy rating. */
+export function trainingCategoryRate(academy: number) {
+  return academy >= 80 ? 77_400 : academy >= 65 ? 51_600 : academy >= 45 ? 25_800 : 8_600;
+}
+
+/**
+ * Training compensation owed for a youth player's first professional registration elsewhere: years from the
+ * training start age to 21, at the category IV rate for ages 12-15 and the new club's category rate from 16
+ * (FIFA RSTP Annexe 4, arts. 4-5). England's EPPP fixed fees are not modelled.
+ */
+export function trainingCompensationFee(age: number, trainingStartAge: number, buyerAcademy: number) {
+  const start = clamp(Math.round(trainingStartAge), 12, 21);
+  const end = Math.max(start + 1, Math.min(Math.floor(age), 21));
+  let total = 0;
+  for (let year = start; year < end; year++) total += year < 16 ? 8_600 : trainingCategoryRate(buyerAcademy);
+  return total;
+}
+
 const ROLES: Record<string, number> = {
   Prospect: 0,
   "Fringe player": 1,
@@ -109,12 +275,10 @@ export async function assessPlayerInterest(
     "Sporting ambition",
     renewal
       ? 2
-      : clamp(
-          (buyer.reputation -
-            (seller?.reputation ?? Math.max(20, player.ability - 8))) *
-            (0.45 + ambition / 150),
-          -35,
-          22,
+      : ambitionImpact(
+          buyer.reputation,
+          seller?.reputation ?? Math.max(20, player.ability - 8),
+          ambition,
         ),
     renewal
       ? "Continuity at the current club."
@@ -136,17 +300,10 @@ export async function assessPlayerInterest(
       ? `${offer.role} is not credible with ${peerCount} stronger players in this position. A clearer route to minutes is needed.`
       : `${peerCount} stronger players compete in this position. Expected role: ${expectedRole.toLowerCase()}${offer.role ? `; proposed role: ${offer.role.toLowerCase()}` : `; likely role: ${credibleRole.toLowerCase()}`}.`,
   );
-  const development =
-    player.age < 24
-      ? (buyer.facilities +
-          buyer.academy -
-          ((seller?.facilities ?? 40) + (seller?.academy ?? 40))) /
-        16
-      : 0;
   factor(
     "development",
     "Development environment",
-    clamp(development + (offer.loan && player.age < 23 ? 5 : 0), -10, 12),
+    developmentImpact(player.age, buyer, seller, !!offer.loan),
     player.age < 24
       ? `Training facilities ${buyer.facilities}/99 and academy ${buyer.academy}/99 ${offer.loan ? "are assessed alongside the loan pathway" : "shape the development opportunity"}.`
       : "Development infrastructure is a secondary concern at this career stage.",
@@ -239,24 +396,17 @@ export async function assessPlayerInterest(
             ? "The player speaks the destination's main language."
             : `A move to ${destination.name} requires language and cultural adaptation.`,
   );
-  const settled =
-    !player.listed &&
-    player.morale >= 65 &&
-    daysBetween(state.date, player.contract_end) > 365;
+  const settled = settledAtClub(player, state.date);
   factor(
     "loyalty",
     "Current situation and loyalty",
+    renewal ? loyalty / 15 + renewalContinuity(player) : situationImpact(player, state.date, loyalty),
     renewal
-      ? loyalty / 15
-      : player.listed
-        ? 8
+      ? player.listed
+        ? "The club has made him available, which undermines trust in a new contract."
         : player.morale < 50
-          ? 6
-          : settled
-            ? -loyalty / 9
-            : 0,
-    renewal
-      ? "A renewal supports continuity and loyalty."
+          ? "He is unhappy at the club, so continuity counts against a new contract."
+          : "A renewal keeps a settled player in a familiar role, team and city."
       : player.listed
         ? "The current club has made the player available."
         : player.morale < 50
@@ -279,10 +429,13 @@ export async function assessPlayerInterest(
         ? 0.07
         : 0;
   // Club-less players have no wage to defend: the destination's going rate, floored by what their level earns there.
+  // Contracted players expect at least their wage and the buyer's own going rate (its payroll scale), not an
+  // English-scale base wage; for a renewal the buyer is the current club.
+  const scale = await wageScale(store, buyer.id);
   const expectedBase =
     player.club_id === null
       ? clublessWageExpectation(
-          baseWage(player.ability) * (await wageScale(store, buyer.id)),
+          marketWage({ ...player, age_group: "Senior", age: Math.max(21, player.age), wage: 0 }, scale),
           (await store.get<{ wage: number | null }>(
             "SELECT avg(CONVERT(float,players.wage)) AS wage FROM clubs JOIN leagues ON leagues.id = clubs.league_id JOIN players ON players.club_id = clubs.id WHERE leagues.country_id = coalesce((SELECT country_id FROM leagues WHERE id = ?),?) AND clubs.type != 'national' AND players.parent_club_id IS NULL AND players.age_group = 'Senior' AND players.role != 'Retired' AND players.ability BETWEEN ? AND ? AND coalesce(JSON_VALUE(players.profile,'$.contract.status'),'professional') = 'professional'",
             buyer.league_id ?? -1,
@@ -292,28 +445,25 @@ export async function assessPlayerInterest(
           ))?.wage,
           player.age,
         )
-      : Math.max(player.wage, baseWage(player.ability));
+      : marketWage(player, scale);
+  const agentPremium =
+    ((profile.agent.difficulty / 500) * Number(settings.agentIntensity ?? 60)) / 60;
+  // A renewal asks a modest raise over the current deal (half the agent premium); a move asks a 10% step up.
   const expectedWage = Math.round(
     expectedBase *
       (offer.loan
         ? 1
-        : 1.1 +
-          ((profile.agent.difficulty / 500) *
-            Number(settings.agentIntensity ?? 60)) /
-            60 +
-          difficulty -
-          state.director.skills.negotiations * 0.012),
+        : Math.max(
+            renewal ? 1 : 0.9,
+            (renewal ? 1 + agentPremium / 2 : 1.1 + agentPremium) +
+              difficulty -
+              state.director.skills.negotiations * 0.012,
+          )),
   );
   factor(
     "wages",
     "Personal terms",
-    offer.wage === undefined
-      ? 0
-      : clamp(
-          Math.log2(Math.max(1, offer.wage) / Math.max(1, expectedWage)) * 12,
-          -24,
-          15,
-        ),
+    offer.wage === undefined ? 0 : wageInterest(offer.wage, expectedWage),
     offer.wage === undefined
       ? `Indicative weekly expectation: ${money(expectedWage)}. Personal terms have not been offered.`
       : `Proposed ${money(offer.wage)} per week against an expectation of ${money(expectedWage)}. Financial attraction is capped.`,
@@ -360,25 +510,34 @@ export async function assessPlayerInterest(
       99,
     ),
   );
+  const moveScore = moveInterest(factors);
+  const refuses = moveScore < MOVE_REFUSAL_THRESHOLD;
+  const concerns = factors
+    .filter((entry) => entry.impact <= -5)
+    .sort((left, right) => left.impact - right.impact)
+    .map((entry) => entry.reason);
+  const withoutWages =
+    60 + factors.reduce((total, entry) => total + (entry.id === "wages" ? 0 : entry.impact), 0);
   return {
     score,
-    stance:
-      score >= 75
-        ? "Very interested"
-        : score >= 60
-          ? "Interested"
-          : score >= 40
-            ? "Open to talks"
-            : score >= 25
-              ? "Needs convincing"
-              : "Not interested",
+    moveScore,
+    refuses,
+    thresholds: { negotiate: MOVE_REFUSAL_THRESHOLD, agree: PERSONAL_TERMS_THRESHOLD },
+    stance: interestStance(score, refuses),
     expectedRole,
     expectedWage,
+    wageToAgree: refuses
+      ? null
+      : wageForInterest(expectedWage, PERSONAL_TERMS_THRESHOLD - withoutWages),
     factors,
-    concerns: factors
-      .filter((entry) => entry.impact <= -5)
-      .sort((left, right) => left.impact - right.impact)
-      .map((entry) => entry.reason),
+    concerns: refuses
+      ? [
+          renewal
+            ? `Not interested in a new contract at ${buyer.name}: better wages cannot change that.`
+            : `Not interested in joining ${buyer.name}: better wages cannot make this move attractive.`,
+          ...concerns,
+        ]
+      : concerns,
   };
 }
 const SAFEGUARDS = [
@@ -526,13 +685,9 @@ export async function assessYouthTransfer(
   const trainingClubId = canApproachWithoutFee
     ? (profile.contract?.trainingClubId ?? currentClub?.id ?? null)
     : null;
-  const trainingYears = Math.max(
-    1,
-    Math.min(player.age, 21) - (profile.contract?.trainingStartAge ?? 12),
-  );
   const compensation =
     trainingClubId && trainingClubId !== buyer.id
-      ? Math.round(trainingYears * clamp(buyer.academy * 150, 2500, 15000))
+      ? trainingCompensationFee(player.age, profile.contract?.trainingStartAge ?? 12, buyer.academy)
       : 0;
   return {
     ...route,

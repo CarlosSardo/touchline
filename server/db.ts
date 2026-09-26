@@ -503,7 +503,9 @@ export function sqlPoolConfig(settings: SqlSettings): Sql.config {
             options: { clientId: settings.managedIdentityClientId },
           },
         }),
-    pool: { min: 0, max: 4, idleTimeoutMillis: 10000 },
+    // Each new connection pays TLS, login and a fresh Entra token; keep one warm while a player reads a screen.
+    // 10 shared by all accounts: parallel readers must not queue behind a few slow scans (GP_S_Gen5_2 allows 150 workers).
+    pool: { min: 0, max: 10, idleTimeoutMillis: 60000 },
     connectionTimeout: 60000,
     requestTimeout: settings.requestTimeout,
     options: {
@@ -523,6 +525,7 @@ interface TransactionContext {
   tail: Promise<void>;
   active: boolean;
   locked: boolean;
+  readOnly: boolean;
   rolledBack: boolean;
   failed: boolean;
   failure?: unknown;
@@ -703,7 +706,9 @@ export class Store {
         this.bind(request, prepared.parameters);
         return (await request.query<Result>(prepared.sql)).recordset ?? [];
       });
-    return prepared.writes ? this.atomic(execute) : execute();
+    if (!prepared.writes) return execute();
+    this.assertWritable();
+    return this.atomic(execute);
   }
 
   async get<Result>(
@@ -714,6 +719,7 @@ export class Store {
   }
 
   async run(sql: string, ...params: SqlParameter[]): Promise<RunResult> {
+    this.assertWritable();
     const prepared = bindSql(sql, params, this.schemaName);
     return this.atomic(async () =>
       this.request(async (request) => {
@@ -734,6 +740,7 @@ export class Store {
   }
 
   async exec(sql: string, ...params: SqlParameter[]): Promise<void> {
+    this.assertWritable();
     const prepared = bindSql(sql, params, this.schemaName);
     await this.atomic(async () =>
       this.request(async (request) => {
@@ -774,6 +781,28 @@ export class Store {
       return callback();
     }
     return this.atomic(callback);
+  }
+
+  /**
+   * A read-only transaction under the world lock in SHARED mode: readers run side by side, yet every writer
+   * (which takes the lock exclusively) still waits for them and they for it. Any write inside it throws.
+   * Inside another transaction or batched() it just runs the callback there.
+   */
+  async readTransaction<Result>(callback: () => Promise<Result>): Promise<Result> {
+    this.assertOpen();
+    if (this.context.getStore() || this.batchContext.getStore()) return callback();
+    const operation = this.startTransaction(callback, true, true);
+    this.activeTransactions.add(operation);
+    try {
+      return await operation;
+    } finally {
+      this.activeTransactions.delete(operation);
+    }
+  }
+
+  private assertWritable(): void {
+    if (this.context.getStore()?.readOnly)
+      throw new Error("A read-only SQL transaction cannot write.");
   }
 
   /**
@@ -841,6 +870,7 @@ export class Store {
   private async startTransaction<Result>(
     callback: () => Promise<Result>,
     acquireLock = true,
+    shared = false,
   ): Promise<Result> {
     const transaction = new this.driver.Transaction(this.pool);
     const context: TransactionContext = {
@@ -848,6 +878,7 @@ export class Store {
       tail: Promise.resolve(),
       active: true,
       locked: false,
+      readOnly: shared,
       rolledBack: false,
       failed: false,
     };
@@ -869,11 +900,12 @@ export class Store {
           );
           await request.query(`SET XACT_ABORT ON;
             DECLARE @lockResult INT;
-            EXEC @lockResult = sys.sp_getapplock @Resource = @worldLock, @LockMode = N'Exclusive',
+            EXEC @lockResult = sys.sp_getapplock @Resource = @worldLock, @LockMode = N'${shared ? "Shared" : "Exclusive"}',
               @LockOwner = N'Transaction', @LockTimeout = 30000;
-            IF @lockResult < 0 THROW 51000, N'Touchline world writer lock could not be acquired.', 1;`);
+            IF @lockResult < 0 THROW 51000, N'Touchline world ${shared ? "reader" : "writer"} lock could not be acquired.', 1;`);
         });
-        context.locked = true;
+        // Only the exclusive lock is a writer lock (clearWorld requires one).
+        context.locked = !shared;
         const result = await callback();
         await context.tail;
         if (context.failed) throw context.failure;
@@ -1029,6 +1061,7 @@ export class Store {
   }
 
   async bulkInsert(table: string, rows: readonly object[]): Promise<void> {
+    this.assertWritable();
     table = this.knownTable(table);
     if (!rows.length) return;
     await this.atomic(async () => {

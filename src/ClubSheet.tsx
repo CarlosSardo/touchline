@@ -19,6 +19,10 @@ import {
 } from "./ui.tsx";
 import { compactNumber, dateLabel } from "../shared/rules.ts";
 import type { ClubDetail } from "../shared/api.ts";
+import ClubTransfers from "./ClubTransfers.tsx";
+import { NationalTeamPanel } from "./NationalTeam.tsx";
+import { SheetOriginContext } from "./sheet-trail.ts";
+import { seasonText } from "./format.ts";
 
 export default function ClubSheet() {
   const { clubProfileId, setClub, openLeague, bootstrap } = useGame();
@@ -31,6 +35,7 @@ export default function ClubSheet() {
   if (!clubProfileId) return null;
   return (
     <Modal title="Team profile" wide onClose={() => setClub(null)}>
+      <SheetOriginContext value={data ? { clubId: data.club.id, clubName: data.club.name } : null}>
       {error ? (
         <div className="sheet-body">
           <ErrorState message={error} />
@@ -46,7 +51,9 @@ export default function ClubSheet() {
                 <Badge tone="blue">{data.country.confederation}</Badge>
                 <Badge tone="green">
                   {data.club.type === "national"
-                    ? `${data.club.age_group} national team`
+                    ? data.club.age_group === "Senior"
+                      ? "National team"
+                      : `${data.club.age_group} national team`
                     : data.club.type === "bteam"
                       ? "Reserve team"
                       : (data.club.league_name ?? "Club")}
@@ -90,8 +97,14 @@ export default function ClubSheet() {
           <Tabs
             items={[
               { id: "overview", label: "Overview" },
+              ...(data.club.type === "national"
+                ? [{ id: "selection", label: "Selection" }]
+                : []),
               { id: "squad", label: "Squads", count: data.players.length },
               { id: "fixtures", label: "Fixtures & results" },
+              ...(data.club.type !== "national"
+                ? [{ id: "transfers", label: "Transfers" }]
+                : []),
               { id: "staff", label: "Staff" },
               ...(data.club.type !== "national"
                 ? [
@@ -209,9 +222,17 @@ export default function ClubSheet() {
               </div>
             </div>
           )}
+          {tab === "selection" && data.club.type === "national" && (
+            <div className="profile-body">
+              <NationalTeamPanel teamId={data.club.id} />
+            </div>
+          )}
           {tab === "affiliates" && (
             <div className="profile-body">
               <SectionHeading title="Affiliate network" />
+              {!data.affiliates.length && (
+                <Empty icon={Users} title="No affiliate clubs" detail="This club has no partnership or feeder agreements." />
+              )}
               {data.affiliates.map((affiliate) => (
                 <div className="club-affiliate-row" key={affiliate.id}>
                   <ClubLink
@@ -279,6 +300,11 @@ export default function ClubSheet() {
               </div>
             </div>
           )}
+          {tab === "transfers" && data.club.type !== "national" && (
+            <div className="profile-body">
+              <ClubTransfers key={data.club.id} clubId={data.club.id} />
+            </div>
+          )}
           {tab === "staff" && (
             <>
               <SectionHeading
@@ -286,7 +312,7 @@ export default function ClubSheet() {
                 subtitle={data.club.manager}
               />
               {data.staff.length ? (
-                <div className="table-scroll">
+                <div className="table-scroll" data-no-swipe role="region" aria-label="Staff" tabIndex={0}>
                   <table className="data-table">
                     <thead>
                       <tr>
@@ -315,7 +341,11 @@ export default function ClubSheet() {
               ) : (
                 <Empty
                   icon={Users}
-                  title="Managed by the national association"
+                  title={
+                    data.club.type === "national"
+                      ? "Managed by the national association"
+                      : "No staff recorded"
+                  }
                 />
               )}
             </>
@@ -338,7 +368,7 @@ export default function ClubSheet() {
                         </strong>
                         <p>
                           {entry.entity_type === "champion"
-                            ? `Champions / ${entry.season}-${String(entry.season + 1).slice(-2)}`
+                            ? `Champions / ${seasonText(entry.season)}`
                             : `${event.appointed} succeeded ${event.departed}`}
                         </p>
                       </span>
@@ -350,13 +380,14 @@ export default function ClubSheet() {
                 <Empty
                   icon={Landmark}
                   title="The club's story begins here"
-                  detail="Simulated honors and managerial changes will be recorded by season."
+                  detail="Simulated honours and managerial changes will be recorded by season."
                 />
               )}
             </div>
           )}
         </>
       )}
+      </SheetOriginContext>
     </Modal>
   );
 }

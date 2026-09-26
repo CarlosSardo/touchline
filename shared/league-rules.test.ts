@@ -9,8 +9,12 @@ import {
   createPlayoff,
   halvedPoints,
   lastStageTies,
+  leagueDateOptions,
   leagueDates,
+  leagueTiebreakers,
+  matchGoalFactor,
   miniLeagueRounds,
+  needsHeadToHead,
   pairQualifyingRound,
   planBoundaries,
   planMovement,
@@ -106,6 +110,73 @@ describe("season dates", () => {
     expect(dates.every((date) => !internationalBreak(date))).toBe(true);
     expect(dates.length).toBeGreaterThanOrEqual(8);
     expect(addDays(dates[0], 3)).toBe(dates[1]);
+  });
+
+  it("uses each league's real calendar: opening weekend, last day, winter break and protected dates", () => {
+    expect(leagueDateOptions("L:XX:1", 2026)).toEqual({});
+    const bundesliga = leagueDates(2026, 34, leagueDateOptions("L:DE:1", 2026));
+    expect(bundesliga).toHaveLength(34);
+    expect(bundesliga[0]).toBe("2026-08-29");
+    expect(bundesliga.at(-1)! <= "2027-05-22").toBe(true);
+    expect(bundesliga.some((date) => date >= "2026-12-21" && date <= "2027-01-08")).toBe(false);
+    expect(bundesliga).not.toContain("2027-05-01");
+    expect(bundesliga.filter((date) => date < "2026-12-21").at(-1)).toBe("2026-12-19");
+    const second = leagueDates(2026, 34, leagueDateOptions("L:DE:2", 2026));
+    expect(second.some((date) => date > "2026-12-20" && date < "2027-01-15")).toBe(false);
+    for (const [key, first, last] of [
+      ["L:EN:1", "2026-08-22", "2027-05-30"],
+      ["L:ES:1", "2026-08-15", "2027-05-30"],
+      ["L:IT:1", "2026-08-22", "2027-05-30"],
+      ["L:NL:1", "2026-08-08", "2027-05-23"],
+    ]) {
+      const dates = leagueDates(2026, 38, leagueDateOptions(key, 2026));
+      expect(dates[0], key).toBe(first);
+      expect(dates.at(-1)! <= last, key).toBe(true);
+      expect(dates.every((date) => !internationalBreak(date)), key).toBe(true);
+    }
+  });
+});
+
+describe("real ranking criteria", () => {
+  const standing = (club_id: number, points: number, gf: number, ga: number, wins = 0) => ({
+    club_id,
+    points,
+    gf,
+    ga,
+    wins,
+    group_name: "",
+  });
+  const rows = [standing(1, 60, 60, 30, 17), standing(2, 60, 50, 30, 18), standing(3, 50, 40, 40, 14)];
+  const results = [
+    { home_id: 1, away_id: 2, home_goals: 0, away_goals: 1 },
+    { home_id: 2, away_id: 1, home_goals: 1, away_goals: 1 },
+    { home_id: 1, away_id: 3, home_goals: 5, away_goals: 0 },
+  ];
+
+  it("ranks LaLiga and Serie A ties on head-to-head first, MLS on wins, the rest on goal difference", () => {
+    const ranked = (key: string) =>
+      rankTable(rows, undefined, { tiebreakers: leagueTiebreakers(key), results }).map((row) => row.club_id);
+    expect(ranked("L:ES:1")).toEqual([2, 1, 3]);
+    expect(ranked("L:IT:1")).toEqual([2, 1, 3]);
+    expect(ranked("L:US:1")).toEqual([2, 1, 3]);
+    expect(ranked("L:EN:1")).toEqual([1, 2, 3]);
+    expect(rankTable(rows).map((row) => row.club_id)).toEqual([1, 2, 3]);
+    expect(needsHeadToHead(leagueTiebreakers("L:ES:1"))).toBe(true);
+    expect(needsHeadToHead(leagueTiebreakers("L:US:1"))).toBe(false);
+  });
+
+  it("reads the catalog criteria even from older league snapshots", () => {
+    expect(readLeagueData({ catalogKey: "L:ES:1", tiebreakers: ["Points", "Goal difference", "Goals scored"] }, 1).tiebreakers).toEqual(
+      leagueTiebreakers("L:ES:1"),
+    );
+    expect(readLeagueData({ catalogKey: "L:EN:1" }, 1).tiebreakers).toEqual(["Points", "Goal difference", "Goals scored"]);
+  });
+
+  it("scales scoring by league: high-scoring Bundesliga and Eredivisie, lower second tiers", () => {
+    expect(matchGoalFactor("DE", 1)).toBeGreaterThan(1.05);
+    expect(matchGoalFactor("ES", 1)).toBeLessThan(1);
+    expect(matchGoalFactor("ES", 2)).toBeLessThan(matchGoalFactor("ES", 1));
+    expect(matchGoalFactor(undefined, undefined)).toBe(1);
   });
 });
 

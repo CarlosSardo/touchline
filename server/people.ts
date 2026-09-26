@@ -19,6 +19,7 @@ import {
   PERSONALITY_KEYS,
   ageOn,
   clamp,
+  daysBetween,
   valuation,
 } from "../shared/rules.ts";
 import type { Club, Country, PlayerProfile, Position } from "../shared/types.ts";
@@ -924,6 +925,145 @@ export function birthDateForAge(random: Rng, age: number, date: string): string 
   const monthDay = `${pad(weightedIndex(MONTH_WEIGHTS, random()) + 1)}-${pad(1 + Math.floor(random() * 28))}`;
   const year = Number(date.slice(0, 4)) - age - (monthDay > date.slice(5, 10) ? 1 : 0);
   return `${year}-${monthDay}`;
+}
+
+// ------------------------------------------------------------------ careers (pure): retirement and staff
+
+/** Every career-end and staff-lifecycle rate in one place (heuristics tuned by the retirement/staff probes). */
+export const CAREER_RULES = {
+  retirement: {
+    /** Onset age: 31 at ability <= 45, +1 per 12 ability above that (max +3); goalkeepers `keeperDelay` years later. */
+    onsetBase: 32,
+    onsetAbilityFrom: 45,
+    onsetAbilityStep: 12,
+    onsetMaxBonus: 3,
+    keeperDelay: 3,
+    /** Chance at the onset, then per year beyond it. */
+    atOnset: 0.08,
+    perYear: { outfield: 0.12, keeper: 0.14 },
+    /** The two seasons before the onset. */
+    earlyChance: 0.02,
+    /** Multiplier by contract years left (0, 1, 2+): players rarely walk away from a running deal. */
+    contractFactor: [1, 0.3, 0.12],
+    /** Club-less players (30+) stop sooner: before / from the onset. */
+    clubless: { early: 0.12, late: 0.25, from: 30 },
+    /** A long injury near the end of a career often finishes it. */
+    injuryDays: 120,
+    injury: 0.2,
+    /** Age at which everyone has stopped. */
+    last: { outfield: 41, keeper: 44 },
+    max: 0.95,
+  },
+  staff: {
+    /** Age range drawn for staff without a recorded birth year. */
+    startAge: [33, 62],
+    maxCeiling: 95,
+    /** Share of the gap to the personal ceiling closed per four-week pass, scaled by 0.5 + ambition/100. */
+    growth: 0.04,
+    /** From this age a four-week pass costs one ability point with `declineChance`. */
+    declineFrom: 60,
+    declineChance: 0.2,
+    /** Morale drifts back toward a personality baseline (share of the distance per pass). */
+    moraleTarget: { Ambitious: 58, Collaborative: 70, default: 65 } as Readonly<Record<string, number>>,
+    moraleReversion: 0.15,
+    /** Yearly retirement chance from `retireFrom` (+`retirePerYear` per year); everyone stops at `retireAlways`. */
+    retireFrom: 63,
+    retireAt: 0.12,
+    retirePerYear: 0.1,
+    retireAlways: 70,
+    /** The user's staff are extended automatically at expiry, except from this age (they retire). */
+    userRetireAt: 66,
+    contractYears: [2, 4],
+    /** AI clubs renew an expiring staff contract with this chance, otherwise replace the person. */
+    renewChance: 0.7,
+    renewalRaise: 1.04,
+    /** Contract expiries handled per day (the rest wait for the next day). */
+    expiryBatch: 120,
+  },
+} as const;
+
+/** Whole contract years left on `date` (a deal ending on 30 June counts as 0 on 1 July). */
+export function contractYearsLeft(contractEnd: string | null | undefined, date: string) {
+  if (!contractEnd || contractEnd <= date) return 0;
+  return Math.max(0, Math.round(daysBetween(date, contractEnd) / 365.25));
+}
+
+/** Retirement onset age: ability lengthens careers, goalkeepers play on about three years longer. */
+export function retirementOnset(ability: number, position: Position | string) {
+  const rule = CAREER_RULES.retirement;
+  return (
+    rule.onsetBase +
+    clamp(Math.round((ability - rule.onsetAbilityFrom) / rule.onsetAbilityStep), 0, rule.onsetMaxBonus) +
+    (position === "GK" ? rule.keeperDelay : 0)
+  );
+}
+
+/**
+ * Chance that a senior retires at the end of a season. Position (keepers later), remaining contract years (a player
+ * on a running deal rarely stops), a long injury late in a career and being club-less all count.
+ */
+export function seniorRetirementChance(input: {
+  age: number;
+  ability: number;
+  position: Position | string;
+  contractYears?: number;
+  clubless?: boolean;
+  injuryDays?: number;
+}) {
+  const rule = CAREER_RULES.retirement;
+  const keeper = input.position === "GK";
+  if (input.age >= (keeper ? rule.last.keeper : rule.last.outfield)) return 1;
+  const onset = retirementOnset(input.ability, input.position);
+  let chance =
+    input.age >= onset
+      ? rule.atOnset + (input.age - onset) * rule.perYear[keeper ? "keeper" : "outfield"]
+      : input.age >= onset - 2
+        ? rule.earlyChance
+        : 0;
+  if (input.clubless && input.age >= rule.clubless.from) chance += input.age >= onset ? rule.clubless.late : rule.clubless.early;
+  if ((input.injuryDays ?? 0) >= rule.injuryDays && input.age >= onset - 2) chance += rule.injury;
+  chance *= rule.contractFactor[Math.min(rule.contractFactor.length - 1, Math.max(0, input.contractYears ?? 0))];
+  return clamp(chance, 0, rule.max);
+}
+
+export interface StaffCareer {
+  birthYear: number;
+  ceiling: number;
+}
+
+/** Birth year and personal ability ceiling for a staff member who has none yet (young, ambitious staff have headroom). */
+export function staffCareerDefaults(staff: { ability: number; ambition: number }, year: number, random: Rng): StaffCareer {
+  const rule = CAREER_RULES.staff;
+  const age = integer(random, rule.startAge[0], rule.startAge[1]);
+  const headroom = age < 42 ? 6 + staff.ambition / 8 : age < 52 ? 3 + staff.ambition / 20 : 1;
+  return {
+    birthYear: year - age,
+    ceiling: Math.round(clamp(staff.ability + headroom * (0.5 + random()), Math.min(staff.ability, rule.maxCeiling), rule.maxCeiling)),
+  };
+}
+
+/** One four-week step of staff ability: growth toward the ceiling, slow decline from 60, drift back when above it. */
+export function staffDevelopment(input: { ability: number; ceiling: number; age: number; ambition: number }, roll: number) {
+  const rule = CAREER_RULES.staff;
+  if (input.age >= rule.declineFrom) return Math.max(1, input.ability - (roll < rule.declineChance ? 1 : 0));
+  if (input.ability > input.ceiling) return input.ability - 1;
+  const gain = (input.ceiling - input.ability) * rule.growth * (0.5 + input.ambition / 100);
+  return Math.min(input.ceiling, input.ability + Math.floor(gain) + (roll < gain - Math.floor(gain) ? 1 : 0));
+}
+
+/** One four-week step of staff morale: part of the way back to the personality's baseline. */
+export function staffMorale(morale: number, personality: string) {
+  const rule = CAREER_RULES.staff;
+  const target = rule.moraleTarget[personality] ?? rule.moraleTarget.default;
+  return Math.round(clamp(morale + (target - morale) * rule.moraleReversion, 1, 99) * 10) / 10;
+}
+
+/** Yearly chance that a staff member retires. */
+export function staffRetirementChance(age: number) {
+  const rule = CAREER_RULES.staff;
+  if (age >= rule.retireAlways) return 1;
+  if (age < rule.retireFrom) return 0;
+  return clamp(rule.retireAt + (age - rule.retireFrom) * rule.retirePerYear, 0, 1);
 }
 
 export async function insertPlayers(

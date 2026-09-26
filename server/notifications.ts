@@ -1,13 +1,139 @@
+import seedrandom from "seedrandom";
 import { z } from "zod";
 import type { Store } from "./db.ts";
 import {
   addDays,
+  ageOn,
+  daysBetween,
   DEFAULT_COMPETITION_ALERTS,
   NOTIFICATION_TOPICS,
 } from "../shared/rules.ts";
 import { GameError, news, settingsOf, stateOf } from "./systems.ts";
-import type { Fixture, League, NewsItem } from "../shared/types.ts";
+import { CAREER_RULES, contractYearsLeft, seniorRetirementChance } from "./people.ts";
+import type { Fixture, League, NewsItem, Player } from "../shared/types.ts";
 import type { CompetitionFavorite } from "../shared/api.ts";
+
+/** Day (MM-DD) of the spring squad notice: retirements at the end of the season and contracts ending on 30 June. */
+export const SQUAD_NOTICE_DAY = "05-01";
+/** Youngest senior whose retirement is considered in the notice. */
+const NOTICE_MIN_AGE = 30;
+
+/** Meta `retirementNotice`: the user's family players who retire at the end of `season` (decided in May). */
+export interface RetirementNotice {
+  season: number;
+  date: string;
+  playerIds: number[];
+}
+
+/** The spring decision for the season ending on this rollover (`finishedSeason`), if one was made. */
+export async function retirementNotice(store: Store, finishedSeason: number): Promise<ReadonlySet<number> | undefined> {
+  const row = await store.get<{ value: string }>("SELECT [value] FROM meta WHERE [key] = 'retirementNotice'");
+  const notice = row ? (JSON.parse(row.value) as RetirementNotice) : undefined;
+  return notice?.season === finishedSeason ? new Set(notice.playerIds) : undefined;
+}
+
+/** Deterministic spring retirement decision (same seed, season and player always give the same answer). */
+export function plannedRetirement(
+  seed: string,
+  season: number,
+  player: Pick<Player, "id" | "birth_date" | "ability" | "position" | "contract_end" | "injury_until">,
+  date: string,
+) {
+  const end = `${season + 1}-07-01`;
+  const chance = seniorRetirementChance({
+    age: ageOn(player.birth_date, end),
+    ability: player.ability,
+    position: player.position,
+    contractYears: contractYearsLeft(player.contract_end, end),
+    injuryDays: player.injury_until && player.injury_until > date ? daysBetween(date, player.injury_until) : 0,
+  });
+  return seedrandom(`${seed}:retire-plan:${season}:${player.id}`)() < chance;
+}
+
+const nameList = (names: string[], limit = 8) =>
+  names.length > limit ? `${names.slice(0, limit).join(", ")} and ${names.length - limit} more` : names.join(", ");
+
+/**
+ * 1 May: the club family's seniors who will retire at the end of the season (the rollover honours this list for the
+ * user's clubs), and the player and staff contracts that end on 30 June across first team, B-teams, youth and loans.
+ * Work: one family query, one senior query, one contract query and one staff query per season.
+ */
+export async function processSquadNotices(store: Store) {
+  const state = await stateOf(store);
+  if (state.date.slice(5) !== SQUAD_NOTICE_DAY || Number(state.date.slice(0, 4)) !== state.season + 1) return;
+  if (await retirementNotice(store, state.season)) return;
+  const end = `${state.season + 1}-06-30`;
+  const clubs = await store.all<{ id: number; name: string }>("SELECT id,name FROM clubs WHERE id = ? OR parent_id = ?", state.clubId, state.clubId);
+  const family = JSON.stringify(clubs.map((club) => club.id));
+  const inFamily = "(SELECT CAST([value] AS int) FROM OPENJSON(?))";
+  const seniors = await store.all<Player>(
+    `SELECT id,name,position,ability,birth_date,contract_end,injury_until,club_id,squad_club_id FROM players WHERE club_id IN ${inFamily} AND parent_club_id IS NULL AND age_group = 'Senior' AND role != 'Retired' AND birth_date <= ?`,
+    family,
+    `${state.season + 1 - NOTICE_MIN_AGE}-07-01`,
+  );
+  const retiring = seniors.filter((player) => plannedRetirement(state.seed, state.season, player, state.date));
+  await store.setMeta("retirementNotice", { season: state.season, date: state.date, playerIds: retiring.map((player) => player.id) } satisfies RetirementNotice);
+  if (retiring.length) {
+    await store.run(
+      "UPDATE target SET profile = JSON_MODIFY(target.profile,'$.retirementPlan',JSON_QUERY(?)) FROM players AS target WHERE target.id IN (SELECT CAST([value] AS int) FROM OPENJSON(?))",
+      JSON.stringify({ season: state.season, announced: state.date }),
+      JSON.stringify(retiring.map((player) => player.id)),
+    );
+    await news(
+      store,
+      "Squad",
+      retiring.length === 1 ? `${retiring[0].name} will retire at the end of the season` : `${retiring.length} players will retire at the end of the season`,
+      `${nameList(retiring.map((player) => `${player.name} (${ageOn(player.birth_date, `${state.season + 1}-07-01`)}, ${player.position})`))} ${retiring.length === 1 ? "has" : "have"} told the club that this season is the last. Plan the replacements before 1 July.`,
+      "important",
+      "squad",
+      { playerIds: retiring.map((player) => player.id), retirementNotice: true },
+    );
+  }
+  const planned = new Set(retiring.map((player) => player.id));
+  const expiring = (
+    await store.all<Player>(
+      `SELECT id,name,age_group,club_id,squad_club_id,parent_club_id,contract_end FROM players WHERE ((club_id IN ${inFamily} AND parent_club_id IS NULL) OR parent_club_id IN ${inFamily}) AND role != 'Retired' AND contract_end >= ? AND contract_end <= ? AND coalesce(JSON_VALUE(profile,'$.contract.status'),'professional') = 'professional' ORDER BY contract_end,ability DESC,id`,
+      family,
+      family,
+      state.date,
+      end,
+    )
+  ).filter((player) => !planned.has(player.id));
+  if (expiring.length) {
+    const clubName = new Map(clubs.map((club) => [club.id, club.name]));
+    const groups = new Map<string, string[]>();
+    for (const player of expiring) {
+      const label = player.parent_club_id
+        ? "On loan"
+        : `${clubName.get(player.squad_club_id ?? player.club_id!) ?? "Club"}${player.age_group === "Senior" ? "" : ` ${player.age_group}`}`;
+      groups.set(label, [...(groups.get(label) ?? []), player.name]);
+    }
+    await news(
+      store,
+      "Squad",
+      `${expiring.length} contract${expiring.length === 1 ? "" : "s"} end on 30 June`,
+      `${[...groups].map(([label, names]) => `${label}: ${nameList(names)}`).join(". ")}. Renew the players you want to keep; the others leave on a free transfer.`,
+      "warning",
+      "squad",
+      { playerIds: expiring.map((player) => player.id), contractNotice: true },
+    );
+  }
+  const staff = await store.all<{ name: string; role: string }>(
+    "SELECT name,role FROM staff WHERE club_id = ? AND JSON_VALUE(data,'$.contractEnd') BETWEEN ? AND ? ORDER BY id",
+    state.clubId,
+    state.date,
+    end,
+  );
+  if (staff.length)
+    await news(
+      store,
+      "Staff",
+      `${staff.length} staff contract${staff.length === 1 ? "" : "s"} end on 30 June`,
+      `${nameList(staff.map((member) => `${member.name} (${member.role})`))}. They are extended for two years unless released; staff aged ${CAREER_RULES.staff.userRetireAt} or over retire instead.`,
+      "info",
+      "staff",
+    );
+}
 
 export async function notificationVisibility(store: Store) {
   const settings = await settingsOf(store);
@@ -159,6 +285,8 @@ export async function favoriteCompetition(
 }
 
 export async function processCompetitionNotifications(store: Store) {
+  // Daily notification pass: the spring squad notice rides along (it acts on one day a year).
+  await processSquadNotices(store);
   const state = await stateOf(store);
   const tomorrow = addDays(state.date, 1);
   for (const favorite of await competitionFavorites(store)) {

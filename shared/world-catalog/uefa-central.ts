@@ -282,7 +282,8 @@ Rödinghausen|town|NW|1
     cups: [
       // Real: 64 teams (Bundesliga, 2. Bundesliga, top four of the 3. Liga and regional cup winners); reserve sides excluded.
       { kind: "national", name: "DFB-Pokal", legs: 1, neutralFinal: true, continental: true },
-      { kind: "super", name: "DFL-Supercup", participants: ["champion", "cup-winner"], legs: 1, start: "08-16" },
+      // Renamed from DFL-Supercup; 22 August 2026, before the Bundesliga opens (28 August).
+      { kind: "super", name: "Franz Beckenbauer Supercup", participants: ["champion", "cup-winner"], legs: 1, start: "08-22" },
     ],
     youth: {
       U19: {

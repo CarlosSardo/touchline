@@ -296,6 +296,37 @@ export interface CheckpointSummary {
   tables: { name: string; rowCount: number; sha256: string }[];
 }
 
+/**
+ * Content identity of a checkpoint's world: format, schema, and every table's columns, row count and row digest.
+ * Unlike sha256/contentSha256 it ignores the manifest's createdAt/provenance, so two checkpoints of the same world match.
+ */
+export function worldDigest(summary: Pick<CheckpointSummary, "manifest" | "tables">): string {
+  const { manifest } = summary;
+  if (summary.tables.length !== manifest.tables.length)
+    throw new SaveFormatError("Checkpoint summary does not match its manifest.");
+  const tables = manifest.tables.map((table, index) => {
+    const rows = summary.tables[index];
+    if (rows.name !== table.name || rows.rowCount !== table.rowCount || !/^[a-f0-9]{64}$/.test(rows.sha256))
+      throw new SaveFormatError("Checkpoint summary does not match its manifest.");
+    return [
+      table.name,
+      table.columns.map((item) => [
+        item.name,
+        item.type,
+        item.nullable,
+        item.maxLength ?? null,
+        item.precision ?? null,
+        item.scale ?? null,
+      ]),
+      rows.rowCount,
+      rows.sha256,
+    ];
+  });
+  return createHash("sha256")
+    .update(JSON.stringify(["touchline-world", manifest.formatVersion, manifest.schemaVersion, tables]))
+    .digest("hex");
+}
+
 function limitsOf(overrides: Partial<SaveLimits> = {}): SaveLimits {
   const limits = { ...SAVE_LIMITS, ...overrides };
   for (const key of Object.keys(SAVE_LIMITS) as (keyof SaveLimits)[])

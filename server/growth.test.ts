@@ -8,11 +8,15 @@ import {
   heightShare,
   initialBody,
   peakHeightVelocityAge,
+  potentialVolatility,
+  weeklyDevelopment,
   weightAt,
   type BodyGrowth,
+  type DevelopmentInput,
 } from "./growth.ts";
-import { addDays } from "../shared/rules.ts";
+import { addDays, currentAttributes, potentialInfluences } from "../shared/rules.ts";
 import type { NationSpec } from "../shared/world-catalog/index.ts";
+import type { Player, PlayerProfile } from "../shared/types.ts";
 
 const average: BodyGrowth = { adultHeight: 181, adultWeight: 76, maturation: 0 };
 const catalog = (height: number) => ({
@@ -129,5 +133,107 @@ describe("initialBody and developBody", () => {
     expect(identity.growth?.adultHeight).toBeGreaterThan(170);
     expect(identity.height).toBeGreaterThanOrEqual(165);
     expect(result.spurt).toBe(true);
+  });
+});
+
+type Career = Partial<DevelopmentInput> & { from: number; to: number };
+
+/** Season-end abilities of a player developed weekly from `from` to `to` (no potential noise unless given). */
+function footballCareer(input: Career) {
+  let state = { ability: input.ability ?? 30, potential: input.potential ?? 75, bank: 0 };
+  const trace = new Map<number, number>([[input.from, state.ability]]);
+  for (let week = 0; week < (input.to - input.from) * 52; week++) {
+    state = weeklyDevelopment({
+      goalkeeper: false,
+      minutesShare: 0.5,
+      environment: 1,
+      professionalism: 50,
+      injured: false,
+      drift: 0,
+      volatility: 0,
+      noise: 0,
+      ...input,
+      ...state,
+      age: input.from + week / 52,
+    });
+    if ((week + 1) % 52 === 0) trace.set(input.from + (week + 1) / 52, state.ability);
+  }
+  return trace;
+}
+
+describe("football development", () => {
+  it("grows steeply from 16 to 21, peaks in the mid-to-late twenties and declines gradually from 30", () => {
+    const trace = footballCareer({ from: 15, to: 37 });
+    const at = (age: number) => trace.get(age)!;
+    expect(at(18) - at(15)).toBeGreaterThan(at(27) - at(24));
+    expect((at(21) - at(15)) / (75 - 30)).toBeGreaterThan(0.4);
+    const peak = [...trace].reduce((best, entry) => (entry[1] > best[1] ? entry : best));
+    expect(peak[0]).toBeGreaterThanOrEqual(24);
+    expect(peak[0]).toBeLessThanOrEqual(31);
+    expect(at(30) - at(31)).toBeLessThan(1.5);
+    expect(at(30) - at(35)).toBeGreaterThan(4);
+    expect(at(30) - at(35)).toBeLessThan(16);
+    expect(at(33) - at(34)).toBeGreaterThan(at(30) - at(31));
+  });
+
+  it("develops and ages goalkeepers later", () => {
+    const outfield = footballCareer({ from: 28, to: 34, ability: 75, potential: 75 });
+    const keeper = footballCareer({ from: 28, to: 34, ability: 75, potential: 75, goalkeeper: true });
+    expect(keeper.get(34)!).toBeGreaterThan(outfield.get(34)! + 2);
+    expect(keeper.get(31)!).toBeGreaterThanOrEqual(74);
+  });
+
+  it("grows faster with minutes, training and professionalism", () => {
+    const grown = (input: Partial<DevelopmentInput>) => footballCareer({ from: 17, to: 20, ...input }).get(20)!;
+    expect(grown({ minutesShare: 0.9 })).toBeGreaterThan(grown({ minutesShare: 0.05 }) + 3);
+    expect(grown({ environment: 1.3 })).toBeGreaterThan(grown({ environment: 0.7 }));
+    expect(grown({ professionalism: 90 })).toBeGreaterThan(grown({ professionalism: 20 }));
+  });
+
+  it("declines slower with professionalism and good staff, faster when injured", () => {
+    const lost = (input: Partial<DevelopmentInput>) =>
+      80 - footballCareer({ from: 33, to: 34, ability: 80, potential: 80, ...input }).get(34)!;
+    expect(lost({ professionalism: 90 })).toBeLessThan(lost({ professionalism: 20 }));
+    expect(lost({ environment: 1.3 })).toBeLessThan(lost({ environment: 0.7 }));
+    expect(lost({ injured: true })).toBeGreaterThan(lost({}));
+    expect(lost({})).toBeGreaterThan(0.5);
+  });
+
+  it("keeps potential centred: no drift without influences, and unrealised potential fades after the early twenties", () => {
+    const young = weeklyDevelopment({ age: 18, goalkeeper: false, ability: 50, potential: 70, bank: 0, minutesShare: 0.5, environment: 1, professionalism: 50, injured: false, drift: 0, volatility: 15, noise: 0 });
+    expect(young.potential).toBe(70);
+    let state = { ability: 60, potential: 75, bank: 0 };
+    for (let week = 0; week < 52; week++)
+      state = weeklyDevelopment({ age: 27, goalkeeper: false, ...state, minutesShare: 0.5, environment: 1, professionalism: 50, injured: false, drift: 0, volatility: 5, noise: 0 });
+    expect(state.potential).toBeLessThan(72);
+    expect(state.potential).toBeGreaterThanOrEqual(state.ability);
+    expect(potentialVolatility(16)).toBeGreaterThan(potentialVolatility(26));
+  });
+
+  it("scores an average player at an average club close to zero on potential influences", () => {
+    const player = { age: 17, position: "CM", injury_until: null, morale: 70, potential: 70, volatility: 10 } as unknown as Player;
+    const profile = {
+      personality: { professionalism: 57, ambition: 57, discipline: 58, pressureHandling: 57 },
+      lifestyle: "gym-rat",
+      mentalHealth: { motivation: 75, burnout: 12, anxiety: 24, confidence: 65 },
+    } as unknown as PlayerProfile;
+    const context = { staff: 50, academy: 53, chemistry: 69, fit: 77, culture: "Family", director: 40, fans: 72, media: 50, tournament: 0, intensity: 60, lifestyleImpact: 60, performance: 0, minutesShare: 0.5 };
+    const average = potentialInfluences(player, profile, context);
+    expect(Math.abs(average.change * 52)).toBeLessThan(0.3);
+    expect(average.factors.lifestyle).toBe(0);
+    const starring = potentialInfluences(player, profile, { ...context, performance: 1, minutesShare: 0.95 });
+    const benched = potentialInfluences(player, profile, { ...context, performance: -0.5, minutesShare: 0.05 });
+    expect(starring.change).toBeGreaterThan(0);
+    expect(benched.change).toBeLessThan(0);
+    const veteran = potentialInfluences({ ...player, age: 31 } as Player, profile, { ...context, performance: 1, minutesShare: 0.95 });
+    expect(veteran.change).toBeLessThan(starring.change / 5);
+  });
+
+  it("gives the engine the attributes the player page shows", () => {
+    const profile = { baseAbility: 30, attributes: { technical: { finishing: 40 }, mental: {}, physical: { pace: 95 }, tactical: {}, goalkeeper: { reflexes: 20 } } } as unknown as PlayerProfile;
+    const current = currentAttributes(profile, 70);
+    expect(current.technical.finishing).toBe(80);
+    expect(current.physical.pace).toBe(99);
+    expect(currentAttributes(profile, 10).goalkeeper.reflexes).toBe(1);
   });
 });

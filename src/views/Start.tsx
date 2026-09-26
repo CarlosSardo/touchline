@@ -44,6 +44,7 @@ import {
   type ListedSave,
 } from "../save-rotation.ts";
 import { CareerSheet } from "./Settings.tsx";
+import { plural } from "../format.ts";
 import type { League } from "../../shared/types.ts";
 import type {
   Bootstrap,
@@ -578,7 +579,7 @@ export default function Start() {
                       ? "Loading saved careers..."
                       : savesError
                         ? "Saved careers unavailable"
-                        : `${groupCareerSaves(saves ?? []).length} saved careers`}
+                        : plural(groupCareerSaves(saves ?? []).length, "saved career")}
                   </small>
                 </span>
                 <ArrowRight size={18} />

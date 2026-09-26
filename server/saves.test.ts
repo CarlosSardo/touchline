@@ -25,6 +25,7 @@ import {
   readCheckpoint,
   validateCheckpoint,
   validateManifest,
+  worldDigest,
   writeCheckpoint,
   type CheckpointManifest,
   type CheckpointSchema,
@@ -923,6 +924,60 @@ if (process.env.SQL_SAVE_TESTS === "true") {
       }
     }, 300_000);
 
+    it("skips the pre-load archive only while the world equals the career's newest manual save", async () => {
+      const state = await store.meta<GameState>("state");
+      const files = async () => (await saves.list()).map((slot) => slot.file).sort();
+      const balance = async () =>
+        (await store.get<{ balance: number }>("SELECT balance FROM clubs WHERE id = ?", state.clubId))!.balance;
+
+      await store.setMeta("state", { ...state, careerId: "unchanged-load-career", careerName: "Unchanged load" });
+      const manual = await saves.create("Saved just before loading");
+      expect((await saves.list()).find((slot) => slot.file === manual.file)!.career).not.toHaveProperty("worldDigest");
+      const metadata = (await store.get<{ career_metadata: string }>(
+        "SELECT career_metadata FROM save_slots WHERE id = ?",
+        manual.file.replace(".touchline.gz", ""),
+      ))!.career_metadata;
+      expect(JSON.parse(metadata).worldDigest).toMatch(/^[a-f0-9]{64}$/);
+      const unchanged = await files();
+      expect(await saves.loadCareer(baseline.file)).toEqual({ archived: manual.file });
+      expect(await files()).toEqual(unchanged);
+
+      // Any change after the save, even one that keeps the date and every row count, gets a real archive.
+      await store.setMeta("state", { ...state, careerId: "changed-load-career", careerName: "Changed load" });
+      const saved = await saves.create("Saved before a transfer");
+      await store.run("UPDATE clubs SET balance = ? WHERE id = ?", 4321.5, state.clubId);
+      const changed = await saves.loadCareer(baseline.file);
+      expect(changed.archived).not.toBeNull();
+      expect(changed.archived).not.toBe(saved.file);
+      expect(await files()).toContain(changed.archived);
+      await saves.restore(changed.archived!);
+      expect(await balance()).toBe(4321.5);
+      expect((await store.meta<GameState>("state")).careerId).toBe("changed-load-career");
+
+      // Autosaves rotate after three, so an unchanged world with only an autosave is still archived.
+      await store.setMeta("state", { ...state, careerId: "autosave-load-career", careerName: "Autosave load" });
+      const autosave = await saves.create("Autosave", true);
+      const autosaved = await saves.loadCareer(baseline.file);
+      expect(autosaved.archived).not.toBeNull();
+      expect(autosaved.archived).not.toBe(autosave.file);
+
+      // An older manual save with the same world does not stand in for the newest one.
+      await store.setMeta("state", { ...state, careerId: "older-match-career", careerName: "Older match" });
+      const original = await balance();
+      const older = await saves.create("Older manual");
+      await store.run("UPDATE clubs SET balance = ? WHERE id = ?", original + 1, state.clubId);
+      const newer = await saves.create("Newer manual");
+      await store.run("UPDATE clubs SET balance = ? WHERE id = ?", original, state.clubId);
+      const reverted = await saves.loadCareer(baseline.file);
+      expect([older.file, newer.file, null]).not.toContain(reverted.archived);
+
+      // An unstarted world is never archived, and an unknown save is refused before anything happens.
+      await store.setMeta("state", { ...state, started: false });
+      expect(await saves.loadCareer(baseline.file)).toEqual({ archived: null });
+      await expect(saves.loadCareer("00000000-0000-4000-8000-000000000000.touchline.gz"))
+        .rejects.toMatchObject({ status: 404 });
+    }, 300_000);
+
     it("does not reuse a legacy unstarted world with an initialized inbox or archive it as a started career", async () => {
       const world = await import("./world.ts");
       const original = await store.meta<GameState>("state");
@@ -1163,5 +1218,135 @@ describe("streamed logical checkpoints (no database)", () => {
       "injected storage failure",
     );
     expect(broken.destroyed).toBe(true);
+  });
+});
+
+describe("career load speed-ups (no database)", () => {
+  async function write(input: CheckpointManifest, rows: (name: string) => unknown[][]) {
+    const chunks: Buffer[] = [];
+    const summary = await writeCheckpoint(
+      new Writable({
+        write(chunk, _encoding, callback) {
+          chunks.push(Buffer.from(chunk));
+          callback();
+        },
+      }),
+      input,
+      (table) => rows(table.name),
+    );
+    return { data: Buffer.concat(chunks), summary };
+  }
+  const counted = () => {
+    const input = manifest();
+    input.tables[0].rowCount = 1;
+    input.tables[1].rowCount = 1;
+    return input;
+  };
+  const world = (name: string) => (name === "meta" ? [["state", "{}"]] : [[42, "Northbridge"]]);
+
+  it("gives the same world the same digest whenever it was saved, and any change a new one", async () => {
+    const first = await write(counted(), world);
+    const later = await write({ ...counted(), createdAt: "2027-01-01T00:00:00.000Z" }, world);
+    expect(later.summary.sha256).not.toBe(first.summary.sha256);
+    expect(worldDigest(later.summary)).toBe(worldDigest(first.summary));
+    const changed = await write(counted(), (name) => (name === "meta" ? [["state", "{}"]] : [[42, "Southbridge"]]));
+    expect(worldDigest(changed.summary)).not.toBe(worldDigest(first.summary));
+    const widened = counted();
+    widened.tables[1].columns[1].maxLength = 300;
+    expect(worldDigest((await write(widened, world)).summary)).not.toBe(worldDigest(first.summary));
+    const read = await readCheckpoint(Readable.from([first.data]), { expected: schema });
+    expect(worldDigest(read)).toBe(worldDigest(first.summary));
+    expect(() => worldDigest({ ...first.summary, tables: first.summary.tables.slice(1) })).toThrow("does not match");
+  });
+
+  function chunkStore(chunks: { ordinal: number; data: Buffer }[], failFrom?: number) {
+    const reads: number[] = [];
+    const store = {
+      schemaName: "touchline_test_chunks",
+      async all(sql: string, _id: string, from: number) {
+        expect(sql).toContain("TOP (4)");
+        reads.push(from);
+        if (failFrom !== undefined && from >= failFrom) throw new Error("injected read failure");
+        return chunks
+          .filter((chunk) => chunk.ordinal >= from)
+          .slice(0, 4)
+          .map((chunk) => ({ ...chunk, byte_length: chunk.data.length }));
+      },
+    } as unknown as Store;
+    return { store, reads };
+  }
+  const pieces = (count: number) =>
+    Array.from({ length: count }, (_, ordinal) => ({ ordinal, data: Buffer.from(`chunk-${ordinal};`) }));
+  const length = (chunks: { data: Buffer }[]) => chunks.reduce((total, chunk) => total + chunk.data.length, 0);
+  const collect = async (iterable: AsyncIterable<Buffer>) => {
+    const parts: Buffer[] = [];
+    for await (const part of iterable) parts.push(part);
+    return Buffer.concat(parts);
+  };
+
+  it("reads save chunks four at a time in order and still refuses gaps, overruns and short saves", async () => {
+    const { storedChunks } = await import("./saves.ts");
+    for (const [count, reads] of [[8, [0, 4, 8]], [6, [0, 4]], [1, [0]]] as const) {
+      const chunks = pieces(count);
+      const fake = chunkStore(chunks);
+      expect(await collect(storedChunks(fake.store, { id: "slot", byte_length: length(chunks) }))).toEqual(
+        Buffer.concat(chunks.map((chunk) => chunk.data)),
+      );
+      expect(fake.reads).toEqual(reads);
+    }
+    const gap = pieces(6).filter((chunk) => chunk.ordinal !== 2);
+    await expect(collect(storedChunks(chunkStore(gap).store, { id: "slot", byte_length: length(gap) })))
+      .rejects.toThrow("missing");
+    const short = pieces(5);
+    await expect(collect(storedChunks(chunkStore(short).store, { id: "slot", byte_length: length(short) + 1 })))
+      .rejects.toThrow("incomplete");
+    await expect(collect(storedChunks(chunkStore([]).store, { id: "slot", byte_length: 0 })))
+      .rejects.toThrow("incomplete");
+    await expect(collect(storedChunks(chunkStore(pieces(8)).store, { id: "slot", byte_length: length(pieces(7)) })))
+      .rejects.toThrow("exceed");
+  });
+
+  it("settles an abandoned or failed prefetch without an unhandled rejection", async () => {
+    const { storedChunks } = await import("./saves.ts");
+    const chunks = pieces(8);
+    const abandoned = chunkStore(chunks, 4);
+    for await (const part of storedChunks(abandoned.store, { id: "slot", byte_length: length(chunks) })) {
+      expect(part).toEqual(chunks[0].data);
+      break;
+    }
+    expect(abandoned.reads).toEqual([0, 4]);
+    await expect(collect(storedChunks(chunkStore(chunks, 4).store, { id: "slot", byte_length: length(chunks) })))
+      .rejects.toThrow("injected read failure");
+  });
+
+  it("validates a checkpoint while writing exactly the validated bytes to a new private file", async () => {
+    const { writeThrough } = await import("./saves.ts");
+    const { data, summary } = await write(counted(), world);
+    const directory = await mkdtemp(join(tmpdir(), "touchline-write-through-"));
+    try {
+      const file = join(directory, "slot.touchline.gz");
+      const parts = [data.subarray(0, 7), data.subarray(7, 20), data.subarray(20)];
+      async function* source() {
+        yield* parts;
+      }
+      const streamed = await readCheckpoint(Readable.from(writeThrough(file, source()), { objectMode: false }), {
+        expected: schema,
+      });
+      expect(streamed).toEqual(summary);
+      expect(await readFile(file)).toEqual(data);
+      expect(await readCheckpoint(createReadStream(file), { expected: schema })).toEqual(summary);
+      await expect(readCheckpoint(Readable.from(writeThrough(file, source()), { objectMode: false })))
+        .rejects.toMatchObject({ code: "EEXIST" });
+      expect(await readFile(file)).toEqual(data);
+      async function* broken() {
+        yield data.subarray(0, 20);
+        throw new Error("injected download failure");
+      }
+      await expect(
+        readCheckpoint(Readable.from(writeThrough(join(directory, "broken.touchline.gz"), broken()), { objectMode: false })),
+      ).rejects.toThrow("injected download failure");
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 });

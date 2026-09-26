@@ -514,7 +514,7 @@ function clubEconomy(
   tier: Pick<LeagueTierSpec, "tier" | "reputation" | "size" | "roundRobins" | "conferences" | "split">,
   reputation: number,
   random: Rng,
-  options: { share?: number; players?: number } = {},
+  options: { share?: number; players?: number; countryCode?: string } = {},
 ) {
   const share = options.share ?? spanShare(model, reputation);
   const academy = Math.round(clamp(lerp(model.academy.bottom, model.academy.top, share) + integer(random, -6, 6), 1, 99));
@@ -532,6 +532,7 @@ function clubEconomy(
     capacity,
     fanMood: 72,
     homeMatches: Math.round(tierMatchdays(tier) / 2) + 2,
+    countryCode: options.countryCode,
   });
   // Even amateur clubs can pay every registered player's expense allowance (payroll ≤ wage budget).
   const players = options.players ?? (model.squadSize?.[1] ?? 30) + 48;
@@ -822,7 +823,7 @@ export function planWorld(
     const { place, token: cityToken, city } = chooseCity(state, input.city, prestige);
     const founded = foundedYear(naming, input.ownTier, input.ownTiers, random);
     const { name, token } = uniqueClubName(state, naming, input.ownTier, place.region, cityToken, founded, city);
-    const economy = clubEconomy(input.tier.clubs, input.tier, input.reputation, random);
+    const economy = clubEconomy(input.tier.clubs, input.tier, input.reputation, random, { countryCode: input.nation.code });
     const balance = economy.balance;
     const nation = input.naming;
     // Unlocated curated cities take a located city of the same region, else the nation's centre, so tiers stay geographic.
@@ -925,6 +926,7 @@ export function planWorld(
     const economy = clubEconomy(input.finance.clubs, input.finance, reputation, random, {
       share: 0,
       players: input.policy.squad?.[1] ?? 26,
+      countryCode: owner.code,
     });
     const founded = JSON.parse(String(parentRow.data)).founded as number;
     const key = reserveClubKey(parent.key);
@@ -1228,10 +1230,10 @@ export function planWorld(
     }
   }
 
-  // Pass 4: senior, U20, U19 and U17 national teams for every nation.
+  // Pass 4: senior, U21, U20, U19 and U17 national teams for every nation (NATIONAL_TEAM_AGES).
   for (const nation of nations) {
     const random = nationState(nation).random;
-    for (const [age, drop] of [["Senior", 0], ["U20", 3], ["U19", 5], ["U17", 6]] as const) {
+    for (const [age, drop] of [["Senior", 0], ["U21", 2], ["U20", 3], ["U19", 5], ["U17", 6]] as const) {
       const id = rows.clubs.length + 1;
       rows.clubs.push({
         id,
@@ -1300,6 +1302,8 @@ interface Slot {
   ageGroup: "Senior" | "U19" | "U17";
   position: Position;
   age: number;
+  /** Real age of a veteran (36-40) whose ratings were drawn at `age`. */
+  veteranAge?: number;
   represent: string;
   context: string;
   foreign: boolean;
@@ -1308,7 +1312,7 @@ interface Slot {
   familyMove?: NonNullable<PlayerProfile["familyMove"]>;
 }
 
-function squadSlots(club: PlanClub, squads: WorldPlan["squads"], random: Rng): Slot[] {
+function squadSlots(club: PlanClub, squads: WorldPlan["squads"], random: Rng, veteran: Rng): Slot[] {
   const slots: Slot[] = [];
   const add = (ageGroup: Slot["ageGroup"], size: number, age: () => number, share: number) => {
     const group = Array.from({ length: size }, (_, index): Slot => {
@@ -1346,6 +1350,11 @@ function squadSlots(club: PlanClub, squads: WorldPlan["squads"], random: Rng): S
   const [minimum, maximum] = club.model.squadSize ?? [25, 30];
   const senior = squads === "minimum" ? SQUAD_MINIMUMS.Senior : integer(random, Math.max(SQUAD_MINIMUMS.Senior, minimum), Math.max(minimum, maximum));
   add("Senior", senior, () => SENIOR_AGES[weightedIndex(SENIOR_AGE_WEIGHTS, random())], share);
+  // A few veterans (mostly goalkeepers) play on to 36-40. Own stream, and ability stays drawn at the slot age, so every
+  // other draw (and player) is unchanged; only the birth year moves.
+  for (const slot of slots)
+    if ((slot.age === 35 || (slot.age === 34 && slot.position === "GK")) && veteran() < (slot.position === "GK" ? 0.6 : 0.15))
+      slot.veteranAge = 36 + weightedIndex(slot.position === "GK" ? [40, 27, 17, 10, 6] : [60, 30, 10], veteran());
   const youth = () => (squads === "minimum" ? SQUAD_MINIMUMS.U19 : integer(random, SQUAD_MINIMUMS.U19, 24));
   add("U19", youth(), () => (random() < 0.1 ? 16 : integer(random, 17, 18)), share * 0.35);
   add("U17", youth(), () => (random() < 0.1 ? 14 : integer(random, 15, 16)), share * 0.35);
@@ -1362,8 +1371,9 @@ function planSlots(plan: WorldPlan, random: Rng) {
     if (!entry) markets.set(code, (entry = { senior: [], youth: [], locals: [] }));
     return entry;
   };
+  const veteran = seedrandom(`${plan.seed}:veterans`);
   for (const club of plan.clubs) {
-    const slots = squadSlots(club, plan.squads, random);
+    const slots = squadSlots(club, plan.squads, random, veteran);
     byClub.set(club.id, slots);
     const entry = market(club.type === "bteam" ? club.code : club.market);
     for (const slot of slots) {
@@ -1573,7 +1583,7 @@ function* clubPlayers(club: PlanClub, slots: Slot[], people: PeopleContext, rand
       contextCode: slot.context,
       ageGroup: slot.ageGroup,
       position: slot.position,
-      birthDate: slotBirthDate(random, slot.age, slot.ageGroup),
+      birthDate: slotBirthDate(random, slot.veteranAge ?? slot.age, slot.ageGroup),
       date: START_DATE,
       ability: draft.ability,
       potential: draft.potential,

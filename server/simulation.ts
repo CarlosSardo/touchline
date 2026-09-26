@@ -1,6 +1,6 @@
 import seedrandom from "seedrandom";
 import { Store } from "./db.ts";
-import { processAffiliateRequests, processAssistant } from "./club-support.ts";
+import { processAffiliateRequests, processAssistant, processStaffCareers } from "./club-support.ts";
 import { processUnexpectedEvents } from "./events.ts";
 import { processCompetitionNotifications } from "./notifications.ts";
 import {
@@ -10,9 +10,13 @@ import {
   type PlayoffData,
 } from "./calendar.ts";
 import {
+  matchGoalFactor,
+  needsHeadToHead,
   planMovement,
   rankTable,
+  readLeagueData,
   resolvePlayoffBySeed,
+  type LeagueResult,
   type PlayoffResult,
 } from "../shared/league-rules.ts";
 import {
@@ -22,30 +26,66 @@ import {
 } from "./fast-match.ts";
 import {
   aggregateScore,
+  isKnockoutStage,
   knockoutRules,
   type KnockoutTie,
 } from "../shared/competition-rules.ts";
+import { MATCH_RULES_VERSION } from "./match.ts";
 import { recordAssociationCoefficients } from "./qualification.ts";
 import { pruneSeason, storedAppearanceStats, storedMatchData } from "./retention.ts";
 import { assessRegistration } from "./registration.ts";
-import { processMinorApplications } from "./recruitment.ts";
+import {
+  assessPlayerInterest,
+  buyerGoingRate,
+  marketMoveInterest,
+  marketWageOffer,
+  MOVE_REFUSAL_THRESHOLD,
+  processMinorApplications,
+} from "./recruitment.ts";
+import {
+  executeMarketTransfer,
+  processTransferBattles,
+  recordShortlistBid,
+  sellerCanRelease,
+} from "./transfer-battles.ts";
 import {
   dailyMedia,
   publishClubRoundup,
   publishTransferStory,
 } from "./media.ts";
 import {
-  acquirePlayerAsset,
   assessFinances,
   closeFinancialYear,
   estimateClubRevenue,
+  leaguePrizeMoney,
+  parachutePayment,
   postWeeklyAccounts,
+  recordFinancialItem,
+  seasonBudgets,
+  MOVEMENT_BUDGET_FACTOR,
   spendRatio,
   weeklyOperatingCosts,
 } from "./finance.ts";
 import { personName } from "./people.ts";
 import { maintainSquads, runYouthIntake, signClublessPlayers, youthBirthCutoff } from "./youth.ts";
-import { developBody } from "./growth.ts";
+import { AVERAGE_MINUTES_SHARE, developBody, exactAge, weeklyDevelopment } from "./growth.ts";
+import {
+  aiLineupCallUps,
+  debutGates,
+  minSeniorAge,
+  aiMeritChance,
+  aiNeedsLower,
+  endAllCallUps,
+  levelOf,
+  lineupExtras,
+  lowerTeam,
+  processCallUps,
+  restCutoff,
+  type TargetLevel,
+} from "./callups.ts";
+import { CALL_UP_RULES } from "../shared/features/callups.ts";
+import { exposureValueFactor, type NationalDutyRecord } from "../shared/features/youth-internationals.ts";
+import { dutySquad, playersOnDuty, processInternationalDuty } from "./internationals.ts";
 import { nationByCode } from "../shared/world-catalog/index.ts";
 import { marketValueFactor } from "../shared/world-catalog/market.ts";
 import { MIN_GOALKEEPERS, SQUAD_MINIMUMS } from "../shared/world-rules.ts";
@@ -59,21 +99,24 @@ import {
   expireLoans,
   finishScouting,
   GameError,
-  ledger,
   news,
   playerOf,
   reviewLoans,
   settingsOf,
   stateOf,
-  transferProceeds,
   weeklyWages,
 } from "./systems.ts";
 import {
   addDays,
+  ADULT_LIFESTYLES,
   ageOn,
   clamp,
+  currentAttributes,
   daysBetween,
+  deadlineDay,
+  disciplineScope,
   internationalBreak,
+  LEGACY_DISCIPLINE_SCOPE,
   potentialInfluences,
   round,
   tacticalFit,
@@ -104,6 +147,7 @@ const formations: Record<string, Position[]> = {
   "3-5-2": ["GK", "CB", "CB", "CB", "RB", "CM", "DM", "CM", "LB", "ST", "ST"],
   "4-4-2": ["GK", "RB", "CB", "CB", "LB", "RW", "CM", "CM", "LW", "ST", "ST"],
 };
+const AGE_LIMITS: Record<string, number> = { U17: 17, U19: 19, U20: 20, U21: 21 };
 
 async function updateSimulationRows(
   store: Store,
@@ -125,20 +169,25 @@ export async function matchTeam(
   ageGroup: AgeGroup,
   date: string,
   league?: League,
+  fixture?: Pick<Fixture, "home_id" | "away_id" | "stage">,
 ): Promise<MatchTeam> {
-  const ageLimit =
-    ageGroup === "U17"
-      ? 17
-      : ageGroup === "U19"
-        ? 19
-        : ageGroup === "U20"
-          ? 20
-          : 100;
-  const scope = disciplineScope(league, club);
+  const ageLimit = AGE_LIMITS[ageGroup] ?? 100;
+  const scope = disciplineScope(league);
   const eligibilityDate =
     ageLimit < 100 ? `${(await stateOf(store)).season}-01-01` : date;
   const birthCutoff = `${Number(eligibilityDate.slice(0, 4)) - ageLimit + 1}-01-01`;
-  const eligible = await store.all<Player & { confidence: number }>(
+  // National teams on duty play their named squad; clubs lose players away with national teams.
+  const squad = club.type === "national" ? await dutySquad(store, club.id, league?.id, date) : undefined;
+  const onDuty = club.type === "national" ? new Set<number>() : await playersOnDuty(store, date);
+  let eligible = squad
+    ? await store.all<Player & { confidence: number }>(
+        `SELECT TOP (60) *, TRY_CONVERT(float,JSON_VALUE(profile,'$.mentalHealth.confidence')) AS confidence FROM players WHERE id IN (SELECT [id] FROM OPENJSON(?) WITH ([id] INT '$')) AND role != 'Retired' AND (injury_until IS NULL OR injury_until <= ?) AND NOT EXISTS(SELECT 1 FROM discipline WHERE discipline.player_id = players.id AND discipline.scope = ? AND suspension > 0) AND NOT EXISTS(SELECT 1 FROM player_match_appearances WHERE player_match_appearances.player_id = players.id AND date = ? AND minutes > 0) ORDER BY ability + fitness * 0.3 DESC, id`,
+        JSON.stringify(squad.players),
+        date,
+        scope,
+        date,
+      )
+    : await store.all<Player & { confidence: number }>(
     `SELECT TOP (60) *, TRY_CONVERT(float,JSON_VALUE(profile,'$.mentalHealth.confidence')) AS confidence FROM players WHERE ${club.type === "national" ? "country_id" : "coalesce(squad_club_id,club_id)"} = ? AND birth_date >= ? AND role != 'Retired' AND (injury_until IS NULL OR injury_until <= ?) AND NOT EXISTS(SELECT 1 FROM discipline WHERE discipline.player_id = players.id AND discipline.scope = ? AND suspension > 0) ${club.type === "national" ? "" : "AND age_group = ?"} AND NOT EXISTS(SELECT 1 FROM player_match_appearances WHERE player_match_appearances.player_id = players.id AND date = ? AND minutes > 0) ORDER BY ability + fitness * 0.3 + CASE role WHEN 'Key player' THEN 5 WHEN 'Captain' THEN 6 WHEN 'Regular starter' THEN 3 ELSE 0 END + coalesce((SELECT TRY_CONVERT(float,JSON_VALUE(terms,'$.playingTime')) / 15.0 FROM loans WHERE loans.player_id = players.id AND loans.status = 'active'),0) DESC`,
     club.type === "national" ? club.country_id : club.id,
     birthCutoff,
@@ -147,11 +196,49 @@ export async function matchTeam(
     ...(club.type === "national" ? [] : [ageGroup]),
     date,
   );
+  if (onDuty.size) eligible = eligible.filter((player) => !onDuty.has(player.id));
+  const extras = (await lineupExtras(
+    store,
+    club,
+    ageGroup,
+    date,
+    league,
+    eligible,
+    (team, cutoff) =>
+      store.all<Player & { confidence: number }>(
+        "SELECT TOP (8) *, TRY_CONVERT(float,JSON_VALUE(profile,'$.mentalHealth.confidence')) AS confidence FROM players WHERE playing_club_id = ? AND age_group = ? AND birth_date >= ? AND role != 'Retired' AND fitness >= ? AND (injury_until IS NULL OR injury_until <= ?) AND NOT EXISTS(SELECT 1 FROM discipline WHERE discipline.player_id = players.id AND discipline.scope = ? AND suspension > 0) AND NOT EXISTS(SELECT 1 FROM player_match_appearances WHERE player_match_appearances.player_id = players.id AND date >= ? AND minutes > 0) ORDER BY ability DESC,id",
+        team.clubId,
+        team.ageGroup,
+        cutoff,
+        CALL_UP_RULES.minFitness,
+        date,
+        scope,
+        restCutoff(date),
+      ),
+    birthCutoff,
+  )).filter((player) => !onDuty.has(player.id));
+  if (extras.length) {
+    // Called-up players slot in by selection score; the squad keeps its SQL order.
+    const score = (player: Player) => player.ability + player.fitness * 0.3;
+    eligible = [...eligible];
+    for (const extra of extras) {
+      const at = eligible.findIndex((player) => score(player) < score(extra));
+      eligible.splice(at < 0 ? eligible.length : at, 0, extra);
+    }
+  }
+  const gates = await debutGates(
+    store,
+    club,
+    ageGroup,
+    eligible,
+    fixture && { ...fixture, kind: league?.kind ?? null },
+  );
   const asMatchPlayer = (
     player: Player & { confidence: number },
     position = player.position,
   ): MatchPlayer => {
     const profile = JSON.parse(player.profile) as PlayerProfile;
+    const attributes = currentAttributes(profile, player.ability);
     const fit =
       player.position === position
         ? 1
@@ -171,16 +258,22 @@ export async function matchTeam(
       discipline: profile.personality.discipline,
       height: profile.identity.height,
       attributes: {
-        ...profile.attributes.technical,
-        ...profile.attributes.physical,
-        ...profile.attributes.tactical,
-        ...profile.attributes.goalkeeper,
+        ...attributes.technical,
+        ...attributes.physical,
+        ...attributes.tactical,
+        ...attributes.goalkeeper,
       },
+      // A gated keeper never starts (starters below), but may always replace an injured goalkeeper from the bench.
+      ...(gates.has(player.id) && player.position !== "GK" ? { callUpDebut: gates.get(player.id) } : {}),
     };
   };
   const lineup: MatchPlayer[] = [];
+  // Called-up debutants start on the bench (see debutGates).
+  const starters = gates.size
+    ? eligible.filter((player) => !gates.has(player.id))
+    : eligible;
   for (const position of formations[club.formation] ?? formations["4-3-3"]) {
-    const available = eligible.filter(
+    const available = starters.filter(
       (player) => !lineup.some((selected) => selected.id === player.id),
     );
     const player =
@@ -201,7 +294,12 @@ export async function matchTeam(
   const reserveKeeper = remaining.find((player) => player.position === "GK");
   const bench = [
     ...(reserveKeeper ? [reserveKeeper] : []),
-    ...remaining.filter((player) => player.id !== reserveKeeper?.id),
+    ...remaining.filter(
+      (player) => player.id !== reserveKeeper?.id && gates.has(player.id),
+    ),
+    ...remaining.filter(
+      (player) => player.id !== reserveKeeper?.id && !gates.has(player.id),
+    ),
   ]
     .slice(0, 12)
     .map((player) => asMatchPlayer(player));
@@ -238,15 +336,6 @@ export async function matchTeam(
   };
 }
 
-function disciplineScope(league: League | undefined, club: Club) {
-  if (!league) return "friendly";
-  return league.kind === "continental"
-    ? `${league.confederation}:senior`
-    : league.kind === "international"
-      ? `national:${league.id}`
-      : `${club.country_id}:${league.age_group}:${league.kind}`;
-}
-
 async function disciplinaryConsequences(
   store: Store,
   fixture: Fixture,
@@ -258,11 +347,12 @@ async function disciplinaryConsequences(
   const state = await stateOf(store);
   for (const team of [snapshot.home, snapshot.away]) {
     const club = await clubOf(store, team.id);
-    const scope = disciplineScope(league, club);
+    const scope = disciplineScope(league);
+    // Bans run down with the matches of the team that played (a B-team or youth side, not the parent club).
     await store.run(
-      "UPDATE discipline SET suspension = GREATEST(0,suspension - 1) WHERE scope = ? AND player_id IN (SELECT id FROM players WHERE club_id = ?)",
+      `UPDATE discipline SET suspension = GREATEST(0,suspension - 1) WHERE scope = ? AND suspension > 0 AND player_id IN (SELECT id FROM players WHERE ${club.type === "national" ? "country_id = ?" : "playing_club_id = ? AND age_group = ?"})`,
       scope,
-      club.id,
+      ...(club.type === "national" ? [club.country_id] : [club.id, league.age_group]),
     );
     const participants = [...team.lineup, ...(team.bench ?? [])].filter(
       (player) => result.players[player.id]?.minutes,
@@ -366,7 +456,7 @@ async function updateTable(
   fixture: Fixture,
   result: MatchResult,
 ) {
-  if (!fixture.league_id) return;
+  if (!fixture.league_id || !tableFixture(fixture)) return;
   const statement =
     "UPDATE standings SET played = played + 1, wins = wins + ?, draws = draws + ?, losses = losses + ?, gf = gf + ?, ga = ga + ?, points = points + ?, xg = xg + ?, xga = xga + ?, xpts = xpts + ?, form = ?, home_record = ?, away_record = ? WHERE league_id = ? AND club_id = ?";
   for (const home of [true, false]) {
@@ -606,10 +696,13 @@ export async function playFixture(store: Store, fixture: Fixture) {
       : "Clear";
     const fixtureDetails = JSON.parse(fixture.data);
     const tie = fixtureDetails.tie as KnockoutTie | undefined;
-    const knockout =
-      ["Qualifying", "Final", "Semi-final", "Quarter-final"].includes(
-        fixture.stage,
-      ) || fixture.stage.startsWith("Round of");
+    const knockout = isKnockoutStage(fixture.stage);
+    const leagueCountry =
+      league?.kind === "league" && league.age_group === "Senior" && league.country_id !== null
+        ? league.country_id === country.id
+          ? country
+          : await store.get<Country>("SELECT * FROM countries WHERE id = ?", league.country_id)
+        : undefined;
     const competitionRules =
       tie ?? knockoutRules(league?.name ?? "Friendly", fixture.stage);
     const previousLegs =
@@ -627,9 +720,10 @@ export async function playFixture(store: Store, fixture: Fixture) {
       );
     const aggregate = aggregateScore(previousLegs, fixture.home_id);
     const snapshot: MatchSnapshot = {
-      rulesVersion: 3,
-      home: await matchTeam(store, homeClub, ageGroup, state.date, league),
-      away: await matchTeam(store, awayClub, ageGroup, state.date, league),
+      rulesVersion: MATCH_RULES_VERSION,
+      goalFactor: leagueCountry ? matchGoalFactor(leagueCountry.code, league!.tier) : 1,
+      home: await matchTeam(store, homeClub, ageGroup, state.date, league, fixture),
+      away: await matchTeam(store, awayClub, ageGroup, state.date, league, fixture),
       weather,
       conditions: settings.weather ? conditions : undefined,
       importance:
@@ -761,12 +855,7 @@ export async function playFixture(store: Store, fixture: Fixture) {
           form: round(stats.rating),
           fatigue:
             ((team.style === "High press" ? 20 : 15) * stats.minutes) / 90,
-          potential_bank:
-            ageGroup !== "Senior" && stats.rating > 7
-              ? 0.07
-              : stats.rating > 8
-                ? 0.035
-                : 0,
+          potential_bank: matchPerformance(stats.rating, stats.minutes),
         });
         if (managedMatch || loanedPlayers.has(player.id))
           history.push({
@@ -859,9 +948,14 @@ interface BatchCandidate {
   fitness: number;
 }
 
-const knockoutStage = (stage: string) =>
-  ["Qualifying", "Final", "Semi-final", "Quarter-final"].includes(stage) ||
-  stage.startsWith("Round of");
+/** Whether a result counts in the competition's table: league, league-phase and group matches, not knockout ties. */
+function tableFixture(fixture: Pick<Fixture, "stage" | "data">) {
+  return !isKnockoutStage(fixture.stage) && !/knockout/i.test(fixture.stage) && !fixture.data.includes('"tie":');
+}
+
+/** Development signal of one appearance (players.potential_bank): the rating against an average match, by involvement. */
+export const matchPerformance = (rating: number, minutes: number) =>
+  round((rating - 6.55) * Math.min(1, minutes / 90), 3);
 
 async function writeChunks<Row>(
   rows: Row[],
@@ -870,6 +964,94 @@ async function writeChunks<Row>(
 ) {
   for (let offset = 0; offset < rows.length; offset += size)
     await write(JSON.stringify(rows.slice(offset, offset + size)));
+}
+
+/**
+ * Lineup-only call-ups for fast-model sides (nothing persisted): a side short of a matchday squad, or passing its
+ * pre-rolled merit chance (higher in the league's last rounds), sees the best fit players of the team below.
+ * Extra reads: one covered max(round) per batch and one TOP (8) lookup per selected side.
+ */
+async function addBatchCallUps(
+  store: Store,
+  state: Awaited<ReturnType<typeof stateOf>>,
+  batch: Fixture[],
+  clubs: Map<number, Club>,
+  leagues: Map<number, League>,
+  sides: { k: number; scope: string; cutoff: string }[],
+  candidates: Map<number, BatchCandidate[]>,
+  onDuty: ReadonlySet<number>,
+) {
+  const leagueIds = [...new Set(batch.map((fixture) => fixture.league_id!))].filter((id) =>
+    ["league", "youth"].includes(leagues.get(id)?.kind ?? ""),
+  );
+  const lastRound = new Map<number, number>();
+  if (leagueIds.length)
+    for (const row of await store.all<{ league_id: number; last: number }>(
+      "SELECT league_id,max(round) AS last FROM fixtures WHERE season = ? AND league_id IN (SELECT [id] FROM OPENJSON(?) WITH ([id] INT '$')) GROUP BY league_id",
+      state.season,
+      JSON.stringify(leagueIds),
+    ))
+      lastRound.set(row.league_id, row.last);
+  const selected: { k: number; owner: number; club_id: number; age_group: string; scope: string; cutoff: string; level: TargetLevel; roll: number; late: boolean; tier: number }[] = [];
+  batch.forEach((fixture, index) => {
+    const league = leagues.get(fixture.league_id!)!;
+    const last = lastRound.get(league.id);
+    const late = last !== undefined && last - fixture.round < CALL_UP_RULES.ai.lateRounds;
+    [fixture.home_id, fixture.away_id].forEach((clubId, side) => {
+      const club = clubs.get(clubId)!;
+      const level = levelOf(club, league.age_group);
+      if (!level) return;
+      const k = index * 2 + side;
+      const roll = seedrandom(`${fixture.seed}:callup:${side}`)();
+      if (!aiNeedsLower(candidates.get(k) ?? []) && roll >= aiMeritChance(level, late, league.tier)) return;
+      const lower = lowerTeam(club, level);
+      if (lower)
+        selected.push({ k, owner: clubId, club_id: lower.clubId, age_group: lower.ageGroup, scope: sides[k].scope, cutoff: sides[k].cutoff, level, roll, late, tier: league.tier });
+    });
+  });
+  if (!selected.length) return;
+  const codes = new Map(
+    (await store.all<{ id: number; code: string }>("SELECT id,code FROM countries")).map((row) => [row.id, row.code]),
+  );
+  const lower = new Map<number, (BatchCandidate & { age: number })[]>();
+  await writeChunks(selected, 1000, async (json) => {
+    for (const row of await store.all<BatchCandidate & { age: number }>(
+      `SELECT side.k, pick.id, pick.name, pick.position, pick.secondary_position, pick.ability, pick.fitness, pick.age
+       FROM OPENJSON(?) WITH (k int, club_id int, age_group nvarchar(10), scope nvarchar(100), cutoff nvarchar(10)) AS side
+       CROSS APPLY (SELECT TOP (8) players.id, players.name, players.position, players.secondary_position, players.ability, players.fitness, players.age FROM players
+         WHERE players.playing_club_id = side.club_id AND players.age_group = side.age_group AND players.birth_date >= side.cutoff AND players.role != 'Retired' AND players.fitness >= ? AND (players.injury_until IS NULL OR players.injury_until <= ?)
+         AND NOT EXISTS(SELECT 1 FROM discipline WHERE discipline.player_id = players.id AND discipline.scope = side.scope AND discipline.suspension > 0)
+         AND NOT EXISTS(SELECT 1 FROM player_match_appearances WHERE player_match_appearances.player_id = players.id AND player_match_appearances.date >= ? AND player_match_appearances.minutes > 0)
+         ORDER BY players.ability DESC, players.id) AS pick`,
+      json,
+      CALL_UP_RULES.minFitness,
+      state.date,
+      restCutoff(state.date),
+    ))
+      lower.set(row.k, [...(lower.get(row.k) ?? []), row]);
+  });
+  for (const side of selected) {
+    const pool = candidates.get(side.k) ?? [];
+    const rows = (lower.get(side.k) ?? []).filter((row) => !pool.some((entry) => entry.id === row.id) && !onDuty.has(row.id));
+    const ids = aiLineupCallUps({
+      level: side.level,
+      pool,
+      lower: rows,
+      lateSeason: side.late,
+      roll: side.roll,
+      minAge: minSeniorAge(codes.get(clubs.get(side.owner)!.country_id)),
+      tier: side.tier,
+    });
+    if (!ids.length) continue;
+    // Called-up players slot in by selection score; the pool keeps its own order.
+    const score = (row: BatchCandidate) => row.ability + row.fitness * 0.3;
+    const merged = [...pool];
+    for (const extra of rows.filter((row) => ids.includes(row.id))) {
+      const at = merged.findIndex((row) => score(row) < score(extra));
+      merged.splice(at < 0 ? merged.length : at, 0, extra);
+    }
+    candidates.set(side.k, merged);
+  }
 }
 
 /**
@@ -901,6 +1083,15 @@ export async function playFixtureBatch(store: Store, fixtures: Fixture[]) {
   );
   const leftover: Fixture[] = [];
   const squads = new Set<string>();
+  // National teams join the batch once their squads are named (processInternationalDuty runs first each day).
+  const named = new Map<string, NationalDutyRecord>();
+  for (const fixture of fixtures)
+    for (const id of [fixture.home_id, fixture.away_id])
+      if (clubs.get(id)?.type === "national") {
+        const record = await dutySquad(store, id, fixture.league_id, state.date);
+        if (record?.leagueId === fixture.league_id) named.set(`${id}:${fixture.league_id}`, record);
+      }
+  const onDuty = await playersOnDuty(store, state.date);
   const batch = fixtures.filter((fixture) => {
     const league = fixture.league_id === null ? undefined : leagues.get(fixture.league_id);
     // One fixture per squad per batch keeps table and squad updates order-free.
@@ -910,7 +1101,7 @@ export async function playFixtureBatch(store: Store, fixtures: Fixture[]) {
       !JSON.parse(fixture.data).tie &&
       keys.every((key) => !squads.has(key)) &&
       [fixture.home_id, fixture.away_id].every(
-        (id) => clubs.has(id) && clubs.get(id)!.type !== "national",
+        (id) => clubs.has(id) && (clubs.get(id)!.type !== "national" || named.has(`${id}:${fixture.league_id}`)),
       );
     if (handled) for (const key of keys) squads.add(key);
     else leftover.push(fixture);
@@ -918,23 +1109,25 @@ export async function playFixtureBatch(store: Store, fixtures: Fixture[]) {
   });
   const sides = batch.flatMap((fixture, index) => {
     const league = leagues.get(fixture.league_id!)!;
-    const limit =
-      ({ U17: 17, U19: 19, U20: 20 } as Record<string, number>)[league.age_group] ?? 100;
+    const limit = AGE_LIMITS[league.age_group] ?? 100;
     const year = Number((limit < 100 ? String(state.season) : state.date).slice(0, 4));
     return [fixture.home_id, fixture.away_id].map((clubId, side) => ({
       k: index * 2 + side,
       club_id: clubId,
       age_group: league.age_group,
-      scope: disciplineScope(league, clubs.get(clubId)!),
+      scope: disciplineScope(league),
       cutoff: `${year - limit + 1}-01-01`,
+      squad: named.get(`${clubId}:${fixture.league_id}`)?.players,
     }));
   });
   const candidates = new Map<number, BatchCandidate[]>();
-  await writeChunks(sides, 1000, async (json) => {
+  // Players away with national teams are dropped from club sides; a few extra rows keep the squad full.
+  const clubTop = onDuty.size ? 34 : 26;
+  await writeChunks(sides.filter((side) => !side.squad), 1000, async (json) => {
     for (const row of await store.all<BatchCandidate>(
       `SELECT side.k, pick.id, pick.name, pick.position, pick.secondary_position, pick.ability, pick.fitness
        FROM OPENJSON(?) WITH (k int, club_id int, age_group nvarchar(10), scope nvarchar(100), cutoff nvarchar(10)) AS side
-       CROSS APPLY (SELECT TOP (26) players.id, players.name, players.position, players.secondary_position, players.ability, players.fitness FROM players
+       CROSS APPLY (SELECT TOP (${clubTop}) players.id, players.name, players.position, players.secondary_position, players.ability, players.fitness FROM players
          WHERE players.playing_club_id = side.club_id AND players.age_group = side.age_group AND players.birth_date >= side.cutoff AND players.role != 'Retired' AND (players.injury_until IS NULL OR players.injury_until <= ?)
          AND NOT EXISTS(SELECT 1 FROM discipline WHERE discipline.player_id = players.id AND discipline.scope = side.scope AND discipline.suspension > 0)
          AND NOT EXISTS(SELECT 1 FROM player_match_appearances WHERE player_match_appearances.player_id = players.id AND player_match_appearances.date = ? AND player_match_appearances.minutes > 0)
@@ -943,8 +1136,30 @@ export async function playFixtureBatch(store: Store, fixtures: Fixture[]) {
       state.date,
       state.date,
     ))
-      candidates.set(row.k, [...(candidates.get(row.k) ?? []), row]);
+      if (!onDuty.has(row.id) && (candidates.get(row.k)?.length ?? 0) < 26)
+        candidates.set(row.k, [...(candidates.get(row.k) ?? []), row]);
   });
+  await writeChunks(
+    sides.filter((side) => side.squad).map((side) => ({ k: side.k, scope: side.scope, squad: side.squad })),
+    500,
+    async (json) => {
+      for (const row of await store.all<BatchCandidate>(
+        `SELECT side.k, pick.id, pick.name, pick.position, pick.secondary_position, pick.ability, pick.fitness
+         FROM OPENJSON(?) WITH (k int, scope nvarchar(100), squad nvarchar(max) AS JSON) AS side
+         CROSS APPLY (SELECT TOP (26) players.id, players.name, players.position, players.secondary_position, players.ability, players.fitness
+           FROM OPENJSON(side.squad) WITH ([id] INT '$') AS member JOIN players ON players.id = member.[id]
+           WHERE players.role != 'Retired' AND (players.injury_until IS NULL OR players.injury_until <= ?)
+           AND NOT EXISTS(SELECT 1 FROM discipline WHERE discipline.player_id = players.id AND discipline.scope = side.scope AND discipline.suspension > 0)
+           AND NOT EXISTS(SELECT 1 FROM player_match_appearances WHERE player_match_appearances.player_id = players.id AND player_match_appearances.date = ? AND player_match_appearances.minutes > 0)
+           ORDER BY players.ability + players.fitness * 0.3 DESC, players.id) AS pick`,
+        json,
+        state.date,
+        state.date,
+      ))
+        candidates.set(row.k, [...(candidates.get(row.k) ?? []), row]);
+    },
+  );
+  await addBatchCallUps(store, state, batch, clubs, leagues, sides, candidates, onDuty);
   const used = new Set<number>();
   const team = (club: Club, rows: BatchCandidate[]): MatchTeam => {
     const pool = rows.filter((row) => !used.has(row.id));
@@ -990,18 +1205,36 @@ export async function playFixtureBatch(store: Store, fixtures: Fixture[]) {
       setPieces: { routine: "Near post", target: "Centre-back", risk: 50 },
     };
   };
+  const leagueCountryIds = [...leagues.values()]
+    .filter((league) => league.kind === "league" && league.age_group === "Senior")
+    .map((league) => league.country_id);
+  const countryCodes = new Map(
+    leagueCountryIds.length
+      ? (
+          await store.all<{ id: number; code: string }>(
+            `SELECT id, code FROM countries WHERE id ${inList}`,
+            idList(leagueCountryIds),
+          )
+        ).map((country) => [country.id, country.code])
+      : [],
+  );
+  const goalFactor = (league: League) =>
+    league.kind === "league" && league.age_group === "Senior" && league.country_id !== null
+      ? matchGoalFactor(countryCodes.get(league.country_id), league.tier)
+      : 1;
   const matches = batch.map((fixture, index) => {
     const league = leagues.get(fixture.league_id!)!;
     const rules = knockoutRules(league.name, fixture.stage);
     const snapshot: MatchSnapshot = {
-      rulesVersion: 3,
+      rulesVersion: MATCH_RULES_VERSION,
+      goalFactor: goalFactor(league),
       home: team(clubs.get(fixture.home_id)!, candidates.get(index * 2) ?? []),
       away: team(clubs.get(fixture.away_id)!, candidates.get(index * 2 + 1) ?? []),
       weather: "Clear",
       importance: fixture.stage === "Final" ? 100 : league.kind === "league" ? 65 : 78,
       detail: String(settings.matchDetail),
       rules: {
-        decisive: knockoutStage(fixture.stage),
+        decisive: isKnockoutStage(fixture.stage),
         extraTime: rules.extraTime,
         neutral: rules.neutral,
         awayGoals: rules.awayGoals,
@@ -1016,7 +1249,10 @@ export async function playFixtureBatch(store: Store, fixtures: Fixture[]) {
       fixture,
       league,
       snapshot,
-      scopes: [fixture.home_id, fixture.away_id].map((id) => disciplineScope(league, clubs.get(id)!)),
+      scopes: [fixture.home_id, fixture.away_id].map(() => disciplineScope(league)),
+      nations: [fixture.home_id, fixture.away_id].map((id) =>
+        clubs.get(id)!.type === "national" ? clubs.get(id)!.country_id : null,
+      ),
       result: simulateFastMatch(snapshot, fixture.seed),
     };
   });
@@ -1029,6 +1265,8 @@ interface BatchMatch {
   league: League;
   snapshot: MatchSnapshot;
   scopes: string[];
+  /** Country of a national side (its suspensions are served by nationality), else null. */
+  nations?: (number | null)[];
   result: MatchResult;
 }
 
@@ -1059,7 +1297,7 @@ async function writeMatchBatch(
   const appearances: Record<string, string | number | null>[] = [];
   const playerUpdates: Record<string, string | number | null>[] = [];
   const history: Record<string, string | number>[] = [];
-  const disciplineTeams: { club_id: number; scope: string }[] = [];
+  const disciplineTeams: { club_id: number; scope: string; country_id: number; national: number; age_group: string }[] = [];
   const participants: { player: MatchPlayer; stats: Record<string, number>; team: MatchTeam; match: BatchMatch; scope: string }[] = [];
   const injuries: { id: number; until: string }[] = [];
   const senior: { club_id: number; league_id: number; result: number; margin: number }[] = [];
@@ -1103,17 +1341,18 @@ async function writeMatchBatch(
         false,
       ),
     });
-    for (const home of [true, false])
-      tableRows.set(`${fixture.league_id}:${home ? fixture.home_id : fixture.away_id}`, {
-        league_id: fixture.league_id!,
-        club_id: home ? fixture.home_id : fixture.away_id,
-        own: home ? homeGoals : awayGoals,
-        against: home ? awayGoals : homeGoals,
-        xg: home ? result.homeXg : result.awayXg,
-        xga: home ? result.awayXg : result.homeXg,
-        xpts: home ? result.homeXpts : result.awayXpts,
-        home,
-      });
+    if (tableFixture(fixture))
+      for (const home of [true, false])
+        tableRows.set(`${fixture.league_id}:${home ? fixture.home_id : fixture.away_id}`, {
+          league_id: fixture.league_id!,
+          club_id: home ? fixture.home_id : fixture.away_id,
+          own: home ? homeGoals : awayGoals,
+          against: home ? awayGoals : homeGoals,
+          xg: home ? result.homeXg : result.awayXg,
+          xga: home ? result.awayXg : result.homeXg,
+          xpts: home ? result.homeXpts : result.awayXpts,
+          home,
+        });
     if (league.kind === "league" && league.age_group === "Senior")
       for (const home of [true, false]) {
         const margin = home ? result.homeGoals - result.awayGoals : result.awayGoals - result.homeGoals;
@@ -1123,7 +1362,8 @@ async function writeMatchBatch(
       injuries.push({ id: injury.playerId, until: addDays(fixture.date, injury.days) });
     for (const team of [snapshot.home, snapshot.away]) {
       const scope = match.scopes[team.id === fixture.home_id ? 0 : 1];
-      disciplineTeams.push({ club_id: team.id, scope });
+      const nation = match.nations?.[team.id === fixture.home_id ? 0 : 1] ?? null;
+      disciplineTeams.push({ club_id: team.id, scope, country_id: nation ?? 0, national: nation === null ? 0 : 1, age_group: league.age_group });
       for (const player of [...team.lineup, ...(team.bench ?? [])]) {
         const stats = result.players[player.id];
         if (!stats?.minutes) continue;
@@ -1157,8 +1397,7 @@ async function writeMatchBatch(
           assists: stats.assists,
           form: round(stats.rating),
           fatigue: ((team.style === "High press" ? 20 : 15) * stats.minutes) / 90,
-          potential_bank:
-            league.age_group !== "Senior" && stats.rating > 7 ? 0.07 : stats.rating > 8 ? 0.035 : 0,
+          potential_bank: matchPerformance(stats.rating, stats.minutes),
         });
         if (loanedPlayers.has(player.id))
           history.push({
@@ -1266,12 +1505,12 @@ async function writeMatchBatch(
 async function writeBatchDiscipline(
   store: Store,
   state: Awaited<ReturnType<typeof stateOf>>,
-  teams: { club_id: number; scope: string }[],
+  teams: { club_id: number; scope: string; country_id: number; national: number; age_group: string }[],
   participants: { player: MatchPlayer; stats: Record<string, number>; team: MatchTeam; match: BatchMatch; scope: string }[],
 ) {
   await writeChunks(teams, 2000, (json) =>
     store.run(
-      "UPDATE target SET suspension = target.suspension - 1 FROM discipline AS target JOIN players ON players.id = target.player_id JOIN OPENJSON(?) WITH (club_id int, scope nvarchar(100)) AS team ON team.club_id = players.club_id AND team.scope = target.scope WHERE target.suspension > 0",
+      "UPDATE target SET suspension = target.suspension - 1 FROM discipline AS target JOIN players ON players.id = target.player_id JOIN OPENJSON(?) WITH (club_id int, scope nvarchar(100), country_id int, [national] int, age_group nvarchar(10)) AS team ON team.scope = target.scope AND ((team.[national] = 0 AND team.club_id = players.playing_club_id AND team.age_group = players.age_group) OR (team.[national] = 1 AND team.country_id = players.country_id)) WHERE target.suspension > 0",
       json,
     ),
   );
@@ -1443,6 +1682,14 @@ export async function developPlayers(store: Store, random: seedrandom.PRNG) {
   const nationCode = new Map(
     (await store.all<{ id: number; code: string }>("SELECT id,code FROM countries")).map((row) => [row.id, row.code]),
   );
+  // League matches each team has played this season: the denominator of a player's minutes share.
+  const teamMatches = new Map(
+    (
+      await store.all<{ club_id: number; age_group: string; played: number }>(
+        "SELECT standings.club_id, leagues.age_group, max(standings.played) AS played FROM standings JOIN leagues ON leagues.id = standings.league_id WHERE leagues.kind IN ('league','youth') GROUP BY standings.club_id, leagues.age_group",
+      )
+    ).map((row) => [`${row.club_id}:${row.age_group}`, row.played]),
+  );
   let cursor = 0;
   while (true) {
     const batch = await store.all<Player>(
@@ -1469,8 +1716,9 @@ export async function developPlayers(store: Store, random: seedrandom.PRNG) {
             id: number;
             profile: string;
             club_id: number | null;
+            role: string;
           }>(
-            `SELECT id,profile,club_id FROM players WHERE id IN (${mentorIds.map(() => "?").join(",")})`,
+            `SELECT id,profile,club_id,role FROM players WHERE id IN (${mentorIds.map(() => "?").join(",")})`,
             ...mentorIds,
           )
         : []
@@ -1494,6 +1742,14 @@ export async function developPlayers(store: Store, random: seedrandom.PRNG) {
             ? club.plan_youth
             : club.plan_focus
           : player.training;
+      const clubless = player.club_id === null;
+      const played = teamMatches.get(`${player.squad_club_id ?? player.club_id}:${player.age_group}`) ?? 0;
+      // Early in a season the share is last season's; club-less players only get amateur football.
+      const minutesShare = clubless
+        ? 0.3
+        : played >= 3
+          ? Math.min(1, player.minutes / (90 * played))
+          : (profile.development.minutesShare ?? AVERAGE_MINUTES_SHARE);
       const context = {
         staff:
           club.staff_ability +
@@ -1505,32 +1761,14 @@ export async function developPlayers(store: Store, random: seedrandom.PRNG) {
         director: ownClub ? state.director.reputation : club.reputation * 0.75,
         fans: club.fan_mood,
         media: Number(settings.mediaPressure) * (club.crisis > 50 ? 1.4 : 1),
-        tournament: player.age_group !== "Senior" && player.form > 7 ? 15 : 0,
+        tournament: 0,
         intensity: Number(settings.potentialIntensity),
         lifestyleImpact: Number(settings.lifestyleImpact),
+        performance: player.potential_bank,
+        minutesShare,
       };
       const influences = potentialInfluences(player, profile, context);
-      const volatility =
-        ((((random() - 0.5) * player.volatility) / 75) *
-          Number(settings.potentialIntensity)) /
-        60;
-      let potential = clamp(
-        player.potential +
-          influences.change +
-          volatility +
-          player.potential_bank,
-      );
       const intensity = (player.intensity + club.plan_intensity) / 2;
-      const youthFactor =
-        age < 19
-          ? 1.5
-          : age < 23
-            ? 1
-            : age < 27
-              ? 0.35
-              : age < 30
-                ? 0.05
-                : -0.2 * (age - 28);
       const dna = JSON.parse(club.data).youthDNA ?? "Technical intelligence";
       const focusBonus =
         age < 21 && effectiveFocus === "Youth development"
@@ -1543,30 +1781,35 @@ export async function developPlayers(store: Store, random: seedrandom.PRNG) {
         : profile.lifestyle === "gym-rat" && effectiveFocus === "Physical"
           ? 1.12
           : 1;
-      const trainingFactor = player.injury_until
-        ? effectiveFocus === "Injury rehab"
-          ? -0.025
-          : -0.12
-        : (0.025 + context.staff / 700 + club.facilities / 1400) *
-          youthFactor *
-          (intensity / 70 + 0.25) *
-          (profile.personality.professionalism / 100 + 0.4) *
+      const mentor = profile.development.mentorId ? mentors.get(profile.development.mentorId) : undefined;
+      const mentored = age < 23 && mentor !== undefined && mentor.club_id === player.club_id && mentor.role !== "Retired";
+      const injured = Boolean(player.injury_until && player.injury_until > state.date);
+      const development = weeklyDevelopment({
+        age: exactAge(player.birth_date, state.date),
+        goalkeeper: player.position === "GK",
+        ability: player.ability,
+        potential: player.potential,
+        bank: player.development_bank,
+        minutesShare,
+        environment:
+          (0.7 + context.staff / 250 + club.facilities / 500) *
+          (intensity / 100 + 0.5) *
           focusBonus *
-          habits;
-      const burnoutFactor = profile.mentalHealth.burnout > 65 ? -0.08 : 0;
-      let progress =
-        player.development_bank +
-        trainingFactor +
-        burnoutFactor +
-        player.loan_progress +
-        (profile.development.mentorId && age < 23 ? 0.035 : 0);
-      let ability = player.ability;
-      if (Math.abs(progress) >= 0.1) {
-        const delta = Math.trunc(progress * 10) / 10;
-        ability = clamp(Math.min(potential, player.ability + delta));
-        progress -= delta;
-      }
-      potential = Math.max(ability, potential);
+          habits *
+          (mentored ? 1.08 : 1) *
+          (profile.mentalHealth.burnout > 65 ? 0.85 : 1) *
+          (injured && effectiveFocus === "Injury rehab" ? 1.2 : 1),
+        professionalism: profile.personality.professionalism,
+        injured,
+        drift: influences.change,
+        volatility: player.volatility,
+        noise: random() - 0.5,
+        intensity: Number(settings.potentialIntensity),
+        extra: player.loan_progress,
+      });
+      const ability = development.ability;
+      let potential = development.potential;
+      const progress = development.bank;
       let profileChanged = false;
       if (effectiveFocus === "Position" && profile.development.positionTarget) {
         profile.development.positionWeeks =
@@ -1636,30 +1879,37 @@ export async function developPlayers(store: Store, random: seedrandom.PRNG) {
         profileChanged = true;
       }
       if (ownClub || state.week % 4 === 0) {
+        // Own-club profiles update weekly at a quarter of the four-weekly step, so every club moves at the same rate.
+        const step = ownClub ? 0.25 : 1;
         const youthStress = age < 19 ? Number(settings.youthRealism) / 75 : 1;
+        // Mental health reverts towards generation levels (burnout 12, anxiety 24, motivation 75) under normal loads.
         profile.mentalHealth.burnout = clamp(
           profile.mentalHealth.burnout +
-            ((intensity > 75 ? 2.5 : -1.5) + (player.fitness < 55 ? 2 : 0)) *
-              youthStress,
+            ((intensity > 75 ? 2.5 : 0) + (player.fitness < 55 ? 2 : 0)) * youthStress * step +
+            (12 - profile.mentalHealth.burnout) * 0.1 * step,
           0,
           100,
         );
         profile.mentalHealth.anxiety = clamp(
           profile.mentalHealth.anxiety +
-            (club.crisis > 50 ? 1.5 : -0.5) -
-            profile.personality.emotionalStability / 100,
+            ((club.crisis > 50 ? 1.5 : 0) + (24 - profile.mentalHealth.anxiety) * 0.08 -
+              (profile.personality.emotionalStability - 50) / 100) *
+              step,
           0,
           100,
         );
         profile.mentalHealth.confidence = clamp(
-          profile.mentalHealth.confidence * 0.85 + player.morale * 0.15,
+          profile.mentalHealth.confidence +
+            (player.morale - profile.mentalHealth.confidence) * (1 - 0.85 ** step),
           0,
           100,
         );
         profile.mentalHealth.motivation = clamp(
           profile.mentalHealth.motivation +
-            (club.momentum > 5 ? 1 : -0.15) -
-            profile.mentalHealth.burnout / 100,
+            ((club.momentum > 5 ? 1 : 0) +
+              (75 - profile.mentalHealth.motivation) * 0.05 -
+              Math.max(0, profile.mentalHealth.burnout - 40) / 100) *
+              step,
           0,
           100,
         );
@@ -1672,6 +1922,13 @@ export async function developPlayers(store: Store, random: seedrandom.PRNG) {
               potential: round(potential),
             },
           ].slice(-24);
+        if (played >= 3) profile.development.minutesShare = round(minutesShare, 2);
+        // Adults get an adult lifestyle once (minors only ever draw positive ones, RAI); seeded per player.
+        if (age >= 18 && age < 23 && !profile.development.adultLifestyle) {
+          profile.lifestyle =
+            ADULT_LIFESTYLES[Math.floor(seedrandom(`${state.seed}:lifestyle:${player.id}`)() * ADULT_LIFESTYLES.length)];
+          profile.development.adultLifestyle = true;
+        }
         const focus =
           effectiveFocus === "Youth development"
             ? dna === "Physical resilience"
@@ -1680,19 +1937,22 @@ export async function developPlayers(store: Store, random: seedrandom.PRNG) {
                 ? "Tactical"
                 : "Technical"
             : effectiveFocus;
+        // Goalkeepers' technical and role work is goalkeeping.
         const group =
-          focus === "Technical"
-            ? "technical"
-            : focus === "Physical"
-              ? "physical"
-              : focus === "Tactical" || focus === "Position"
-                ? "tactical"
-                : focus === "Mental"
-                  ? "mental"
-                  : player.position === "GK" && focus === "Role"
-                    ? "goalkeeper"
+          player.position === "GK" && ["Technical", "Role", "Balanced"].includes(focus)
+            ? "goalkeeper"
+            : focus === "Technical"
+              ? "technical"
+              : focus === "Physical"
+                ? "physical"
+                : focus === "Tactical" || focus === "Position"
+                  ? "tactical"
+                  : focus === "Mental"
+                    ? "mental"
                     : "technical";
-        if (random() < 0.35 && !player.injury_until) {
+        // Attribute training runs every four weeks for every club; ability drives the overall level (currentAttributes).
+        const developmentYears = age - (player.position === "GK" ? 2.5 : 0);
+        if (state.week % 4 === 0 && !injured && developmentYears < 29 && random() < 0.35) {
           const roleAttributes: Record<string, string[]> = {
             ST: ["finishing", "firstTouch", "heading"],
             CB: ["tackling", "heading", "passing"],
@@ -1712,6 +1972,11 @@ export async function developPlayers(store: Store, random: seedrandom.PRNG) {
           profile.attributes[group][attribute] = clamp(
             profile.attributes[group][attribute] + 1,
           );
+        } else if (state.week % 4 === 0 && developmentYears >= 31 && random() < 0.35) {
+          // Ageing takes the physical edge first.
+          const keys = Object.keys(profile.attributes.physical);
+          const attribute = keys[Math.floor(random() * keys.length)];
+          profile.attributes.physical[attribute] = clamp(profile.attributes.physical[attribute] - 1);
         }
         profileChanged = true;
       }
@@ -1731,6 +1996,7 @@ export async function developPlayers(store: Store, random: seedrandom.PRNG) {
         ((0.004 * Number(settings.injuryFrequency)) / 50) *
         (1 + Math.max(0, intensity - 50) / 50) *
         (1 - club.rehab_ability / 250) *
+        (1 + Math.max(0, age - 29) * 0.06) *
         (profile.lifestyle === "nightlife" ? 1.3 : 1);
       if (!injury && random() < injuryChance) {
         const duration =
@@ -1760,7 +2026,6 @@ export async function developPlayers(store: Store, random: seedrandom.PRNG) {
         99,
       );
       // Club-less players (free agents, home-based pools) are priced in their nation's league market.
-      const clubless = player.club_id === null;
       const market = profile.homeBased?.countryId ?? profile.registration?.lastAssociationId ?? player.country_id;
       const value = valuation(
         { ...player, ability, potential, age, injury_until: injury },
@@ -1775,6 +2040,7 @@ export async function developPlayers(store: Store, random: seedrandom.PRNG) {
           inflation: Number(settings.transferInflation),
           crisis: clubless ? 0 : club.crisis,
           hype: clubless ? 0 : club.hype,
+          exposure: exposureValueFactor(profile.international, state.date),
         },
       ).value;
       const updatedProfile = profileChanged ? JSON.stringify(profile) : null;
@@ -1795,6 +2061,7 @@ export async function developPlayers(store: Store, random: seedrandom.PRNG) {
           id: player.id,
           profile: updatedProfile ?? player.profile,
           club_id: player.club_id,
+          role: player.role,
         });
     }
     await updateSimulationRows(
@@ -1875,9 +2142,13 @@ async function weeklyFinances(store: Store) {
   const leagueSizes = new Map<number, number>();
   for (const club of clubs)
     leagueSizes.set(club.league_id ?? -1, (leagueSizes.get(club.league_id ?? -1) ?? 0) + 1);
+  const countryCodes = new Map(
+    (await store.all<{ id: number; code: string }>("SELECT id, code FROM countries")).map((row) => [row.id, row.code]),
+  );
   for (const club of clubs) {
     const wages = (salaries.get(club.id) ?? 0) + (staffCosts.get(club.id) ?? 0);
     const league = leagues.get(club.league_id ?? -1);
+    const countryCode = countryCodes.get(league?.country_id ?? club.country_id);
     const expected = estimateClubRevenue({
       reputation: club.reputation,
       leagueReputation: league?.reputation ?? club.reputation,
@@ -1885,6 +2156,7 @@ async function weeklyFinances(store: Store) {
       capacity: club.capacity,
       fanMood: 72,
       homeMatches: Math.max(0, (leagueSizes.get(club.league_id ?? -1) ?? 1) - 1) + 2,
+      countryCode,
     }).annualOperatingRevenue;
     const operating = weeklyOperatingCosts({
       annualRevenue: expected,
@@ -1893,6 +2165,7 @@ async function weeklyFinances(store: Store) {
       facilities: club.facilities,
       academy: club.academy,
       balance: club.balance,
+      staffWages: staffCosts.get(club.id) ?? 0,
     });
     const running = operating.total;
     const revenue = estimateClubRevenue({
@@ -1902,6 +2175,7 @@ async function weeklyFinances(store: Store) {
       capacity: club.capacity,
       fanMood: club.fan_mood,
       homeMatches: gates.get(club.id) ?? 0,
+      countryCode,
     });
     const sponsorship = Math.round(revenue.annualCommercial / 52);
     const gate = revenue.annualMatchday;
@@ -2054,11 +2328,6 @@ async function weeklyStaffAndPolitics(store: Store, random: seedrandom.PRNG) {
     "id int,chemistry float",
     "chemistry = changes.chemistry",
   );
-  if (state.week % 4 === 0)
-    await store.run(
-      "UPDATE staff SET ability = LEAST(99,ability + CASE WHEN ambition > 70 THEN 1 ELSE 0 END), morale = GREATEST(1,LEAST(99,morale + CASE WHEN personality = ? THEN -1 ELSE 1 END)) WHERE club_id IS NOT NULL",
-      "Ambitious",
-    );
   for (const troubled of await store.all<Club>(
     "SELECT * FROM clubs WHERE type = 'club' AND manager_trust < 22 AND crisis > 50 ORDER BY id",
   )) {
@@ -2333,8 +2602,8 @@ async function processNegotiations(store: Store, random: seedrandom.PRNG) {
       );
       continue;
     }
-    const deadlineDay = ["09-01", "01-31"].includes(state.date.slice(5));
-    const eventChance = (deadlineDay ? 0.18 : 0.015) * (settings.chaos ? 3 : 1);
+    const lastWindowDay = deadlineDay(state.date);
+    const eventChance = (lastWindowDay ? 0.18 : 0.015) * (settings.chaos ? 3 : 1);
     if (random() > eventChance) continue;
     const event = random();
     const player = await playerOf(store, negotiation.player_id);
@@ -2347,7 +2616,7 @@ async function processNegotiations(store: Store, random: seedrandom.PRNG) {
           "Negotiation details leaked. Rival interest and the asking price have risen.",
       });
       await store.run(
-        "UPDATE negotiations SET tension = LEAST(99,tension + 12), asking_price = asking_price * 1.08, [public] = 1, data = ? WHERE id = ?",
+        "UPDATE negotiations SET tension = LEAST(99,tension + 12), asking_price = ROUND(asking_price * 1.08, 0), [public] = 1, data = ? WHERE id = ?",
         JSON.stringify(data),
         negotiation.id,
       );
@@ -2364,6 +2633,8 @@ async function processNegotiations(store: Store, random: seedrandom.PRNG) {
       negotiation.buying_club_id === state.clubId &&
       negotiation.interest < 65
     ) {
+      // Club-to-club purchases are contested by real rival clubs (transfer-battles.ts), not by this abstract hijack.
+      if (negotiation.type === "Permanent transfer" && negotiation.selling_club_id) continue;
       data.hijack = true;
       data.log.push({
         date: state.date,
@@ -2457,7 +2728,7 @@ export async function worldTransfers(store: Store, random: seedrandom.PRNG) {
     if (!player || userFamily.has(player.club_id!) || player.value <= 0)
       continue;
     const fee = Math.round(player.value * (0.95 + random() * 0.15));
-    const newWage = Math.round(player.wage * 1.1);
+    const minimumWage = Math.round(player.wage * 1.1);
     const buyers = await store.all<Club>(
       "SELECT TOP (8) * FROM clubs WHERE type = 'club' AND id NOT IN (?,?) AND reputation BETWEEN ? AND ? AND transfer_budget > ? AND balance > ? AND wage_budget > (SELECT coalesce(sum(wage),0) FROM players WHERE players.club_id = clubs.id) + ? AND (SELECT count(*) FROM players WHERE players.club_id = clubs.id AND age_group = 'Senior' AND role != 'Retired') < 28 ORDER BY (SELECT count(*) FROM players WHERE players.club_id = clubs.id AND players.position = ? AND age_group = 'Senior'),abs(reputation - ?),id",
       player.club_id!,
@@ -2466,89 +2737,49 @@ export async function worldTransfers(store: Store, random: seedrandom.PRNG) {
       player.ability + 14,
       fee,
       fee,
-      newWage,
+      minimumWage,
       player.position,
       player.ability + random() * 10,
     );
     let buyer: Club | undefined;
-    for (const candidate of buyers) {
-      if (
-        (await weeklyWages(store, candidate.id)) + newWage <=
-          candidate.wage_budget &&
-        (await assessRegistration(store, player, candidate)).allowed
-      ) {
-        buyer = candidate;
-        break;
+    let newWage = 0;
+    if (buyers.length) {
+      const seller = await store.get<Club>("SELECT * FROM clubs WHERE id = ?", player.club_id);
+      const profile = JSON.parse(player.profile) as PlayerProfile;
+      for (const candidate of buyers) {
+        // The player must want the move: below 50% he refuses; the buyer pays up to 1.5x his expectation to reach 85%.
+        // His expectation is his wage + 10% or the buyer's going rate for his level, whichever is higher.
+        const moveScore = marketMoveInterest(player, profile, candidate, seller, state.date);
+        if (moveScore < MOVE_REFUSAL_THRESHOLD) continue;
+        const wage = marketWageOffer(player.wage, moveScore, await buyerGoingRate(store, player, candidate));
+        if (
+          wage !== null &&
+          (await weeklyWages(store, candidate.id)) + wage <=
+            candidate.wage_budget &&
+          (await assessRegistration(store, player, candidate)).allowed
+        ) {
+          buyer = candidate;
+          newWage = wage;
+          break;
+        }
       }
     }
     if (!buyer) continue;
-    // The seller keeps the player's squad at its minimum (first team 25 without B-team or youth players, B-team 20) and two goalkeepers.
-    const squad = (await store.get<{ type: string; players: number; keepers: number }>(
-      "SELECT clubs.type,count(players.id) AS players,coalesce(sum(CASE WHEN players.position = 'GK' THEN 1 ELSE 0 END),0) AS keepers FROM clubs LEFT JOIN players ON players.playing_club_id = clubs.id AND players.age_group = 'Senior' AND players.role != 'Retired' AND (players.contract_end >= ? OR players.parent_club_id IS NOT NULL) WHERE clubs.id = ? GROUP BY clubs.type",
-      state.date,
-      player.squad_club_id ?? player.club_id,
-    ))!;
-    if (squad.players <= (squad.type === "bteam" ? SQUAD_MINIMUMS.BTeam : SQUAD_MINIMUMS.Senior)) continue;
-    if (player.position === "GK" && squad.keepers <= MIN_GOALKEEPERS) continue;
-    await ledger(
+    if (!(await sellerCanRelease(store, player, state.date))) continue;
+    // A shortlisted target is not taken at once: the director is alerted and has time to compete.
+    if (player.shortlisted) {
+      await recordShortlistBid(store, player, buyer, fee, newWage);
+      continue;
+    }
+    await executeMarketTransfer(
       store,
-      buyer.id,
-      -fee,
-      "Transfer fees",
-      `${player.name}: recruitment`,
-    );
-    await transferProceeds(
-      store,
-      player.id,
-      player.club_id!,
+      player,
+      buyer,
       fee,
-      `${player.name}: sale`,
-    );
-    await acquirePlayerAsset(
-      store,
-      buyer.id,
-      player.id,
-      fee,
-      state.date,
-      `${state.season + 4}-06-30`,
-    );
-    await store.run(
-      "UPDATE clubs SET transfer_budget = transfer_budget - ?, season_spend = season_spend + ? WHERE id = ?",
-      fee,
-      fee,
-      buyer.id,
-    );
-    await store.run(
-      "UPDATE players SET club_id = ?, squad_club_id = NULL, wage = ?, contract_end = ?, role = 'Squad player', morale = LEAST(99,morale + 4) WHERE id = ?",
-      buyer.id,
       newWage,
-      `${state.season + 4}-06-30`,
-      player.id,
-    );
-    await store.run(
-      "INSERT INTO history(season, entity_type, entity_id, date, data) VALUES (?, ?, ?, ?, ?)",
-      state.season,
-      "transfer",
-      player.id,
-      state.date,
-      JSON.stringify({
-        name: player.name,
-        from: player.club_id,
-        to: buyer.id,
-        club: buyer.name,
-        fee,
-      }),
+      activity.completed < 2 ? `world:${player.id}:${state.date}` : undefined,
     );
     activity.completed++;
-    if (activity.completed <= 2)
-      await publishTransferStory(store, {
-        key: `world:${player.id}:${state.date}`,
-        phase: "signing",
-        playerId: player.id,
-        buyerId: buyer.id,
-        sellerId: player.club_id,
-        fee,
-      });
   }
   activity.completed += await signClublessPlayers(store, state, Math.max(1, Math.round(quota / 2)), random);
   const recentOffers = (await store.get<{ total: number }>(
@@ -2559,11 +2790,13 @@ export async function worldTransfers(store: Store, random: seedrandom.PRNG) {
   ))!.total;
   if (recentOffers >= (deadlineWeek ? 5 : 3)) return activity;
   const prospects = await store.all<Player>(
-    "SELECT TOP (12) * FROM players WHERE club_id = ? AND parent_club_id IS NULL AND age >= 18 AND age_group = 'Senior' AND role != 'Retired' AND contract_end > ? AND (listed = 1 OR available_loan = 1 OR form >= 7.2 OR (age <= 23 AND potential - ability >= 8) OR contract_end <= ?) AND NOT EXISTS (SELECT 1 FROM negotiations WHERE negotiations.player_id = players.id AND (stage NOT IN ('Completed','Rejected','Withdrawn','Expired','Hijacked') OR created >= ?)) ORDER BY listed DESC,available_loan DESC,form DESC,potential DESC,id",
+    "SELECT TOP (12) * FROM players WHERE club_id = ? AND parent_club_id IS NULL AND age >= 18 AND age_group = 'Senior' AND role != 'Retired' AND contract_end > ? AND (listed = 1 OR available_loan = 1 OR form >= 7.2 OR (age <= 23 AND potential - ability >= 8) OR contract_end <= ?) AND NOT EXISTS (SELECT 1 FROM negotiations WHERE negotiations.player_id = players.id AND (stage NOT IN ('Completed','Rejected','Withdrawn','Expired','Hijacked') OR created >= ?)) AND (listed = 1 OR available_loan = 1 OR NOT EXISTS (SELECT 1 FROM history WHERE history.entity_type = 'transfer' AND history.entity_id = players.id AND history.date >= ?)) ORDER BY listed DESC,available_loan DESC,form DESC,potential DESC,id",
     state.clubId,
     state.date,
     addDays(state.date, 365),
     addDays(state.date, -21),
+    // No unsolicited bids in a signing's first year: a bought player cannot be flipped at once for a premium.
+    addDays(state.date, -365),
   );
   for (const listed of prospects) {
     if (
@@ -2580,7 +2813,7 @@ export async function worldTransfers(store: Store, random: seedrandom.PRNG) {
           ? 0.03
           : listed.listed
             ? 0.88 + random() * 0.16
-            : 1.05 + random() * 0.15),
+            : 1 + random() * 0.1),
     );
     const interested = await store.all<Club>(
       "SELECT TOP (10) * FROM clubs WHERE id != ? AND type = 'club' AND transfer_budget > ? AND balance > ? AND reputation BETWEEN ? AND ? AND (SELECT count(*) FROM players WHERE players.club_id = clubs.id AND age_group = 'Senior' AND role != 'Retired') < 28 ORDER BY abs(reputation - ?),id",
@@ -2592,22 +2825,36 @@ export async function worldTransfers(store: Store, random: seedrandom.PRNG) {
       listed.ability + (isLoan ? -5 : 3),
     );
     let buyer: Club | undefined;
+    let offeredWage = 0;
     for (const candidate of interested) {
+      // A permanent bidder offers a raise or its own going rate for the player's level, whichever is higher.
+      const wage = isLoan
+        ? listed.wage
+        : Math.max(Math.round(listed.wage * 1.15), await buyerGoingRate(store, listed, candidate));
       if (
         (await weeklyWages(store, candidate.id)) +
-          listed.wage * (isLoan ? 0.7 : 1.2) <=
+          (isLoan ? listed.wage * 0.7 : wage) <=
           candidate.wage_budget &&
         (await assessRegistration(store, listed, candidate)).allowed
       ) {
         buyer = candidate;
+        offeredWage = wage;
         break;
       }
     }
     if (buyer) {
       const profile = JSON.parse(listed.profile) as PlayerProfile;
       const terms = defaultLoanTerms(listed, buyer);
+      // The player's real view of the move, so the director knows before accepting whether he may refuse terms.
+      const interestDetails = await assessPlayerInterest(store, listed, buyer, {
+        loan: isLoan,
+        role: "Regular starter",
+        wage: offeredWage,
+        playingTime: isLoan ? terms.playingTime : undefined,
+      });
       const data = {
         workflowVersion: 2,
+        interestDetails,
         log: [
           {
             date: state.date,
@@ -2630,8 +2877,8 @@ export async function worldTransfers(store: Store, random: seedrandom.PRNG) {
         "Offer received",
         isLoan ? fee : listed.value,
         fee,
-        Math.round(listed.wage * (isLoan ? 1 : 1.15)),
-        75,
+        offeredWage,
+        interestDetails.score,
         state.date,
         addDays(state.date, 7),
         JSON.stringify(data),
@@ -2667,10 +2914,145 @@ export async function worldTransfers(store: Store, random: seedrandom.PRNG) {
   return activity;
 }
 
+/**
+ * League merit payments by final position (senior leagues, before promotion and relegation), credited to cash.
+ * Returns each club's expected revenue in its final top-flight table (the base of a parachute payment).
+ */
+async function payLeaguePrizeMoney(
+  store: Store,
+  userClubId: number,
+  season: number,
+  leagues: League[],
+  tables: Map<number, Standing[]>,
+) {
+  const clubs = new Map(
+    (
+      await store.all<Pick<Club, "id" | "reputation" | "capacity" | "country_id">>(
+        "SELECT id,reputation,capacity,country_id FROM clubs WHERE type != 'national'",
+      )
+    ).map((club) => [club.id, club]),
+  );
+  const codes = new Map(
+    (await store.all<{ id: number; code: string }>("SELECT id, code FROM countries")).map((row) => [row.id, row.code]),
+  );
+  const payments: Record<string, number>[] = [];
+  const topFlight = new Map<number, number>();
+  for (const league of leagues) {
+    if (league.age_group !== "Senior") continue;
+    const table = tables.get(league.id) ?? [];
+    table.forEach((row, index) => {
+      const club = clubs.get(row.club_id);
+      if (!club) return;
+      const revenue = estimateClubRevenue({
+        reputation: club.reputation,
+        leagueReputation: league.reputation,
+        tier: league.tier,
+        capacity: club.capacity,
+        fanMood: 72,
+        homeMatches: Math.max(0, table.length - 1) + 2,
+        countryCode: codes.get(league.country_id ?? club.country_id),
+      }).annualOperatingRevenue;
+      if (league.tier === 1) topFlight.set(club.id, revenue);
+      const prize = leaguePrizeMoney(index + 1, table.length, revenue);
+      if (prize > 0) payments.push({ id: club.id, amount: prize, position: index + 1, league: league.id });
+    });
+  }
+  await updateSimulationRows(store, "clubs", payments, "id int,amount float", "balance = target.balance + changes.amount");
+  const own = payments.find((payment) => payment.id === userClubId);
+  if (own) {
+    await store.run(
+      "INSERT INTO ledger(club_id, date, category, amount, description) VALUES (?, ?, ?, ?, ?)",
+      userClubId,
+      (await stateOf(store)).date,
+      "League prize money",
+      own.amount,
+      `Merit payment for finishing ${own.position}${own.position === 1 ? "st" : own.position === 2 ? "nd" : own.position === 3 ? "rd" : "th"}`,
+    );
+    await recordFinancialItem(store, userClubId, "revenue", own.amount, season + 1);
+  }
+  return topFlight;
+}
+
+/** England's Premier League parachute: paid each summer after relegation until it runs out or the club goes back up. */
+async function payParachutes(store: Store, userClubId: number, season: number) {
+  const date = (await stateOf(store)).date;
+  for (const club of await store.all<{ id: number; tier: number | null; parachute: string }>(
+    "SELECT clubs.id,leagues.tier,JSON_QUERY(clubs.data,'$.parachute') AS parachute FROM clubs LEFT JOIN leagues ON leagues.id = clubs.league_id WHERE JSON_QUERY(clubs.data,'$.parachute') IS NOT NULL",
+  )) {
+    const plan = JSON.parse(club.parachute) as { code: string; first: number; seasons: number; revenue: number };
+    const amount = club.tier === 1 ? 0 : parachutePayment(plan.code, season - plan.first + 1, plan.seasons, plan.revenue);
+    if (amount <= 0) {
+      await store.run("UPDATE clubs SET data = JSON_MODIFY(data,'$.parachute',NULL) WHERE id = ?", club.id);
+      continue;
+    }
+    await store.run("UPDATE clubs SET balance = balance + ? WHERE id = ?", amount, club.id);
+    if (club.id === userClubId) {
+      await store.run(
+        "INSERT INTO ledger(club_id, date, category, amount, description) VALUES (?, ?, ?, ?, ?)",
+        club.id,
+        date,
+        "Parachute payment",
+        amount,
+        `Premier League parachute payment, season ${season - plan.first + 1} after relegation`,
+      );
+      await recordFinancialItem(store, club.id, "revenue", amount, season);
+    }
+  }
+}
+
+/**
+ * Next season's budgets (finance.ts `seasonBudgets`): 40% of cash less reserved deals and every unpaid instalment,
+ * wage budget back to the operating reference, both scaled by promotion/relegation; the new wage budget becomes the
+ * reference. Warns the user's board when cash is negative.
+ */
+async function resetSeasonBudgets(store: Store, userClubId: number) {
+  const rows = await store.all<{
+    id: number;
+    balance: number;
+    wage_budget: number;
+    wage_reference: number | null;
+    movement: string | null;
+    reserved: number;
+    owed: number;
+  }>(
+    "SELECT clubs.id,clubs.balance,clubs.wage_budget,TRY_CONVERT(float,JSON_VALUE(coalesce(clubs.data,'{}'),'$.operatingWageBudget')) AS wage_reference,JSON_VALUE(coalesce(clubs.data,'{}'),'$.budgetMovement') AS movement,coalesce(reserved.total,0) AS reserved,coalesce(owed.total,0) AS owed FROM clubs OUTER APPLY (SELECT sum(TRY_CONVERT(float,JSON_VALUE(negotiations.data,'$.reservedBudget'))) AS total FROM negotiations WHERE negotiations.buying_club_id = clubs.id AND negotiations.stage IN ('Scheduled','Medical','Registration')) AS reserved OUTER APPLY (SELECT sum(transfer_payments.amount) AS total FROM transfer_payments WHERE transfer_payments.payer_id = clubs.id AND transfer_payments.paid_date IS NULL) AS owed WHERE clubs.type != 'national'",
+  );
+  const updates = rows.map((row) => {
+    const movement = row.movement && row.movement in MOVEMENT_BUDGET_FACTOR ? (row.movement as keyof typeof MOVEMENT_BUDGET_FACTOR) : "none";
+    const budgets = seasonBudgets({
+      balance: row.balance,
+      reserved: row.reserved,
+      owedInstalments: row.owed,
+      wageReference: row.wage_reference ?? row.wage_budget,
+      movement,
+    });
+    return { id: row.id, transfer_budget: budgets.transferBudget, wage_budget: budgets.wageBudget };
+  });
+  await updateSimulationRows(
+    store,
+    "clubs",
+    updates,
+    "id int,transfer_budget float,wage_budget float",
+    "transfer_budget = changes.transfer_budget, wage_budget = changes.wage_budget, data = JSON_MODIFY(JSON_MODIFY(coalesce(target.data,'{}'),'$.operatingWageBudget',changes.wage_budget),'$.budgetMovement',NULL)",
+  );
+  const own = rows.find((row) => row.id === userClubId);
+  if (own && own.balance < 0)
+    await news(
+      store,
+      "Finance",
+      "Board warning: the club is in the red",
+      "The season starts with a negative cash balance. There is no transfer budget, transfer fees cannot be paid until the accounts are back in credit, and the board expects sales or wage savings.",
+      "warning",
+      "finances",
+    );
+}
+
 export async function seasonRollover(store: Store) {
   return store.transaction(async () => {
     const state = await stateOf(store);
     const oldSeason = state.season;
+    // Called-up players return before the youth cycle recomputes age groups.
+    await endAllCallUps(store);
     await closeFinancialYear(store, oldSeason);
     const financialReview = await assessFinances(store, state.clubId);
     if ((await settingsOf(store)).ffp && financialReview.status === "review") {
@@ -2725,11 +3107,30 @@ export async function seasonRollover(store: Store) {
     const lastHistoryId = (await store.get<{ id: number }>(
       "SELECT coalesce(max(id),0) AS id FROM history WITH (UPDLOCK,HOLDLOCK)",
     ))!.id;
-    const archives = (
-      await store.all<League>(
-        "SELECT * FROM leagues WHERE kind = 'league' ORDER BY id",
-      )
-    ).map((league, index) => ({
+    const leagueRows = await store.all<League>(
+      "SELECT * FROM leagues WHERE kind = 'league' ORDER BY id",
+    );
+    // Final tables use each league's tiebreakers; head-to-head criteria need the season's results.
+    const criteria = new Map(leagueRows.map((league) => [league.id, readLeagueData(league.data, league.tier).tiebreakers]));
+    const headToHead = [...criteria].filter(([, list]) => needsHeadToHead(list)).map(([id]) => id);
+    const leagueResults = new Map<number, LeagueResult[]>();
+    if (headToHead.length)
+      for (const row of await store.all<LeagueResult & { league_id: number }>(
+        "SELECT league_id,home_id,away_id,home_goals,away_goals FROM fixtures WHERE season = ? AND status = 'played' AND league_id IN (SELECT [id] FROM OPENJSON(?) WITH ([id] INT '$'))",
+        oldSeason,
+        JSON.stringify(headToHead),
+      ))
+        leagueResults.set(row.league_id, [...(leagueResults.get(row.league_id) ?? []), row]);
+    const rankedTables = new Map(
+      leagueRows.map((league) => [
+        league.id,
+        rankTable(tables.get(league.id) ?? [], JSON.parse(league.data).split, {
+          tiebreakers: criteria.get(league.id),
+          results: leagueResults.get(league.id),
+        }),
+      ]),
+    );
+    const archives = leagueRows.map((league, index) => ({
       id: lastHistoryId + index + 1,
       season: oldSeason,
       entity_type: "league",
@@ -2737,12 +3138,13 @@ export async function seasonRollover(store: Store) {
       date: state.date,
       data: JSON.stringify({
         name: league.name,
-        table: rankTable(tables.get(league.id) ?? [], JSON.parse(league.data).split),
+        table: rankedTables.get(league.id),
         ...(champions.has(league.id) ? { champion: champions.get(league.id) } : {}),
       }),
     }));
     for (let offset = 0; offset < archives.length; offset += 1000)
       await store.bulkInsert("history", archives.slice(offset, offset + 1000));
+    const topFlightRevenue = await payLeaguePrizeMoney(store, state.clubId, oldSeason, leagueRows, rankedTables);
     const shortfalls: Record<number, number> = {};
     for (const country of await store.all<Country>(
       "SELECT * FROM countries ORDER BY id",
@@ -2810,14 +3212,28 @@ export async function seasonRollover(store: Store) {
           to,
           club,
         );
+        // Budgets are reset once, after every move (seasonBudgets); the flag carries the movement factor there.
         await store.run(
-          "UPDATE clubs SET league_id = ?, reputation = LEAST(99,GREATEST(1,reputation + ?)), transfer_budget = transfer_budget * ?, fan_mood = LEAST(99,GREATEST(1,fan_mood + ?)) WHERE id = ?",
+          "UPDATE clubs SET league_id = ?, reputation = LEAST(99,GREATEST(1,reputation + ?)), data = JSON_MODIFY(coalesce(data,'{}'),'$.budgetMovement',?), fan_mood = LEAST(99,GREATEST(1,fan_mood + ?)) WHERE id = ?",
           to,
           move.promoted ? 4 : -4,
-          move.promoted ? 1.25 : 0.7,
+          move.promoted ? "promoted" : "relegated",
           move.promoted ? 15 : -15,
           club,
         );
+        const fromTier = pyramid.leagues.find((league) => league.id === move.from)?.tier;
+        if (!move.promoted && fromTier === 1 && parachutePayment(country.code, 1, 1, 1_000_000) > 0) {
+          const seasons = (await store.get<{ total: number }>(
+            "SELECT count(*) AS total FROM history WHERE entity_type = 'league' AND entity_id = ? AND data LIKE ?",
+            move.from,
+            `%"club_id":${club}[,}]%`,
+          ))!.total;
+          await store.run(
+            "UPDATE clubs SET data = JSON_MODIFY(coalesce(data,'{}'),'$.parachute',JSON_QUERY(?)) WHERE id = ?",
+            JSON.stringify({ code: country.code, first: oldSeason + 1, seasons, revenue: topFlightRevenue.get(club) ?? 0 }),
+            club,
+          );
+        }
         if (club === state.clubId)
           await news(
             store,
@@ -2844,6 +3260,7 @@ export async function seasonRollover(store: Store) {
     }
     // Read by the simulation check: boundaries that moved fewer clubs than their spec, per upper league.
     await store.setMeta("movementAudit", { season: oldSeason + 1, shortfalls });
+    await payParachutes(store, state.clubId, oldSeason + 1);
     await store.run(
       "UPDATE standings SET played = 0, wins = 0, draws = 0, losses = 0, gf = 0, ga = 0, points = 0, xg = 0, xga = 0, xpts = 0, form = '', home_record = '0-0-0', away_record = '0-0-0', deducted = 0",
     );
@@ -2856,9 +3273,10 @@ export async function seasonRollover(store: Store) {
       ageCutoff(17),
     );
     await store.run(
-      "UPDATE clubs SET season_spend = 0, income = 0, spending = 0, board_confidence = LEAST(90,board_confidence + 5), transfer_budget = GREATEST(0,balance * 0.4 - (SELECT coalesce(sum(TRY_CONVERT(float,JSON_VALUE(data,'$.reservedBudget'))),0) FROM negotiations WHERE buying_club_id = clubs.id AND stage IN ('Scheduled','Medical','Registration'))), momentum = 0, crisis = 0, hype = 0 WHERE type != ?",
+      "UPDATE clubs SET season_spend = 0, income = 0, spending = 0, board_confidence = LEAST(90,board_confidence + 5), momentum = 0, crisis = 0, hype = 0 WHERE type != ?",
       "national",
     );
+    await resetSeasonBudgets(store, state.clubId);
     const intake = await runYouthIntake(store, oldSeason + 1, state.date, random);
     const latest = await stateOf(store);
     latest.season = oldSeason + 1;
@@ -2896,6 +3314,8 @@ async function weeklyUpdate(store: Store) {
   state.week++;
   await store.setMeta("state", state);
   const random = seedrandom(`${state.seed}:week:${state.week}`);
+  // Pre-scoping saves: cautions and bans under the shared `country:age group:kind` scopes can no longer be served.
+  await store.run("DELETE FROM discipline WHERE scope LIKE ?", LEGACY_DISCIPLINE_SCOPE);
   await developPlayers(store, random);
   await reviewLoans(store);
   await weeklyFinances(store);
@@ -2959,6 +3379,8 @@ export async function advance(store: Store, days: number) {
       );
       await processMinorApplications(store);
       await processNegotiations(store, random);
+      // After expiries (so closed talks hand their rivals to the market) and before the world market.
+      await processTransferBattles(store);
       await processTransferPayments(store);
       await processAffiliateRequests(store);
       await processUnexpectedEvents(store);
@@ -2966,6 +3388,10 @@ export async function advance(store: Store, days: number) {
       await maintainSquads(store, state);
       await worldTransfers(store, random);
       await finishScouting(store);
+      // The coach calls up/returns players of the user's club family before today's fixtures.
+      await processCallUps(store);
+      // National squads for fixtures in the next days; players away are unavailable to their clubs.
+      await processInternationalDuty(store);
       const fixtures = await store.all<Fixture>(
         "SELECT * FROM fixtures WHERE date <= ? AND season = ? AND status = 'scheduled' ORDER BY date, id",
         state.date,
@@ -2995,6 +3421,7 @@ export async function advance(store: Store, days: number) {
       if (daysBetween("2026-07-01", state.date) % 7 === 0)
         await weeklyUpdate(store);
       await processAssistant(store);
+      await processStaffCareers(store);
       if (
         state.date.slice(5) === "07-01" &&
         Number(state.date.slice(0, 4)) > state.season
@@ -3002,7 +3429,7 @@ export async function advance(store: Store, days: number) {
         await seasonRollover(store);
         rollover = true;
       }
-      if (["09-01", "01-31"].includes(state.date.slice(5)))
+      if (deadlineDay(state.date))
         await news(
           store,
           "Transfers",
@@ -3035,7 +3462,7 @@ export async function advance(store: Store, days: number) {
         "profile = JSON_MODIFY(JSON_MODIFY(target.profile,'$.registration',JSON_QUERY(coalesce(JSON_QUERY(target.profile,'$.registration'),N'{}'))),'$.registration.lastAssociationId',(SELECT CASE WHEN JSON_VALUE(clubs.data,'$.hosted.registration') = 'host' THEN coalesce((SELECT id FROM countries WHERE code = JSON_VALUE(clubs.data,'$.hosted.host')),clubs.country_id) ELSE clubs.country_id END FROM clubs WHERE clubs.id = target.club_id)), club_id = NULL, squad_club_id = NULL, wage = 0, value = 100, listed = 0, available_loan = 0, role = 'Free agent'",
       );
       for (const player of expired) {
-        if (player.club_id === state.clubId)
+        if (player.club_id !== null && family.has(player.club_id))
           await news(
             store,
             "Transfers",

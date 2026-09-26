@@ -30,6 +30,7 @@ import {
   transferWindow,
 } from "../shared/rules.ts";
 import { advance, seasonRollover } from "./simulation.ts";
+import { owedInstalments, seasonBudgets } from "./finance.ts";
 import { CONTINENTAL } from "../shared/world-catalog/continental.ts";
 import {
   clubRegistration,
@@ -371,10 +372,20 @@ describe("youth recruitment registration", () => {
       ...(await stateOf(store)),
       date: "2027-07-01",
     });
+    const tierOf = async () =>
+      (await store.get<{ tier: number }>("SELECT leagues.tier FROM clubs JOIN leagues ON leagues.id = clubs.league_id WHERE clubs.id = ?", (await stateOf(store)).clubId))?.tier ?? 0;
+    const tierBefore = await tierOf();
     await seasonRollover(store);
-    expect((await clubOf(store)).transfer_budget).toBeCloseTo(
-      (await clubOf(store)).balance * 0.4 - reserved,
-      2,
+    const tierAfter = await tierOf();
+    const own = await clubOf(store);
+    expect(own.transfer_budget).toBe(
+      seasonBudgets({
+        balance: own.balance,
+        reserved,
+        owedInstalments: await owedInstalments(store, own.id),
+        wageReference: 0,
+        movement: tierAfter < tierBefore ? "promoted" : tierAfter > tierBefore ? "relegated" : "none",
+      }).transferBudget,
     );
     const budget = (await clubOf(store)).transfer_budget;
     const balance = (await clubOf(store)).balance;

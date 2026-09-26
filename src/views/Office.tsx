@@ -44,10 +44,13 @@ import {
   daysBetween,
   compactNumber,
   transferWindow,
+  winterWindowClose,
 } from "../../shared/rules.ts";
-import type { Dashboard } from "../../shared/api.ts";
+import type { CompetitionDetail, Dashboard } from "../../shared/api.ts";
 import type { Player } from "../../shared/types.ts";
 import { EventsPanel } from "./ClubSupport.tsx";
+import { leagueZones } from "../table-zones.ts";
+import { expectationText, ordinal, plural, seasonText } from "../format.ts";
 
 function MiniPitch() {
   const { bootstrap } = useGame();
@@ -159,15 +162,18 @@ export default function Office() {
   const { bootstrap, navigate, openLeague, openMatch, setPlayer } = useGame();
   const { money } = useCurrency();
   const { data, error, loading } = useResource<Dashboard>("dashboard");
+  const leagueId = bootstrap?.club.league_id;
+  const { data: league } = useResource<CompetitionDetail>(
+    leagueId ? `leagues/${leagueId}` : null,
+    { cache: true },
+  );
   if (error) return <ErrorState message={error} />;
   if (!data || !bootstrap) return <Loading />;
   const { club, state } = bootstrap;
   const inWindow = transferWindow(state.date);
-  const monthDay = state.date.slice(5);
+  const winterClose = winterWindowClose(Number(state.date.slice(0, 4)));
   const deadline =
-    monthDay <= "01-31"
-      ? `${state.date.slice(0, 4)}-01-31`
-      : `${state.date.slice(0, 4)}-09-01`;
+    state.date <= winterClose ? winterClose : `${state.date.slice(0, 4)}-09-01`;
   const deadlineDays = Math.max(0, daysBetween(state.date, deadline));
   const ownGroup = data.table.find((entry) => entry.club_id === club.id)?.group_name;
   // Conference and split leagues rank clubs within their group.
@@ -177,6 +183,7 @@ export default function Office() {
       : data.table;
   const ownPosition =
     table.findIndex((entry) => entry.club_id === club.id) + 1;
+  const zones = league ? leagueZones(JSON.parse(league.league.data)) : null;
   const newsItems = data.news
     .filter((item) => item.category !== "Match")
     .slice(0, 3);
@@ -205,7 +212,7 @@ export default function Office() {
   return (
     <div className="page" aria-busy={loading}>
       <PageHeading
-        eyebrow={`THE DIRECTOR'S OFFICE / ${state.season}-${String(state.season + 1).slice(-2)}`}
+        eyebrow={`THE DIRECTOR'S OFFICE / ${seasonText(state.season)}`}
         title={`Good morning, ${firstName}.`}
         subtitle={
           <>
@@ -317,7 +324,7 @@ export default function Office() {
               </h2>
               <p>
                 {inWindow
-                  ? `${deadlineDays} days to shape the squad. Every signing is a decision about your future.`
+                  ? `${plural(deadlineDays, "day")} to shape the squad. Every signing is a decision about your future.`
                   : `${club.manager} leads the team. The long-term direction is in your hands.`}
               </p>
               <div className="window-bottom">
@@ -408,8 +415,8 @@ export default function Office() {
               title={club.league_name ?? "League standings"}
               subtitle={
                 table[0]?.played
-                  ? `Matchweek ${Math.max(...table.map((entry) => entry.played))} / ${ownPosition}${ownPosition === 1 ? "st" : ownPosition === 2 ? "nd" : ownPosition === 3 ? "rd" : "th"} place${table !== data.table && ownGroup ? ` / ${ownGroup}` : ""}`
-                  : `${state.season}/${String(state.season + 1).slice(-2)} season / Kick-off in August`
+                  ? `Matchweek ${Math.max(...table.map((entry) => entry.played))}${ownPosition > 0 ? ` / ${ordinal(ownPosition)} place` : ""}${table !== data.table && ownGroup ? ` / ${ownGroup}` : ""}`
+                  : `${seasonText(state.season)} season${data.fixtures[0] ? ` / First match ${dateLabel(data.fixtures[0].date)}` : ""}`
               }
             >
               <TextLink
@@ -422,6 +429,9 @@ export default function Office() {
               entries={table.slice(0, 6)}
               ownId={club.id}
               compact
+              zones={zones}
+              tableSize={table.length}
+              label={`${club.league_name ?? "League"} table, top six`}
             />
             <div className="pulse-footer">
               <span className="status-dot positive" />
@@ -523,7 +533,7 @@ export default function Office() {
               <ul className="mandate-list">
                 <li>
                   <Target size={14} />
-                  <span>Finish in the top {club.expectations}</span>
+                  <span>{expectationText(club.expectations)}</span>
                 </li>
                 <li>
                   <ArrowDownLeft size={14} />

@@ -9,8 +9,11 @@ import {
   configureAssistant,
   processAffiliateRequests,
   processAssistant,
+  processStaffCareers,
   requestAffiliate,
+  STARTER_AFFILIATE_MAX_TIER,
 } from "./club-support.ts";
+import { processSquadNotices } from "./notifications.ts";
 import { addDays, DEFAULT_ASSISTANT_DUTIES } from "../shared/rules.ts";
 import {
   createUnexpectedEvent,
@@ -38,13 +41,24 @@ describe("sporting director assistant", () => {
   );
   afterAll(async () => await store?.close());
 
-  it("gives every first team an assistant and a starter affiliate, and B-teams neither", async () => {
+  it("gives every first team an assistant, starter affiliates only to professional-level clubs, and B-teams neither", async () => {
     const count = async (sql: string) => (await store.get<{ total: number }>(sql))!.total;
+    const tier = "coalesce((SELECT tier FROM leagues WHERE leagues.id = clubs.league_id),9)";
     expect(
       await count(
-        "SELECT count(*) AS total FROM clubs WHERE type = 'club' AND NOT EXISTS (SELECT 1 FROM partnerships WHERE partnerships.club_id = clubs.id OR partnerships.partner_id = clubs.id)",
+        `SELECT count(*) AS total FROM clubs WHERE type = 'club' AND ${tier} <= ${STARTER_AFFILIATE_MAX_TIER} AND NOT EXISTS (SELECT 1 FROM partnerships WHERE partnerships.club_id = clubs.id OR partnerships.partner_id = clubs.id)`,
       ),
     ).toBe(0);
+    expect(
+      await count(
+        `SELECT count(*) AS total FROM partnerships JOIN clubs ON clubs.id = partnerships.club_id WHERE JSON_VALUE(partnerships.data,'$.origin') = 'initial' AND ${tier} > ${STARTER_AFFILIATE_MAX_TIER} AND clubs.reputation < 55`,
+      ),
+    ).toBe(0);
+    expect(
+      await count(
+        `SELECT count(*) AS total FROM clubs WHERE type = 'club' AND ${tier} > ${STARTER_AFFILIATE_MAX_TIER} AND NOT EXISTS (SELECT 1 FROM partnerships WHERE partnerships.club_id = clubs.id OR partnerships.partner_id = clubs.id)`,
+      ),
+    ).toBeGreaterThan(0);
     expect(
       await count(
         "SELECT count(*) AS total FROM partnerships JOIN clubs ON clubs.id = partnerships.club_id OR clubs.id = partnerships.partner_id WHERE clubs.type != 'club'",
@@ -65,6 +79,59 @@ describe("sporting director assistant", () => {
         "SELECT count(*) AS total FROM partnerships WHERE JSON_VALUE(data,'$.origin') = 'initial' AND (JSON_VALUE(data,'$.annualFee') != '0' OR JSON_VALUE(data,'$.since') IS NULL)",
       ),
     ).toBe(0);
+  });
+
+  it("ages, bounds and renews staff, and replaces AI staff who leave", async () => {
+    const state = await stateOf(store);
+    await store.transaction(() => processStaffCareers(store));
+    const rows = await store.all<{ id: number; club_id: number | null; role: string; ability: number; morale: number; data: string }>(
+      "SELECT id,club_id,role,ability,morale,data FROM staff ORDER BY id",
+    );
+    const data = rows.map((row) => ({ ...row, ...(JSON.parse(row.data) as { birthYear?: number; ceiling?: number; contractEnd?: string }) }));
+    expect(data.every((row) => typeof row.birthYear === "number" && row.ceiling! >= Math.min(row.ability, 95) - 1)).toBe(true);
+    expect(new Set(data.filter((row) => row.club_id !== null).map((row) => row.contractEnd)).size).toBeGreaterThanOrEqual(3);
+    const aiClub = data.find((row) => row.club_id !== null && row.club_id !== state.clubId)!;
+    await store.run("UPDATE staff SET data = JSON_MODIFY(data,'$.contractEnd','2026-06-30') WHERE club_id = ?", aiClub.club_id);
+    const own = data.find((row) => row.club_id === state.clubId)!;
+    await store.run("UPDATE staff SET data = JSON_MODIFY(JSON_MODIFY(data,'$.contractEnd','2026-06-30'),'$.birthYear',1980) WHERE id = ?", own.id);
+    await store.setMeta("state", { ...state, date: "2026-07-02" });
+    await store.transaction(() => processStaffCareers(store));
+    const after = await store.all<{ role: string; data: string }>("SELECT role,data FROM staff WHERE club_id = ?", aiClub.club_id);
+    const roles = data.filter((row) => row.club_id === aiClub.club_id).map((row) => row.role).sort();
+    expect(after.map((row) => row.role).sort()).toEqual(roles);
+    expect(after.every((row) => (JSON.parse(row.data) as { contractEnd: string }).contractEnd > "2026-07-02")).toBe(true);
+    const renewed = (await store.get<{ club_id: number; data: string }>("SELECT club_id,data FROM staff WHERE id = ?", own.id))!;
+    expect(renewed.club_id).toBe(state.clubId);
+    expect((JSON.parse(renewed.data) as { contractEnd: string }).contractEnd).toBe(`${state.season + 2}-06-30`);
+  });
+
+  it("announces spring retirements and expiring contracts across the club family", async () => {
+    const state = await stateOf(store);
+    const veteran = (await store.get<Player>(
+      "SELECT TOP (1) * FROM players WHERE club_id = ? AND parent_club_id IS NULL AND age_group = 'Senior' ORDER BY id",
+      state.clubId,
+    ))!;
+    await store.run("UPDATE players SET birth_date = '1984-01-01', contract_end = ? WHERE id = ?", `${state.season + 1}-06-30`, veteran.id);
+    const youth = (await store.get<Player>(
+      "SELECT TOP (1) * FROM players WHERE club_id = ? AND age_group = 'U19' ORDER BY id",
+      state.clubId,
+    ))!;
+    await store.run(
+      "UPDATE players SET contract_end = ?, profile = JSON_MODIFY(profile,'$.contract.status','professional') WHERE id = ?",
+      `${state.season + 1}-06-30`,
+      youth.id,
+    );
+    await store.setMeta("state", { ...state, date: `${state.season + 1}-05-01` });
+    await store.transaction(() => processSquadNotices(store));
+    const notice = await store.meta<{ season: number; playerIds: number[] }>("retirementNotice");
+    expect(notice.season).toBe(state.season);
+    expect(notice.playerIds).toContain(veteran.id);
+    const items = await store.all<{ title: string; body: string }>("SELECT title,body FROM news WHERE category = 'Squad' ORDER BY id");
+    expect(items.some((item) => /retire at the end of the season/.test(item.title) && item.body.includes(veteran.name))).toBe(true);
+    expect(items.some((item) => /end on 30 June/.test(item.title) && item.body.includes(youth.name))).toBe(true);
+    const before = items.length;
+    await store.transaction(() => processSquadNotices(store));
+    expect((await store.all("SELECT id FROM news WHERE category = 'Squad'")).length).toBe(before);
   });
 
   it("keeps undelegated decisions with the director", async () => {

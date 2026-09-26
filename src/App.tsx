@@ -28,6 +28,7 @@ import {
   Inbox,
   Landmark,
   LoaderCircle,
+  Medal,
   Menu,
   MessageSquare,
   Play,
@@ -41,7 +42,7 @@ import {
   X,
   type LucideIcon,
 } from "lucide-react";
-import { GameProvider, useGame, type Page } from "./game-context.tsx";
+import { GameProvider, useGame, useResource, type Page } from "./game-context.tsx";
 import {
   Button,
   Crest,
@@ -51,6 +52,8 @@ import {
   Modal,
 } from "./ui.tsx";
 import { compactNumber, dateLabel } from "../shared/rules.ts";
+import type { NewsItem } from "../shared/types.ts";
+import { seasonText, unreadLabel } from "./format.ts";
 import Office from "./views/Office.tsx";
 const PlayerSheet = lazy(() => import("./PlayerSheet.tsx"));
 const CareerSheet = lazy(() =>
@@ -93,6 +96,7 @@ const StaffView = lazy(() =>
   })),
 );
 const CompetitionView = lazy(() => import("./views/Competitions.tsx"));
+const InternationalsView = lazy(() => import("./views/Internationals.tsx"));
 const AnalyticsView = lazy(() => import("./views/Analytics.tsx"));
 const FinanceView = lazy(() =>
   import("./views/ClubOffice.tsx").then((module) => ({
@@ -119,9 +123,25 @@ const StartView = lazy(() => import("./views/Start.tsx"));
 const WorldView = lazy(() => import("./views/World.tsx"));
 const ClubSheet = lazy(() => import("./ClubSheet.tsx"));
 
+/** Internationals lives under the competitions page (`#competitions/internationals`) so deep links and Back work. */
+type Screen = Page | "internationals";
+const INTERNATIONALS_HASH = "#competitions/internationals";
+
+function useHashSegment() {
+  const [hash, setHash] = useState(() => location.hash);
+  useEffect(() => {
+    const handler = () => setHash(location.hash);
+    window.addEventListener("hashchange", handler);
+    return () => window.removeEventListener("hashchange", handler);
+  }, []);
+  return { segment: hash.slice(1).split("/")[1] ?? "", setHash };
+}
+
+const UNREAD_LIMIT = 100;
+
 const navigation: {
   label: string;
-  items: { id: Page; label: string; icon: LucideIcon }[];
+  items: { id: Screen; label: string; icon: LucideIcon }[];
 }[] = [
   {
     label: "Workspace",
@@ -153,6 +173,7 @@ const navigation: {
     items: [
       { id: "world", label: "World browser", icon: Globe2 },
       { id: "competitions", label: "Competitions", icon: Trophy },
+      { id: "internationals", label: "Internationals", icon: Medal },
       { id: "analytics", label: "Match centre", icon: ChartNoAxesCombined },
     ],
   },
@@ -165,13 +186,14 @@ const navigation: {
     ],
   },
 ];
-const allItems = [
-  ...navigation.flatMap((group) => group.items),
-  { id: "settings" as Page, label: "Settings", icon: Settings2 },
-  { id: "offer" as Page, label: "Make an offer", icon: ArrowLeftRight },
-  { id: "contract" as Page, label: "Player contract", icon: ArrowLeftRight },
+const mainItems = navigation.flatMap((group) => group.items);
+const allItems: { id: Screen; label: string; icon: LucideIcon }[] = [
+  ...mainItems,
+  { id: "settings", label: "Settings", icon: Settings2 },
+  { id: "offer", label: "Make an offer", icon: ArrowLeftRight },
+  { id: "contract", label: "Player contract", icon: ArrowLeftRight },
 ];
-const views: Record<Page, ReactNode> = {
+const views: Record<Screen, ReactNode> = {
   start: <StartView />,
   office: <Office />,
   inbox: <InboxView />,
@@ -187,6 +209,7 @@ const views: Record<Page, ReactNode> = {
   training: <TrainingView />,
   staff: <StaffView />,
   competitions: <CompetitionView />,
+  internationals: <InternationalsView />,
   analytics: <AnalyticsView />,
   finances: <FinanceView />,
   board: <BoardView />,
@@ -246,6 +269,11 @@ function Shell() {
     days: number;
   } | null>(null);
   const touch = useRef<{ x: number; y: number } | null>(null);
+  const { segment, setHash } = useHashSegment();
+  const { data: unread } = useResource<NewsItem[]>(
+    `news?status=unread&limit=${UNREAD_LIMIT}`,
+    { keepPreviousData: true },
+  );
   useEffect(() => {
     if (!bootstrap) return;
     const handleKey = (event: KeyboardEvent) => {
@@ -303,9 +331,20 @@ function Shell() {
         : speed === "deliberate"
           ? 1
           : 7;
-  const current = allItems.find((item) => item.id === page)!;
-  const navClick = (next: Page) => {
-    navigate(next);
+  const screen: Screen =
+    page === "competitions" && segment === "internationals" ? "internationals" : page;
+  const current = allItems.find((item) => item.id === screen) ?? allItems[0];
+  const open = (next: Screen) => {
+    if (next !== "internationals") {
+      navigate(next);
+      return;
+    }
+    navigate("competitions");
+    history.replaceState(history.state, "", INTERNATIONALS_HASH);
+    setHash(INTERNATIONALS_HASH);
+  };
+  const navClick = (next: Screen) => {
+    open(next);
     setMenu(false);
   };
   const mobilePages: Page[] = ["office", "database", "squad", "academy"];
@@ -352,14 +391,16 @@ function Shell() {
                 {group.items.map((item) => (
                   <button
                     key={item.id}
-                    className={`nav-item ${page === item.id ? "active" : ""}`}
-                    aria-current={page === item.id ? "page" : undefined}
+                    className={`nav-item ${screen === item.id ? "active" : ""}`}
+                    aria-current={screen === item.id ? "page" : undefined}
                     onClick={() => navClick(item.id)}
                   >
                     <item.icon size={17} strokeWidth={1.55} />
                     <span>{item.label}</span>
-                    {item.id === "inbox" && !state.started && (
-                      <span className="nav-count">4</span>
+                    {item.id === "inbox" && !!unread?.length && (
+                      <span className="nav-count" aria-label={`${unread.length} unread`}>
+                        {unreadLabel(unread.length, UNREAD_LIMIT)}
+                      </span>
                     )}
                   </button>
                 ))}
@@ -428,9 +469,7 @@ function Shell() {
                     { weekday: "long", timeZone: "UTC" },
                   )}{" "}
                   /{" "}
-                  {state.date.slice(5, 7) === "07"
-                    ? "Pre-season"
-                    : `${state.season}/${String(state.season + 1).slice(-2)}`}
+                  {seasonText(state.season, state.date.slice(5, 7) === "07")}
                 </small>
               </div>
               <IconButton
@@ -519,9 +558,11 @@ function Shell() {
                 Math.abs(deltaY) > Math.abs(deltaX) * 0.4
               )
                 return;
-              const index = allItems.findIndex((item) => item.id === page);
-              const next = allItems[index + (deltaX < 0 ? 1 : -1)];
-              if (next) navigate(next.id);
+              // Swipe only between the main navigation pages, never into settings or the offer/contract pages.
+              const index = mainItems.findIndex((item) => item.id === screen);
+              if (index < 0) return;
+              const next = mainItems[index + (deltaX < 0 ? 1 : -1)];
+              if (next) open(next.id);
             }}
           >
             {state.gameOver && (
@@ -533,8 +574,8 @@ function Shell() {
                 </Button>
               </div>
             )}
-            <ScreenBoundary key={page}>
-              <Suspense fallback={<Loading />}>{views[page]}</Suspense>
+            <ScreenBoundary key={screen}>
+              <Suspense fallback={<Loading />}>{views[screen]}</Suspense>
             </ScreenBoundary>
           </main>
         </div>
@@ -614,8 +655,8 @@ function Shell() {
                     <button
                       type="button"
                       key={item.id}
-                      className={`nav-item ${page === item.id ? "active" : ""}`}
-                      aria-current={page === item.id ? "page" : undefined}
+                      className={`nav-item ${screen === item.id ? "active" : ""}`}
+                      aria-current={screen === item.id ? "page" : undefined}
                       onClick={() => navClick(item.id)}
                     >
                       <item.icon size={18} aria-hidden="true" />

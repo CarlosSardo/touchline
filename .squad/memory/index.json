@@ -63,7 +63,7 @@
     "id": "8f649cfb-0d12-4209-96ca-c105ce29c4e6",
     "class": "DECISION",
     "loadGuidance": "ALWAYS",
-    "title": "Azure CLI must use carlos.sardo@outlook.com for Touchline",
+    "title": "Azure CLI must use <owner-email> for Touchline",
     "path": ".squad/decisions/inbox/squad-coordinator-azure-cli-must-use-carlos-sardo-outlook-com-for-touchline-8f649cfb.md",
     "status": "active",
     "createdAt": "2026-09-23T11:55:26.466Z",

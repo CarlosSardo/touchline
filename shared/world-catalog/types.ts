@@ -377,6 +377,10 @@ export interface CupSpec {
   continental?: boolean;
   /** "MM-DD" start override within the July–June season. */
   start?: string;
+  /** "MM-DD" final; rounds are spread evenly up to it (default national cups 05-22, league cups 02-28). */
+  final?: string;
+  /** Open-draw home rule: a club at least this many tiers lower hosts (Copa del Rey 1, Coupe de France 2). */
+  lowerTierHome?: number;
 }
 export interface YouthDivisionSpec {
   /** Real name, e.g. "División de Honor Juvenil", "U18 Premier League". */

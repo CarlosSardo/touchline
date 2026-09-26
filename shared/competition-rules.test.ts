@@ -1,12 +1,21 @@
 import { describe, expect, it } from "vitest";
+import seedrandom from "seedrandom";
 import { CONTINENTAL } from "./world-catalog/continental.ts";
+import { internationalBreak } from "./rules.ts";
 import {
   coefficientSeedRows,
   coefficientTotal,
+  cupEntryPlan,
+  cupRoundDates,
   frozenAssociationPoints,
+  isKnockoutStage,
+  KNOCKOUT_PLAYOFF_STAGE,
   knockoutRules,
+  nextSeededRound,
+  openDraw,
   rankAssociations,
   resolveContinentalAccess,
+  seededPairs,
   type AccessEntrant,
   type AccessNation,
 } from "./competition-rules.ts";
@@ -267,5 +276,88 @@ describe("association coefficients", () => {
   it("seeds the real 2025/26 season for the ranking-only UEFA associations", () => {
     const uefa = ["IL", "AZ", "FO", "MK"].map((code) => CONTINENTAL.rankingOnly?.[code as "IL"]);
     expect(uefa.every((seed) => seed?.season2025 !== undefined)).toBe(true);
+  });
+});
+
+describe("knockout brackets and domestic cup draws", () => {
+  it("keeps the top seeds apart after byes: seed 1 meets the weakest first-round winner, 8 meets 9", () => {
+    const seeds = Array.from({ length: 20 }, (_, index) => index + 1);
+    const first = seededPairs(seeds);
+    expect(first.byes).toEqual(seeds.slice(0, 12));
+    expect(first.pairs).toEqual([[13, 20], [14, 19], [15, 18], [16, 17]]);
+    const second = seededPairs(nextSeededRound(first.pairs.map(([better]) => better), first.byes));
+    expect(second.byes).toEqual([]);
+    expect(second.pairs).toEqual([[1, 16], [2, 15], [3, 14], [4, 13], [5, 12], [6, 11], [7, 10], [8, 9]]);
+    const third = seededPairs(nextSeededRound(second.pairs.map(([better]) => better)));
+    expect(third.pairs).toEqual([[1, 8], [2, 7], [3, 6], [4, 5]]);
+  });
+
+  it("gives every round an even field and lets whole top tiers join later (FA Cup: 8 rounds, tiers 1–2 in round 3)", () => {
+    const random = seedrandom("cup-plans");
+    for (let count = 2; count <= 160; count++) {
+      const perTier = 4 + Math.floor(random() * 20);
+      const entrants = Array.from({ length: count }, (_, index) => ({ id: index + 1, tier: 1 + Math.floor(index / perTier) }));
+      for (const seeded of [false, true]) {
+        const plan = cupEntryPlan(entrants, seeded);
+        expect(Object.values(plan.entry).filter((entry) => entry === 1).length, `${count} clubs round one`).toBeGreaterThanOrEqual(2);
+        let field = 0;
+        for (let round = 1; round <= plan.rounds; round++) {
+          field = field / 2 + Object.values(plan.entry).filter((entry) => entry === round).length;
+          expect(field % 2, `${count} clubs, seeded ${seeded}, round ${round}`).toBe(0);
+        }
+        expect(field, `${count} clubs final`).toBe(2);
+        const byTier = (tier: number) => entrants.filter((club) => club.tier === tier).map((club) => plan.entry[club.id]);
+        const lowest = Math.max(...entrants.map((club) => club.tier));
+        if (lowest > 1) expect(Math.min(...byTier(1))).toBeGreaterThanOrEqual(Math.max(...byTier(lowest)));
+      }
+    }
+    const tiers = [20, 24, 24, 24, 24, 8];
+    const lone = cupEntryPlan([...Array.from({ length: 40 }, (_, index) => ({ id: index, tier: 1 })), { id: 99, tier: 2 }], true);
+    expect(Object.values(lone.entry).filter((entry) => entry === 1).length % 2).toBe(0);
+    const facup = tiers.flatMap((size, tier) => Array.from({ length: size }, (_, index) => ({ id: tier * 100 + index, tier: tier + 1 })));
+    const plan = cupEntryPlan(facup, true);
+    expect(plan.rounds).toBe(8);
+    const entries = (tier: number) => new Set(facup.filter((club) => club.tier === tier).map((club) => plan.entry[club.id]));
+    expect([...entries(1)]).toEqual([3]);
+    expect([...entries(2)]).toEqual([3]);
+    expect([...entries(3)]).toEqual([1]);
+    expect(Object.values(plan.entry).filter((entry) => entry === 1)).toHaveLength(80);
+  });
+
+  it("draws openly with the first club drawn at home, unless the other is far enough down the pyramid", () => {
+    const clubs = Array.from({ length: 32 }, (_, index) => index + 1);
+    const pairs = openDraw(clubs, seedrandom("draw"));
+    expect(pairs).toHaveLength(16);
+    expect(new Set(pairs.flat()).size).toBe(32);
+    expect(pairs.some(([home, away]) => home > away)).toBe(true);
+    expect(pairs.some(([home, away]) => home < away)).toBe(true);
+    expect(openDraw(clubs, seedrandom("draw"))).toEqual(pairs);
+    const tiers = Object.fromEntries(clubs.map((id) => [id, id <= 16 ? 1 : 3]));
+    for (const [home, away] of openDraw(clubs, seedrandom("home rule"), tiers, 2))
+      expect(tiers[home]).toBeGreaterThanOrEqual(tiers[away]);
+  });
+
+  it("spreads cup rounds to a May final (national) and a late-February final (league cup), midweek rounds", () => {
+    const national = cupRoundDates(2026, "10-21", "05-22", 8);
+    expect(national[0]).toBe("2026-10-21");
+    expect(national.at(-1)).toBe("2027-05-22");
+    expect(national.every((date, index) => !index || date > national[index - 1])).toBe(true);
+    expect(national.slice(1, -1).every((date) => new Date(`${date}T12:00:00Z`).getUTCDay() === 3)).toBe(true);
+    expect(national.every((date) => !internationalBreak(date))).toBe(true);
+    const league = cupRoundDates(2026, "08-26", "02-28", 7);
+    expect(league.at(-1)! >= "2027-02-27" && league.at(-1)! <= "2027-03-06").toBe(true);
+    expect(cupRoundDates(2026, "07-25", undefined, 3)).toEqual(["2026-07-25", "2026-08-08", "2026-08-22"]);
+  });
+
+  it("names the UEFA knockout play-offs and sends CONMEBOL two-legged ties straight to penalties", () => {
+    expect(isKnockoutStage(KNOCKOUT_PLAYOFF_STAGE)).toBe(true);
+    expect(isKnockoutStage("Round of 80")).toBe(true);
+    expect(isKnockoutStage("League phase")).toBe(false);
+    for (const name of ["CONMEBOL Libertadores", "CONMEBOL Sudamericana"]) {
+      expect(knockoutRules(name, "Round of 16"), name).toMatchObject({ legs: 2, extraTime: false });
+      expect(knockoutRules(`${name} Qualifying`, "Qualifying").extraTime, name).toBe(false);
+      expect(knockoutRules(name, "Final"), name).toMatchObject({ legs: 1, extraTime: true });
+    }
+    expect(knockoutRules("UEFA Champions League", "Round of 16").extraTime).toBe(true);
   });
 });
