@@ -542,12 +542,23 @@ export async function checkContinentalEntries(store: Store) {
     );
     if (!separate) for (const entry of expected) used.add(entry.club.id);
     const main = await store.get<{ data: string }>("SELECT data FROM leagues WHERE name = ? AND country_id IS NULL", spec.name);
-    const data = JSON.parse(main?.data ?? "{}") as { season?: number; qualification?: { clubId: number; stage: string }[] };
+    const data = JSON.parse(main?.data ?? "{}") as {
+      season?: number;
+      phase?: string;
+      qualification?: { clubId: number; stage: string }[];
+    };
     if (data.season !== season) {
       if (expected.length) failures.push(`${spec.name} was not created for ${season} (${expected.length} clubs qualify)`);
       continue;
     }
-    if (!Array.isArray(data.qualification)) continue;
+    if (!Array.isArray(data.qualification)) {
+      // The calendar stores every access list; only a competition not held, with nobody qualifying, may lack one.
+      if (data.phase !== "not held" || expected.length)
+        failures.push(
+          `${spec.name}: no stored qualification list for ${season} (phase ${data.phase ?? "none"}, ${expected.length} clubs qualify)`,
+        );
+      continue;
+    }
     const entries = data.qualification;
     total += entries.length;
     const want = expected.map((entry) => `${entry.club.id}:${entry.stage}`).sort();
