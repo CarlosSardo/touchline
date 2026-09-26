@@ -4,7 +4,7 @@ set +x
 
 deploy_usage() {
   printf '%s\n' \
-    'Usage: bash scripts/azure-deploy.sh --yes [--stage-only | --hold-ingress] [--skip-db-prepare] [--empty-worlds] [--verification full|smoke] [--image ghcr.io/OWNER/IMAGE@sha256:DIGEST]' \
+    'Usage: bash scripts/azure-deploy.sh --yes [--stage-only | --hold-ingress] [--skip-db-prepare] [--empty-worlds | --current-worlds] [--verification full|smoke] [--image ghcr.io/OWNER/IMAGE@sha256:DIGEST]' \
     '--stage-only builds/publishes and configures internal-only maintenance mode without opening SQL or enabling gameplay.' \
     '--hold-ingress builds a SQL-configured gameplay candidate but leaves ingress internal, without public probes or promotion.' \
     'Held candidates are recorded in .azure/held-app.json as pendingPromotion; runtime health and human sign-in remain unverified.' \
@@ -15,6 +15,8 @@ deploy_usage() {
     'equals the clean checkout HEAD; the check reads GHCR with the pull token and needs no Docker. --hold-ingress still requires a local build.' \
     '--empty-worlds is for the release after a reviewed world reset: every registered world must be empty; the dbo export is skipped' \
     'and the smoke checks expect no career. The operator full backup must precede the reset.' \
+    '--current-worlds accepts registered worlds that are each either empty or a complete career at the current WORLD_VERSION;' \
+    'any older, newer or partial world refuses. The smoke checks and the dbo export follow the dbo world found.' \
     '--verification smoke runs a fresh build and read-only live API checks; it does not certify the full regression suite. Default: full.' \
     'Gameplay deployment requires an explicitly provisioned accounts.users registry, the preserved dbo career (or --empty-worlds), UMI and Consumption environment; other worlds may be empty.' \
     'Missing accounts block upgrades: review scripts/accounts-migrate.ts and separately provision with --apply --yes; deployment never binds users or seeds.' \
@@ -90,6 +92,37 @@ try {
     const slots=await store.get(`SELECT COUNT_BIG(*) AS [total] FROM ${tableName(schema,'save_slots')}`);
     console.log(`[sql] ${maskSchema(schema)}: world empty; ${Number(slots.total)} saved snapshot(s).`);
   }
+} finally { await store.close(); }
+NODE
+}
+
+deployment_current_worlds_check() {
+  printf '%s\n' '[verify] --current-worlds: every registered world must be empty or a complete career at the current world version.'
+  DEPLOY_DBO_WORLD_FILE="$1" deployment_sql -- node --import tsx --input-type=module <<'NODE'
+import {writeFileSync} from 'node:fs';
+import {Store} from './server/db.ts';
+import {registeredAccountSchemas} from './server/accounts.ts';
+import {tableName} from './server/sql-schema.ts';
+import {WORLD_VERSION} from './shared/world-rules.ts';
+import {maskSchema} from './scripts/career-delete.ts';
+const store=await Store.open();
+const json=row=>{ try { return row ? JSON.parse(row.value) : undefined; } catch { return null; } };
+try {
+  let dbo;
+  for(const schema of await registeredAccountSchemas(store)) {
+    const meta=key=>store.get(`SELECT TOP (1) [value] FROM ${tableName(schema,'meta')} WHERE [key] = ?`,key);
+    const state=json(await meta('state')), world=json(await meta('world'));
+    const club=await store.get(`SELECT TOP (1) [id] FROM ${tableName(schema,'clubs')}`);
+    const player=await store.get(`SELECT TOP (1) [id] FROM ${tableName(schema,'players')}`);
+    let kind;
+    if(state===undefined && world===undefined && !club && !player) kind='empty';
+    else if(typeof state?.date==='string' && state.date && club && player && world?.version===WORLD_VERSION) kind='career';
+    else throw new Error(`--current-worlds refused: ${maskSchema(schema)} is neither empty nor a complete world at version ${WORLD_VERSION} (world version ${world?.version ?? 'missing'}). Review it; deployment never deletes or migrates worlds.`);
+    if(schema.toLowerCase()==='dbo') dbo=kind;
+    console.log(`[sql] ${maskSchema(schema)}: ${kind==='empty' ? 'world empty' : `career at world version ${WORLD_VERSION}`}.`);
+  }
+  if(!dbo) throw new Error('--current-worlds refused: dbo is not a registered world.');
+  writeFileSync(process.env.DEPLOY_DBO_WORLD_FILE,dbo);
 } finally { await store.close(); }
 NODE
 }
@@ -428,7 +461,7 @@ NODE
 }
 
 deployment_main() {
-  local consent='' image='' stage_only=false hold_ingress=false verification=full skip_db_prepare=false empty_worlds=false image_verified=false
+  local consent='' image='' stage_only=false hold_ingress=false verification=full skip_db_prepare=false empty_worlds=false current_worlds=false image_verified=false
   while (( $# )); do
     case "$1" in
       --help|-h) deploy_usage; return ;;
@@ -437,6 +470,7 @@ deployment_main() {
       --hold-ingress) hold_ingress=true; shift ;;
       --skip-db-prepare) skip_db_prepare=true; shift ;;
       --empty-worlds) empty_worlds=true; shift ;;
+      --current-worlds) current_worlds=true; shift ;;
       --verification) [[ $# -ge 2 ]] || { deploy_usage >&2; return 2; }; verification="$2"; shift 2 ;;
       --image) [[ $# -ge 2 ]] || { deploy_usage >&2; return 2; }; image="$2"; shift 2 ;;
       *) deploy_usage >&2; return 2 ;;
@@ -447,6 +481,8 @@ deployment_main() {
   [[ "$hold_ingress" != true || "$stage_only" != true ]] || fail '--hold-ingress and --stage-only are mutually exclusive.'
   [[ "$hold_ingress" != true || -z "$image" ]] || fail '--hold-ingress requires a reviewed source build, not a prebuilt --image.'
   [[ "$empty_worlds" != true || "$stage_only" != true ]] || fail '--empty-worlds applies to gameplay deployments only.'
+  [[ "$current_worlds" != true || "$stage_only" != true ]] || fail '--current-worlds applies to gameplay deployments only.'
+  [[ "$current_worlds" != true || "$empty_worlds" != true ]] || fail '--empty-worlds and --current-worlds are mutually exclusive.'
   [[ "$consent" == --yes ]] || fail 'Deployment requires --yes. Use --help to review prerequisites.'
   [[ "$GHCR_IMAGE" =~ ^ghcr\.io/[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._/-]*$ ]] || fail 'GHCR_IMAGE must be an untagged private ghcr.io repository.'
   if [[ -n "$image" ]]; then
@@ -526,6 +562,10 @@ NODE
     [[ -z "$image" || "$image_verified" == true ]] || fail 'Gameplay deployment with an unverified --image is blocked. Omit --image to build the reviewed source, or use a digest whose revision label equals the clean checkout HEAD.'
     if [[ "$empty_worlds" == true ]]; then
       deployment_empty_worlds_check
+    elif [[ "$current_worlds" == true ]]; then
+      deployment_current_worlds_check "$temp_dir/dbo-world"
+      # An empty dbo takes the --empty-worlds smoke and skips the dbo export.
+      if [[ "$(<"$temp_dir/dbo-world")" == empty ]]; then empty_worlds=true; fi
     else
       printf '%s\n' '[verify] Checking only the preserved dbo career, then running isolated SQL-backed verification; other registered worlds may be empty.'
       deployment_sql -- node --import tsx --input-type=module -e 'const {Store}=await import("./server/db.ts"); const {stateOf}=await import("./server/systems.ts"); const store=await Store.open(); try { if(!(await stateOf(store))?.date || !(await store.get("SELECT TOP(1) id FROM clubs"))) throw new Error("Load an initialized world before deployment; no seed is performed."); } finally { await store.close(); }'
