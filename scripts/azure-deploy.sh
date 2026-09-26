@@ -76,6 +76,7 @@ deployment_empty_worlds_check() {
 import {Store} from './server/db.ts';
 import {registeredAccountSchemas} from './server/accounts.ts';
 import {tableName} from './server/sql-schema.ts';
+import {maskSchema} from './scripts/career-delete.ts';
 const store=await Store.open();
 try {
   for(const schema of await registeredAccountSchemas(store)) {
@@ -83,9 +84,9 @@ try {
     const club=await store.get(`SELECT TOP (1) [id] FROM ${tableName(schema,'clubs')}`);
     const player=await store.get(`SELECT TOP (1) [id] FROM ${tableName(schema,'players')}`);
     if(state || club || player)
-      throw new Error(`--empty-worlds refused: ${schema} still holds a world. Run the reviewed world reset first; deployment never deletes data.`);
+      throw new Error(`--empty-worlds refused: ${maskSchema(schema)} still holds a world. Run the reviewed world reset first; deployment never deletes data.`);
     const slots=await store.get(`SELECT COUNT_BIG(*) AS [total] FROM ${tableName(schema,'save_slots')}`);
-    console.log(`[sql] ${schema}: world empty; ${Number(slots.total)} saved snapshot(s).`);
+    console.log(`[sql] ${maskSchema(schema)}: world empty; ${Number(slots.total)} saved snapshot(s).`);
   }
 } finally { await store.close(); }
 NODE
@@ -234,6 +235,7 @@ deployment_schema_check() {
   deployment_sql -- node --import tsx --input-type=module - "${1:-}" "${2:-registered}" <<'NODE'
 import {Store} from './server/db.ts';
 import {registeredAccountSchemas} from './server/accounts.ts';
+import {maskSchema} from './scripts/career-delete.ts';
 const expectedVersion=process.argv[2], mode=process.argv[3];
 if(!['registered','legacy-rollback'].includes(mode)) throw new Error('Unknown schema verification mode.');
 const store=await Store.open();
@@ -250,7 +252,7 @@ try {
     try {
       schemas=await registeredAccountSchemas(store);
     } catch(error) {
-      throw new Error('Release blocked: account registry or registered worlds are not ready. Review scripts/accounts-migrate.ts with explicit --tenant-id, --legacy-object-id and --legacy-email; provisioning requires a separate --apply --yes operation. Deployment never binds an owner, recreates a world or seeds data.', {cause:error});
+      throw new Error('Release blocked: account registry or registered worlds are not ready. Review scripts/accounts-migrate.ts with explicit --tenant-id, --legacy-object-id and --legacy-email; provisioning requires a separate --apply --yes operation. Deployment never binds an owner, recreates a world or seeds data.', {cause:String(error?.message ?? error).replace(/touchline_user_\w+/gi,maskSchema)});
     }
     const registry=store.forSchema('accounts');
     try {
@@ -265,8 +267,8 @@ try {
     try {
       const row=await scoped.get('SELECT MAX(version) AS version FROM schema_migrations');
       if(!Number.isSafeInteger(row?.version) || row.version<1 || (expectedVersion && String(row.version)!==expectedVersion))
-        throw new Error(`Candidate schema mismatch for ${schema}; database downgrade/restore is never automatic.`);
-      console.log(`[sql] ${schema}: schema version ${row.version}`);
+        throw new Error(`Candidate schema mismatch for ${maskSchema(schema)}; database downgrade/restore is never automatic.`);
+      console.log(`[sql] ${maskSchema(schema)}: schema version ${row.version}`);
     } finally { await scoped.close(); }
   }
 } finally { await store.close(); }
