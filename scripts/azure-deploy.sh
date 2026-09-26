@@ -115,7 +115,7 @@ try {
     const club=await store.get(`SELECT TOP (1) [id] FROM ${tableName(schema,'clubs')}`);
     const player=await store.get(`SELECT TOP (1) [id] FROM ${tableName(schema,'players')}`);
     let kind;
-    if(state===undefined && world===undefined && !club && !player) kind='empty';
+    if(state===undefined && !club && !player) kind='empty';
     else if(typeof state?.date==='string' && state.date && club && player && world?.version===WORLD_VERSION) kind='career';
     else throw new Error(`--current-worlds refused: ${maskSchema(schema)} is neither empty nor a complete world at version ${WORLD_VERSION} (world version ${world?.version ?? 'missing'}). Review it; deployment never deletes or migrates worlds.`);
     if(schema.toLowerCase()==='dbo') dbo=kind;

@@ -72,6 +72,14 @@ Data owns SQL schema and queries, saves and snapshots, account mapping, authoriz
 - Loans between associations: FIFA max one year → validate at enquiry (Two-year loan) and offer (terms.duration) with `crossBorder` from clubs' `country_id`.
 - Shared terminal output is unreliable with many agents: write command output to /tmp files and read them.
 
+### 2026-09-27T00:10:00+02:00 — Release CI for features wave 1 (PR #9) + `--current-worlds` deploy gate → decisions/inbox/data-release-ci.md
+- `NATIONAL` is a reserved T-SQL keyword: `OPENJSON(...) WITH (national int)` failed every batched match day ("Incorrect syntax near the keyword 'national'") and broke advance, the soak and e2e. Bracket JSON-mapped column names that could be keywords (`[national]`); reserved words bite in WITH column lists too, not only aliases.
+- First SQL run of a big uncommitted wave: failures were mostly tests written blind against rules changed the same day (U21 = 5 national teams, 1.06x buyer ceiling, loan subsidy pricing, 50/85 refusal on buy-backs, 32-player call-up cap). Fix the test to the rule, not the rule to the test; keep the rule covered by a pure test.
+- Deleting a generated club in a SQL test hits FKs (standings, fixtures): hide it by flipping `type` and restore it afterwards.
+- CI speed-up without cancelling the PR run: push the fix to a separate probe branch and `gh workflow run verify.yml --ref <probe> -f suites=world|e2e|backend` (different concurrency group). The PR run keeps collecting failures from the other jobs.
+- `setsid nohup bash script &` from the shared terminal often doesn't start on the first try when the script file was created moments before; re-run it and confirm with `pgrep -af`.
+- Waiting on CI without `sleep`: `timeout N tail -n0 -F log | grep -m1 DONE` fed by a setsid poller that writes `gh run view --json` status lines every minute.
+
 ## Summarized (2026-09-26)
 Condensed by Scribe on 2026-09-26T23:30:00+02:00 from 2 detailed entries and 2 team updates (2026-09-23T09:15 – 2026-09-23T13:56); the later entries above stay verbatim.
 - 2026-09-23T09:15 team update: account-release verification gate (the checkpoint busy-response race had to pass before production; the browser suite was not certified).
