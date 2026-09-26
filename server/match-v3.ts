@@ -1,5 +1,6 @@
 import seedrandom from "seedrandom";
 import { clamp, round } from "../shared/rules.ts";
+import { debutSubAllowed } from "../shared/features/callups.ts";
 import type {
   MatchAction,
   MatchPlayer,
@@ -45,14 +46,56 @@ export function shotProbability(
   angle: number,
   header: boolean,
   pressured: boolean,
+  offset = 0,
 ) {
   const logOdds =
-    -1.18 -
+    -1.18 +
+    offset -
     distance * 0.095 +
     angle * 1.35 -
     (header ? 0.35 : 0) -
     (pressured ? 0.25 : 0);
   return round(clamp(1 / (1 + Math.exp(-logOdds)), 0.005, 0.9), 4);
+}
+
+/** Rules version 4 finishing: open-play shots convert ~11% (xG per shot ~0.11), as in the top five leagues. */
+export const V4_SHOT_OFFSET = -0.22;
+/** Share of open-play shooting chances that end in a foul in the box instead (~0.27 penalties per match). */
+export const V4_PENALTY_SHARE = 0.014;
+
+/** Rules 4 attacking intent by goal margin: a side ahead manages the game, a side behind pushes. */
+export const gameStateFactor = (margin: number) =>
+  margin >= 2 ? 0.85 : margin === 1 ? 0.95 : margin < 0 ? 1.03 : 1;
+
+export interface SubstitutionPlan {
+  /** Changes at half-time (they use no window). */
+  halfTime: number;
+  windows: { minute: number; count: number }[];
+}
+
+/**
+ * One team's substitutions (rules version 4 and the fast model): ~4.3 of 5 used on average, a fifth of teams change
+ * at half-time, then one to three windows spread over the second half.
+ */
+export function substitutionPlan(random: () => number, limit = 5, windows = 3): SubstitutionPlan {
+  const roll = random();
+  const unused = roll < 0.55 ? 0 : roll < 0.8 ? 1 : roll < 0.92 ? 2 : roll < 0.98 ? 3 : 4;
+  let total = Math.max(0, limit - unused);
+  const halfTime = total && random() < 0.22 ? (total >= 2 && random() < 0.2 ? 2 : 1) : 0;
+  total -= halfTime;
+  const spread = random();
+  const used = Math.min(windows, total, spread < 0.15 ? 1 : spread < 0.55 ? 2 : 3);
+  const ranges =
+    used === 1 ? [[58, 76]] : used === 2 ? [[55, 69], [70, 85]] : [[54, 65], [66, 77], [78, 88]];
+  const counts = Array.from({ length: used }, () => 1);
+  for (let extra = total - used; extra > 0; extra--) counts[Math.floor(random() * used)]++;
+  return {
+    halfTime,
+    windows: ranges.slice(0, used).map(([from, to], index) => ({
+      minute: from + Math.floor(random() * (to - from + 1)),
+      count: counts[index],
+    })),
+  };
 }
 
 export function simulateMatchV3(
@@ -61,6 +104,12 @@ export function simulateMatchV3(
   retainActions = true,
 ): MatchResult {
   const random = seedrandom(`${seed}:laws-v3`);
+  // Version 4 changes are gated so that stored version-3 snapshots replay exactly.
+  const v4 = (snapshot.rulesVersion ?? 1) >= 4;
+  const goalFactor = v4 ? clamp(snapshot.goalFactor ?? 1, 0.6, 1.5) : 1;
+  const seconds = v4
+    ? { foul: 10, yellow: 20, red: 60, substitution: 25, goal: 40, injury: 90 }
+    : { foul: 12, yellow: 20, red: 75, substitution: 25, goal: 45, injury: 100 };
   const rules = snapshot.rules ?? {
     decisive: false,
     extraTime: true,
@@ -249,7 +298,7 @@ export function simulateMatchV3(
       (candidate) => candidate.id !== player.id,
     );
     ensureKeeper(index);
-    stoppageSeconds += 75;
+    stoppageSeconds += seconds.red;
     if (active[index].length < 7)
       result.abandoned = {
         teamId: teams[index].id,
@@ -296,20 +345,33 @@ export function simulateMatchV3(
             (result.players[right.id].yellowCards ? 10 : 0)),
       )[0];
       if (!off) break;
+      const lead =
+        result.stats[teams[index].id].goals -
+        result.stats[teams[1 - index].id].goals;
+      // A called-up debutant waits for a late, comfortable moment and is then the first choice.
+      const debutant = (player: MatchPlayer) =>
+        player.callUpDebut && debutSubAllowed(player.callUpDebut, minute, lead)
+          ? 100
+          : 0;
       const replacement = benches[index]
-        .filter((player) =>
-          off.position === "GK"
-            ? player.position === "GK"
-            : player.position !== "GK",
+        .filter(
+          (player) =>
+            (off.position === "GK"
+              ? player.position === "GK"
+              : player.position !== "GK") &&
+            (!player.callUpDebut ||
+              debutSubAllowed(player.callUpDebut, minute, lead)),
         )
         .sort(
           (left, right) =>
             (right.position === off.position ? 20 : 0) +
             right.ability +
-            right.fitness / 4 -
+            right.fitness / 4 +
+            debutant(right) -
             ((left.position === off.position ? 20 : 0) +
               left.ability +
-              left.fitness / 4),
+              left.fitness / 4 +
+              debutant(left)),
         )[0];
       if (!replacement) break;
       const on = { ...replacement, position: off.position };
@@ -339,7 +401,7 @@ export function simulateMatchV3(
         targetId: on.id,
         second: 0,
       });
-      if (!freeWindow) stoppageSeconds += 25;
+      if (!freeWindow) stoppageSeconds += seconds.substitution;
     }
     if (made && !freeWindow) usedWindows[index]++;
     return made > 0;
@@ -400,7 +462,7 @@ export function simulateMatchV3(
       random() < 0.4 + (active[opponentIndex].length - 11) * 0.045;
     const xg = penalty
       ? 0.76
-      : shotProbability(distance, angle, header, pressured);
+      : shotProbability(distance, angle, header, pressured, v4 ? V4_SHOT_OFFSET : 0);
     const psychology =
       (((shooter.pressureHandling ?? 50) - 50) * snapshot.importance) / 90000 +
       (shooter.traits?.includes("Big-game player") && snapshot.importance > 70
@@ -461,20 +523,30 @@ export function simulateMatchV3(
         "goal",
         `${shooter.name}${penalty ? " scores a penalty" : setPiece ? ` scores from a ${teams[index].setPieces.routine.toLowerCase()} routine` : " scores"}`,
       );
-      stoppageSeconds += 45;
+      stoppageSeconds += seconds.goal;
     } else if (onTarget) {
       bump(opponentIndex, keeper, "saves");
       record(opponentIndex, keeper, "save", "saved", 2, 50, 9, shotY, { xg });
     }
   };
 
+  const plans = v4
+    ? [0, 1].map(() => substitutionPlan(random, rules.substitutions, rules.substitutionWindows))
+    : undefined;
   const simulateMinute = () => {
     if (result.abandoned) return;
-    if (!addedTime && [60, 72, 82, 105].includes(minute))
+    if (plans) {
+      if (!addedTime && period === 2)
+        for (const index of [0, 1])
+          for (const window of plans[index].windows)
+            if (window.minute === minute) substitute(index, window.count);
+      if (!addedTime && minute === 105) for (const index of [0, 1]) substitute(index, 1);
+    } else if (!addedTime && [60, 72, 82, 105].includes(minute))
       for (const index of [0, 1])
         substitute(index, minute === 60 || minute === 72 ? 2 : 1);
     for (const index of [0, 1])
-      for (const player of active[index]) result.players[player.id].minutes++;
+      for (const player of active[index])
+        if (!v4 || !addedTime) result.players[player.id].minutes++;
     const phases = 7 + Math.floor(random() * 5);
     for (let phase = 0; phase < phases && !result.abandoned; phase++) {
       const strength = (index: number) =>
@@ -571,18 +643,18 @@ export function simulateMatchV3(
       ) {
         bump(defendTeam, defender, "fouls");
         record(defendTeam, defender, "foul", "free kick", 100 - x, y);
-        stoppageSeconds += 12;
+        stoppageSeconds += seconds.foul;
         if (random() < 0.004)
           dismiss(defendTeam, defender, "serious foul play");
         else if (random() < 0.2) {
           bump(defendTeam, defender, "yellowCards");
           record(defendTeam, defender, "yellow card", "caution", 100 - x, y);
           event(defendTeam, defender, "yellow card", `${defender.name} booked`);
-          stoppageSeconds += 20;
+          stoppageSeconds += seconds.yellow;
           if (result.players[defender.id].yellowCards >= 2)
             dismiss(defendTeam, defender, "second caution");
         }
-        if (!result.abandoned && x >= 84 && y > 21 && y < 79 && random() < 0.4)
+        if (!v4 && !result.abandoned && x >= 84 && y > 21 && y < 79 && random() < 0.4)
           shoot(
             attackTeam,
             weighted(players, (candidate) => attribute(candidate, "penalties")),
@@ -722,11 +794,42 @@ export function simulateMatchV3(
           50,
         );
       }
+      // Rules 4 game state: a side two goals up manages the game, a trailing side pushes.
+      const margin =
+        result.stats[team.id].goals - result.stats[teams[defendTeam].id].goals;
+      const gameState = v4 ? gameStateFactor(margin) : 1;
       const shotChance =
-        (lastPass ? 0.029 : 0.008) +
-        (corner ? 0.23 + team.setPieces.risk / 1000 : 0) +
-        (team.style === "Counter attack" && !pressing ? 0.004 : 0);
+        ((lastPass ? 0.029 : 0.008) +
+          (corner ? 0.23 + team.setPieces.risk / 1000 : 0) +
+          (team.style === "Counter attack" && !pressing ? 0.004 : 0)) *
+        goalFactor *
+        gameState;
       if (random() < shotChance) {
+        if (v4 && !corner && random() < V4_PENALTY_SHARE) {
+          // Brought down in the box: the designated taker steps up.
+          bump(defendTeam, defender, "fouls");
+          record(defendTeam, defender, "foul", "penalty", 100 - 89, 50);
+          stoppageSeconds += seconds.foul + 50;
+          const caution = random();
+          if (caution < 0.03) dismiss(defendTeam, defender, "denying an obvious goal-scoring opportunity");
+          else if (caution < 0.33) {
+            bump(defendTeam, defender, "yellowCards");
+            record(defendTeam, defender, "yellow card", "caution", 11, 50);
+            event(defendTeam, defender, "yellow card", `${defender.name} booked`);
+            stoppageSeconds += seconds.yellow;
+            if (result.players[defender.id].yellowCards >= 2)
+              dismiss(defendTeam, defender, "second caution");
+          }
+          if (!result.abandoned)
+            shoot(
+              attackTeam,
+              [...players].sort((left, right) => attribute(right, "penalties") - attribute(left, "penalties"))[0],
+              false,
+              null,
+              true,
+            );
+          continue;
+        }
         const targetPosition =
           team.setPieces.target === "Centre-back"
             ? "CB"
@@ -764,7 +867,7 @@ export function simulateMatchV3(
               : 35 + Math.floor(random() * 120);
           result.injuries!.push({ playerId: injured.id, days });
           event(index, injured, "injury", `${injured.name} cannot continue`);
-          stoppageSeconds += 100;
+          stoppageSeconds += seconds.injury;
           if (!substitute(index, 1, false, injured.id)) {
             active[index] = active[index].filter(
               (player) => player.id !== injured.id,
@@ -812,9 +915,14 @@ export function simulateMatchV3(
   };
   if (!result.abandoned) {
     playPeriod(1, 45, 0);
-    for (const index of [0, 1])
-      if (active[index].some((player) => fatigue(player, index) < 45))
-        substitute(index, 1, true);
+    if (plans)
+      for (const index of [0, 1]) {
+        if (plans[index].halfTime) substitute(index, plans[index].halfTime, true);
+      }
+    else
+      for (const index of [0, 1])
+        if (active[index].some((player) => fatigue(player, index) < 45))
+          substitute(index, 1, true);
     playPeriod(2, 45, 45);
     result.regulationScore = {
       home: result.stats[teams[0].id].goals,
@@ -836,7 +944,9 @@ export function simulateMatchV3(
         .sort(
           (left, right) =>
             attribute(right, "penalties") - attribute(left, "penalties") ||
-            right.pressureHandling! - left.pressureHandling!,
+            (v4
+              ? (right.pressureHandling ?? 50) - (left.pressureHandling ?? 50)
+              : right.pressureHandling! - left.pressureHandling!),
         )
         .slice(0, count),
     );

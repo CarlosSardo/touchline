@@ -1,6 +1,7 @@
 import seedrandom from "seedrandom";
 import { clamp, round } from "../shared/rules.ts";
 import { expectedPoints, simulateMatch } from "./match.ts";
+import { gameStateFactor, substitutionPlan } from "./match-v3.ts";
 import type {
   MatchPlayer,
   MatchResult,
@@ -8,9 +9,12 @@ import type {
   MatchTeam,
 } from "../shared/types.ts";
 
-// Calibrated against simulateMatchV3 on synthetic squads; fast-match.test.ts guards the parity.
-export const FAST_GOAL_RATE = 118.8;
+// Calibrated against simulateMatchV3 (rules version 4) on synthetic squads; fast-match.test.ts guards the parity.
+export const FAST_GOAL_RATE = 100;
 export const FAST_ASSIST_SHARE = 0.828;
+/** Scoring-rate multipliers per dismissal: the ten men and their opponents. */
+export const RED_CARD_ATTACK = 0.75;
+export const RED_CARD_OPPONENT = 1.2;
 const FATIGUE_DROP = 12;
 const STAT_KEYS = ["goals", "assists", "yellowCards", "redCards", "minutes", "rating"];
 
@@ -137,7 +141,7 @@ export function fastExpectedGoals(snapshot: MatchSnapshot) {
   });
   // Log ratio of home to away goals and total goals, fitted to the full engine's outcomes.
   const ratio =
-    4.52 * (homeShare - 0.5) + 0.0032 * (sides[0].quality - sides[1].quality);
+    4.5 * (homeShare - 0.5) + 0.003 * (sides[0].quality - sides[1].quality);
   const total =
     FAST_GOAL_RATE * ((sides[0].chances + sides[1].chances) / 2) * (1 + 0.055 * Math.abs(ratio));
   const home = total / (1 + Math.exp(-ratio));
@@ -182,7 +186,7 @@ interface Stint {
  * possession and chance model, then scorers, cards, substitutions and injuries for season stats.
  */
 export function simulateFastMatch(snapshot: MatchSnapshot, seed: string): MatchResult {
-  const random = seedrandom(`${seed}:fast-v1`);
+  const random = seedrandom(`${seed}:fast-v2`);
   const rules = snapshot.rules;
   const teams = [snapshot.home, snapshot.away];
   const result: MatchResult = {
@@ -214,15 +218,19 @@ export function simulateFastMatch(snapshot: MatchSnapshot, seed: string): MatchR
     if (team.lineup.length < 7 && !result.abandoned)
       result.abandoned = { teamId: team.id, reason: "Fewer than seven eligible players" };
   }
-  const [homeXg, awayXg, homeShare] = fastExpectedGoals(snapshot);
-  const firstAdded = 3 + Math.floor(random() * 4);
-  const secondAdded = 7 + Math.floor(random() * 4);
+  const [baseHomeXg, baseAwayXg, homeShare] = fastExpectedGoals(snapshot);
+  const goalFactor = clamp(snapshot.goalFactor ?? 1, 0.6, 1.5);
+  const homeXg = baseHomeXg * goalFactor;
+  const awayXg = baseAwayXg * goalFactor;
+  const firstAdded = 3 + Math.floor(random() * 3);
+  const secondAdded = 5 + Math.floor(random() * 5);
   result.stoppageTime = [firstAdded, secondAdded];
-  let duration = 90 + firstAdded + secondAdded;
+  const regulationEnd = 90 + firstAdded + secondAdded;
+  let duration = regulationEnd;
   const event = (team: number, player: MatchPlayer, elapsed: number, type: string, text: string, playerOnId?: number) => {
-    const period = elapsed <= 45 + firstAdded ? 1 : elapsed <= duration ? 2 : elapsed <= duration + 15 ? 3 : 4;
+    const period = elapsed <= 45 + firstAdded ? 1 : elapsed <= regulationEnd ? 2 : elapsed <= regulationEnd + 15 ? 3 : 4;
     result.events.push({
-      minute: period === 1 ? Math.min(45, elapsed) : period === 2 ? Math.min(90, elapsed - firstAdded) : 90 + elapsed - duration,
+      minute: period === 1 ? Math.min(45, elapsed) : period === 2 ? Math.min(90, elapsed - firstAdded) : 90 + elapsed - regulationEnd,
       period,
       addedTime: period === 1 ? Math.max(0, elapsed - 45) : period === 2 ? Math.max(0, elapsed - firstAdded - 90) : 0,
       elapsed,
@@ -268,28 +276,44 @@ export function simulateFastMatch(snapshot: MatchSnapshot, seed: string): MatchR
     return true;
   };
 
+  // Injuries, bookings and changes are rolled first, then played in time order: a dismissed player is off the
+  // pitch before any later window, so he can never be substituted.
+  type Planned =
+    | { elapsed: number; team: number; kind: "injury" }
+    | { elapsed: number; team: number; kind: "card"; red: boolean }
+    | { elapsed: number; team: number; kind: "change"; count: number; window: number };
+  const planned: Planned[] = [];
   for (const team of [0, 1]) {
     const injuryChance =
       ((0.00075 * (rules?.injuryFrequency ?? 50)) / 50) * (snapshot.weather === "Heat" ? 1.2 : 1);
-    if (random() < 1 - (1 - injuryChance) ** duration) {
-      const elapsed = 2 + Math.floor(random() * (duration - 2));
+    if (random() < 1 - (1 - injuryChance) ** duration)
+      planned.push({ elapsed: 2 + Math.floor(random() * (duration - 2)), team, kind: "injury" });
+    const discipline = weightedMean(teams[team].lineup, (player) => player.discipline ?? 60, () => 1);
+    const opponentShare = team ? homeShare : 1 - homeShare;
+    const fouls = duration * 8.4 * opponentShare * 0.026 * (1 + (60 - discipline) / 140);
+    const direct = random() < 1 - Math.exp(-fouls * 0.004);
+    const bookings = poisson(random, fouls * 0.2) + (direct ? 1 : 0);
+    for (let card = 0; card < bookings; card++)
+      planned.push({ elapsed: 1 + Math.floor(random() * duration), team, kind: "card", red: card === bookings - 1 && direct });
+    const plan = substitutionPlan(random, rules?.substitutions ?? 5, rules?.substitutionWindows ?? 3);
+    if (plan.halfTime) planned.push({ elapsed: 46 + firstAdded, team, kind: "change", count: plan.halfTime, window: 0 });
+    for (const [index, window] of plan.windows.entries())
+      planned.push({ elapsed: window.minute + firstAdded, team, kind: "change", count: window.count, window: index + 1 });
+  }
+  planned.sort((left, right) => left.elapsed - right.elapsed || left.team - right.team);
+  const dismissals: number[][] = [[], []];
+  for (const item of planned) {
+    const { team, elapsed } = item;
+    if (item.kind === "injury") {
       const players = onPitch(team, elapsed);
       const victim = players[Math.floor(random() * players.length)];
-      if (victim) {
-        const days = random() < 0.9 ? 3 + Math.floor(random() * 25) : 35 + Math.floor(random() * 120);
-        result.injuries!.push({ playerId: victim.player.id, days });
-        event(team, victim.player, elapsed, "injury", `${victim.player.name} cannot continue`);
-        if (!substitute(team, victim, elapsed, 0)) victim.off = elapsed;
-      }
-    }
-    const windows = [
-      [60, 2],
-      [72, 2],
-      [82, 1],
-    ] as const;
-    for (const [index, [minute, count]] of windows.entries()) {
-      const elapsed = minute + firstAdded;
-      for (let change = 0; change < count; change++) {
+      if (!victim) continue;
+      const days = random() < 0.9 ? 3 + Math.floor(random() * 25) : 35 + Math.floor(random() * 120);
+      result.injuries!.push({ playerId: victim.player.id, days });
+      event(team, victim.player, elapsed, "injury", `${victim.player.name} cannot continue`);
+      if (!substitute(team, victim, elapsed, 0)) victim.off = elapsed;
+    } else if (item.kind === "change") {
+      for (let change = 0; change < item.count; change++) {
         const tired = onPitch(team, elapsed)
           .filter((stint) => stint.player.position !== "GK" && elapsed - stint.on > 15)
           .sort(
@@ -297,19 +321,9 @@ export function simulateFastMatch(snapshot: MatchSnapshot, seed: string): MatchR
               left.player.fitness - attribute(left.player, "stamina") / 8 -
               (right.player.fitness - attribute(right.player, "stamina") / 8),
           )[0];
-        if (!tired || !substitute(team, tired, elapsed, index + 1)) break;
+        if (!tired || !substitute(team, tired, elapsed, item.window)) break;
       }
-    }
-  }
-
-  for (const team of [0, 1]) {
-    const discipline = weightedMean(teams[team].lineup, (player) => player.discipline ?? 60, () => 1);
-    const opponentShare = team ? homeShare : 1 - homeShare;
-    const fouls = duration * 8.4 * opponentShare * 0.026 * (1 + (60 - discipline) / 140);
-    const direct = random() < 1 - Math.exp(-fouls * 0.004);
-    const bookings = poisson(random, fouls * 0.2) + (direct ? 1 : 0);
-    for (let card = 0; card < bookings; card++) {
-      const elapsed = 1 + Math.floor(random() * duration);
+    } else {
       const candidates = onPitch(team, elapsed).filter((stint) => stint.player.position !== "GK");
       if (!candidates.length) continue;
       const stint = pickWeighted(random, candidates, (candidate) =>
@@ -318,12 +332,12 @@ export function simulateFastMatch(snapshot: MatchSnapshot, seed: string): MatchR
         (result.players[candidate.player.id].yellowCards ? 0.2 : 1),
       );
       const stats = result.players[stint.player.id];
-      const red = card === bookings - 1 && direct;
-      if (red) {
+      if (item.red) {
         stats.redCards++;
         result.stats[teams[team].id].redCards++;
         event(team, stint.player, elapsed, "red card", `${stint.player.name} sent off (serious foul play)`);
         stint.off = elapsed;
+        dismissals[team].push(elapsed);
         continue;
       }
       stats.yellowCards++;
@@ -334,6 +348,7 @@ export function simulateFastMatch(snapshot: MatchSnapshot, seed: string): MatchR
         result.stats[teams[team].id].redCards++;
         event(team, stint.player, elapsed, "red card", `${stint.player.name} sent off (second caution)`);
         stint.off = elapsed;
+        dismissals[team].push(elapsed);
       }
     }
   }
@@ -357,8 +372,27 @@ export function simulateFastMatch(snapshot: MatchSnapshot, seed: string): MatchR
         result.players[pickWeighted(random, helpers, (stint) => assistWeight(stint.player)).player.id].assists++;
     }
   };
-  scoreGoals(0, poisson(random, homeXg), 0, duration);
-  scoreGoals(1, poisson(random, awayXg), 0, duration);
+  // Scoring rate by numbers on the pitch: each dismissal scales the side down and its opponent up.
+  const manFactor = (team: number, elapsed: number) => {
+    const own = dismissals[team].filter((minute) => minute < elapsed).length;
+    const other = dismissals[1 - team].filter((minute) => minute < elapsed).length;
+    return RED_CARD_ATTACK ** own * RED_CARD_OPPONENT ** other;
+  };
+  // Goals in slices of up to ten minutes: the rate follows the numbers on the pitch and the score (game state).
+  const cuts = [0, ...new Set([...dismissals[0], ...dismissals[1]])].sort((left, right) => left - right);
+  for (const [index, segmentStart] of cuts.entries()) {
+    const segmentEnd = cuts[index + 1] ?? duration;
+    for (let from = segmentStart; from < segmentEnd; from += 10) {
+      const to = Math.min(segmentEnd, from + 10);
+      const counts = [homeXg, awayXg].map((xg, team) =>
+        poisson(
+          random,
+          (xg * (to - from) * manFactor(team, from + 1) * gameStateFactor(score[team] - score[1 - team])) / duration,
+        ),
+      );
+      for (const [team, count] of counts.entries()) scoreGoals(team, count, from, to);
+    }
+  }
   result.regulationScore = { home: score[0], away: score[1] };
   const aggregate = rules?.aggregate ?? { home: 0, away: 0, homeAwayGoals: 0, awayAwayGoals: 0 };
   const winner = () => {
@@ -376,8 +410,8 @@ export function simulateFastMatch(snapshot: MatchSnapshot, seed: string): MatchR
     const start = duration;
     duration += 31;
     xgScale += 31 / 95;
-    scoreGoals(0, poisson(random, homeXg * 0.3), start, duration);
-    scoreGoals(1, poisson(random, awayXg * 0.3), start, duration);
+    scoreGoals(0, poisson(random, homeXg * 0.3 * manFactor(0, start)), start, duration);
+    scoreGoals(1, poisson(random, awayXg * 0.3 * manFactor(1, start)), start, duration);
   }
   result.winnerId = winner();
   if (rules?.decisive && !result.winnerId) {
@@ -422,9 +456,16 @@ export function simulateFastMatch(snapshot: MatchSnapshot, seed: string): MatchR
   result.stats[teams[1].id].possession = 100 - result.stats[teams[0].id].possession;
   result.stats[teams[0].id].xG = result.homeXg;
   result.stats[teams[1].id].xG = result.awayXg;
+  // Season minutes count the regulation clock only (90, or 120 after extra time), not stoppage time.
+  const clock = (elapsed: number) =>
+    elapsed <= 45 + firstAdded
+      ? Math.min(45, elapsed)
+      : elapsed <= regulationEnd
+        ? Math.min(90, Math.max(45, elapsed - firstAdded))
+        : 90 + Math.min(30, elapsed - regulationEnd);
   for (const stint of stints) {
     const stats = result.players[stint.player.id];
-    stats.minutes += Math.max(0, Math.min(stint.off, duration) - stint.on);
+    stats.minutes += Math.max(0, clock(Math.min(stint.off, duration)) - clock(stint.on));
   }
   for (const [index, team] of teams.entries()) {
     const difference = score[index] - score[1 - index];

@@ -1,7 +1,15 @@
 import seedrandom from "seedrandom";
 import { z } from "zod";
 import type { Store } from "./db.ts";
-import { personName, weightedIndex } from "./people.ts";
+import {
+  CAREER_RULES,
+  personName,
+  staffCareerDefaults,
+  staffDevelopment,
+  staffMorale,
+  staffRetirementChance,
+  weightedIndex,
+} from "./people.ts";
 import { nationByCode } from "../shared/world-catalog/index.ts";
 import {
   ASSISTANT_DUTIES,
@@ -42,6 +50,7 @@ import {
   news,
   stateOf,
 } from "./systems.ts";
+import { assessPlayerInterest } from "./recruitment.ts";
 
 export async function ensureClubSupport(store: Store) {
   if (!(await store.get("SELECT [key] FROM meta WHERE [key] = 'state'")))
@@ -117,7 +126,7 @@ export async function ensureClubSupport(store: Store) {
         ]);
       }
       supportRows.push([club.id, JSON.stringify(DEFAULT_ASSISTANT_DUTIES)]);
-      if (linked.has(club.id)) continue;
+      if (linked.has(club.id) || !starterAffiliateEligible(club)) continue;
       const partner = starterPartner(
         club,
         countries.get(club.country_id) ?? [],
@@ -174,6 +183,16 @@ interface SupportClub extends Club {
   tier: number;
 }
 
+/** Deepest league tier whose clubs start with a feeder/development partner (amateur clubs lower down do not). */
+export const STARTER_AFFILIATE_MAX_TIER = 4;
+/** Deepest tier a starter partner may come from. */
+const STARTER_PARTNER_MAX_TIER = 6;
+
+/** Whether a first team starts the world with an affiliate: professional-level tiers, or a big club in a low tier. */
+export function starterAffiliateEligible(club: { tier: number; reputation: number }) {
+  return club.tier <= STARTER_AFFILIATE_MAX_TIER || club.reputation >= 55;
+}
+
 /**
  * Starter affiliate: usually a domestic club about a level below; about a third of leading top-flight clubs
  * instead partner a club in a heritage-linked nation (France–Senegal, Portugal–Brazil, Spain–Argentina...).
@@ -205,7 +224,10 @@ function starterPartner(
       if (partner) return partner;
     }
   }
-  return closest(domestic.filter((entry) => entry.id !== club.id), club.reputation - 12);
+  return closest(
+    domestic.filter((entry) => entry.id !== club.id && entry.tier <= STARTER_PARTNER_MAX_TIER),
+    club.reputation - 12,
+  );
 }
 
 export async function clubAffiliates(
@@ -615,15 +637,25 @@ export async function processAssistant(store: Store, requested = false) {
     if (player) {
       try {
         const enquiry = await enquire(store, player.id, "Contract renewal");
-        await negotiationStep(store, enquiry.id, "formalize");
-        const result = await negotiate(store, enquiry.id, {
-          fee: 0,
-          wage: Math.round(enquiry.wage * 1.25),
-          years: player.age >= 30 ? 2 : 3,
-          role: player.role,
-          promises: [],
-          signingBonus: 0,
-        });
+        const years = player.age >= 30 ? 2 : 3;
+        const formal =
+          enquiry.stage === "Rejected"
+            ? { stage: "Rejected", message: (JSON.parse(enquiry.data) as NegotiationData).log.at(-1)!.message }
+            : await negotiationStep(store, enquiry.id, "formalize");
+        // The draft offers the wage the player would accept for his current role, when one exists within the cap.
+        const result =
+          formal.stage === "Rejected"
+            ? formal
+            : await negotiate(store, enquiry.id, {
+                fee: 0,
+                wage:
+                  (await assessPlayerInterest(store, player, club, { role: player.role, years }))
+                    .wageToAgree ?? Math.round(enquiry.wage * 1.25),
+                years,
+                role: player.role,
+                promises: [],
+                signingBonus: 0,
+              });
         const saved = (await store.get<Negotiation>(
           "SELECT * FROM negotiations WHERE id = ?",
           enquiry.id,
@@ -644,7 +676,9 @@ export async function processAssistant(store: Store, requested = false) {
           message:
             result.stage === "Contract review"
               ? `Prepared ${player.name}'s renewal. The draft still requires your signature.`
-              : `${player.name}'s representatives are still considering the renewal terms.`,
+              : result.stage === "Rejected"
+                ? `Renewal declined. ${result.message}`
+                : `${player.name}'s representatives are still considering the renewal terms.`,
           playerId: player.id,
           playerName: player.name,
           negotiationId: enquiry.id,
@@ -751,4 +785,264 @@ export async function processAssistant(store: Store, requested = false) {
     spending,
     actions,
   };
+}
+
+// ------------------------------------------------------------------ staff careers and scouting knowledge
+
+/** Scouting knowledge (players.knowledge) fades without a fresh report: `perPass` every four weeks down to `floor`. */
+export const SCOUTING_KNOWLEDGE_DECAY = { perPass: 2, floor: 25, freshDays: 56 } as const;
+
+export function decayedKnowledge(knowledge: number) {
+  const rule = SCOUTING_KNOWLEDGE_DECAY;
+  return knowledge <= rule.floor ? knowledge : Math.max(rule.floor, knowledge - rule.perPass);
+}
+
+interface StaffData {
+  birthYear?: number;
+  ceiling?: number;
+  contractEnd?: string;
+  retired?: boolean;
+  preferredRegion?: number;
+  [key: string]: unknown;
+}
+
+type CareerStaff = Staff & { reputation: number; country_id: number; code: string };
+
+const staffWage = (ability: number) => Math.round(ability ** 2 * 0.4);
+const contractEndFor = (season: number, random: () => number) => {
+  const [min, max] = CAREER_RULES.staff.contractYears;
+  return `${season + min + Math.floor(random() * (max - min + 1))}-06-30`;
+};
+
+/**
+ * Daily: staff contract expiries (bounded batch, only in July-August or on a four-week pass day) and, every four
+ * weeks, staff development toward a personal ceiling, ageing and decline, morale reverting to a baseline,
+ * retirements, and the decay of unrefreshed scouting knowledge. Staff age, ceiling and contract live in `staff.data`.
+ */
+export async function processStaffCareers(store: Store) {
+  const state = await stateOf(store);
+  const row = await store.get<{ value: string }>("SELECT [value] FROM meta WHERE [key] = 'staffCareers'");
+  const last = row ? (JSON.parse(row.value) as { date: string }).date : null;
+  const pass = !last || daysBetween(last, state.date) >= 28;
+  if (pass) {
+    await store.setMeta("staffCareers", { date: state.date });
+    await staffPass(store, state);
+  }
+  if (pass || ["07", "08"].includes(state.date.slice(5, 7))) await staffExpiries(store, state);
+}
+
+async function staffPass(store: Store, state: GameState) {
+  const rule = CAREER_RULES.staff;
+  const year = Number(state.date.slice(0, 4));
+  const rows = await store.all<Staff>("SELECT id,club_id,name,role,ability,ambition,personality,morale,data FROM staff ORDER BY id");
+  const updates: { id: number; ability: number; morale: number; data: string }[] = [];
+  const retiring: Staff[] = [];
+  for (const member of rows) {
+    const data = JSON.parse(member.data) as StaffData;
+    if (data.retired) continue;
+    let changed = false;
+    if (typeof data.birthYear !== "number" || typeof data.ceiling !== "number") {
+      Object.assign(data, staffCareerDefaults(member, year, seedrandom(`${state.seed}:staff-profile:${member.id}`)));
+      // Generation gave every club contract the same end date: spread them over the next four summers.
+      if (member.club_id !== null && (!data.contractEnd || data.contractEnd === "2029-06-30"))
+        data.contractEnd = `${state.season + 1 + (member.id % 4)}-06-30`;
+      changed = true;
+    }
+    if (member.club_id !== null && !data.contractEnd) {
+      data.contractEnd = `${state.season + rule.contractYears[0]}-06-30`;
+      changed = true;
+    }
+    const random = seedrandom(`${state.seed}:staff-career:${member.id}:${state.date}`);
+    const age = year - data.birthYear!;
+    const yearly = staffRetirementChance(age);
+    // The user's staff retire at contract expiry (announced in May) unless they reach the hard limit.
+    const own = member.club_id === state.clubId;
+    if (yearly >= 1 || (!own && random() < yearly / 13)) {
+      retiring.push(member);
+      continue;
+    }
+    const ability = staffDevelopment({ ability: member.ability, ceiling: data.ceiling!, age, ambition: member.ambition }, random());
+    const morale = staffMorale(member.morale, member.personality);
+    if (changed || ability !== member.ability || morale !== member.morale)
+      updates.push({ id: member.id, ability, morale, data: JSON.stringify(data) });
+  }
+  for (let offset = 0; offset < updates.length; offset += 1000)
+    await store.run(
+      "UPDATE target SET ability = changes.ability, morale = changes.morale, data = changes.data FROM staff AS target JOIN OPENJSON(?) WITH (id int, ability float, morale float, data nvarchar(max)) AS changes ON changes.id = target.id",
+      JSON.stringify(updates.slice(offset, offset + 1000)),
+    );
+  if (retiring.length) await retireStaff(store, state, retiring);
+  const decay = SCOUTING_KNOWLEDGE_DECAY;
+  await store.run(
+    "UPDATE players SET knowledge = CASE WHEN knowledge - ? < ? THEN ? ELSE knowledge - ? END WHERE knowledge > ? AND (club_id IS NULL OR club_id NOT IN (SELECT id FROM clubs WHERE id = ? OR parent_id = ?)) AND NOT EXISTS (SELECT 1 FROM reports WHERE reports.player_id = players.id AND reports.date >= ?)",
+    decay.perPass,
+    decay.floor,
+    decay.floor,
+    decay.perPass,
+    decay.floor,
+    state.clubId,
+    state.clubId,
+    addDays(state.date, -decay.freshDays),
+  );
+}
+
+/**
+ * Staff who stop working. A row nobody's report or assignment points to becomes a new free-pool person (so the pool
+ * keeps its size and nothing references the retiree); otherwise it stays as a retired, unemployable record. AI clubs
+ * fill the vacancy; the user's club is told.
+ */
+async function retireStaff(store: Store, state: GameState, members: readonly Staff[]) {
+  const codes = new Map(
+    (await store.all<{ id: number; code: string }>("SELECT id,code FROM countries")).map((country) => [country.id, country.code]),
+  );
+  const clubs = new Map(
+    (
+      await store.all<Club>(
+        "SELECT * FROM clubs WHERE id IN (SELECT CAST([value] AS int) FROM OPENJSON(?))",
+        JSON.stringify([...new Set(members.flatMap((member) => (member.club_id === null ? [] : [member.club_id])))]),
+      )
+    ).map((club) => [club.id, club]),
+  );
+  const year = Number(state.date.slice(0, 4));
+  for (const member of members) {
+    const data = JSON.parse(member.data) as StaffData;
+    const club = member.club_id === null ? undefined : clubs.get(member.club_id);
+    await leaveClub(store, member.id);
+    const referenced = (await store.get<{ found: number }>(
+      "SELECT CASE WHEN EXISTS (SELECT 1 FROM reports WHERE staff_id = ?) OR EXISTS (SELECT 1 FROM assignments WHERE staff_id = ?) THEN 1 ELSE 0 END AS found",
+      member.id,
+      member.id,
+    ))!.found;
+    if (referenced)
+      await store.run(
+        "UPDATE staff SET ability = 1, data = JSON_MODIFY(JSON_MODIFY(data,'$.retired',CAST(1 AS bit)),'$.contractEnd',NULL) WHERE id = ?",
+        member.id,
+      );
+    else {
+      const random = seedrandom(`${state.seed}:staff-recycle:${member.id}:${state.date}`);
+      const code = codes.get(data.preferredRegion ?? club?.country_id ?? -1) ?? "EN";
+      const ability = Math.round(clamp(member.ability - 15 + random() * 20, 25, 90));
+      const ambition = 25 + Math.floor(random() * 66);
+      const career = staffCareerDefaults({ ability, ambition }, year, random);
+      const birthYear = year - (30 + Math.floor(random() * 13));
+      await store.run(
+        "UPDATE staff SET name = ?, ability = ?, ambition = ?, morale = 70, wage = ?, tactical_knowledge = ?, data = ? WHERE id = ?",
+        personName(random, code),
+        ability,
+        ambition,
+        Math.round(ability ** 2 * 0.45),
+        Math.round(clamp(ability + random() * 30 - 20)),
+        JSON.stringify({ ...data, birthYear, ceiling: Math.max(career.ceiling, ability), contractEnd: undefined, development: 0 }),
+        member.id,
+      );
+    }
+    if (!club) continue;
+    if (club.id === state.clubId)
+      await news(
+        store,
+        "Staff",
+        `${member.name} retires`,
+        `${member.name} (${member.role}) has retired at ${year - (data.birthYear ?? year - 66)}. The role is vacant; free staff are available on the Staff page.`,
+        "important",
+        "staff",
+      );
+    else await replaceStaff(store, state, club, member.role);
+  }
+}
+
+/** A staff member leaves his club: backroom relationships and the director's active assignments end with him. */
+async function leaveClub(store: Store, staffId: number) {
+  await store.run("UPDATE staff SET club_id = NULL WHERE id = ?", staffId);
+  await store.run("DELETE FROM relationships WHERE source_type = 'staff' AND (source_id = ? OR target_id = ?)", staffId, staffId);
+  await store.run("UPDATE assignments SET status = 'cancelled' WHERE staff_id = ? AND status = 'active'", staffId);
+}
+
+/** An AI club fills a vacancy: the best free candidate of the role within its level, or a newly generated one. */
+async function replaceStaff(store: Store, state: GameState, club: Pick<Club, "id" | "reputation" | "country_id">, role: string) {
+  const random = seedrandom(`${state.seed}:staff-hire:${club.id}:${role}:${state.date}`);
+  const candidate = await store.get<Staff>(
+    "SELECT TOP (1) * FROM staff WHERE club_id IS NULL AND role = ? AND JSON_VALUE(data,'$.retired') IS NULL AND ability BETWEEN ? AND ? ORDER BY ability DESC,id",
+    role,
+    club.reputation - 20,
+    club.reputation + 8,
+  );
+  const contractEnd = contractEndFor(state.season, random);
+  if (candidate) {
+    await store.run(
+      "UPDATE staff SET club_id = ?, morale = 75, wage = ?, data = JSON_MODIFY(data,'$.contractEnd',?) WHERE id = ? AND club_id IS NULL",
+      club.id,
+      staffWage(candidate.ability),
+      contractEnd,
+      candidate.id,
+    );
+    return;
+  }
+  const code = (await store.get<{ code: string }>("SELECT code FROM countries WHERE id = ?", club.country_id))?.code ?? "EN";
+  const ability = Math.round(clamp(club.reputation - 20 + random() * 32));
+  const ambition = 25 + Math.floor(random() * 66);
+  const career = staffCareerDefaults({ ability, ambition }, Number(state.date.slice(0, 4)), random);
+  await store.run(
+    "INSERT INTO staff(club_id,name,role,ability,influence,communication,tactical_knowledge,personality,ambition,morale,wage,data) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+    club.id,
+    personName(random, code),
+    role,
+    ability,
+    30 + Math.floor(random() * 61),
+    40 + Math.floor(random() * 56),
+    Math.round(clamp(ability + random() * 37 - 25)),
+    ["Collaborative", "Ambitious", "Reserved", "Outspoken", "Methodical"][Math.floor(random() * 5)],
+    ambition,
+    75,
+    staffWage(ability),
+    JSON.stringify({
+      bias: ["Youth", "Physical", "Technical", "Home nation", "Reputation"][Math.floor(random() * 5)],
+      accuracy: Math.round(clamp(ability + random() * 15 - 5)),
+      detail: 45 + Math.floor(random() * 51),
+      riskTolerance: 20 + Math.floor(random() * 71),
+      preferredRegion: club.country_id,
+      development: 0,
+      ...career,
+      contractEnd,
+    }),
+  );
+}
+
+/** Staff contracts past their end date: the user's are extended (or the veteran retires), AI clubs renew or replace. */
+async function staffExpiries(store: Store, state: GameState) {
+  const rule = CAREER_RULES.staff;
+  const due = await store.all<CareerStaff>(
+    `SELECT TOP (${rule.expiryBatch}) staff.*,clubs.reputation,clubs.country_id,countries.code FROM staff JOIN clubs ON clubs.id = staff.club_id JOIN countries ON countries.id = clubs.country_id WHERE JSON_VALUE(staff.data,'$.contractEnd') < ? ORDER BY JSON_VALUE(staff.data,'$.contractEnd'),staff.id`,
+    state.date,
+  );
+  const year = Number(state.date.slice(0, 4));
+  const retiring: Staff[] = [];
+  for (const member of due) {
+    const data = JSON.parse(member.data) as StaffData;
+    const random = seedrandom(`${state.seed}:staff-contract:${member.id}:${data.contractEnd}`);
+    const age = typeof data.birthYear === "number" ? year - data.birthYear : 50;
+    const own = member.club_id === state.clubId;
+    if (own ? age >= rule.userRetireAt : random() < staffRetirementChance(age)) {
+      retiring.push(member);
+      continue;
+    }
+    if (own || random() < rule.renewChance) {
+      const contractEnd = own ? `${state.season + 2}-06-30` : contractEndFor(state.season, random);
+      const wage = Math.round(member.wage * rule.renewalRaise);
+      await store.run("UPDATE staff SET wage = ?, data = JSON_MODIFY(data,'$.contractEnd',?) WHERE id = ?", wage, contractEnd, member.id);
+      if (own)
+        await news(
+          store,
+          "Staff",
+          `${member.name}: contract extended`,
+          `${member.name} (${member.role}) stays until ${dateLabel(contractEnd)} on a slightly higher wage.`,
+          "info",
+          "staff",
+        );
+      continue;
+    }
+    await leaveClub(store, member.id);
+    await store.run("UPDATE staff SET data = JSON_MODIFY(data,'$.contractEnd',NULL) WHERE id = ?", member.id);
+    await replaceStaff(store, state, { id: member.club_id!, reputation: member.reputation, country_id: member.country_id }, member.role);
+  }
+  if (retiring.length) await retireStaff(store, state, retiring);
 }

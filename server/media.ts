@@ -236,6 +236,88 @@ export async function publishTransferStory(
   });
 }
 
+/**
+ * A transfer rumour about REAL rival interest in a player the director is chasing (idempotent by `key`).
+ * An unnamed rival (`named: false`) is described by country only and kept out of `clubIds`.
+ */
+export async function publishTransferRumour(
+  store: Store,
+  input: {
+    key: string;
+    phase: "monitoring" | "bid" | "final-offers" | "decision" | "refused";
+    playerId: number;
+    rivalId: number;
+    named: boolean;
+    sellerId: number | null;
+    directorClubId: number;
+    feeRange?: { low: number; high: number } | null;
+    negotiationId?: number;
+  },
+) {
+  const player = (await store.get<Player>("SELECT * FROM players WHERE id = ?", input.playerId))!;
+  const rival = (await store.get<Club & { country_name: string }>(
+    "SELECT clubs.*,countries.name AS country_name FROM clubs JOIN countries ON countries.id = clubs.country_id WHERE clubs.id = ?",
+    input.rivalId,
+  ))!;
+  const director = (await store.get<Club>("SELECT * FROM clubs WHERE id = ?", input.directorClubId))!;
+  const seller = input.sellerId
+    ? await store.get<Club>("SELECT * FROM clubs WHERE id = ?", input.sellerId)
+    : null;
+  const who = input.named ? rival.name : `A club in ${rival.country_name}`;
+  const fee = input.feeRange
+    ? `${money(input.feeRange.low)}-${money(input.feeRange.high)}`
+    : null;
+  const headlines = {
+    monitoring: `${who} monitoring ${player.name}`,
+    bid: `${rival.name} bid for ${player.name}`,
+    "final-offers": `${seller?.name ?? "The selling club"} call for final offers for ${player.name}`,
+    decision: `${player.name} weighs up ${rival.name} and ${director.name}`,
+    refused: `${player.name} turns down ${rival.name}`,
+  };
+  const first = {
+    monitoring: `${who} ${input.named ? "has" : "is understood to have"} asked about ${player.name}. No bid has been made; ${director.name} are already in talks.`,
+    bid: `${rival.name} have made a formal proposal${fee ? `, reported at ${fee},` : ""} for ${player.name}. ${seller ? `${seller.name} must still accept a fee` : "The player's representatives are comparing offers"}, and the player still decides where he goes.`,
+    "final-offers": `${seller?.name ?? "The selling club"} have asked the clubs chasing ${player.name}, including ${director.name}, for best and final offers.${fee ? ` The leading bid is reported at ${fee}.` : ""}`,
+    decision: `${rival.name} have an agreed fee and personal terms on the table. ${player.name} is expected to choose between them and ${director.name} within days.`,
+    refused: `${player.name} is not interested in joining ${rival.name}; the pursuit is over for now.`,
+  };
+  return await publish(store, {
+    mediaKey: input.key,
+    title: headlines[input.phase],
+    topic: "transfer",
+    status: "Reported",
+    club: seller?.id === director.id ? seller : director,
+    clubIds: [director.id, ...(input.named ? [rival.id] : []), ...(seller ? [seller.id] : [])],
+    playerId: player.id,
+    playerName: player.name,
+    negotiationId: input.negotiationId,
+    beats: ["Transfers"],
+    paragraphs: [
+      first[input.phase],
+      `${player.name}, ${player.age}, plays as a ${player.position}. Interest from several clubs usually raises the fee and gives the player more say over where he goes.`,
+    ],
+    discussion: [
+      `If ${player.name} is the target, ${director.name} need to decide how far they will go before someone else does.`,
+      "Competing bids are about more than money: the role and the project decide where players end up.",
+      `Every window there is a story like this. Until anyone signs, ${player.name} is not going anywhere.`,
+      `${director.name} should not overpay just because another club is interested.`,
+    ],
+  });
+}
+
+/** A result told from one club's side: "0-3 defeat at Rivals", "2-1 win against Rivals". */
+export function resultLine(
+  fixture: Pick<Fixture, "home_id" | "home_goals" | "away_goals">,
+  clubId: number,
+  opponent?: string,
+) {
+  const home = fixture.home_id === clubId;
+  const scored = (home ? fixture.home_goals : fixture.away_goals) ?? 0;
+  const conceded = (home ? fixture.away_goals : fixture.home_goals) ?? 0;
+  const outcome = scored > conceded ? "win" : scored < conceded ? "defeat" : "draw";
+  return `${scored}-${conceded} ${outcome}${opponent ? ` ${home ? "against" : "at"} ${opponent}` : ""}`;
+}
+
 export async function publishPlayerCoverage(store: Store, fixtureId?: number) {
   const state = await store.meta<GameState>("state");
   const club = (await store.get<Club>(
@@ -308,7 +390,7 @@ export async function publishPlayerCoverage(store: Store, fixtureId?: number) {
       ? `match:${fixture.id}:${club.id}`
       : `player:${club.id}:${state.date}`,
     title: performance
-      ? `${player.name} in focus after ${club.name}'s ${fixture!.home_goals}-${fixture!.away_goals} match`
+      ? `${player.name} in focus after ${club.name}'s ${resultLine(fixture!, club.id, opponent?.name)}`
       : `${player.name}: the role behind the recruitment debate`,
     topic: performance ? "match" : "player",
     status: "Analysis",
@@ -351,8 +433,10 @@ export async function publishClubRoundup(store: Store) {
     gf: number;
     ga: number;
   }>(
-    "SELECT club_id,played,points,gf,ga FROM standings WHERE league_id = ? ORDER BY points DESC,(gf-ga) DESC,gf DESC,club_id",
+    "SELECT club_id,played,points - deducted AS points,gf,ga FROM standings WHERE league_id = ? AND group_name = (SELECT TOP (1) own.group_name FROM standings AS own WHERE own.league_id = ? AND own.club_id = ?) ORDER BY points - deducted DESC,(gf-ga) DESC,gf DESC,club_id",
     club.league_id,
+    club.league_id,
+    club.id,
   );
   const position = table.findIndex((entry) => entry.club_id === club.id);
   const record = table[position];
@@ -362,7 +446,7 @@ export async function publishClubRoundup(store: Store) {
     state.date,
   ))!.total;
   const recruitment = (await store.get<{ incoming: number; outgoing: number }>(
-    "SELECT coalesce(sum(CASE WHEN TRY_CONVERT(int, JSON_VALUE(data,'$.to')) = ? THEN 1 ELSE 0 END),0) AS incoming,coalesce(sum(CASE WHEN TRY_CONVERT(int, JSON_VALUE(data,'$.from')) = ? THEN 1 ELSE 0 END),0) AS outgoing FROM history WHERE entity_type IN ('transfer','loan') AND date BETWEEN ? AND ?",
+    "SELECT coalesce(sum(CASE WHEN TRY_CONVERT(int, JSON_VALUE(data,'$.to')) = ? THEN 1 ELSE 0 END),0) AS incoming,coalesce(sum(CASE WHEN TRY_CONVERT(int, JSON_VALUE(data,'$.from')) = ? THEN 1 ELSE 0 END),0) AS outgoing FROM history WHERE entity_type IN ('transfer','loan') AND coalesce(JSON_VALUE(data,'$.type'),'') != 'Squad registration' AND date BETWEEN ? AND ?",
     club.id,
     club.id,
     addDays(state.date, -7),

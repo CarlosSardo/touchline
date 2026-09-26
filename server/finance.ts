@@ -25,6 +25,13 @@ export const professionalWageFloor = (wageBudget: number, allowances: number, pr
     ? clamp(Math.floor((0.88 * wageBudget - allowances) / professionals / 10) * 10, 10, 50)
     : 50;
 
+/** Scale of a club without professionals: its going rate is the professional minimum, not 4x the English base. */
+export const AMATEUR_CLUB_SCALE = 0.02;
+
+/** payrollScale, except that a squad with no professional base wages pays the professional minimum. */
+export const clubPayrollScale = (wageBudget: number, baseTotal: number, allowances = 0) =>
+  baseTotal < 1 ? AMATEUR_CLUB_SCALE : payrollScale(wageBudget, baseTotal, allowances);
+
 export async function wageScale(store: Store, clubId: number) {
   const row = (await store.get<{ budget: number; base: number; allowances: number }>(
     `SELECT clubs.wage_budget AS budget,payroll.base,payroll.allowances FROM clubs,(SELECT ${PAYROLL_SQL} FROM players WHERE ((players.club_id = ? AND players.parent_club_id IS NULL) OR players.parent_club_id = ?) AND ${REGISTERED}) AS payroll WHERE clubs.id = ?`,
@@ -32,7 +39,7 @@ export async function wageScale(store: Store, clubId: number) {
     clubId,
     clubId,
   ))!;
-  return payrollScale(row.budget, row.base, row.allowances);
+  return clubPayrollScale(row.budget, row.base, row.allowances);
 }
 
 /** payrollScale for every non-national club in one pass. */
@@ -51,7 +58,7 @@ export async function wageScales(store: Store) {
       )
     ).map((club) => [
       club.id,
-      payrollScale(club.wage_budget, payroll.get(club.id)?.base ?? 0, payroll.get(club.id)?.allowances ?? 0),
+      clubPayrollScale(club.wage_budget, payroll.get(club.id)?.base ?? 0, payroll.get(club.id)?.allowances ?? 0),
     ]),
   );
 }
@@ -111,7 +118,29 @@ export interface ClubEconomyInput {
   capacity: number;
   fanMood: number;
   homeMatches?: number;
+  /** Association code of the club's league; smaller football economies earn less at the same reputation. */
+  countryCode?: string;
 }
+
+/**
+ * Commercial/broadcast revenue relative to the big-five scale at equal reputation, calibrated so top-flight
+ * medians land near real orders of magnitude (Deloitte/UEFA club licensing benchmarks 2023-25: PT ~£15-25M,
+ * NL ~£25M, SCO ~£10M, BE ~£25M, DK ~£12M, JP ~£25-30M outside the few rich clubs). Unlisted codes use 1.
+ */
+export const REVENUE_MARKET_FACTOR: Record<string, number> = {
+  PT: 0.25,
+  NL: 0.3,
+  SCO: 0.3,
+  BE: 0.45,
+  DK: 0.4,
+  JP: 0.45,
+};
+
+/** The national factor at `tier`: full in the top flight, half-way in the second tier, none from the third down. */
+export const revenueMarketFactor = (code?: string, tier = 1) => {
+  const factor = code ? REVENUE_MARKET_FACTOR[code] ?? 1 : 1;
+  return factor + (1 - factor) * clamp((tier - 1) / 2, 0, 1);
+};
 
 export interface ClubRevenueEstimate {
   currency: "GBP";
@@ -139,10 +168,11 @@ export function estimateClubRevenue(
   const reputation = clamp(input.reputation, 0, 100) / 100;
   const league = clamp(input.leagueReputation, 0, 100) / 100;
   const tier = clamp(input.tier, 1, 10);
+  const market = revenueMarketFactor(input.countryCode, tier);
   const annualCommercial = Math.round(
     Math.max(
       2500,
-      500_000_000 * reputation ** 3 * league ** 3 * 0.45 ** (tier - 1),
+      500_000_000 * reputation ** 3 * league ** 3 * 0.45 ** (tier - 1) * market,
     ),
   );
   const attendance = clamp(
@@ -150,7 +180,7 @@ export function estimateClubRevenue(
     0.2,
     0.9,
   );
-  const ticketPrice = 5 + (55 * reputation * league) / Math.sqrt(tier);
+  const ticketPrice = (5 + (55 * reputation * league) / Math.sqrt(tier)) * (0.5 + market / 2);
   const matchdayPerHomeMatch = Math.round(
     clamp(input.capacity, 0, 150_000) * attendance * ticketPrice,
   );
@@ -180,22 +210,90 @@ export interface OperatingCostInput {
   facilities: number;
   academy: number;
   balance: number;
+  /** Weekly staff wages charged separately; they are part of the spend ratio, so operations exclude them. */
+  staffWages?: number;
 }
 
 /**
- * Weekly non-player costs (GBP): facilities and academy upkeep, plus non-player staff, matchday,
- * commercial and admin costs up to the spend ratio less the budgeted payroll share. Wages above
- * or below the budget change profit. Cash below 10% of revenue cuts up to 6 points of that spend.
+ * Weekly non-player costs (GBP): facilities and academy upkeep, plus matchday, commercial and admin costs up to
+ * the spend ratio less the budgeted payroll share and the (separately charged) staff wages. Upkeep is capped at
+ * 8% / 6% of revenue scaled by the rating, so small clubs are not charged elite running costs. Wages above or
+ * below the budget change profit. Cash below 10% of revenue cuts up to 6 points of that spend.
  */
 export function weeklyOperatingCosts(input: OperatingCostInput) {
-  const facilities = Math.round(input.facilities ** 2 * 2.2);
-  const academy = Math.round(input.academy ** 2 * 1.6);
   const revenue = Math.max(0, input.annualRevenue);
+  const weekly = revenue / 52;
+  const facilities = Math.round(Math.min(input.facilities ** 2 * 2.2, (weekly * 0.08 * clamp(input.facilities, 0, 99)) / 99));
+  const academy = Math.round(Math.min(input.academy ** 2 * 1.6, (weekly * 0.06 * clamp(input.academy, 0, 99)) / 99));
   const cushion = clamp(input.balance / Math.max(1, revenue * 0.1), 0, 1);
-  const budget = ((input.spendRatio - 0.06 * (1 - cushion) - input.wageShare) * revenue) / 52;
+  const budget = ((input.spendRatio - 0.06 * (1 - cushion) - input.wageShare) * revenue) / 52 - Math.max(0, input.staffWages ?? 0);
   const operations = Math.max(0, Math.round(budget - facilities - academy));
   return { facilities, academy, operations, total: facilities + academy + operations };
 }
+
+/** League merit payment: 0 for last place up to 10% of the club's expected revenue for the champion. */
+export function leaguePrizeMoney(position: number, size: number, annualRevenue: number) {
+  if (size < 2 || position < 1) return 0;
+  return Math.round((Math.max(0, annualRevenue) * 0.1 * clamp(size - position, 0, size - 1)) / (size - 1));
+}
+
+/**
+ * Solidarity for a club relegated from the top flight, as a share of its last top-flight revenue. Only England's
+ * Premier League parachute is modelled (about £49M/£40M/£17M on ~£140M: 35%, 28%, then 12% only after two or more
+ * top-flight seasons); other leagues' relegation aid is unverified and not paid.
+ */
+export function parachutePayment(
+  countryCode: string,
+  seasonsSinceRelegation: number,
+  topFlightSeasons: number,
+  lastTopFlightRevenue: number,
+) {
+  if (countryCode !== "EN" || lastTopFlightRevenue <= 0) return 0;
+  const share = [0.35, 0.28, topFlightSeasons >= 2 ? 0.12 : 0][seasonsSinceRelegation - 1] ?? 0;
+  return Math.round(lastTopFlightRevenue * share);
+}
+
+/** Budget multipliers after a league move (1 when the club stayed up/down). */
+export const MOVEMENT_BUDGET_FACTOR = { promoted: 1.25, relegated: 0.75, none: 1 } as const;
+
+export interface SeasonBudgetInput {
+  balance: number;
+  /** Transfer allocation reserved by signed future/pending deals. */
+  reserved: number;
+  /** Unpaid instalments this club owes (transfer_payments where it is the payer). */
+  owedInstalments: number;
+  /** The reference wage budget fixed at the start of the previous season (clubs.data.operatingWageBudget). */
+  wageReference: number;
+  movement: keyof typeof MOVEMENT_BUDGET_FACTOR;
+}
+
+/**
+ * Next season's budgets: 40% of cash less reserved deals and ALL unpaid instalments (deferred fees are debt),
+ * scaled by promotion/relegation; the wage budget returns to the reference × movement factor, so a budget slider
+ * move lasts one season instead of turning each expiring transfer budget into permanent wage room.
+ */
+export function seasonBudgets(input: SeasonBudgetInput) {
+  const factor = MOVEMENT_BUDGET_FACTOR[input.movement];
+  return {
+    transferBudget: Math.round(
+      Math.max(0, input.balance * 0.4 - Math.max(0, input.reserved) - Math.max(0, input.owedInstalments)) * factor,
+    ),
+    wageBudget: Math.round(Math.max(0, input.wageReference) * factor),
+  };
+}
+
+/** Unpaid transfer instalments owed by a club. */
+export async function owedInstalments(store: Store, clubId: number) {
+  return (
+    await store.get<{ total: number }>(
+      "SELECT coalesce(sum(amount),0) AS total FROM transfer_payments WHERE payer_id = ? AND paid_date IS NULL",
+      clubId,
+    )
+  )!.total;
+}
+
+/** A club with a negative cash balance may not pay transfer fees (simplified embargo); free and fee-less deals remain. */
+export const transferEmbargo = (balance: number, fee: number) => balance < 0 && fee > 0;
 
 export function initialClubFinances(
   input: ClubEconomyInput,
@@ -380,6 +478,10 @@ export async function projectedOperatingRevenue(store: Store, club: Club) {
     "SELECT count(*) AS total FROM standings WHERE league_id = ?",
     club.league_id,
   ))!.total;
+  const country = await store.get<{ code: string }>(
+    "SELECT code FROM countries WHERE id = ?",
+    league?.country_id ?? club.country_id,
+  );
   return estimateClubRevenue({
     reputation: club.reputation,
     leagueReputation: league?.reputation ?? club.reputation,
@@ -387,6 +489,7 @@ export async function projectedOperatingRevenue(store: Store, club: Club) {
     capacity: club.capacity,
     fanMood: club.fan_mood,
     homeMatches: Math.max(0, size - 1) + 2,
+    countryCode: country?.code,
   }).annualOperatingRevenue;
 }
 

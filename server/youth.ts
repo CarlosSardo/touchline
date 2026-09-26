@@ -11,7 +11,10 @@ import {
   type PlayerRow,
   type PlayerSpec,
   type Rng,
+  contractYearsLeft,
+  seniorRetirementChance,
 } from "./people.ts";
+import { retirementNotice } from "./notifications.ts";
 import { baseWage, marketWage, professionalWageFloor, wageScale, wageScales } from "./finance.ts";
 import {
   assessRegistration,
@@ -28,7 +31,8 @@ import {
   type ClubRegistration,
 } from "./registration.ts";
 import { news } from "./systems.ts";
-import { ageOn, clamp, daysBetween, transferWindow } from "../shared/rules.ts";
+import { marketMoveInterest, marketWageOffer } from "./recruitment.ts";
+import { ageOn, clamp, daysBetween, transferWindow, winterWindowClose } from "../shared/rules.ts";
 import { MIN_GOALKEEPERS, SQUAD_MINIMUMS } from "../shared/world-rules.ts";
 import { hasOwnLeague, nationByCode } from "../shared/world-catalog/index.ts";
 import type {
@@ -154,14 +158,6 @@ export function selectSquad<Player extends { position: Position; ability: number
   return { kept, rest: ranked.filter((player) => !kept.includes(player)) };
 }
 
-/** Probability that a senior retires at the end of a season: careers end from 31 at semi-professional level (ability ≤ 50) to 34 for elite players (≥ 80). */
-export function retirementChance(age: number, ability: number, clubless: boolean) {
-  if (age >= 40) return 1;
-  const onset = 31 + clamp(Math.round((ability - 50) / 10), 0, 3);
-  if (age < onset) return clubless && age >= 30 ? 0.12 : 0;
-  return clamp(0.1 + (age - onset) * 0.12 + (clubless ? 0.25 : 0), 0, 1);
-}
-
 /** Ability below which a club-less player cannot find a club in the nation's lowest modeled tier. */
 export const leaveThreshold = (weakestClubReputation: number) =>
   weakestClubReputation * 0.66 + 22 - 10;
@@ -237,6 +233,7 @@ interface Member {
   wage: number;
   role: string;
   contract_status: string | null;
+  injury_until?: string | null;
   /** profile.identity.nationalities (JSON), for quota and passport checks. */
   citizenships?: string | null;
   /** profile.identity.birthCountryId and profile.familyMove (JSON): the family's nation, for minors' registrations. */
@@ -455,7 +452,7 @@ export async function runYouthIntake(
   );
   const members = (
     await store.all<Member>(
-      "SELECT id,club_id,squad_club_id,parent_club_id,country_id,age_group,position,ability,potential,birth_date,contract_end,wage,role,JSON_VALUE(profile,'$.contract.status') AS contract_status,JSON_QUERY(profile,'$.identity.nationalities') AS citizenships,TRY_CONVERT(int,JSON_VALUE(profile,'$.identity.birthCountryId')) AS birth_country_id,JSON_QUERY(profile,'$.familyMove') AS family_move FROM players WHERE club_id IS NOT NULL AND role != 'Retired'",
+      "SELECT id,club_id,squad_club_id,parent_club_id,country_id,age_group,position,ability,potential,birth_date,contract_end,wage,role,injury_until,JSON_VALUE(profile,'$.contract.status') AS contract_status,JSON_QUERY(profile,'$.identity.nationalities') AS citizenships,TRY_CONVERT(int,JSON_VALUE(profile,'$.identity.birthCountryId')) AS birth_country_id,JSON_QUERY(profile,'$.familyMove') AS family_move FROM players WHERE club_id IS NOT NULL AND role != 'Retired'",
     )
   ).map((member) => ({
     ...member,
@@ -519,7 +516,11 @@ export async function runYouthIntake(
   const wageFor = (member: Pick<Member, "ability" | "age">, clubId: number) =>
     Math.max(floors.get(clubId) ?? 50, Math.round((baseWage(member.ability) * (scales.get(clubId) ?? 1) * (member.age <= 20 ? 0.75 : 1)) / 10) * 10);
   const signProfessional = (member: Member, clubId: number, random: Rng) => {
-    member.wage = wageFor(member, clubId);
+    const market = wageFor(member, clubId);
+    // Renewals keep >= 90% of the wage; ability only falls past the peak (growth.ts: ~30, keepers ~33).
+    const declining = member.age >= (member.position === "GK" ? 33 : 30);
+    const renewal = member.contract_status !== "amateur" && member.wage > 0 && !declining;
+    member.wage = renewal ? Math.max(market, Math.ceil((member.wage * 0.9) / 10) * 10) : market;
     member.contract_end = `${season + contractYears(member.age, random)}-06-30`;
     member.contract_status = "professional";
     professional.add(member.id);
@@ -549,12 +550,26 @@ export async function runYouthIntake(
     changed.delete(member.id);
   };
 
-  // 1. Retirements of contracted seniors (loanees finish their loans first).
+  // 1. Retirements of contracted seniors (loanees finish their loans first); the user's clubs follow the 1 May notice.
   const retiring = rng("retire");
   const retiredNames: string[] = [];
+  const notice = await retirementNotice(store, season - 1);
   for (const member of members)
-    if (!member.parent_club_id && member.age_group === "Senior" && retiring() < retirementChance(member.age, member.ability, false)) {
-      if (member.club_id !== null && userClubs.has(member.club_id)) retiredNames.push(String(member.id));
+    if (!member.parent_club_id && member.age_group === "Senior") {
+      const roll = retiring();
+      const user = member.club_id !== null && userClubs.has(member.club_id);
+      const retires = user && notice
+        ? notice.has(member.id)
+        : roll <
+          seniorRetirementChance({
+            age: member.age,
+            ability: member.ability,
+            position: member.position,
+            contractYears: contractYearsLeft(member.contract_end, date),
+            injuryDays: member.injury_until && member.injury_until > date ? daysBetween(date, member.injury_until) : 0,
+          });
+      if (!retires) continue;
+      if (user) retiredNames.push(String(member.id));
       leave(member, "retired");
     }
 
@@ -567,7 +582,10 @@ export async function runYouthIntake(
   for (const row of clubless) {
     const profile = JSON.parse(row.profile) as PlayerProfile;
     const member: Member = { ...row, contract_status: profile.contract?.status ?? null, age: ageOn(row.birth_date, date), locked: locked.has(row.id) };
-    if (retiring() < retirementChance(member.age, member.ability, !profile.homeBased) || (profile.homeBased && member.age >= 36)) {
+    if (
+      retiring() < seniorRetirementChance({ age: member.age, ability: member.ability, position: member.position, clubless: !profile.homeBased }) ||
+      (profile.homeBased && member.age >= 36)
+    ) {
       leave(member, "retired");
       continue;
     }
@@ -1069,8 +1087,8 @@ function legalizeMinor(row: PlayerRow, club: ClubRow, registration: ClubRegistra
  * A minor moved by the rollover must be lawfully present at the new club without the move history, as the soak
  * checks: one registration association is not enough (a Derry youth, FAI-registered, at a Republic club).
  */
-function minorMayJoin(
-  member: Member,
+export function minorMayJoin(
+  member: Pick<Member, "age" | "birth_date" | "birth_country_id" | "family_move">,
   profile: PlayerProfile | undefined,
   nationalities: readonly string[],
   registration: ClubRegistration,
@@ -1119,8 +1137,8 @@ function usesQuota(candidate: Pick<Available, "age" | "nationalities">, club: Cl
 /** Last day of the latest registration period closed before `date` (FIFA RSTP Art. 6.1 cut-off for free agents). */
 function lastWindowClose(date: string) {
   const year = Number(date.slice(0, 4));
-  const monthDay = date.slice(5);
-  return monthDay > "09-01" ? `${year}-09-01` : monthDay > "01-31" ? `${year}-01-31` : `${year - 1}-09-01`;
+  const winter = winterWindowClose(year);
+  return date.slice(5) > "09-01" ? `${year}-09-01` : date > winter ? winter : `${year - 1}-09-01`;
 }
 
 /** Free agents left unsigned by the registration period that closed on `closedAt` and no longer wanted leave football. */
@@ -1405,7 +1423,14 @@ export async function signClublessPlayers(
       (player.ability - 22) / 0.66 + random() * 6,
     );
     for (const buyer of buyers) {
-      const wage = marketWage({ ...player, age_group: "Senior", wage: 0 }, await wageScale(store, buyer.id));
+      // Free agents choose too (50/85 directive): no move below 50% interest; the club pays up to 1.5x its going rate.
+      const goingRate = marketWage({ ...player, age_group: "Senior", wage: 0 }, await wageScale(store, buyer.id));
+      const wage = marketWageOffer(
+        0,
+        marketMoveInterest(player, JSON.parse(player.profile) as PlayerProfile, buyer, undefined, state.date),
+        goingRate,
+      );
+      if (wage === null) continue;
       const payroll = (await store.get<{ total: number }>(
         "SELECT coalesce(sum(wage),0) AS total FROM players WHERE (club_id = ? AND parent_club_id IS NULL) OR parent_club_id = ?",
         buyer.id,

@@ -1,6 +1,6 @@
 export type Position =
   "GK" | "CB" | "LB" | "RB" | "DM" | "CM" | "AM" | "LW" | "RW" | "ST";
-export type AgeGroup = "Senior" | "U19" | "U17" | "U20";
+export type AgeGroup = "Senior" | "U19" | "U17" | "U20" | "U21";
 export type SettingValue = string | number | boolean;
 export type Settings = Record<string, SettingValue>;
 export type Attributes = Record<string, number>;
@@ -71,6 +71,10 @@ export interface PlayerProfile {
     positionTarget?: Position;
     positionWeeks?: number;
     lastSupport?: string;
+    /** Share of team minutes last measured (carries a player's playing time into the next season's first weeks). */
+    minutesShare?: number;
+    /** Adult lifestyle drawn (minors only draw positive lifestyles). */
+    adultLifestyle?: boolean;
   };
   relationships: { group: string; loyalty: number; influence: number };
   registration?: {
@@ -89,6 +93,10 @@ export interface PlayerProfile {
     date: string;
     reason: "retired" | "left-football";
   };
+  /** Announced on 1 May (user's club family): retires at the end of `season`. */
+  retirementPlan?: { season: number; announced: string };
+  /** Visibility from youth national-team finals (shared/features/youth-internationals.ts); fades over time. */
+  international?: { value: number; date: string; tournament: string };
 }
 
 export interface Player {
@@ -386,6 +394,8 @@ export interface MatchPlayer {
   height?: number;
   discipline?: number;
   stats?: Record<string, number>;
+  /** Called-up first-team debutant: substitution gate (shared/features/callups.ts `debutSubAllowed`). */
+  callUpDebut?: "lead" | "open" | "hold";
 }
 
 export interface MatchTeam {
@@ -405,6 +415,8 @@ export interface MatchTeam {
 
 export interface MatchSnapshot {
   rulesVersion?: number;
+  /** League scoring level relative to the engine reference (shared/league-rules.ts matchGoalFactor); rules 4+. */
+  goalFactor?: number;
   home: MatchTeam;
   away: MatchTeam;
   weather: string;
@@ -547,6 +559,9 @@ export interface Negotiation {
   potential?: number;
   buyer_name?: string;
   seller_name?: string;
+  /** Transfer desk only: rivals for this player as the director knows them (data.rivals is removed). */
+  rivals?: RivalInterest[];
+  battle?: TransferBattleView | null;
 }
 
 export interface TransferTerms {
@@ -612,11 +627,104 @@ export interface AffiliateWillingness {
 
 export interface PlayerInterest {
   score: number;
+  /** Interest in the move itself, wages excluded (absent in saves before the refusal rule). */
+  moveScore?: number;
+  /** The player refuses personal terms whatever the wage. */
+  refuses?: boolean;
+  /**
+   * Bands this assessment applies: below `negotiate` (moveScore) he will not talk; from `agree` (score, wages
+   * included) he accepts terms that meet his wage floor. Absent in older saves: use INTEREST_BANDS.
+   */
+  thresholds?: { negotiate: number; agree: number };
   stance: string;
   expectedRole: string;
   expectedWage: number;
+  /**
+   * Weekly wage that would lift overall interest to the acceptance band with the other assessed terms unchanged;
+   * null when he refuses or no wage within the cap is enough (absent in older saves).
+   */
+  wageToAgree?: number | null;
+  /** Rival clubs chasing the same player, as far as the director knows (interest preview and player detail). */
+  rivals?: RivalInterest[];
   factors: { id: string; label: string; impact: number; reason: string }[];
   concerns: string[];
+}
+
+export type RivalStatus =
+  | "monitoring"
+  | "bid"
+  | "fee-agreed"
+  | "withdrawn"
+  | "won"
+  | "lost";
+
+/** Server-side truth about a rival club's pursuit, stored in NegotiationData.rivals. Never sent to the client. */
+export interface RivalBid {
+  clubId: number;
+  since: string;
+  status: RivalStatus;
+  /** Latest bid (GBP); 0 while monitoring or for a club-less player. */
+  fee: number;
+  /** Weekly wage the rival offers. */
+  wage: number;
+  /** The player's overall interest in the rival's package. */
+  interest: number;
+  raises: number;
+  nextAction: string;
+  source: "market" | "shortlist";
+  /** The rival has put personal terms to the player (its `interest` is then the player's real answer). */
+  termsOffered?: boolean;
+  /** Why the pursuit ended (withdrawn/lost/won). */
+  outcome?: string;
+}
+
+/** Server-side state of a contested negotiation, stored in NegotiationData.battle. */
+export interface TransferBattle {
+  status: "open" | "final-offers" | "decision";
+  finalOffersRequested?: boolean;
+  finalOffersDeadline?: string;
+  /** The director's lodged final fee (below the floor offers are countered as usual). */
+  userFinalOffer?: number;
+  decisionDeadline?: string;
+  /** Rival fees were handed to the market after the director's talks closed. */
+  handedOver?: boolean;
+}
+
+/** A rival as the director sees it: identity and fee are only as precise as scouting and press knowledge. */
+export interface RivalInterest {
+  /** Stable React key. */
+  key: string;
+  /** null while the club is only rumoured. */
+  clubId: number | null;
+  /** The club's name, or e.g. "A club in Spain" while rumoured. */
+  clubName: string;
+  countryName: string | null;
+  reputation: number | null;
+  /** confirmed = told by the selling club/agent; reported = press and scouting; rumoured = unnamed. */
+  certainty: "confirmed" | "reported" | "rumoured";
+  status: RivalStatus;
+  /** Estimated bid (GBP) that contains the real bid; null while monitoring or for a club-less player. */
+  feeRange: { low: number; high: number } | null;
+  /** Whom the player currently leans towards, when the agent or scouting reveals it. */
+  preference: "rival" | "you" | "undecided" | "unknown";
+  since: string;
+  negotiationId: number | null;
+  /** Pursuit ended: why, in plain words. */
+  outcome: string | null;
+}
+
+/** A contested negotiation as the director sees it. */
+export interface TransferBattleView {
+  status: "open" | "final-offers" | "decision";
+  /** Best-and-final offers are due by this date (selling club's bidding war). */
+  finalOffersDeadline: string | null;
+  /** Your lodged final fee, if any. */
+  yourFinalOffer: number | null;
+  /** The player chooses between the clubs with agreed fees on this date. */
+  decisionDeadline: string | null;
+  /** The selling club's indication of the leading rival bid during final offers. */
+  leadingBid: { low: number; high: number } | null;
+  message: string;
 }
 
 export interface NegotiationData {
@@ -641,6 +749,8 @@ export interface NegotiationData {
   log: { date: string; message: string; type: string }[];
   agent: PlayerProfile["agent"];
   terms: LoanTerms;
+  /** Wage share (%) the parent club expects a borrower to pay; lower splits are priced into the loan fee. */
+  loanReferenceSplit?: number;
   years: number;
   role: string;
   promises: string[];
@@ -652,4 +762,6 @@ export interface NegotiationData {
   hijack?: boolean;
   sabotage?: boolean;
   signingBonus?: number;
+  rivals?: RivalBid[];
+  battle?: TransferBattle;
 }

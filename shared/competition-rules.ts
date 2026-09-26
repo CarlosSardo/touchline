@@ -1,5 +1,7 @@
 import type { Club, Fixture, League } from "./types.ts";
+import { addDays, daysBetween, internationalBreak } from "./rules.ts";
 import { CONTINENTAL } from "./world-catalog/continental.ts";
+import { YOUTH_TOURNAMENT_BY_NAME } from "./features/youth-internationals.ts";
 import type {
   AccessEntry,
   CoefficientSeed,
@@ -46,10 +48,13 @@ export function knockoutRules(name: string, stage: string): KnockoutRules {
     // ACL Elite: two-legged round of 16, then single matches at a centralised venue.
     const centralised = spec.id === "afc-champions-league-elite" && /Quarter|Semi|Final/i.test(stage);
     const qualifying = stage === "Qualifying" || competition !== name;
+    const legs = final ? spec.finalLegs : centralised ? 1 : qualifying ? spec.qualifyingLegs ?? spec.legs : spec.legs;
+    // CONMEBOL two-legged ties go straight to penalties; only the single-match final has extra time.
+    const penaltiesOnly = ["copa-libertadores", "copa-sudamericana"].includes(spec.id) && legs === 2;
     return {
       version: 1,
-      legs: final ? spec.finalLegs : centralised ? 1 : qualifying ? spec.qualifyingLegs ?? spec.legs : spec.legs,
-      extraTime: spec.age === "Senior" && spec.id !== "leagues-cup",
+      legs,
+      extraTime: spec.age === "Senior" && spec.id !== "leagues-cup" && !penaltiesOnly,
       awayGoals: false,
       neutral: (final && spec.neutralFinal) || centralised,
     };
@@ -59,6 +64,12 @@ export function knockoutRules(name: string, stage: string): KnockoutRules {
     "UEFA Europa League",
     "UEFA Conference League",
   ].includes(competition);
+  const youth = YOUTH_TOURNAMENT_BY_NAME.get(competition);
+  if (youth) {
+    // Finals and mini-tournament qualifiers are single-venue; U21 qualifiers are home and away.
+    const homeAway = competition !== name && youth.qualifying?.venue === "home-away";
+    return { version: 1, legs: 1, extraTime: youth.extraTime, awayGoals: false, neutral: !homeAway };
+  }
   return {
     version: 1,
     legs: europeanSenior && !final ? 2 : 1,
@@ -112,6 +123,135 @@ export function knockoutWinner(fixtures: Fixture[]): number | null {
       ? last.home_id
       : last.away_id;
   return details.winnerId ?? null;
+}
+
+/** UEFA/CONMEBOL name of the round that 9th–24th (or group runners-up) play before the round of 16. */
+export const KNOCKOUT_PLAYOFF_STAGE = "Knockout round play-offs";
+
+/** Stages decided on the day (or on aggregate): the engine needs a winner. */
+export const isKnockoutStage = (stage: string) =>
+  ["Qualifying", "Final", "Semi-final", "Quarter-final", KNOCKOUT_PLAYOFF_STAGE].includes(stage) ||
+  stage.startsWith("Round of");
+
+// ------------------------------------------------------------ domestic cup draws
+
+/**
+ * Seeded bracket round (clubs strongest first): the top seeds take the byes up to a power of two, then the best
+ * remaining seed meets the worst. The next round must list the byes first, then the winners in tie order, so that
+ * seed 1 meets the winner of the weakest tie and the bracket stays 1 v 8, 2 v 7...
+ */
+export function seededPairs(clubs: readonly number[]) {
+  const size = 2 ** Math.ceil(Math.log2(Math.max(1, clubs.length)));
+  const count = Math.max(0, size - clubs.length);
+  const playing = clubs.slice(count);
+  const pairs: [number, number][] = [];
+  for (let index = 0; index < Math.floor(playing.length / 2); index++)
+    pairs.push([playing[index], playing[playing.length - 1 - index]]);
+  return { byes: clubs.slice(0, count), pairs };
+}
+
+/** Next seeded round: byes first, then winners in tie order (see seededPairs). */
+export const nextSeededRound = (winners: readonly number[], byes: readonly number[] = []) => [...byes, ...winners];
+
+const seasonDay = (season: number, monthDay: string) =>
+  `${Number(monthDay.slice(0, 2)) >= 7 ? season : season + 1}-${monthDay}`;
+
+/** Round dates of a domestic cup: evenly spread to the final (midweek rounds, weekend final), or every 14 days. */
+export function cupRoundDates(season: number, start: string, final: string | undefined, rounds: number) {
+  const first = seasonDay(season, start);
+  const span = final ? Math.max(0, daysBetween(first, seasonDay(season, final))) : 14 * Math.max(0, rounds - 1);
+  return Array.from({ length: rounds }, (_, index) => {
+    if (rounds === 1 || index === 0) return first;
+    let date = addDays(first, Math.round((span * index) / (rounds - 1)));
+    if (final) {
+      const target = index === rounds - 1 ? 6 : 3;
+      while (new Date(`${date}T12:00:00Z`).getUTCDay() !== target) date = addDays(date, 1);
+    }
+    while (internationalBreak(date)) date = addDays(date, 7);
+    return date;
+  });
+}
+
+export interface CupEntrant {
+  id: number;
+  /** Senior tier (1 = top); entrants arrive strongest first. */
+  tier: number;
+}
+
+export interface CupEntryPlan {
+  rounds: number;
+  /** Round (1-based) in which each club enters. */
+  entry: Record<string, number>;
+}
+
+/**
+ * Rounds and entry round of every club so that each round has an even field and the final has two clubs. With
+ * `seeded` (FA Cup, Copa del Rey) whole tiers from the top join as late as the field allows (never after the
+ * round of 32, and one extra round is added when the top tier could not skip a round at all); otherwise only the
+ * byes needed to reach a power of two go to the strongest clubs.
+ */
+export function cupEntryPlan(entrants: readonly CupEntrant[], seeded: boolean): CupEntryPlan {
+  const count = entrants.length;
+  if (count < 2) return { rounds: count ? 1 : 0, entry: Object.fromEntries(entrants.map((club) => [club.id, 1])) };
+  const tiers: CupEntrant[][] = [];
+  for (const club of entrants) {
+    const last = tiers.at(-1);
+    if (last && last[0].tier === club.tier) last.push(club);
+    else tiers.push([club]);
+  }
+  let rounds = Math.ceil(Math.log2(count));
+  if (seeded && tiers.length > 1 && count >= 32 && 2 ** rounds - count < tiers[0].length) rounds++;
+  let budget = 2 ** rounds - count;
+  const entry = new Map(entrants.map((club) => [club.id, 1]));
+  const latest = seeded ? Math.max(2, rounds - 4) : 2;
+  // A club entering in round r skips r - 1 rounds, which uses 2^(r-1) - 1 of the bracket's empty places.
+  if (seeded)
+    for (const group of tiers.slice(0, -1)) {
+      let round = latest;
+      while (round > 1 && group.length * (2 ** (round - 1) - 1) > budget) round--;
+      if (round === 1) break;
+      for (const club of group) entry.set(club.id, round);
+      budget -= group.length * (2 ** (round - 1) - 1);
+    }
+  // Round one always keeps at least one tie.
+  let firstRound = [...entry.values()].filter((round) => round === 1).length;
+  for (let pass = 0; budget > 0 && pass < rounds; pass++)
+    for (const club of entrants) {
+      const current = entry.get(club.id)!;
+      if (budget <= 0) break;
+      if (current < latest && 2 ** (current - 1) <= budget && (current > 1 || firstRound > 2)) {
+        entry.set(club.id, current + 1);
+        budget -= 2 ** (current - 1);
+        if (current === 1) firstRound--;
+      }
+    }
+  // Degenerate tier shapes (a lone club below a big tier) fall back to plain byes, which always balance.
+  if (budget !== 0) return cupEntryPlan(entrants, false);
+  return { rounds, entry: Object.fromEntries(entry) };
+}
+
+/**
+ * Open draw: clubs are drawn one by one and each pair's first club hosts, unless the other club is at least
+ * `lowerTierHome` tiers lower (Copa del Rey 1, Coupe de France 2), in which case the lower club hosts.
+ */
+export function openDraw(
+  clubs: readonly number[],
+  random: () => number,
+  tiers: Readonly<Record<string, number>> = {},
+  lowerTierHome?: number,
+): [number, number][] {
+  const pot = [...clubs];
+  for (let index = pot.length - 1; index > 0; index--) {
+    const other = Math.floor(random() * (index + 1));
+    [pot[index], pot[other]] = [pot[other], pot[index]];
+  }
+  const pairs: [number, number][] = [];
+  for (let index = 0; index + 1 < pot.length; index += 2) {
+    const [first, second] = [pot[index], pot[index + 1]];
+    const gap = (tiers[second] ?? 0) - (tiers[first] ?? 0);
+    pairs.push(lowerTierHome && gap >= lowerTierHome ? [second, first] : [first, second]);
+  }
+  return pairs;
 }
 
 // ------------------------------------------------------------ continental access

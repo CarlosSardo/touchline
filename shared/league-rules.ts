@@ -13,6 +13,46 @@ import type {
 
 export const DEFAULT_TIEBREAKERS = ["Points", "Goal difference", "Goals scored"];
 
+/** Real ranking criteria that differ from the default (2026/27 regulations: RFEF, FIGC, FFF Ligue 3, MLS). */
+export const LEAGUE_TIEBREAKERS: Readonly<Record<string, readonly string[]>> = {
+  "ES:1": ["Points", "Head-to-head points", "Head-to-head goal difference", "Goal difference", "Goals scored"],
+  "ES:2": ["Points", "Head-to-head points", "Head-to-head goal difference", "Goal difference", "Goals scored"],
+  "IT:1": ["Points", "Head-to-head points", "Head-to-head goal difference", "Goal difference", "Goals scored"],
+  "FR:3": ["Points", "Head-to-head points", "Head-to-head goal difference", "Goal difference", "Goals scored"],
+  "US:1": ["Points", "Wins", "Goal difference", "Goals scored"],
+};
+
+/** Ranking criteria of a league by catalog key (`L:ES:1`), default points, goal difference, goals scored. */
+export const leagueTiebreakers = (catalogKey: string): string[] => [
+  ...(LEAGUE_TIEBREAKERS[catalogKey.replace(/^L:/, "")] ?? DEFAULT_TIEBREAKERS),
+];
+
+/**
+ * Goals per match relative to the engine's reference (~2.75): approximate long-run top-flight averages
+ * (2019/20–2024/25); second tiers score ~7% less, lower tiers ~3% less. Unlisted nations use 1.
+ */
+const NATION_GOAL_FACTOR: Readonly<Record<string, number>> = {
+  DE: 1.12,
+  NL: 1.14,
+  EN: 1.04,
+  NO: 1.08,
+  CH: 1.08,
+  AT: 1.08,
+  BE: 1.04,
+  US: 1.08,
+  IT: 0.98,
+  FR: 0.99,
+  ES: 0.93,
+  PT: 0.94,
+  AR: 0.84,
+  BR: 0.92,
+  GR: 0.88,
+};
+export function matchGoalFactor(nationCode: string | undefined, tier: number | undefined) {
+  const nation = (nationCode && NATION_GOAL_FACTOR[nationCode]) || 1;
+  return nation * (!tier || tier <= 1 ? 1 : tier === 2 ? 0.93 : 0.97);
+}
+
 /** Senior league.data snapshot written at generation and read by calendar, qualification and rollover. */
 export interface SeniorLeagueData {
   worldVersion: 4;
@@ -90,7 +130,7 @@ export function seniorLeagueData(
     movementDown: down,
     bTeamsAllowed: Boolean(pyramid && tier.tier >= pyramid.highestTier),
     targetFirstTeams: tier.size - (tier.bTeams ?? 0),
-    tiebreakers: [...DEFAULT_TIEBREAKERS],
+    tiebreakers: leagueTiebreakers(`${code}:${tier.tier}`),
   };
 }
 
@@ -141,9 +181,12 @@ export function readLeagueData(
     movementDown,
     bTeamsAllowed: data.bTeamsAllowed !== false,
     targetFirstTeams: count(data.targetFirstTeams, 0),
-    tiebreakers: Array.isArray(data.tiebreakers)
-      ? data.tiebreakers.map(String)
-      : [...DEFAULT_TIEBREAKERS],
+    // Catalog rules win over the snapshot, so older saves rank with the real criteria too.
+    tiebreakers: LEAGUE_TIEBREAKERS[String(data.catalogKey ?? "").replace(/^L:/, "")]
+      ? leagueTiebreakers(String(data.catalogKey))
+      : Array.isArray(data.tiebreakers)
+        ? data.tiebreakers.map(String)
+        : [...DEFAULT_TIEBREAKERS],
   };
 }
 
@@ -271,6 +314,46 @@ export interface LeagueDateOptions {
   to?: string;
   /** Senior club football avoids international windows. */
   avoidBreaks?: boolean;
+  /** Inclusive ISO date ranges without league football (winter breaks). */
+  breaks?: [string, string][];
+  /** Single ISO dates kept free (1 May in Germany). */
+  blocked?: string[];
+}
+
+interface LeagueCalendarSpec {
+  /** MM-DD of the opening weekend and the last matchday. */
+  start?: string;
+  end?: string;
+  winterBreak?: [string, string];
+  blocked?: string[];
+}
+
+/** 2026/27 framework calendars (Premier League, LaLiga, Serie A, DFB Rahmenterminkalender, Eredivisie). */
+export const LEAGUE_CALENDARS: Readonly<Record<string, LeagueCalendarSpec>> = {
+  "EN:1": { start: "08-21", end: "05-30" },
+  "ES:1": { start: "08-15", end: "05-30" },
+  "IT:1": { start: "08-22", end: "05-30" },
+  "DE:1": { start: "08-28", end: "05-22", winterBreak: ["12-21", "01-08"], blocked: ["05-01"] },
+  "DE:2": { start: "08-07", winterBreak: ["12-21", "01-14"], blocked: ["05-01"] },
+  "DE:3": { start: "08-07", winterBreak: ["12-21", "01-14"], blocked: ["05-01"] },
+  "NL:1": { start: "08-07", end: "05-23" },
+};
+
+const inSeason = (season: number, monthDay: string) =>
+  `${Number(monthDay.slice(0, 2)) >= 7 ? season : season + 1}-${monthDay}`;
+
+/** Date options of one senior league (catalog key `L:DE:1`); unlisted leagues keep the defaults. */
+export function leagueDateOptions(catalogKey: string, season: number): LeagueDateOptions {
+  const spec = LEAGUE_CALENDARS[catalogKey.replace(/^L:/, "")];
+  if (!spec) return {};
+  return {
+    ...(spec.start ? { from: inSeason(season, spec.start) } : {}),
+    ...(spec.end ? { to: inSeason(season, spec.end) } : {}),
+    ...(spec.winterBreak
+      ? { breaks: [[inSeason(season, spec.winterBreak[0]), inSeason(season, spec.winterBreak[1])]] }
+      : {}),
+    ...(spec.blocked ? { blocked: spec.blocked.map((day) => inSeason(season, day)) } : {}),
+  };
 }
 
 /**
@@ -287,7 +370,10 @@ export function leagueDates(
   const to = options.to ?? `${season + 1}-05-17`;
   const avoid = options.avoidBreaks !== false;
   const free = (date: string) =>
-    (!avoid || !internationalBreak(date)) && date.slice(5) !== "12-25";
+    (!avoid || !internationalBreak(date)) &&
+    date.slice(5) !== "12-25" &&
+    !options.blocked?.includes(date) &&
+    !options.breaks?.some(([first, last]) => date >= first && date <= last);
   const weekends: string[] = [];
   for (let date = nextWeekday(from, 6); date <= to; date = addDays(date, 7))
     if (free(date)) weekends.push(date);
@@ -347,7 +433,9 @@ export function regularSeasonDates(
 
 // --------------------------------------------------------------- tables
 
-export type RankableRow = Pick<Standing, "club_id" | "points" | "gf" | "ga" | "group_name">;
+export type RankableRow = Pick<Standing, "club_id" | "points" | "gf" | "ga" | "group_name"> & {
+  wins?: number;
+};
 
 export const compareStandings = (left: RankableRow, right: RankableRow) =>
   right.points - left.points ||
@@ -355,25 +443,102 @@ export const compareStandings = (left: RankableRow, right: RankableRow) =>
   right.gf - left.gf ||
   left.club_id - right.club_id;
 
-/** Final ranking: split groups keep their fixed order (top group first), then points, goal difference, goals. */
+/** A played league match, for head-to-head criteria. */
+export interface LeagueResult {
+  home_id: number;
+  away_id: number;
+  home_goals: number | null;
+  away_goals: number | null;
+}
+
+export interface RankOptions {
+  /** Criteria in order (see LEAGUE_TIEBREAKERS); omitted = points, goal difference, goals scored. */
+  tiebreakers?: readonly string[];
+  results?: readonly LeagueResult[];
+}
+
+export const needsHeadToHead = (tiebreakers: readonly string[] | undefined) =>
+  Boolean(tiebreakers?.some((criterion) => criterion.startsWith("Head-to-head")));
+
+/** Sorts rows by the league's criteria; head-to-head criteria use matches among the clubs tied on points. */
+function sortByCriteria<Row extends RankableRow>(rows: Row[], options: RankOptions): Row[] {
+  const criteria = options.tiebreakers ?? DEFAULT_TIEBREAKERS;
+  if (!criteria.some((criterion) => criterion !== "Points" && !DEFAULT_TIEBREAKERS.includes(criterion)))
+    return rows.sort(compareStandings);
+  const sorted = [...rows].sort((left, right) => right.points - left.points);
+  const ranked: Row[] = [];
+  for (let start = 0; start < sorted.length; ) {
+    let end = start + 1;
+    while (end < sorted.length && sorted[end].points === sorted[start].points) end++;
+    const block = sorted.slice(start, end);
+    const ids = new Set(block.map((row) => row.club_id));
+    const mini = new Map(block.map((row) => [row.club_id, { points: 0, difference: 0, scored: 0 }]));
+    if (block.length > 1 && needsHeadToHead(criteria))
+      for (const match of options.results ?? []) {
+        if (!ids.has(match.home_id) || !ids.has(match.away_id) || match.home_goals === null || match.away_goals === null)
+          continue;
+        const home = mini.get(match.home_id)!;
+        const away = mini.get(match.away_id)!;
+        home.scored += match.home_goals;
+        away.scored += match.away_goals;
+        home.difference += match.home_goals - match.away_goals;
+        away.difference += match.away_goals - match.home_goals;
+        home.points += match.home_goals > match.away_goals ? 3 : match.home_goals === match.away_goals ? 1 : 0;
+        away.points += match.away_goals > match.home_goals ? 3 : match.home_goals === match.away_goals ? 1 : 0;
+      }
+    const value = (row: Row, criterion: string) => {
+      const own = mini.get(row.club_id)!;
+      switch (criterion) {
+        case "Head-to-head points":
+          return own.points;
+        case "Head-to-head goal difference":
+          return own.difference;
+        case "Head-to-head goals scored":
+          return own.scored;
+        case "Goal difference":
+          return row.gf - row.ga;
+        case "Goals scored":
+          return row.gf;
+        case "Wins":
+          return row.wins ?? 0;
+        default:
+          return 0;
+      }
+    };
+    block.sort((left, right) => {
+      for (const criterion of criteria) {
+        const difference = value(right, criterion) - value(left, criterion);
+        if (difference) return difference;
+      }
+      return compareStandings(left, right);
+    });
+    ranked.push(...block);
+    start = end;
+  }
+  return ranked;
+}
+
+/** Final ranking: split groups keep their fixed order (top group first), then the league's criteria. */
 export function rankTable<Row extends RankableRow>(
   rows: readonly Row[],
   split?: LeagueSplitSpec,
+  options: RankOptions = {},
 ): Row[] {
   const order = new Map((split?.groups ?? []).map((group, index) => [group.name, index]));
   const groupIndex = (row: RankableRow) => order.get(row.group_name) ?? order.size;
-  return [...rows].sort(
-    (left, right) => groupIndex(left) - groupIndex(right) || compareStandings(left, right),
-  );
+  const groups = new Map<number, Row[]>();
+  for (const row of rows) groups.set(groupIndex(row), [...(groups.get(groupIndex(row)) ?? []), row]);
+  return [...groups.keys()].sort((left, right) => left - right).flatMap((key) => sortByCriteria(groups.get(key)!, options));
 }
 
 /** Rank within one conference (or the whole table without conferences). */
 export function conferenceTables<Row extends RankableRow>(
   rows: readonly Row[],
   conferences: readonly string[] = [],
+  options: RankOptions = {},
 ): Map<string, Row[]> {
   const tables = new Map<string, Row[]>();
-  for (const row of [...rows].sort(compareStandings)) {
+  for (const row of sortByCriteria([...rows], options)) {
     const key = conferences.length > 1 ? row.group_name : "";
     tables.set(key, [...(tables.get(key) ?? []), row]);
   }

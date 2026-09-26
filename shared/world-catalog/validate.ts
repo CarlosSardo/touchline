@@ -630,6 +630,7 @@ export function validateCatalog(
         error(at, "rounds must be 1-10");
       if (!legsValid(cup.legs, cup.finalLegs)) error(at, "legs must be 1 or 2");
       if (cup.start !== undefined && !MONTH_DAY.test(cup.start)) error(at, "start must be MM-DD");
+      if (cup.final !== undefined && !MONTH_DAY.test(cup.final)) error(at, "final must be MM-DD");
       if (cup.kind === "super") {
         const participants = cup.participants ?? [];
         if (![2, 4].includes(participants.length) || new Set(participants).size !== participants.length)

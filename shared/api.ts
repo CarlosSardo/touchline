@@ -18,6 +18,7 @@ import type {
   BuyBackClause,
   SellOnClause,
   TransferPayment,
+  TransferTerms,
   PlayerInterest,
 } from "./types.ts";
 import type { AssistantDuty } from "./rules.ts";
@@ -245,7 +246,9 @@ export interface Dashboard {
 }
 export interface PlayerPage {
   players: Player[];
+  /** Capped at 10,000 when `totalCapped` (more players match: show "10,000+"). */
   total: number;
+  totalCapped?: boolean;
   page: number;
   pageSize: number;
   pages: number;
@@ -419,6 +422,151 @@ export interface PlayerCareer {
   page: number;
   pageSize: number;
   pages: number;
+}
+export interface PlayerHistoryClub {
+  id: number;
+  name: string;
+  color: string | null;
+}
+/**
+ * transfer: permanent move between clubs; free: joined without a fee (from no club or a free deal);
+ * loan / loanReturn / loanRecall / loanPurchase: loan spells and how they ended; registration: automatic move
+ * inside a club family (B-team, age group); squad: the user's own squad assignment (e.g. a youth promotion).
+ */
+export type PlayerMoveKind =
+  | "transfer"
+  | "free"
+  | "loan"
+  | "loanReturn"
+  | "loanRecall"
+  | "loanPurchase"
+  | "registration"
+  | "squad";
+export interface PlayerMove {
+  kind: PlayerMoveKind;
+  /** null: the move happened but its date was not recorded (loan recalls and purchases before recording began). */
+  date: string | null;
+  /** true: `date` is the loan's scheduled end, the player returned on the first processed day on or after it. */
+  dateEstimated: boolean;
+  season: number | null;
+  /** null: no club (a free agent or club-less player). */
+  from: PlayerHistoryClub | null;
+  to: PlayerHistoryClub | null;
+  /** GBP; 0 = no fee; null = not recorded. */
+  fee: number | null;
+  /** The recorded deal type, e.g. "Standard loan", "Free transfer", "Squad registration"; null if none. */
+  dealType: string | null;
+  /** Loans only: the scheduled end of the spell. */
+  loanUntil: string | null;
+  /** Squad moves only. */
+  ageGroup: { from: string | null; to: string | null } | null;
+  /** Squad moves only, present only when true: a temporary call-up / the return from one. */
+  callUp?: boolean;
+  callUpReturn?: boolean;
+  /** Call-ups only: the recorded end (match date or chosen date). */
+  until?: string | null;
+}
+/**
+ * appearances and minutes cover every recorded match. goals, assists and averageRating come only from
+ * full-engine matches (the user's club family): null means not recorded, which is different from 0.
+ */
+export interface PlayerStatLine {
+  appearances: number;
+  minutes: number;
+  /** Full-engine matches in this line; goals, assists and averageRating cover exactly these. */
+  recordedAppearances: number;
+  goals: number | null;
+  assists: number | null;
+  averageRating: number | null;
+  coverage: "full" | "partial" | "none";
+}
+export interface PlayerCompetitionStats extends PlayerStatLine {
+  club: PlayerHistoryClub;
+  /** id null: friendlies. */
+  competition: { id: number | null; name: string; ageGroup: string | null };
+}
+export interface PlayerSeasonStats {
+  season: number;
+  competitions: PlayerCompetitionStats[];
+  total: PlayerStatLine;
+}
+/** GET /api/players/:id/history. Moves oldest first; seasons newest first. */
+export interface PlayerHistory {
+  playerId: number;
+  moves: PlayerMove[];
+  /** true: only the latest 500 moves are listed. */
+  movesTruncated: boolean;
+  seasons: PlayerSeasonStats[];
+  career: PlayerStatLine;
+}
+export interface ClubTransferClub extends PlayerHistoryClub {
+  country: { id: number; name: string; code: string } | null;
+}
+export interface ClubTransfer {
+  /** Stable row key. */
+  key: string;
+  kind: PlayerMoveKind;
+  direction: "in" | "out";
+  /** null: recalled or purchased loan whose end date was not recorded. */
+  date: string | null;
+  /** true: `date` is the loan's scheduled end (return processed on or after it). */
+  dateEstimated: boolean;
+  season: number;
+  /** ageAtMove, position null: unknown or the player has since been removed (retired and pruned). */
+  player: { id: number; name: string; position: string | null; ageAtMove: number | null };
+  /** The other club; null: no club (a free agent). */
+  club: ClubTransferClub | null;
+  /** GBP agreed fee (loan fee for loans, option fee for loan purchases); 0 = no fee; null = not recorded. */
+  fee: number | null;
+  dealType: string | null;
+  loanUntil: string | null;
+  /** Instalments, sell-on and buy-back agreed in the director's own negotiations; null for AI deals. */
+  terms: TransferTerms | null;
+  /** Squad moves only, present only when true; call-ups never count in the season totals. */
+  callUp?: boolean;
+  callUpReturn?: boolean;
+  until?: string | null;
+}
+/** Fees count in the season of the move, at the agreed amount (instalments are not spread). */
+export interface ClubTransferTotals {
+  spent: number;
+  received: number;
+  /** received - spent. */
+  net: number;
+  /** Moves with another club: transfers, free signings, loan starts and loan purchases. */
+  countIn: number;
+  countOut: number;
+  /** Registrations and squad moves inside the club family, both directions (call-ups excluded). */
+  countInternal?: number;
+  /** Loans ending (returns and recalls), both directions. */
+  countLoanEnds?: number;
+  /** Fee-bearing moves (transfer, loan, loan purchase) with no recorded fee. */
+  unknownFees: number;
+}
+export interface ClubTransferSeasonSummary {
+  season: number;
+  /** Every move of the season, regardless of the direction/type filter. */
+  totals: ClubTransferTotals;
+}
+export interface ClubTransferSeason extends ClubTransferSeasonSummary {
+  /** This page's moves of the season, newest first. */
+  transfers: ClubTransfer[];
+}
+/** GET /api/clubs/:id/transfers?season=&direction=in|out|all&type=kind[,kind]&page=&pageSize= */
+export interface ClubTransfers {
+  club: ClubTransferClub;
+  /** Seasons with a recorded move plus the current season, newest first. */
+  seasons: ClubTransferSeasonSummary[];
+  filter: { season: number | null; direction: "in" | "out" | "all"; types: PlayerMoveKind[] };
+  /** The page's moves grouped by season, newest first. */
+  groups: ClubTransferSeason[];
+  /** Filtered moves across all pages. */
+  total: number;
+  page: number;
+  pageSize: number;
+  pages: number;
+  /** true: only the club's latest 20,000 recorded moves were read. */
+  truncated: boolean;
 }
 export interface Assignment {
   id: number;

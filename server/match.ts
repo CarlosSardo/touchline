@@ -60,6 +60,9 @@ export function expectedPoints(homeXg: number, awayXg: number) {
   return [round(homePoints, 3), round(awayPoints, 3)];
 }
 
+/** Rules version for new match snapshots; stored snapshots replay with the version they were played under. */
+export const MATCH_RULES_VERSION = 4;
+
 export function simulateMatch(
   snapshot: MatchSnapshot,
   seed: string,

@@ -12,6 +12,7 @@ import {
   type ReservePolicySpec,
 } from "../shared/world-catalog/index.ts";
 import { MIN_GOALKEEPERS, SQUAD_MINIMUMS, WORLD_VERSION } from "../shared/world-rules.ts";
+import { NATIONAL_TEAM_AGES } from "../shared/features/youth-internationals.ts";
 import type { PlayerProfile } from "../shared/types.ts";
 
 export async function checkSqlConstraints(store: Store) {
@@ -217,14 +218,15 @@ export async function verifyWorld(
     if (size < 2 || size > 16) fail(`${league.name}: youth league of ${size} clubs (2-16)`);
   }
   const national = clubs.filter((club) => club.type === "national");
-  if (national.length !== countries.length * 4)
-    fail(`${national.length} national teams, expected ${countries.length * 4}`);
+  if (national.length !== countries.length * NATIONAL_TEAM_AGES.length)
+    fail(`${national.length} national teams, expected ${countries.length * NATIONAL_TEAM_AGES.length}`);
   const nationalGroups = new Map<number, string[]>();
   for (const team of national)
     nationalGroups.set(team.country_id, [...(nationalGroups.get(team.country_id) ?? []), team.age_group]);
+  const expectedGroups = [...NATIONAL_TEAM_AGES].sort().join(",");
   for (const country of countries) {
     const groups = (nationalGroups.get(country.id) ?? []).sort().join(",");
-    if (groups !== "Senior,U17,U19,U20") fail(`${country.code}: national teams ${groups || "none"}, expected Senior,U17,U19,U20`);
+    if (groups !== expectedGroups) fail(`${country.code}: national teams ${groups || "none"}, expected ${expectedGroups}`);
   }
 
   // 2. Squads.

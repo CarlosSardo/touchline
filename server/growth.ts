@@ -1,4 +1,5 @@
-// Pure physical-growth model for players (world version 4): adult targets, adolescent growth curve, adult weight drift.
+// Pure growth models: physical growth (world version 4: adult targets, adolescent curve, adult weight drift) and the
+// weekly football development of ability and potential (weeklyDevelopment).
 import type seedrandom from "seedrandom";
 import { nationByCode, type CatalogLookup } from "../shared/world-catalog/index.ts";
 import { clamp, daysBetween } from "../shared/rules.ts";
@@ -294,4 +295,118 @@ export function developBody(
     changed,
     spurt: age < 18 && heightVelocity(growth, age) >= SPURT_VELOCITY,
   };
+}
+
+// ---------- Football development (ability and potential), applied weekly to every player.
+
+/** Goalkeepers develop, peak and decline this many years later than outfield players. */
+export const GOALKEEPER_AGE_SHIFT = 2.5;
+/** Outfield decline starts here (goalkeepers GOALKEEPER_AGE_SHIFT later). */
+export const DECLINE_ONSET = 29.5;
+/** Minutes share of an average squad member (about 11 starters and five substitutes in a squad of 22-25). */
+export const AVERAGE_MINUTES_SHARE = 0.5;
+
+/** Outfield-equivalent development age. */
+export const developmentAge = (age: number, goalkeeper: boolean) =>
+  age - (goalkeeper ? GOALKEEPER_AGE_SHIFT : 0);
+
+/**
+ * Share of the remaining gap to potential realised per season at an average environment and playing time: steep
+ * from 16 to 21, slowing towards the peak years and zero from 29 (outfield-equivalent age).
+ */
+export function growthRate(age: number) {
+  if (age < 16) return 0.1;
+  if (age <= 21) return 0.13;
+  return 0.13 * clamp((29 - age) / 8, 0, 1) ** 1.3;
+}
+
+/** Ability lost per season by ageing at an average environment: gradual from 30, faster in the mid-thirties. */
+export function declineRate(age: number) {
+  return age <= DECLINE_ONSET ? 0 : 0.35 * (age - DECLINE_ONSET) ** 1.35;
+}
+
+/** Weekly potential volatility by age: a youth's ceiling moves most, a veteran's hardly at all. */
+export function potentialVolatility(age: number) {
+  return age < 18 ? 1 : age < 21 ? 0.8 : age < 24 ? 0.5 : age < 28 ? 0.25 : 0.1;
+}
+
+/** Share of the unrealised potential that fades each season once a player is past his development years. */
+export const potentialConvergence = (age: number) => clamp((age - 20) / 6, 0, 1) * 0.5;
+
+export interface DevelopmentInput {
+  /** Exact age in years. */
+  age: number;
+  goalkeeper: boolean;
+  ability: number;
+  potential: number;
+  /** Carried fractional ability progress (players.development_bank). */
+  bank: number;
+  /** Share of the team's minutes this season (0-1). */
+  minutesShare: number;
+  /** Training environment: staff, facilities, intensity, focus, habits, mentor (1 = average). */
+  environment: number;
+  professionalism: number;
+  injured: boolean;
+  /** Centred weekly potential influence (shared/rules.ts potentialInfluences().change). */
+  drift: number;
+  /** Player volatility (players.volatility). */
+  volatility: number;
+  /** Uniform draw in [-0.5, 0.5). */
+  noise: number;
+  /** Potential intensity setting (60 = default). */
+  intensity?: number;
+  /** Other ability progress this week (loan reviews, settings). */
+  extra?: number;
+}
+
+/**
+ * One week of development. Ability grows with the gap to potential, age, playing time, training environment and
+ * professionalism, and declines from the early thirties (slower with professionalism and good staff, faster when
+ * injured). Potential moves with centred influences and age-scaled noise, and fades towards ability from 21.
+ */
+export function weeklyDevelopment(input: DevelopmentInput) {
+  const age = developmentAge(input.age, input.goalkeeper);
+  const share = clamp(input.minutesShare, 0, 1);
+  const environment = clamp(input.environment, 0.6, 1.4);
+  const professionalism = clamp(input.professionalism, 0, 100) / 100;
+  const gap = Math.max(0, input.potential - input.ability);
+  // Each point is harder to gain at the elite end of the scale.
+  const elite = 1 - clamp(input.ability - 70, 0, 30) / 30;
+  const growth =
+    (gap *
+      growthRate(age) *
+      environment *
+      (0.55 + 0.9 * share) *
+      (0.8 + 0.4 * professionalism) *
+      (0.35 + 0.65 * elite) *
+      (input.injured ? 0.2 : 1)) /
+    52;
+  const decline =
+    (declineRate(age) *
+      (1.25 - 0.5 * professionalism) *
+      (1.3 - 0.3 * environment) *
+      (1.1 - 0.2 * share) *
+      (input.injured ? 2 : 1)) /
+    52;
+  let progress = clamp(input.bank + growth - decline + (input.extra ?? 0), -1, 1);
+  let ability = input.ability;
+  if (Math.abs(progress) >= 0.1) {
+    const delta = Math.trunc(progress * 10) / 10;
+    ability = clamp(Math.min(input.potential, input.ability + delta));
+    progress -= delta;
+  }
+  // A player at his ceiling does not bank growth he cannot use.
+  if (ability >= input.potential) progress = Math.min(progress, 0);
+  const intensity = (input.intensity ?? 60) / 60;
+  const potential = clamp(
+    Math.max(
+      ability,
+      input.potential +
+        input.drift +
+        input.noise * (input.volatility / 75) * 1.6 * potentialVolatility(age) * intensity -
+        ((input.potential - ability) * potentialConvergence(age)) / 52 -
+        decline,
+    ),
+  );
+  return { ability, potential, bank: progress };
 }

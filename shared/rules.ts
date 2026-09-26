@@ -53,6 +53,13 @@ export function groupCareerSaves(slots: SaveSlot[], search = "") {
 }
 
 export const START_DATE = "2026-07-01";
+/**
+ * Player-interest bands (percent). Below `refuse` (interest in the move, wages excluded) the player will not
+ * negotiate at all; from `agree` (overall interest, wages included) he accepts personal terms that meet his wage floor.
+ * Stance labels: Not interested (< refuse, move) / Needs convincing (< refuse, overall) / Open to talks (< 70) /
+ * Interested (< agree) / Very interested (>= agree).
+ */
+export const INTEREST_BANDS = { refuse: 50, interested: 70, agree: 85 } as const;
 export const DEFAULT_TRANSFER_TERMS: TransferTerms = {
   upfrontPercent: 100,
   installments: 0,
@@ -377,6 +384,42 @@ export const clamp = (value: number, min = 1, max = 99) =>
   Math.max(min, Math.min(max, value));
 export const round = (value: number, decimals = 1) =>
   Math.round(value * 10 ** decimals) / 10 ** decimals;
+/** An attribute as it stands today: the generated value moved by the ability gained or lost since generation. */
+export const currentAttribute = (value: number, ability: number, baseAbility: number) =>
+  clamp(value + ability - baseAbility);
+/** Every attribute group as it stands today (what the player page shows and the match engine plays with). */
+export function currentAttributes(
+  profile: Pick<PlayerProfile, "attributes" | "baseAbility">,
+  ability: number,
+): PlayerProfile["attributes"] {
+  const base = profile.baseAbility ?? ability;
+  return Object.fromEntries(
+    Object.entries(profile.attributes).map(([group, values]) => [
+      group,
+      Object.fromEntries(
+        Object.entries(values).map(([key, value]) => [key, round(currentAttribute(value, ability, base))]),
+      ),
+    ]),
+  ) as PlayerProfile["attributes"];
+}
+/**
+ * Discipline scope of a competition: every league and cup keeps its own cautions and bans (a B-team plays in another
+ * competition than its parent), play-offs count as their league, continental bans cover the confederation.
+ */
+export function disciplineScope(
+  league: { id: number; kind: string; confederation: string; data?: string } | undefined,
+) {
+  if (!league) return "friendly";
+  if (league.kind === "continental") return `${league.confederation}:senior`;
+  if (league.kind === "international") return `national:${league.id}`;
+  if (league.kind === "cup" && league.data?.includes('"playoff":true')) {
+    const parent = (JSON.parse(league.data) as { leagueId?: number }).leagueId;
+    if (parent) return `league:${parent}`;
+  }
+  return `${league.kind === "cup" ? "cup" : "league"}:${league.id}`;
+}
+/** Discipline scopes written before competitions were scoped individually (`country:age group:kind`). */
+export const LEGACY_DISCIPLINE_SCOPE = "%:%:%";
 export const label = (value: string) =>
   value
     .replace(/([A-Z])/g, " $1")
@@ -474,13 +517,25 @@ export const internationalBreak = (date: string) => {
     ["06-07", "06-15"],
   ].some(([start, end]) => monthDay >= start && monthDay <= end);
 };
+/**
+ * Last day of the winter registration period in `year`: 1 February (Premier League 2026/27: 1 Jan - 1 Feb 2027), moved
+ * to the following Monday when 31 January falls on a weekend.
+ */
+export function winterWindowClose(year: number) {
+  const weekday = new Date(Date.UTC(year, 0, 31)).getUTCDay();
+  const day = weekday === 6 ? 2 : 1;
+  return `${year}-02-0${day}`;
+}
 export const transferWindow = (date: string) => {
   const monthDay = date.slice(5);
   return (
     (monthDay >= "06-15" && monthDay <= "09-01") ||
-    (monthDay >= "01-01" && monthDay <= "01-31")
+    (monthDay <= "02-02" && date <= winterWindowClose(Number(date.slice(0, 4))))
   );
 };
+/** Whether `date` is the last day of a registration period. */
+export const deadlineDay = (date: string) =>
+  date.slice(5) === "09-01" || date === winterWindowClose(Number(date.slice(0, 4)));
 export function adultTransferArrival(birthDate: string) {
   const birthday = new Date(`${birthDate}T12:00:00Z`);
   birthday.setUTCFullYear(birthday.getUTCFullYear() + 18);
@@ -650,6 +705,21 @@ export const SETTING_DEFINITIONS: SettingDefinition[] = [
     type: "select",
     default: "medium",
     options: ["low", "medium", "high"],
+  },
+  {
+    id: "autoCallUps",
+    label: "Coach call-ups",
+    group: "Simulation",
+    type: "toggle",
+    default: true,
+  },
+  {
+    id: "youthRelease",
+    label: "Release for youth tournaments outside FIFA windows",
+    group: "Simulation",
+    type: "select",
+    default: "club policy",
+    options: ["club policy", "always", "mandatory only"],
   },
   {
     id: "matchDetail",
@@ -927,6 +997,8 @@ export function valuation(
     inflation: number;
     crisis: number;
     hype: number;
+    /** Youth international visibility multiplier (exposureValueFactor), 1–1.1. */
+    exposure?: number;
   },
 ) {
   const ability = clamp(player.ability);
@@ -980,7 +1052,7 @@ export function valuation(
     ? Math.max(0, daysBetween(context.date, player.injury_until))
     : 0;
   const injury = 1 - clamp(injuryDays / 365.25, 0, 1) * 0.3;
-  const market = inflation * form * hype * injury;
+  const market = inflation * form * hype * injury * clamp(context.exposure ?? 1, 1, 1.1);
   const finances =
     context.balance < 0 ? 0.9 : context.balance > 100_000_000 ? 1.05 : 1;
   const philosophy =
@@ -1024,6 +1096,33 @@ export function valuation(
   };
 }
 
+export const ADULT_LIFESTYLES = [
+  "disciplined",
+  "nightlife",
+  "family-focused",
+  "luxury-obsessed",
+  "gym-rat",
+] as const;
+/** Lifestyle effect on potential; zero on average over ADULT_LIFESTYLES (minors' lifestyles count as neutral). */
+const LIFESTYLE_EFFECT: Record<string, number> = {
+  disciplined: 0.3,
+  nightlife: -0.45,
+  "family-focused": 0.15,
+  "luxury-obsessed": -0.2,
+  "gym-rat": 0.2,
+};
+
+/** Weight of the influences on potential by age: a youth's ceiling is still being formed, a veteran's is set. */
+export function potentialDriftScale(age: number, position?: string) {
+  const years = age - (position === "GK" ? 2.5 : 0);
+  return years < 21 ? 1 : years < 24 ? 0.6 : years < 28 ? 0.3 : 0.1;
+}
+
+/**
+ * Weekly influences on potential. Every factor is centred on the generated population (an average player at an
+ * average club scores 0), so potential only drifts up or down with a better or worse environment than typical.
+ * `performance` (centred match ratings this week) and `minutesShare` (share of team minutes) come from the simulation.
+ */
 export function potentialInfluences(
   player: Player,
   profile: PlayerProfile,
@@ -1039,6 +1138,8 @@ export function potentialInfluences(
     tournament: number;
     intensity: number;
     lifestyleImpact: number;
+    performance?: number;
+    minutesShare?: number;
   },
 ) {
   const factors = {
@@ -1046,46 +1147,46 @@ export function potentialInfluences(
       (profile.personality.professionalism +
         profile.personality.ambition +
         profile.personality.discipline -
-        150) /
+        172) /
       150,
     lifestyle:
-      (({
-        disciplined: 0.4,
-        nightlife: -0.55,
-        "family-focused": 0.2,
-        "luxury-obsessed": -0.2,
-        "gym-rat": 0.35,
-      }[profile.lifestyle] ?? 0) *
-        context.lifestyleImpact) /
-      60,
+      player.age < 18
+        ? 0
+        : ((LIFESTYLE_EFFECT[profile.lifestyle] ?? 0) * context.lifestyleImpact) / 60,
     staff: (context.staff - 50) / 125,
-    tournaments: context.tournament / 100,
-    injuries: player.injury_until ? -0.55 : 0.05,
-    media: (profile.personality.pressureHandling - context.media) / 250,
-    fans: (context.fans - 50) / 200,
-    tacticalFit: (context.fit - 50) / 150,
+    tournaments: context.tournament / 200,
+    performance: clamp(context.performance ?? 0, -1.5, 1.5) * 0.8,
+    minutes:
+      context.minutesShare === undefined
+        ? 0
+        : (clamp(context.minutesShare, 0, 1) - 0.5) * 0.8,
+    injuries: player.injury_until ? -0.45 : 0.02,
+    media: (profile.personality.pressureHandling - 57 - (context.media - 50)) / 250,
+    fans: (context.fans - 72) / 200,
+    tacticalFit: (context.fit - 77) / 150,
     clubCulture:
       context.culture === "Development"
-        ? 0.3
+        ? 0.15
         : context.culture === "Demanding" &&
             profile.personality.pressureHandling < 45
-          ? -0.3
-          : 0.05,
-    academy: player.age < 21 ? (context.academy - 40) / 150 : 0,
-    chemistry: (context.chemistry - 50) / 200,
+          ? -0.25
+          : -0.02,
+    academy: player.age < 21 ? (context.academy - 53) / 150 : 0,
+    chemistry: (context.chemistry - 69) / 200,
     director: (context.director - 40) / 250,
     mentalHealth:
       (profile.mentalHealth.motivation -
         profile.mentalHealth.burnout -
-        profile.mentalHealth.anxiety / 2) /
+        profile.mentalHealth.anxiety / 2 -
+        51) /
       200,
-    confidence: (player.morale - 50) / 200,
-    age: player.age < 23 ? 0.1 : player.age > 29 ? -0.45 : -0.1,
+    confidence: (player.morale - 70) / 300,
   };
   const change =
     (Object.values(factors).reduce((sum, value) => sum + value, 0) *
       0.065 *
-      context.intensity) /
+      context.intensity *
+      potentialDriftScale(player.age, player.position)) /
     60;
   return {
     factors,

@@ -32,7 +32,7 @@ const europe = (spec: EuropeSpec): ContinentalCompetitionSpec => ({
 const COMPETITIONS: ContinentalCompetitionSpec[] = [
   europe({
     id: UCL, name: "UEFA Champions League", shortName: "Champions League", level: 1, teams: 36, matchdays: 8,
-    advance: 24, byes: 8, start: "09-16",
+    advance: 24, byes: 8, start: "09-08",
     titleholders: [{ from: UCL, stage: "main", vacancyPath: "champions" }, { from: UEL, stage: "main" }],
     drops: [
       { from: "q1", path: "champions", to: UECL, stage: "q2" },

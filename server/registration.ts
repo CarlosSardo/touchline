@@ -12,6 +12,10 @@ import type {
 } from "../shared/types.ts";
 import type { YouthTransferAssessment } from "../shared/api.ts";
 
+// Players' season minutes count the regulation clock only (v4), so available minutes must too.
+const REGULATION_MINUTES =
+  "CASE WHEN coalesce(TRY_CONVERT(float, JSON_VALUE(fixtures.data,'$.duration')),90) >= 120 THEN 120 ELSE 90 END";
+
 // ------------------------------------------------ nationality facts (all held nationalities count)
 
 // Fallbacks keep the rules usable for nations a partial catalog does not describe yet.
@@ -397,6 +401,7 @@ export function endorsementPoints(
     "Quarter-final": [8, 5, 0],
     "Round of 16": [7, 4, 0],
     "Round of 32": [6, 3, 0],
+    "Knockout round play-offs": [6, 3, 0],
     "Knockout play-off": [6, 3, 0],
     "League phase": [5, 2, 0],
     "Group stage": [5, 2, 0],
@@ -524,7 +529,7 @@ export async function assessRegistration(
   );
   const availableDomestic = currentClub
     ? (await store.get<{ minutes: number }>(
-        "SELECT coalesce(sum(coalesce(TRY_CONVERT(float, JSON_VALUE(fixtures.data,'$.duration')),90)),0) AS minutes FROM fixtures JOIN leagues ON leagues.id = fixtures.league_id WHERE leagues.kind = 'league' AND leagues.age_group = 'Senior' AND fixtures.status = 'played' AND (home_id = ? OR away_id = ?) AND fixtures.season >= ?",
+        `SELECT coalesce(sum(${REGULATION_MINUTES}),0) AS minutes FROM fixtures JOIN leagues ON leagues.id = fixtures.league_id WHERE leagues.kind = 'league' AND leagues.age_group = 'Senior' AND fixtures.status = 'played' AND (home_id = ? OR away_id = ?) AND fixtures.season >= ?`,
         currentClub.id,
         currentClub.id,
         state.season - 1,
@@ -583,7 +588,7 @@ export async function assessRegistration(
         stage: string;
         minutes: number;
       }>(
-        "SELECT series.league_id,series.club_id,fixtures.stage,sum(coalesce(TRY_CONVERT(float, JSON_VALUE(fixtures.data,'$.duration')),90)) AS minutes FROM (SELECT DISTINCT player_season_stats.league_id,player_season_stats.club_id FROM player_season_stats JOIN leagues ON leagues.id = player_season_stats.league_id WHERE player_id = ? AND season BETWEEN ? AND ? AND leagues.kind = 'continental') AS series JOIN fixtures ON fixtures.league_id = series.league_id AND (fixtures.home_id = series.club_id OR fixtures.away_id = series.club_id) WHERE fixtures.status = 'played' GROUP BY series.league_id,series.club_id,fixtures.stage",
+        `SELECT series.league_id,series.club_id,fixtures.stage,sum(${REGULATION_MINUTES}) AS minutes FROM (SELECT DISTINCT player_season_stats.league_id,player_season_stats.club_id FROM player_season_stats JOIN leagues ON leagues.id = player_season_stats.league_id WHERE player_id = ? AND season BETWEEN ? AND ? AND leagues.kind = 'continental') AS series JOIN fixtures ON fixtures.league_id = series.league_id AND (fixtures.home_id = series.club_id OR fixtures.away_id = series.club_id) WHERE fixtures.status = 'played' GROUP BY series.league_id,series.club_id,fixtures.stage`,
         player.id,
         state.season - (player.age < 21 ? 1 : 2),
         state.season,
@@ -612,6 +617,7 @@ export async function assessRegistration(
         "Quarter-final",
         "Round of 16",
         "Round of 32",
+        "Knockout round play-offs",
         "League phase",
         "Group stage",
       ].find((value) => stages.includes(value)) ?? "Other";

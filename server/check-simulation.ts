@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
-import { simulateMatch } from "./match.ts";
+import { MATCH_RULES_VERSION, simulateMatch } from "./match.ts";
 import { Store } from "./db.ts";
 import { generateWorld } from "./world.ts";
 import { checkSqlConstraints } from "./check-world.ts";
@@ -113,7 +113,7 @@ export function calibrationSample(matches = 600) {
     const awayAbility = 65 + ((index * 7 + 3) % 21);
     const result = simulateMatch(
       {
-        rulesVersion: 3,
+        rulesVersion: MATCH_RULES_VERSION,
         home: referenceTeam(1, homeAbility),
         away: referenceTeam(2, awayAbility),
         weather: "Clear",
@@ -142,7 +142,8 @@ export function calibrationSample(matches = 600) {
   }
   const reference = {
     matches: 760,
-    goalsPerMatch: 2361 / 760,
+    // Engine reference level (goalFactor 1); the pinned Premier League seasons (3.11) run at 1.04 plus two freak seasons.
+    goalsPerMatch: 2.75,
     homeWinRate: 330 / 760,
     drawRate: 175 / 760,
   };
@@ -161,15 +162,15 @@ export function calibrationSample(matches = 600) {
     reference,
   };
   assert(
-    Math.abs(report.goalsPerMatch - reference.goalsPerMatch) < 0.45,
+    Math.abs(report.goalsPerMatch - reference.goalsPerMatch) < 0.3,
     "Goals per match outside the recorded reference envelope",
   );
   assert(
-    Math.abs(report.homeWinRate - reference.homeWinRate) < 0.07,
+    Math.abs(report.homeWinRate - reference.homeWinRate) < 0.05,
     "Home advantage outside the recorded reference envelope",
   );
   assert(
-    Math.abs(report.drawRate - reference.drawRate) < 0.07,
+    Math.abs(report.drawRate - reference.drawRate) < 0.05,
     "Draw rate outside the recorded reference envelope",
   );
   assert(report.homeWinRate > report.awayWinRate, "Home advantage is missing");
@@ -182,7 +183,7 @@ export function calibrationSample(matches = 600) {
     "Dismissal frequency outside sanity limits",
   );
   assert(
-    Math.abs(report.goalsPerMatch - report.expectedGoalsPerMatch) < 0.35,
+    Math.abs(report.goalsPerMatch - report.expectedGoalsPerMatch) < 0.2,
     "Goals and expected goals are not calibrated",
   );
   return report;

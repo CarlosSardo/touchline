@@ -258,15 +258,16 @@ const FR_FOOTBALL: DomesticFootballSpec = {
       relegated: 2,
       playoffs: [{ type: "cross-tier", upperPositions: [16], lowerPositions: [3, 4, 5], legs: 1, finalLegs: 2 }],
     },
+    // Ligue 3 3rd–6th play off (single legs); the winner meets Ligue 2's 16th over two legs.
     {
       upper: 2,
       promoted: 2,
       relegated: 2,
-      playoffs: [{ type: "cross-tier", upperPositions: [16], lowerPositions: [3], legs: 2 }],
+      playoffs: [{ type: "cross-tier", upperPositions: [16], lowerPositions: [3, 4, 5, 6], legs: 1, finalLegs: 2 }],
     },
   ],
   cups: [
-    { kind: "national", name: "Coupe de France", seededEntry: true, legs: 1, neutralFinal: true, continental: true },
+    { kind: "national", name: "Coupe de France", seededEntry: true, legs: 1, neutralFinal: true, continental: true, lowerTierHome: 2 },
     { kind: "super", name: "Trophée des Champions", participants: ["champion", "cup-winner"], neutralFinal: true, start: "01-04" },
   ],
   youth: {
