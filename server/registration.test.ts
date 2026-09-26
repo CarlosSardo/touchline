@@ -30,8 +30,10 @@ import {
   transferWindow,
 } from "../shared/rules.ts";
 import { advance, seasonRollover } from "./simulation.ts";
+import { CONTINENTAL } from "../shared/world-catalog/continental.ts";
 import {
   clubRegistration,
+  continentalBand,
   countsTowardQuota,
   endorsementPoints,
   familyResidence,
@@ -641,6 +643,25 @@ describe("FA 2026/27 endorsement criteria", () => {
     expect(leagueBand("DE", 2)).toBe(4);
     expect(leagueBand("EN", 3)).toBe(5);
     expect(leagueBand("IS", 1)).toBe(6);
+  });
+  it("bands continental competitions by their catalog names, qualifying included", () => {
+    const expected: Record<string, number> = {
+      "UEFA Champions League": 1,
+      "CONMEBOL Libertadores": 1,
+      "UEFA Europa League": 2,
+      "UEFA Conference League": 2,
+      "CONMEBOL Sudamericana": 2,
+    };
+    const names = CONTINENTAL.competitions.map((competition) => competition.name);
+    expect(names).toEqual(expect.arrayContaining(Object.keys(expected)));
+    expect(names).toContain("CONMEBOL Libertadores Sub-20");
+    for (const name of names) {
+      const band = expected[name] ?? 3;
+      expect({ name, bands: [continentalBand(name), continentalBand(`${name} Qualifying`)] }).toEqual({
+        name,
+        bands: [band, band],
+      });
+    }
   });
   it("does not grant a permit without sporting evidence", () => {
     const report = endorsementPoints(evidence);

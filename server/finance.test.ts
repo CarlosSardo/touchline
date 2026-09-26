@@ -358,8 +358,10 @@ describe("heuristic player valuation", () => {
 });
 
 describe("wage levels", () => {
-  it("scales payroll to 88% of the wage budget within 0.02-4", () => {
+  it("scales payroll to 88% of the wage budget less amateur allowances, within 0.02-4", () => {
     expect(payrollScale(100_000, 100_000)).toBeCloseTo(0.88);
+    expect(payrollScale(100_000, 100_000, 8_000)).toBeCloseTo(0.8);
+    expect(payrollScale(1_000, 100, 900)).toBe(0.02);
     expect(payrollScale(10, 1_000_000)).toBe(0.02);
     expect(payrollScale(100_000_000, 1)).toBe(4);
     expect(payrollScale(-5, 100)).toBe(0.02);

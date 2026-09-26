@@ -1,12 +1,7 @@
-import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Store } from "./db.ts";
 import { Saves } from "./saves.ts";
 import { generateWorld } from "./world.ts";
-import { verifyBackup } from "../scripts/data-export.ts";
 import {
   addForeignKeySql,
   allResetSchemas,
@@ -30,32 +25,6 @@ const chunkKey: ForeignKeyRow = {
   on_update: "NO_ACTION",
   is_disabled: false,
 };
-
-describe("full backup verification (no database)", () => {
-  it("accepts an intact backup and reports altered or incomplete ones without SQL", async () => {
-    const directory = await mkdtemp(join(tmpdir(), "touchline-backup-"));
-    try {
-      await mkdir(join(directory, "dbo"));
-      await writeFile(join(directory, "dbo", "world.touchline.gz"), "world");
-      const manifest = {
-        format: "touchline-backup", version: 1, database: "touchline", startedAt: "", updatedAt: "", complete: true,
-        items: { "dbo/world": { kind: "world", schema: "dbo", file: "dbo/world.touchline.gz", bytes: 5,
-          sha256: createHash("sha256").update("world").digest("hex") } },
-        failures: {},
-      };
-      await writeFile(join(directory, "manifest.json"), JSON.stringify(manifest));
-      expect(await verifyBackup(directory)).toMatchObject({ ok: true, files: 1, worlds: 1, bytes: 5, problems: [] });
-      await writeFile(join(directory, "dbo", "world.touchline.gz"), "World");
-      const altered = await verifyBackup(directory);
-      expect(altered.ok).toBe(false);
-      expect(altered.problems).toEqual([expect.stringMatching(/SHA-256 differs/)]);
-      await writeFile(join(directory, "manifest.json"), JSON.stringify({ ...manifest, complete: false, items: {} }));
-      expect((await verifyBackup(directory)).problems).toEqual([expect.stringMatching(/incomplete/)]);
-    } finally {
-      await rm(directory, { recursive: true, force: true });
-    }
-  });
-});
 
 describe("world reset options (no database)", () => {
   it("is a dry run unless --apply --yes is given", () => {

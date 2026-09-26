@@ -6,14 +6,18 @@ import type { Club, GameState, League, Player } from "../shared/types.ts";
 export const baseWage = (ability: number) =>
   Math.round(((clamp(ability) / 100) ** 7 * 190_000) / 10) * 10 + 50;
 
+/** people.ts professionalBaseWage in SQL (youth professionals at 8%). */
 const BASE_WAGE_SQL =
-  "ROUND(POWER(CONVERT(float, players.ability) / 100.0, 7) * 19000, 0) * 10 + 50";
-const PROFESSIONAL_SENIORS =
-  "players.club_id IS NOT NULL AND players.role != 'Retired' AND players.age_group = 'Senior' AND coalesce(JSON_VALUE(players.profile,'$.contract.status'),'professional') = 'professional'";
+  "ROUND(POWER(CONVERT(float, players.ability) / 100.0, 7) * CASE WHEN players.age_group = 'Senior' THEN 19000 ELSE 1520 END, 0) * 10 + 50";
+const PROFESSIONAL =
+  "coalesce(JSON_VALUE(players.profile,'$.contract.status'),'professional') = 'professional'";
+const REGISTERED = "players.club_id IS NOT NULL AND players.role != 'Retired'";
+/** The generator's payroll inputs: professional base wages, and amateur allowances (the amateurs' wages). */
+const PAYROLL_SQL = `coalesce(sum(CASE WHEN ${PROFESSIONAL} THEN ${BASE_WAGE_SQL} ELSE 0 END),0) AS base,coalesce(sum(CASE WHEN ${PROFESSIONAL} THEN 0 ELSE players.wage END),0) AS allowances`;
 
-/** Section 5 payroll calibration: professional wages ≈ 88% of the weekly wage budget, factor 0.02–4 as generated. */
-export const payrollScale = (wageBudget: number, baseTotal: number) =>
-  clamp((0.88 * Math.max(0, wageBudget)) / Math.max(1, baseTotal), 0.02, 4);
+/** Section 5 payroll calibration: professional wages ≈ 88% of the weekly wage budget less amateur allowances, factor 0.02–4 as generated. */
+export const payrollScale = (wageBudget: number, baseTotal: number, allowances = 0) =>
+  clamp((0.88 * Math.max(0, wageBudget) - allowances) / Math.max(1, baseTotal), 0.02, 4);
 
 /** Weekly professional wage floor as generated: 50, or 10–50 where 88% of the budget cannot pay 50 each. */
 export const professionalWageFloor = (wageBudget: number, allowances: number, professionals: number) =>
@@ -22,21 +26,23 @@ export const professionalWageFloor = (wageBudget: number, allowances: number, pr
     : 50;
 
 export async function wageScale(store: Store, clubId: number) {
-  const row = (await store.get<{ budget: number; base: number }>(
-    `SELECT clubs.wage_budget AS budget,(SELECT coalesce(sum(${BASE_WAGE_SQL}),0) FROM players WHERE ((players.club_id = clubs.id AND players.parent_club_id IS NULL) OR players.parent_club_id = clubs.id) AND ${PROFESSIONAL_SENIORS}) AS base FROM clubs WHERE clubs.id = ?`,
+  const row = (await store.get<{ budget: number; base: number; allowances: number }>(
+    `SELECT clubs.wage_budget AS budget,payroll.base,payroll.allowances FROM clubs,(SELECT ${PAYROLL_SQL} FROM players WHERE ((players.club_id = ? AND players.parent_club_id IS NULL) OR players.parent_club_id = ?) AND ${REGISTERED}) AS payroll WHERE clubs.id = ?`,
+    clubId,
+    clubId,
     clubId,
   ))!;
-  return payrollScale(row.budget, row.base);
+  return payrollScale(row.budget, row.base, row.allowances);
 }
 
 /** payrollScale for every non-national club in one pass. */
 export async function wageScales(store: Store) {
-  const base = new Map(
+  const payroll = new Map(
     (
-      await store.all<{ club_id: number; base: number }>(
-        `SELECT coalesce(players.parent_club_id,players.club_id) AS club_id,sum(${BASE_WAGE_SQL}) AS base FROM players WHERE ${PROFESSIONAL_SENIORS} GROUP BY coalesce(players.parent_club_id,players.club_id)`,
+      await store.all<{ club_id: number; base: number; allowances: number }>(
+        `SELECT coalesce(players.parent_club_id,players.club_id) AS club_id,${PAYROLL_SQL} FROM players WHERE ${REGISTERED} GROUP BY coalesce(players.parent_club_id,players.club_id)`,
       )
-    ).map((row) => [row.club_id, row.base]),
+    ).map((row) => [row.club_id, row]),
   );
   return new Map(
     (
@@ -45,7 +51,7 @@ export async function wageScales(store: Store) {
       )
     ).map((club) => [
       club.id,
-      payrollScale(club.wage_budget, base.get(club.id) ?? 0),
+      payrollScale(club.wage_budget, payroll.get(club.id)?.base ?? 0, payroll.get(club.id)?.allowances ?? 0),
     ]),
   );
 }

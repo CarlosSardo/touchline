@@ -1003,6 +1003,17 @@ export interface QualifyingRound {
 }
 
 /**
+ * Ties in a round of the repeating last stage. Byes fall only in its first round, so every later round halves
+ * exactly (CAF: round 1 byes bring round 2 to 32; 60 → 32 → 16).
+ */
+export function lastStageTies(playing: number, slots: number) {
+  if (slots <= 0 || playing <= slots) return 0;
+  let after = slots;
+  while (after * 2 < playing) after *= 2;
+  return playing - after;
+}
+
+/**
  * Knockout qualifying by entry stage: each stage's entrants join the previous winners and the lowest seeds play.
  * The last entry stage repeats until exactly `slots` clubs remain (fewer only when there are not enough entrants).
  */
@@ -1026,7 +1037,7 @@ export function qualifyingPlan(entrants: Partial<Record<QualifyingStage, number>
       continue;
     }
     while (playing > slots) {
-      const ties = Math.min(Math.floor(playing / 2), playing - slots);
+      const ties = lastStageTies(playing, slots);
       rounds.push({ stage, playing, ties });
       playing -= ties;
     }
@@ -1035,8 +1046,9 @@ export function qualifyingPlan(entrants: Partial<Record<QualifyingStage, number>
 }
 
 /**
- * Pairs one qualifying round: the best seeds get byes, the others meet top-v-bottom within their path
- * (Champions/League); only odd leftovers cross paths. `seeds` is ordered best first.
+ * Pairs one qualifying round: the best seeds get byes (an odd path's best seed first, so odd rounds after vacancies
+ * keep their paths apart), the others meet top-v-bottom within their path (Champions/League); only odd leftovers
+ * cross paths. `seeds` is ordered best first.
  */
 export function pairQualifyingRound(
   seeds: readonly number[],
@@ -1044,8 +1056,26 @@ export function pairQualifyingRound(
   path: (clubId: number) => string = () => "",
 ): { byes: number[]; pairs: [number, number][] } {
   const count = Math.max(0, Math.min(ties, Math.floor(seeds.length / 2)));
-  const byes = seeds.slice(0, seeds.length - count * 2);
-  const playing = seeds.slice(byes.length);
+  let free = seeds.length - count * 2;
+  const groups = new Map<string, number[]>();
+  for (const clubId of seeds) groups.set(path(clubId), [...(groups.get(path(clubId)) ?? []), clubId]);
+  const bye = new Set<number>();
+  for (const group of groups.values())
+    if (group.length % 2 && free > 0) {
+      bye.add(group[0]);
+      free--;
+    }
+  const order = new Map(seeds.map((clubId, index) => [clubId, index]));
+  while (free >= 2) {
+    const [best] = [...groups.values()]
+      .map((group) => group.filter((clubId) => !bye.has(clubId)))
+      .filter((group) => group.length >= 2)
+      .sort((left, right) => order.get(left[0])! - order.get(right[0])!);
+    bye.add(best[0]).add(best[1]);
+    free -= 2;
+  }
+  const byes = seeds.filter((clubId) => bye.has(clubId));
+  const playing = seeds.filter((clubId) => !bye.has(clubId));
   const paths = new Map<string, number[]>();
   for (const clubId of playing) paths.set(path(clubId), [...(paths.get(path(clubId)) ?? []), clubId]);
   const pairs: [number, number][] = [];

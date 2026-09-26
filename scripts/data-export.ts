@@ -2,8 +2,11 @@ import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
+import { Writable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
+import { createGunzip } from "node:zlib";
 import type { Store } from "../server/db.ts";
 import {
   validateCheckpoint,
@@ -374,15 +377,34 @@ export async function exportEverything(root: Store, options: EverythingOptions) 
   };
 }
 
-/** Offline check of a --everything backup (no SQL): complete manifest, every file's size and SHA-256. */
+/** What a matching SHA-256 cannot show: each world's per-table row counts, every gzip end to end, the registry size. */
+async function contentProblem(path: string, item: BackupItem) {
+  if (item.kind === "registry") {
+    const { accounts } = JSON.parse(await readFile(path, "utf8")) as { accounts?: unknown };
+    return Array.isArray(accounts) && accounts.length === item.rows?.users ? undefined : "account count differs from the manifest";
+  }
+  if (item.kind === "snapshot") {
+    await pipeline(createReadStream(path), createGunzip(), new Writable({ write: (_chunk, _encoding, done) => done() }));
+    return undefined;
+  }
+  const counted = new Map((await validateCheckpoint(createReadStream(path))).tables.map((table) => [table.name, table.rowCount]));
+  const expected = new Map(Object.entries(item.rows ?? {}));
+  const differs = [...new Set([...counted.keys(), ...expected.keys()])].filter((name) => counted.get(name) !== expected.get(name));
+  return differs.length ? `row counts differ from the manifest (${differs.join(", ")})` : undefined;
+}
+
+/** Offline check of a --everything backup (no SQL, no SQL_* settings): complete manifest, every file's size, SHA-256 and content. */
 export async function verifyBackup(outDir: string) {
   const directory = resolve(outDir);
-  const manifest = JSON.parse(await readFile(join(directory, "manifest.json"), "utf8")) as BackupManifest;
-  if (manifest.format !== "touchline-backup") throw new Error("manifest.json is not a Touchline backup.");
+  const manifest = JSON.parse(await readFile(join(directory, "manifest.json"), "utf8")) as BackupManifest | null;
+  if (manifest?.format !== "touchline-backup" || !manifest.items || typeof manifest.items !== "object")
+    throw new Error("manifest.json is not a Touchline backup.");
   const problems: string[] = [];
-  if (!manifest.complete || Object.keys(manifest.failures).length)
-    problems.push(`backup incomplete: ${Object.keys(manifest.failures).map(masked).join(", ") || "not finished"}`);
+  const failures = Object.keys(manifest.failures ?? {});
+  if (!manifest.complete || failures.length)
+    problems.push(`backup incomplete: ${failures.map(masked).join(", ") || "not finished"}`);
   const items = Object.entries(manifest.items);
+  if (!items.some(([, item]) => item.kind === "world")) problems.push("no world file in the backup");
   for (const [key, item] of items) {
     const path = resolve(directory, item.file);
     if (!path.startsWith(`${directory}${sep}`)) {
@@ -392,6 +414,11 @@ export async function verifyBackup(outDir: string) {
     const actual = await hashFile(path).catch(() => undefined);
     if (!actual) problems.push(`${masked(key)}: missing`);
     else if (actual.bytes !== item.bytes || actual.sha256 !== item.sha256) problems.push(`${masked(key)}: size or SHA-256 differs`);
+    else {
+      const problem = await contentProblem(path, item).catch((error: unknown) =>
+        `content check failed (${error instanceof Error ? error.message : String(error)})`);
+      if (problem) problems.push(`${masked(key)}: ${masked(problem)}`);
+    }
   }
   const schemas = new Set(items.filter(([, item]) => item.kind === "snapshot").map(([, item]) => item.schema));
   for (const schema of schemas)
@@ -409,7 +436,8 @@ export async function verifyBackup(outDir: string) {
   };
 }
 
-export async function main(args = process.argv.slice(2)) {
+/** The CLI flags, checked without SQL; undefined means --help. */
+export function exportOptions(args: string[]) {
   const { values } = parseArgs({
     args,
     options: {
@@ -425,16 +453,27 @@ export async function main(args = process.argv.slice(2)) {
       verify: { type: "string" },
     },
   });
-  if (values.help) {
+  if (values.help) return undefined;
+  if (values.everything && values.out)
+    throw new Error("--everything writes a directory: use --out-dir <directory> (--out is the single-file export).");
+  if (Boolean(values.everything) !== Boolean(values["out-dir"]))
+    throw new Error("--everything requires --out-dir <directory>, and --out-dir is only for --everything.");
+  if (!values.everything && (values["account-schema"] || values["skip-snapshots"]))
+    throw new Error("--account-schema and --skip-snapshots are only for --everything.");
+  if ([values.out, values["dry-run"], values["verify-staging"], values.everything, values.verify].filter(Boolean).length !== 1)
+    throw new Error("Choose exactly one of --out, --dry-run, --verify-staging, --everything, or --verify.");
+  if (values.verify && values.database) throw new Error("--verify reads local files only; it takes no --database.");
+  return values;
+}
+
+export async function main(args = process.argv.slice(2)) {
+  const values = exportOptions(args);
+  if (!values) {
     console.log(
-      "Usage: tsx scripts/data-export.ts --out <new-file.touchline.gz> [--database NAME]\n       tsx scripts/data-export.ts --dry-run [--database NAME]\n       tsx scripts/data-export.ts --verify-staging <converted-checkpoint-directory>\n       tsx scripts/data-export.ts --everything --out-dir <directory> [--account-schema accounts] [--skip-snapshots]\nExports or read-only verifies the active SQL world, without migrating or seeding. Existing output files are refused. Catalog snapshots stay in SQL. Uses SQL_* connection settings.\n--everything backs up every world schema (legacy dbo and each account world), every complete snapshot and the account registry\nto a local directory with manifest.json and RESTORE.txt; re-running it with the same --out-dir resumes. Stop the app first.\n--verify <directory> checks a --everything backup offline (no SQL): complete manifest, every file's size and SHA-256.",
+      "Usage: tsx scripts/data-export.ts --out <new-file.touchline.gz> [--database NAME]\n       tsx scripts/data-export.ts --dry-run [--database NAME]\n       tsx scripts/data-export.ts --verify-staging <converted-checkpoint-directory>\n       tsx scripts/data-export.ts --everything --out-dir <directory> [--account-schema accounts] [--skip-snapshots]\n       tsx scripts/data-export.ts --verify <backup-directory>\nExports or read-only verifies the active SQL world, without migrating or seeding. Existing output files are refused. Catalog snapshots stay in SQL. Uses SQL_* connection settings.\n--everything backs up every world schema (legacy dbo and each account world), every complete snapshot and the account registry\nto a local directory with manifest.json and RESTORE.txt; re-running it with the same --out-dir resumes. Stop the app first.\n--verify <directory> checks a --everything backup offline, without SQL or SQL_* settings: complete manifest, every file's size and\nSHA-256, every gzip end to end, each world's per-table row counts and the registry's account count. Exit 1 on any problem.",
     );
     return;
   }
-  if ([values.out, values["dry-run"], values["verify-staging"], values.everything, values.verify].filter(Boolean).length !== 1)
-    throw new Error("Choose exactly one of --out, --dry-run, --verify-staging, --everything, or --verify.");
-  if (values.everything !== Boolean(values["out-dir"]))
-    throw new Error("--everything requires --out-dir <directory>, and --out-dir is only for --everything.");
   if (values.verify) {
     const result = await verifyBackup(values.verify);
     console.log(JSON.stringify(result, null, 2));

@@ -316,11 +316,11 @@ export function leagueBand(code: string, tier: number) {
   return 6;
 }
 
-const continentalBand = (name: string) =>
+export const continentalBand = (name: string) =>
   name.startsWith("UEFA Champions League") ||
-  name.startsWith("Copa Libertadores")
+  (name.startsWith("CONMEBOL Libertadores") && !name.includes("Sub-20"))
     ? 1
-    : /UEFA Europa|UEFA Conference|Copa Sudamericana|FIFA Club World/.test(name)
+    : /UEFA Europa|UEFA Conference|CONMEBOL Sudamericana|FIFA Club World/.test(name)
       ? 2
       : 3;
 

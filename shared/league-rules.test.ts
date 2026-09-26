@@ -7,6 +7,7 @@ import {
   boundaryKey,
   createPlayoff,
   halvedPoints,
+  lastStageTies,
   leagueDates,
   miniLeagueRounds,
   pairQualifyingRound,
@@ -523,5 +524,31 @@ describe("continental qualifying plan", () => {
     const mixed = pairQualifyingRound([1, 2, 3, 4], 2, (id) => (id === 1 ? "league" : "champions"));
     expect(mixed.pairs.flat().sort()).toEqual([1, 2, 3, 4]);
     expect(mixed.pairs.filter(([home, away]) => (home === 1) !== (away === 1))).toHaveLength(1);
+  });
+
+  it("gives byes only in the first round of the last stage (CAF round 2 = 32; UYL 20 → 10, 30 + 10 → 20 → 10)", () => {
+    expect([lastStageTies(60, 16), lastStageTies(32, 16), lastStageTies(3, 2), lastStageTies(2, 2), lastStageTies(5, 0)]).toEqual([
+      28, 16, 1, 0, 0,
+    ]);
+    expect(qualifyingPlan({ q1: 60 }, 16)).toEqual([
+      { stage: "q1", playing: 60, ties: 28 },
+      { stage: "q1", playing: 32, ties: 16 },
+    ]);
+    expect(qualifyingPlan({ q1: 20, q2: 30 }, 10)).toEqual([
+      { stage: "q1", playing: 20, ties: 10 },
+      { stage: "q2", playing: 40, ties: 20 },
+      { stage: "q2", playing: 20, ties: 10 },
+    ]);
+  });
+
+  it("gives an odd path's best seed the bye, so an odd round after vacancies keeps its paths apart", () => {
+    const paths: Record<number, string> = { 1: "league", 2: "champions", 3: "league", 4: "champions", 5: "champions", 6: "league", 7: "league" };
+    const odd = pairQualifyingRound([1, 2, 3, 4, 5, 6, 7], 3, (id) => paths[id]);
+    expect(odd.byes).toEqual([2]);
+    expect(odd.pairs.filter(([home, away]) => paths[home] !== paths[away])).toHaveLength(0);
+    const side = (id: number) => ([2, 6].includes(id) ? "b" : "a");
+    const two = pairQualifyingRound([1, 2, 3, 4, 5, 6], 2, side);
+    expect(two.byes).toEqual([1, 3]);
+    expect(two.pairs.filter(([home, away]) => side(home) !== side(away))).toHaveLength(0);
   });
 });

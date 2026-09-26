@@ -16,6 +16,7 @@ import {
   createPlayoff,
   halvedPoints,
   knockoutStage,
+  lastStageTies,
   miniLeagueRounds,
   pairQualifyingRound,
   planBoundaries,
@@ -99,11 +100,16 @@ export const CADENCE: Record<
   },
   "recopa-sudamericana": { start: "08-19" },
   "libertadores-sub-20": { start: "08-12", gap: 3 },
+  // Domestic Champions Path, two legs: round 1 in October, round 2 (top 30 champions enter) in November.
+  "uefa-youth-league": { qualifying: { q1: "10-01", q2: "11-05" } },
   // 2025/26 knockout calendars: quarter-finals in March, finals in May (the ACL Elite finals are centralised).
   "afc-champions-league-elite": { knockout: { "16": "03-03", "8": "04-25", "4": "04-29", "2": "05-03" } },
   "afc-champions-league-two": { knockout: { "16": "02-11", "8": "03-04", "4": "04-08", "2": "05-17" } },
-  "caf-champions-league": { knockout: { "8": "03-13", "4": "04-10", "2": "05-15" } },
-  "caf-confederation-cup": { knockout: { "8": "03-14", "4": "04-11", "2": "05-16" } },
+  "caf-champions-league": { qualifying: { q1: "09-19", q2: "10-17" }, knockout: { "8": "03-13", "4": "04-10", "2": "05-15" } },
+  "caf-confederation-cup": {
+    qualifying: { q1: "09-19", playoff: "10-31" },
+    knockout: { "8": "03-14", "4": "04-11", "2": "05-16" },
+  },
   "concacaf-champions-cup": { start: "03-10", knockout: { "8": "04-07", "4": "04-28", "2": "05-30" } },
 };
 
@@ -620,7 +626,7 @@ async function catalogMainPhase(
       continue;
     }
     if (catalog.format === "league-phase") {
-      if (zone.clubs.length !== 12) return false;
+      if (zone.clubs.length !== catalog.teams / zones.length) return false;
       let draw: ReturnType<typeof drawZoneLeaguePhase>;
       try {
         draw = drawZoneLeaguePhase(drawn(zone.clubs), `${season}:${spec.name}:${zone.name}`);
@@ -1317,6 +1323,8 @@ interface QualifyingData extends CompetitionData {
   carried: number[];
   completedStages: QualifyingStage[];
   resolvedRound?: number;
+  /** Winners wanted per zone at the last stage (ACL Elite: 16 per zone minus its direct entrants). */
+  pathTargets?: Record<string, number>;
 }
 
 const catalogById = (id: string) => CONTINENTAL.competitions.find((item) => item.id === id);
@@ -1376,7 +1384,9 @@ async function deliverDrop(
     const data = qualifying.data as QualifyingData;
     const stage = drop.stage as QualifyingStage;
     data.stageEntrants[stage] = [...(data.stageEntrants[stage] ?? []), clubId];
-    data.paths[clubId] = drop.path ?? from.paths[clubId] ?? "";
+    // The League Path exists only in the Champions League: its losers join the target's main path.
+    const path = drop.path ?? from.paths[clubId] ?? "";
+    data.paths[clubId] = path === "league" ? "" : path;
     data.seeds[clubId] = from.seeds[clubId] ?? 0;
     await setData(store, qualifying.league.id, data);
     await store.bulkInsert("standings", [{ league_id: qualifying.league.id, club_id: clubId, group_name: stage }]);
@@ -1457,18 +1467,39 @@ async function advanceQualifying(store: Store, leagueId: number, season: number,
       if (pending === null) return;
       slots -= new Set(mainData.direct ?? []).size + pending;
     }
+    const pathOf = (clubId: number) => data.paths[clubId] ?? "";
+    // Zoned competitions fill each zone on its own (ACL Elite preliminary round: two ties per zone).
+    const zoneTies =
+      last && data.pathTargets
+        ? Object.fromEntries(
+            Object.entries(data.pathTargets).map(([zone, target]) => [
+              zone,
+              lastStageTies(playing.filter((clubId) => pathOf(clubId) === zone).length, target),
+            ]),
+          )
+        : undefined;
+    const laterEntrants = QUALIFYING_STAGES.slice(nextIndex + 1).some(
+      (later) => (data.stageEntrants[later]?.length ?? 0) > 0,
+    );
     const ties = !last
-      ? Math.floor(playing.length / 2)
-      : slots <= 0
-        ? 0
-        : Math.max(0, Math.min(Math.floor(playing.length / 2), playing.length - slots));
+      ? laterEntrants || playing.length < 2
+        ? Math.floor(playing.length / 2)
+        : // Only drop-ins follow (CAF Confederation Cup): byes bring the next round to a power of two (60 → 32).
+          playing.length - 2 ** (Math.ceil(Math.log2(playing.length)) - 1)
+      : zoneTies
+        ? Object.values(zoneTies).reduce((sum, count) => sum + count, 0)
+        : lastStageTies(playing.length, slots);
     if (!ties) {
       if (!last) {
         carried = playing;
         index = nextIndex;
         continue;
       }
-      const winners = slots <= 0 ? [] : playing;
+      const winners = zoneTies
+        ? playing.filter((clubId) => (data.pathTargets![pathOf(clubId)] ?? 0) > 0)
+        : slots <= 0
+          ? []
+          : playing;
       const current: CompetitionData = JSON.parse(
         (await store.get<League>("SELECT * FROM leagues WHERE id = ?", main.id))!.data,
       );
@@ -1484,7 +1515,15 @@ async function advanceQualifying(store: Store, leagueId: number, season: number,
       return;
     }
     const sorted = playing.sort((left, right) => (data.seeds[right] ?? 0) - (data.seeds[left] ?? 0) || left - right);
-    const { byes, pairs } = pairQualifyingRound(sorted, ties, (clubId) => data.paths[clubId] ?? "");
+    const pairs = (
+      zoneTies
+        ? Object.entries(zoneTies).map(([zone, count]) =>
+            pairQualifyingRound(sorted.filter((clubId) => pathOf(clubId) === zone), count),
+          )
+        : [pairQualifyingRound(sorted, ties, pathOf)]
+    ).flatMap((part) => part.pairs);
+    const paired = new Set(pairs.flat());
+    const byes = sorted.filter((clubId) => !paired.has(clubId));
     const round = (data.nextRound ?? 0) + 1;
     const stageDates = CADENCE[catalog.id]?.qualifying ?? (catalog.confederation === "UEFA" ? UEFA_STAGE_DATES : undefined);
     const planned = stageDates?.[stage];
@@ -1620,6 +1659,10 @@ async function setupContinental(store: Store, spec: CompetitionSpec, season: num
     const stages = [...qualifying.map((entry) => entry.stage), ...sources.map(({ drop }) => drop.stage)];
     const lastIndex = Math.max(...stages.map((stage) => QUALIFYING_STAGES.indexOf(stage as QualifyingStage)));
     const knockoutSize = 2 ** Math.ceil(Math.log2(Math.max(2, catalog.advance)));
+    const zoneSize = catalog.zones?.length ? catalog.teams / catalog.zones.length : 0;
+    const directIn = (zone: string) =>
+      new Set(entries.filter((entry) => entry.stage === "main" && pathOf(entry) === zone).map((entry) => entry.club.id))
+        .size;
     await setData(store, qualifyingId, {
       spec: qualifyingSpec,
       season,
@@ -1634,6 +1677,9 @@ async function setupContinental(store: Store, spec: CompetitionSpec, season: num
       carried: [],
       completedStages: [],
       nextRound: 0,
+      ...(zoneSize
+        ? { pathTargets: Object.fromEntries(catalog.zones!.map((zone) => [zone.name, zoneSize - directIn(zone.name)])) }
+        : {}),
     } satisfies QualifyingData);
     await store.bulkInsert(
       "standings",

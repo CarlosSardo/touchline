@@ -357,6 +357,72 @@ describe("football calendar", () => {
       ),
     ).toEqual([]);
   });
+
+  it("plays the Youth League Domestic Champions Path over two legs from October, top 30 champions entering in round 2", async () => {
+    const qualifying = (await store.get<League>(
+      "SELECT * FROM leagues WHERE name = 'UEFA Youth League Qualifying' AND country_id IS NULL",
+    ))!;
+    const data = JSON.parse(qualifying.data) as { stageEntrants: Record<string, number[]> };
+    expect(Object.keys(data.stageEntrants).sort()).toEqual(["q1", "q2"]);
+    const fixtures = await store.all<Fixture>("SELECT * FROM fixtures WHERE league_id = ? ORDER BY date", qualifying.id);
+    expect(fixtures.length).toBeGreaterThan(0);
+    expect(fixtures.every((fixture) => JSON.parse(fixture.data).tie?.legs === 2)).toBe(true);
+    expect(fixtures[0].date >= "2026-10-01").toBe(true);
+    const roundTwo = new Set(data.stageEntrants.q2);
+    expect(fixtures.filter((fixture) => roundTwo.has(fixture.home_id) || roundTwo.has(fixture.away_id))).toEqual([]);
+  });
+
+  it("drops Europa League Q1 losers into the Conference League Q2 main path", async () => {
+    const europa = (await store.get<League>(
+      "SELECT * FROM leagues WHERE name = 'UEFA Europa League Qualifying' AND country_id IS NULL",
+    ))!;
+    const first = await store.all<Fixture>("SELECT * FROM fixtures WHERE league_id = ? AND round = 1", europa.id);
+    expect(first.length).toBeGreaterThan(0);
+    expect(first.every((fixture) => JSON.parse(fixture.data).qualifyingStage === "q1")).toBe(true);
+    await store.run(
+      "UPDATE fixtures SET status = 'played', home_goals = CASE JSON_VALUE(data,'$.tie.leg') WHEN 2 THEN 0 ELSE 1 END, away_goals = 0 WHERE league_id = ? AND round = 1",
+      europa.id,
+    );
+    await progressCompetitions(store, "2026-10-02");
+    // The first-leg hosts win 1-0 on aggregate, so the first-leg visitors (the seeded clubs) drop.
+    const losers = first.filter((fixture) => JSON.parse(fixture.data).tie?.leg === 1).map((fixture) => fixture.away_id);
+    const conference = JSON.parse(
+      (await store.get<League>(
+        "SELECT * FROM leagues WHERE name = 'UEFA Conference League Qualifying' AND country_id IS NULL",
+      ))!.data,
+    ) as { stageEntrants: Record<string, number[]>; paths: Record<string, string> };
+    expect(losers.filter((clubId) => !conference.stageEntrants.q2?.includes(clubId))).toEqual([]);
+    expect(losers.map((clubId) => conference.paths[clubId])).toEqual(losers.map(() => ""));
+  });
+
+  it("plays the ACL Elite preliminary round as single matches inside each zone and fills 16 clubs per zone", async () => {
+    const elite = CONTINENTAL.competitions.find((competition) => competition.id === "afc-champions-league-elite")!;
+    const qualifying = (await store.get<League>(
+      "SELECT * FROM leagues WHERE name = ? AND country_id IS NULL",
+      `${elite.name} Qualifying`,
+    ))!;
+    const data = JSON.parse(qualifying.data) as { paths: Record<string, string>; pathTargets: Record<string, number> };
+    expect(Object.keys(data.pathTargets).sort()).toEqual(["East", "West"]);
+    const fixtures = await store.all<Fixture>("SELECT * FROM fixtures WHERE league_id = ?", qualifying.id);
+    expect(fixtures.every((fixture) => data.paths[fixture.home_id] === data.paths[fixture.away_id])).toBe(true);
+    expect(fixtures.every((fixture) => JSON.parse(fixture.data).tie?.legs === 1)).toBe(true);
+    for (const zone of ["West", "East"])
+      expect(fixtures.filter((fixture) => data.paths[fixture.home_id] === zone).length).toBeLessThanOrEqual(2);
+    await store.run(
+      "UPDATE fixtures SET status = 'played', home_goals = 1, away_goals = 0 WHERE league_id = ?",
+      qualifying.id,
+    );
+    await progressCompetitions(store, "2026-10-03");
+    const main = (await store.get<League>("SELECT * FROM leagues WHERE name = ? AND country_id IS NULL", elite.name))!;
+    expect(JSON.parse(main.data).phase).toBe("groups");
+    for (const zone of ["West", "East"])
+      expect(
+        await store.all("SELECT club_id FROM standings WHERE league_id = ? AND group_name = ?", main.id, zone),
+      ).toHaveLength(elite.teams / elite.zones!.length);
+    expect(await store.all("SELECT id FROM fixtures WHERE league_id = ?", main.id)).toHaveLength(
+      (elite.teams * elite.matchdays!) / 2,
+    );
+  });
 });
 
 describe("competition-specific knockout regulations", () => {
