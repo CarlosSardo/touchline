@@ -848,8 +848,10 @@ export class Saves {
     });
   }
 
-  async create(name: string, automatic = false) {
+  /** `keep` names a save that must survive this save's rotation (the one being loaded); the next oldest goes instead. */
+  async create(name: string, automatic = false, keep?: string) {
     saveName(name);
+    const kept = keep === undefined ? undefined : slotId(keep);
     return this.store.transaction(async () => {
       const state = await this.requireState();
       const club = await clubOf(this.store);
@@ -883,11 +885,12 @@ export class Saves {
       await completeSlot(this.store, slot.id, summary);
       const obsolete = await this.store.all<{ id: string }>(
         `SELECT id FROM ${tableName(this.store, "save_slots")} WHERE automatic = ? AND imported = 0 AND complete = 1 AND career_id COLLATE Latin1_General_100_BIN2 = ? AND DATALENGTH(career_id) = DATALENGTH(?)
-         ORDER BY CASE WHEN id = ? THEN 0 ELSE 1 END,created_at DESC,id DESC OFFSET ${automatic ? SAVE_SLOT_LIMITS.automatic : SAVE_SLOT_LIMITS.manual} ROWS`,
+         ORDER BY CASE WHEN id IN (?, ?) THEN 0 ELSE 1 END,created_at DESC,id DESC OFFSET ${automatic ? SAVE_SLOT_LIMITS.automatic : SAVE_SLOT_LIMITS.manual} ROWS`,
         automatic ? 1 : 0,
         state.careerId,
         state.careerId,
         slot.id,
+        kept ?? slot.id,
       );
       for (const old of obsolete)
         await this.store.run(

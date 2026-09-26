@@ -1264,3 +1264,63 @@ export class Store {
     return this.closing;
   }
 }
+
+/** The game database could not be opened; the request did no work and can be retried. */
+export class DatabaseUnavailableError extends Error {
+  readonly status = 503;
+  readonly code = "database_unavailable";
+
+  constructor(cause?: unknown) {
+    super("The game database is starting or unavailable. Try again in a moment.", { cause });
+    this.name = "DatabaseUnavailableError";
+  }
+}
+
+/**
+ * Opens the database on the first call instead of at boot, so requests that never need SQL never wake it.
+ * Concurrent callers share one attempt. Retryable failures are retried for `retryFor` ms (a paused serverless
+ * database takes about a minute to resume), then the call rejects with DatabaseUnavailableError and the next
+ * call starts a new attempt.
+ */
+export function openOnFirstUse<Resource>(
+  open: () => Promise<Resource>,
+  { retryFor = 90_000, retryDelay = 3_000, retryable = () => true }: {
+    retryFor?: number;
+    retryDelay?: number;
+    retryable?: (error: unknown) => boolean;
+  } = {},
+) {
+  let pending: Promise<Resource> | undefined;
+  let closed = false;
+  const attempt = async () => {
+    const deadline = Date.now() + retryFor;
+    for (;;) {
+      if (closed) throw new DatabaseUnavailableError();
+      try {
+        return await open();
+      } catch (error) {
+        if (closed || !retryable(error) || Date.now() + retryDelay >= deadline)
+          throw new DatabaseUnavailableError(error);
+      }
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, retryDelay));
+    }
+  };
+  return {
+    get(): Promise<Resource> {
+      if (closed) return Promise.reject(new DatabaseUnavailableError());
+      pending ??= attempt().catch((error: unknown) => {
+        pending = undefined;
+        throw error;
+      });
+      return pending;
+    },
+    /** Stops new attempts; an opened, or still opening, resource is passed to `dispose`. */
+    async close(dispose: (resource: Resource) => Promise<void>): Promise<void> {
+      closed = true;
+      const current = pending;
+      pending = undefined;
+      const resource = await current?.catch(() => undefined);
+      if (resource !== undefined) await dispose(resource);
+    },
+  };
+}

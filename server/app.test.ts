@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import request from "supertest";
 import { randomUUID } from "node:crypto";
 import { readFile, rm } from "node:fs/promises";
-import { Store } from "./db.ts";
+import { openOnFirstUse, Store } from "./db.ts";
 import { AccountNotProvisionedError, type AuthenticatedIdentity } from "./accounts.ts";
 import { processCompetitionNotifications } from "./notifications.ts";
 import { generateWorld } from "./world.ts";
@@ -139,6 +139,65 @@ describe("hosted invitation access (no database)", () => {
     if (origin) mutation.set("Origin", origin);
     expect((await mutation.send({ type: "read-news" })).status).toBe(403);
     expect(resolve).not.toHaveBeenCalled();
+  });
+});
+
+describe("SQL opened on the first request that needs it (no database)", () => {
+  beforeEach(() => {
+    for (const [name, value] of Object.entries(configuration)) vi.stubEnv(name, value);
+  });
+  afterEach(() => vi.unstubAllEnvs());
+  const fakeDatabase = () => {
+    const store = Object.create(Store.prototype) as Store;
+    return {
+      store,
+      accounts: {
+        async resolve(identity: AuthenticatedIdentity) {
+          return { user: { id: identity.objectId, displayName: identity.displayName, email: identity.email }, store };
+        },
+      },
+    };
+  };
+
+  it("never opens SQL for health, static files or anonymous and refused requests", async () => {
+    const open = vi.fn(async () => { throw new Error("SQL must not be opened."); });
+    const application = createApp(open);
+    const health = await request(application).get("/api/health");
+    expect(health.status).toBe(200);
+    expect(health.body).toEqual({ status: "ok" });
+    expect((await request(application).get("/api/bootstrap")).status).toBe(401);
+    expect((await request(application).get("/api/me").set("x-ms-client-principal", "not a principal")).status).toBe(401);
+    expect((await request(application).get("/api/me")
+      .set("x-ms-client-principal", principal("44444444-4444-4444-4444-444444444444"))).status).toBe(403);
+    expect((await request(application).post("/api/careers/prepare")
+      .set("x-ms-client-principal", principal(owner)).send({})).status).toBe(403);
+    expect((await request(application).get("/")).status).toBeLessThan(500);
+    expect(open).not.toHaveBeenCalled();
+  });
+
+  it("answers 503 while SQL is unavailable, then opens it once for concurrent first requests", async () => {
+    const open = vi.fn<() => Promise<ReturnType<typeof fakeDatabase>>>()
+      .mockRejectedValueOnce(new Error("Database is not currently available (40613)"));
+    const application = createApp(openOnFirstUse(open, { retryFor: 0 }).get);
+    const unavailable = await request(application).get("/api/me").set("x-ms-client-principal", principal(owner));
+    expect(unavailable.status).toBe(503);
+    expect(unavailable.headers["retry-after"]).toBe("5");
+    expect(unavailable.body).toEqual({
+      error: "The game database is starting or unavailable. Try again in a moment.",
+      code: "database_unavailable",
+    });
+    let finish: (database: ReturnType<typeof fakeDatabase>) => void = () => {};
+    open.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    const pending = [owner, guest, secondGuest].map((objectId) =>
+      request(application).get("/api/access-probe").set("x-ms-client-principal", principal(objectId)).then((response) => response));
+    await vi.waitFor(() => expect(open).toHaveBeenCalledTimes(2));
+    finish(fakeDatabase());
+    for (const response of await Promise.all(pending)) {
+      expect(response.status).toBe(404);
+      expect(response.body.error).toBe("API route not found.");
+    }
+    expect((await request(application).get("/api/access-probe").set("x-ms-client-principal", principal(guest))).status).toBe(404);
+    expect(open).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -1699,6 +1758,26 @@ describe("game HTTP API and SQL saves", () => {
     expect((await request(app).get("/api/bootstrap")).body.state).toEqual(
       original,
     );
+  });
+
+  it("loads the oldest manual save of a career that is at the manual save cap", async () => {
+    const saves = new Saves(store);
+    const original = await stateOf(store);
+    await store.setMeta("state", { ...original, careerId: "load-oldest-at-cap" });
+    try {
+      const manual = [];
+      for (let index = 0; index < 10; index++) manual.push(await saves.create(`Cap ${index}`));
+      const response = await request(app).post("/api/careers/load").send({ file: manual[0].file });
+      expect(response.status).toBe(200);
+      const career = (await saves.list())
+        .filter((slot) => slot.career?.id === "load-oldest-at-cap" && !slot.automatic)
+        .map((slot) => slot.file);
+      expect(career).toHaveLength(10);
+      expect(career).toEqual(expect.arrayContaining([manual[0].file, response.body.archived]));
+      expect(career).not.toContain(manual[1].file);
+    } finally {
+      await store.setMeta("state", original);
+    }
   });
 
   it("starts a fresh named career and can load the previous career without losing it", async () => {

@@ -8,7 +8,7 @@ import { createReadStream, existsSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { pipeline } from "node:stream/promises";
 import { z } from "zod";
-import { Store } from "./db.ts";
+import { DatabaseUnavailableError, Store } from "./db.ts";
 import { AccountNotProvisionedError, Accounts, type AuthenticatedIdentity } from "./accounts.ts";
 import {
   affiliateDesk,
@@ -848,10 +848,24 @@ export async function dispatchAction(
   }
 }
 
-export function createApp(store: Store, accounts?: Pick<Accounts, "resolve">) {
+export interface AppDatabase {
+  store: Store;
+  accounts?: Pick<Accounts, "resolve">;
+}
+
+/** `database` is an open store, or a function that opens it on the first request that needs SQL. */
+export function createApp(
+  database: Store | (() => Promise<AppDatabase>),
+  accounts?: Pick<Accounts, "resolve">,
+) {
   const configuration = readApiConfiguration();
   const app = express();
-  const resolver = configuration.requireAuth ? accounts ?? new Accounts(store) : undefined;
+  const connection = (store: Store, resolver?: Pick<Accounts, "resolve">) => ({
+    store,
+    resolver: configuration.requireAuth ? resolver ?? new Accounts(store) : undefined,
+  });
+  const open = typeof database === "function" ? database : undefined;
+  let connected = typeof database === "function" ? undefined : connection(database, accounts);
   const worlds = new Map<string, ReturnType<typeof createWorldRouter>>();
   const localUser: AccountUser = { id: "local", displayName: "Local director", email: null };
   app.disable("x-powered-by");
@@ -983,6 +997,11 @@ export function createApp(store: Store, accounts?: Pick<Accounts, "resolve">) {
   app.use(async (request, response, next) => {
     if (request.path !== "/api" && !request.path.startsWith("/api/")) return next();
     try {
+      if (!connected) {
+        const opened = await open!();
+        connected ??= connection(opened.store, opened.accounts);
+      }
+      const { store, resolver } = connected;
       const account = resolver
         ? await resolver.resolve(response.locals.identity as AuthenticatedIdentity)
         : { user: localUser, store };
@@ -1020,6 +1039,8 @@ export function createApp(store: Store, accounts?: Pick<Accounts, "resolve">) {
       if (response.headersSent) return response.destroy();
       if (error instanceof AccountNotProvisionedError)
         return response.status(error.status).json({ error: error.message, code: error.code });
+      if (error instanceof DatabaseUnavailableError)
+        return response.set("Retry-After", "5").status(error.status).json({ error: error.message, code: error.code });
       if (error instanceof z.ZodError)
         return response.status(400).json({
           error: error.issues
@@ -1561,6 +1582,8 @@ function createWorldRouter(
         const state = await saves.currentState();
         const snapshot = state && state.started !== false ? await saves.create(
           `${state.careerName ?? state.director.name} before load`,
+          false,
+          file,
         ) : undefined;
         await saves.restore(file);
         return snapshot;
