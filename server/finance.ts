@@ -165,6 +165,38 @@ export function estimateClubRevenue(
   };
 }
 
+/** Share of expected revenue a board spends on player wages and non-staff running costs: 0.90–0.98 in top flights, 0.855–0.935 from the fourth tier, where staff wages take a larger share. */
+export const spendRatio = (clubId: number, tier: number) =>
+  0.9 -
+  0.015 * clamp(Math.round(tier) - 1, 0, 3) +
+  (0.08 * (Math.imul(clubId, 0x9e3779b1) >>> 0)) / 2 ** 32;
+
+export interface OperatingCostInput {
+  /** Expected annual operating revenue (neutral fan mood, league home matches + 2). */
+  annualRevenue: number;
+  /** Budgeted player payroll (88% of the reference wage budget) / expected annual revenue. */
+  wageShare: number;
+  spendRatio: number;
+  facilities: number;
+  academy: number;
+  balance: number;
+}
+
+/**
+ * Weekly non-player costs (GBP): facilities and academy upkeep, plus non-player staff, matchday,
+ * commercial and admin costs up to the spend ratio less the budgeted payroll share. Wages above
+ * or below the budget change profit. Cash below 10% of revenue cuts up to 6 points of that spend.
+ */
+export function weeklyOperatingCosts(input: OperatingCostInput) {
+  const facilities = Math.round(input.facilities ** 2 * 2.2);
+  const academy = Math.round(input.academy ** 2 * 1.6);
+  const revenue = Math.max(0, input.annualRevenue);
+  const cushion = clamp(input.balance / Math.max(1, revenue * 0.1), 0, 1);
+  const budget = ((input.spendRatio - 0.06 * (1 - cushion) - input.wageShare) * revenue) / 52;
+  const operations = Math.max(0, Math.round(budget - facilities - academy));
+  return { facilities, academy, operations, total: facilities + academy + operations };
+}
+
 export function initialClubFinances(
   input: ClubEconomyInput,
 ): Pick<Club, "balance" | "transfer_budget" | "wage_budget"> {

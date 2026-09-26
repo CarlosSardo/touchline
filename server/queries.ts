@@ -68,6 +68,7 @@ import { assessRegistration } from "./registration.ts";
 import { assessPlayerInterest, assessYouthTransfer } from "./recruitment.ts";
 import { clubAffiliates } from "./club-support.ts";
 import { describeIdentity, peopleContext } from "./people.ts";
+import { marketValueFactor } from "../shared/world-catalog/market.ts";
 import { associationNotes, reservePolicy } from "../shared/world-rules.ts";
 import { notificationFeed, notificationVisibility } from "./notifications.ts";
 
@@ -604,6 +605,25 @@ export async function players(
   };
 }
 
+/** valuation() context of the weekly revaluation (simulation.developPlayers); `club` null = club-less player. */
+export function playerValueContext(
+  market: { reputation: number | null; code: string | null } | undefined,
+  club: Pick<Club, "reputation" | "balance" | "philosophy" | "crisis" | "hype"> | null,
+  date: string,
+  inflation: number,
+) {
+  return {
+    date,
+    leagueReputation: Number(market?.reputation ?? club?.reputation ?? 30),
+    marketFactor: marketValueFactor(market?.code),
+    balance: club?.balance ?? 0,
+    philosophy: club?.philosophy ?? "",
+    inflation,
+    crisis: club?.crisis ?? 0,
+    hype: club?.hype ?? 0,
+  };
+}
+
 export async function playerDetail(
   store: Store,
   id: number,
@@ -623,10 +643,10 @@ export async function playerDetail(
     ? await clubOf(store, player.club_id)
     : await clubOf(store);
   // Same context as the weekly revaluation: the club's league, or the nation's league for club-less players.
-  const market = await store.get<{ reputation: number }>(
+  const market = await store.get<{ reputation: number; code: string | null }>(
     player.club_id
-      ? "SELECT COALESCE(leagues.reputation, clubs.reputation) AS reputation FROM clubs LEFT JOIN leagues ON leagues.id = clubs.league_id WHERE clubs.id = ?"
-      : "SELECT reputation FROM countries WHERE id = ?",
+      ? "SELECT COALESCE(leagues.reputation, clubs.reputation) AS reputation, (SELECT code FROM countries WHERE countries.id = COALESCE(leagues.country_id, clubs.country_id)) AS code FROM clubs LEFT JOIN leagues ON leagues.id = clubs.league_id WHERE clubs.id = ?"
+      : "SELECT reputation, code FROM countries WHERE id = ?",
     player.club_id ?? profile.homeBased?.countryId ?? profile.registration?.lastAssociationId ?? player.country_id,
   );
   const state = await stateOf(store);
@@ -661,15 +681,15 @@ export async function playerDetail(
         "SELECT TOP (1) reports.*, staff.name AS scout_name FROM reports JOIN staff ON staff.id = reports.staff_id WHERE player_id = ? ORDER BY reports.id DESC",
         id,
       )) ?? null,
-    value: valuation(player, {
-      date: state.date,
-      leagueReputation: Number(market?.reputation ?? club.reputation),
-      balance: player.club_id ? club.balance : 0,
-      philosophy: player.club_id ? club.philosophy : "",
-      inflation: Number(settings.transferInflation),
-      crisis: player.club_id ? club.crisis : 0,
-      hype: player.club_id ? club.hype : 0,
-    }),
+    value: valuation(
+      player,
+      playerValueContext(
+        market,
+        player.club_id ? club : null,
+        state.date,
+        Number(settings.transferInflation),
+      ),
+    ),
     development: potentialInfluences(player, profile, {
       staff,
       academy: club.academy,

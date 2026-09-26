@@ -118,6 +118,17 @@ describe("2026/27 FIFA windows and continental dates (pure)", () => {
       expect(COMPETITIONS.find((spec) => spec.catalog?.id === id)?.start, id).toBe("08-04");
     expect(CADENCE["leagues-cup"].knockout!["2"]).toBe("09-06");
   });
+
+  it("starts every competition on its CADENCE date, after its qualifying (mirrored Youth League path excepted)", () => {
+    for (const [id, cadence] of Object.entries(CADENCE)) {
+      const spec = COMPETITIONS.find((item) => item.catalog?.id === id)!;
+      if (cadence.start) expect(spec.start, id).toBe(cadence.start);
+      if (!spec.catalog!.mirrors)
+        for (const date of Object.values(cadence.qualifying ?? {})) expect(dated(date) < dated(spec.start), id).toBe(true);
+    }
+    expect(COMPETITIONS.find((spec) => spec.catalog?.id === "afc-champions-league-two")?.start).toBe("09-15");
+    expect(CADENCE["caf-confederation-cup"].qualifying).not.toHaveProperty("playoff");
+  });
 });
 // Every UEFA association (Russia included, to prove its exclusion), all of CONMEBOL and the clubs of the other access lists.
 const CALENDAR_NATIONS = [
@@ -480,6 +491,26 @@ describe("football calendar", () => {
     expect(await store.all("SELECT id FROM fixtures WHERE league_id = ?", main.id)).toHaveLength(
       (elite.teams * elite.matchdays!) / 2,
     );
+  });
+
+  it("shows the AFC Challenge League as not held when no ACL Two preliminary loser drops: no standings, no fixtures", async () => {
+    const [two, challenge] = ["afc-champions-league-two", "afc-challenge-league"].map(
+      (id) => CONTINENTAL.competitions.find((competition) => competition.id === id)!,
+    );
+    const qualifying = await store.get<League>(
+      "SELECT * FROM leagues WHERE name = ? AND country_id IS NULL",
+      `${two.name} Qualifying`,
+    );
+    if (qualifying)
+      await store.run(
+        "UPDATE fixtures SET status = 'played', home_goals = 1, away_goals = 0 WHERE league_id = ? AND status = 'scheduled'",
+        qualifying.id,
+      );
+    for (const date of ["2026-10-04", "2026-10-05"]) await progressCompetitions(store, date);
+    const main = (await store.get<League>("SELECT * FROM leagues WHERE name = ? AND country_id IS NULL", challenge.name))!;
+    expect(JSON.parse(main.data)).toMatchObject({ phase: "not held", season: 2026 });
+    expect(await store.all("SELECT club_id FROM standings WHERE league_id = ?", main.id)).toEqual([]);
+    expect(await store.all("SELECT id FROM fixtures WHERE league_id = ?", main.id)).toEqual([]);
   });
 });
 

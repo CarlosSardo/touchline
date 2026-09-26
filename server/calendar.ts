@@ -769,7 +769,11 @@ export async function setupMainCompetition(
     );
     await store.run("DELETE FROM standings WHERE league_id = ?", leagueId);
     const uniqueClubs = [...new Set(clubs)];
-    if (uniqueClubs.length < 2) return;
+    if (uniqueClubs.length < 2) {
+      // A lone entrant keeps no "Qualified" row: nobody is listed in a competition that is not held.
+      await setData(store, leagueId, { ...oldData, spec, season, phase: "not held", qualified: [] });
+      return;
+    }
     const plannedStart = seasonDate(season, spec.start);
     const start =
       earliestDate && earliestDate > plannedStart ? earliestDate : plannedStart;
@@ -1259,7 +1263,7 @@ async function scheduleNationalCups(store: Store, country: Country, season: numb
     const leagueId = await createLeague(store, spec, country.id);
     if (entries.length === 1 && byId.has(entries[0]))
       await recordWalkover(store, leagueId, spec, byId.get(entries[0])!, season);
-    else if (entries.length > 1) await setupMainCompetition(store, leagueId, entries, spec, season);
+    else await setupMainCompetition(store, leagueId, entries, spec, season);
   }
   for (const age of ["U19", "U17"] as const) {
     const name = football.youth[age].cup?.name;
@@ -1442,10 +1446,7 @@ async function tryStartMain(store: Store, mainId: number, season: number, date: 
     );
     clubs = (mirroredData.qualified ?? []).filter((id) => sides.has(id));
   }
-  if (clubs.length < 2) {
-    await setData(store, mainId, { ...data, phase: "not held" });
-    return;
-  }
+  // Fewer than two clubs: "not held" (AFC Challenge League when no ACL Two preliminary loser drops).
   await setupMainCompetition(store, mainId, clubs.slice(0, spec.teams), spec, season, addDays(date, 3));
 }
 

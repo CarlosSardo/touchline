@@ -40,6 +40,8 @@ import {
   closeFinancialYear,
   estimateClubRevenue,
   postWeeklyAccounts,
+  spendRatio,
+  weeklyOperatingCosts,
 } from "./finance.ts";
 import { personName } from "./people.ts";
 import { runYouthIntake, signClublessPlayers } from "./youth.ts";
@@ -1863,14 +1865,36 @@ async function weeklyFinances(store: Store) {
     );
     accountUpdates.length = 0;
   };
-  for (const club of await store.all<Club>(
-    "SELECT * FROM clubs WHERE type != 'national' ORDER BY id",
-  )) {
+  // The first week fixes each club's reference wage budget, so budget rebalancing cannot lower operating costs.
+  await store.run(
+    "UPDATE clubs SET data = JSON_MODIFY(coalesce(data,'{}'),'$.operatingWageBudget',wage_budget) WHERE type != 'national' AND JSON_VALUE(coalesce(data,'{}'),'$.operatingWageBudget') IS NULL",
+  );
+  const clubs = await store.all<Club & { wage_reference: number | null }>(
+    "SELECT *, TRY_CONVERT(float,JSON_VALUE(coalesce(data,'{}'),'$.operatingWageBudget')) AS wage_reference FROM clubs WHERE type != 'national' ORDER BY id",
+  );
+  const leagueSizes = new Map<number, number>();
+  for (const club of clubs)
+    leagueSizes.set(club.league_id ?? -1, (leagueSizes.get(club.league_id ?? -1) ?? 0) + 1);
+  for (const club of clubs) {
     const wages = (salaries.get(club.id) ?? 0) + (staffCosts.get(club.id) ?? 0);
-    const running = Math.round(
-      club.facilities ** 2 * 2.2 + club.academy ** 2 * 1.6,
-    );
     const league = leagues.get(club.league_id ?? -1);
+    const expected = estimateClubRevenue({
+      reputation: club.reputation,
+      leagueReputation: league?.reputation ?? club.reputation,
+      tier: league?.tier ?? 1,
+      capacity: club.capacity,
+      fanMood: 72,
+      homeMatches: Math.max(0, (leagueSizes.get(club.league_id ?? -1) ?? 1) - 1) + 2,
+    }).annualOperatingRevenue;
+    const operating = weeklyOperatingCosts({
+      annualRevenue: expected,
+      wageShare: (0.88 * (club.wage_reference ?? club.wage_budget) * 52) / Math.max(1, expected),
+      spendRatio: spendRatio(club.id, league?.tier ?? 1),
+      facilities: club.facilities,
+      academy: club.academy,
+      balance: club.balance,
+    });
+    const running = operating.total;
     const revenue = estimateClubRevenue({
       reputation: club.reputation,
       leagueReputation: league?.reputation ?? club.reputation,
@@ -1889,8 +1913,8 @@ async function weeklyFinances(store: Store) {
       club.id,
       income,
       wages,
-      club.facilities ** 2 * 2.2,
-      club.academy ** 2 * 1.6,
+      operating.facilities + operating.operations,
+      operating.academy,
     );
     const period = (await store.get<{ deficit: number }>(
       "SELECT GREATEST(0,wages + operating + amortization + agent_fees - revenue - sale_profit) AS deficit FROM financial_periods WHERE club_id = ? AND season = ?",

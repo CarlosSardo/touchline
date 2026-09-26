@@ -9,7 +9,9 @@ import {
   peopleContext,
   personName,
   type PeopleContext,
+  type PlayerRow,
 } from "./people.ts";
+import { playerValueContext } from "./queries.ts";
 import { catalogLookup, worldCatalog } from "../shared/world-catalog/index.ts";
 import { isRealPersonName } from "../shared/world-catalog/real-names.ts";
 import type {
@@ -17,8 +19,8 @@ import type {
   NationSpec,
   WorldCatalog,
 } from "../shared/world-catalog/index.ts";
-import { START_DATE, ageOn } from "../shared/rules.ts";
-import type { Country, PlayerProfile } from "../shared/types.ts";
+import { START_DATE, ageOn, valuation } from "../shared/rules.ts";
+import type { Country, PlayerProfile, Position } from "../shared/types.ts";
 
 const LATIN = /^[\p{Script=Latin}\p{M}'’ʻ .-]+$/u;
 const SN_FAMILY = ["Diop", "Ndiaye", "Sow", "Fall", "Gueye", "Sarr", "Faye", "Mbaye", "Cissé", "Diallo"];
@@ -528,5 +530,52 @@ describe("regional name cultures", () => {
         const name = personName(random, code, { catalog: lookup });
         expect(isRealPersonName(name), `${code}: ${name}`).toBe(false);
       }
+  });
+});
+
+describe("player values", () => {
+  it("reproduces the stored value in the player-detail breakdown, league market factor included", () => {
+    const random = seedrandom("market-values");
+    const club = { id: 3, country_id: 1, reputation: 70, academy: 60, balance: 2_000_000, philosophy: "Win now", type: "club" as const };
+    const create = (code: string, leagueReputation: number, pool: boolean) =>
+      createPlayer(random, people, {
+        club: pool ? null : club,
+        representCode: code,
+        contextCode: code,
+        ageGroup: "Senior",
+        position: "ST",
+        birthDate: birthDateForAge(random, 25, START_DATE),
+        date: START_DATE,
+        ability: 78,
+        potential: 80,
+        leagueReputation,
+        contract: pool ? "pool" : "professional",
+      });
+    const priced = (row: PlayerRow) => ({
+      ability: Number(row.ability),
+      potential: Number(row.potential),
+      age: Number(row.age),
+      position: row.position as Position,
+      contract_end: String(row.contract_end),
+      form: Number(row.form),
+      injury_until: null,
+    });
+    // Day one of a career: default 4% inflation, no crisis or hype yet.
+    const clubContext = { ...club, crisis: 0, hype: 0 };
+    for (const [code, reputation] of [["JP", 70], ["BR", 75], ["EN", 92]] as const) {
+      const contracted = create(code, reputation, false);
+      const detail = valuation(priced(contracted), playerValueContext({ reputation, code }, clubContext, START_DATE, 4));
+      expect(detail.value, code).toBe(contracted.value);
+      const clubless = create(code, reputation, true);
+      expect(
+        valuation(priced(clubless), playerValueContext({ reputation, code }, null, START_DATE, 4)).value,
+        `${code} club-less`,
+      ).toBe(clubless.value);
+    }
+    const japanese = create("JP", 70, false);
+    const context = playerValueContext({ reputation: 70, code: "JP" }, clubContext, START_DATE, 4);
+    expect(context.marketFactor).toBe(0.27);
+    // Without the factor the breakdown showed J1 players at about 3.7 times their stored value.
+    expect(valuation(priced(japanese), { ...context, marketFactor: 1 }).value).toBeGreaterThan(3.5 * Number(japanese.value));
   });
 });

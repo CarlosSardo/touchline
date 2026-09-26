@@ -30,6 +30,8 @@ import {
   professionalWageFloor,
   recordFinancialItem,
   sellPlayerAsset,
+  spendRatio,
+  weeklyOperatingCosts,
   type ClubEconomyInput,
 } from "./finance.ts";
 import type { AgeGroup } from "../shared/types.ts";
@@ -680,5 +682,111 @@ describe("financial regulatory accounting", () => {
     await recordFinancialItem(store, 1, "revenue", 100_000_000);
     await closeFinancialYear(store, 2026);
     expect((await assessFinances(store, 1)).footballRevenue).toBe(109_000_000);
+  });
+});
+
+describe("weekly operating costs", () => {
+  /** One synthetic 20-club season: 52 weeks, 21 home matches, payroll on or above budget. */
+  const season = (options: {
+    tier: number;
+    league: number;
+    payrollShare: number;
+    staffShare: number;
+    overspend?: number;
+    upkeepOnly?: boolean;
+  }) =>
+    Array.from({ length: 20 }, (_, index) => {
+      const facilities = 80 - index * 2;
+      const academy = 70 - index * 2;
+      const expected = estimateClubRevenue({
+        reputation: 90 - index * 2,
+        leagueReputation: options.league,
+        tier: options.tier,
+        capacity: 60_000 - index * 2_500,
+        fanMood: 72,
+        homeMatches: 21,
+      });
+      const revenue = expected.annualOperatingRevenue;
+      const budgeted = (options.payrollShare * revenue) / 52;
+      const weeklyWages = budgeted * (1 + (options.overspend ?? 0)) + (options.staffShare * revenue) / 52;
+      let balance = revenue * 0.2;
+      let lowest = balance;
+      let income = 0;
+      let costs = 0;
+      for (let week = 0; week < 52; week++) {
+        const weekIncome =
+          expected.annualCommercial / 52 + (week < 42 && week % 2 === 0 ? expected.matchdayPerHomeMatch : 0);
+        const operating = options.upkeepOnly
+          ? Math.round(facilities ** 2 * 2.2) + Math.round(academy ** 2 * 1.6)
+          : weeklyOperatingCosts({
+              annualRevenue: revenue,
+              wageShare: (budgeted * 52) / revenue,
+              spendRatio: spendRatio(options.tier * 100 + index, options.tier),
+              facilities,
+              academy,
+              balance,
+            }).total;
+        income += weekIncome;
+        costs += weeklyWages + operating;
+        balance += weekIncome - weeklyWages - operating;
+        lowest = Math.min(lowest, balance);
+      }
+      return { margin: (income - costs) / income, lowest };
+    });
+  const median = (values: number[]) => [...values].sort((left, right) => left - right)[values.length >> 1];
+
+  it("keeps top-flight margins between break-even and a modest profit", () => {
+    // Revenue far above the catalog wage bill (Portugal, Netherlands, Morocco top flights) used to leave 60–90% margins.
+    const rich = { tier: 1, league: 85, payrollShare: 0.12, staffShare: 0.005 };
+    expect(median(season({ ...rich, upkeepOnly: true }).map((club) => club.margin))).toBeGreaterThan(0.6);
+    const clubs = season(rich);
+    for (const club of clubs) {
+      expect(club.margin).toBeGreaterThan(0);
+      expect(club.margin).toBeLessThan(0.1);
+      expect(club.lowest).toBeGreaterThan(0);
+    }
+    // Premier League-like wage share: still modest profits before transfers.
+    const english = season({ tier: 1, league: 92, payrollShare: 0.34, staffShare: 0.01 }).map((club) => club.margin);
+    expect(median(english)).toBeGreaterThan(0.01);
+    expect(median(english)).toBeLessThan(0.08);
+    expect(Math.max(...english)).toBeLessThan(0.1);
+  });
+
+  it("gives lower tiers thin margins with some losses", () => {
+    const margins = season({ tier: 3, league: 70, payrollShare: 0.45, staffShare: 0.08 }).map((club) => club.margin);
+    expect(median(margins)).toBeGreaterThan(-0.04);
+    expect(median(margins)).toBeLessThan(0.05);
+    expect(margins.some((margin) => margin < 0)).toBe(true);
+    expect(margins.some((margin) => margin > 0)).toBe(true);
+  });
+
+  it("charges only upkeep where wages already exceed revenue", () => {
+    const poor = { tier: 4, league: 60, payrollShare: 1.1, staffShare: 0.1 };
+    const before = season({ ...poor, upkeepOnly: true }).map((club) => club.margin);
+    expect(season(poor).map((club) => club.margin)).toEqual(before);
+    expect(Math.max(...before)).toBeLessThan(0);
+  });
+
+  it("makes wages above the budget cost money, and cuts spending when cash runs low", () => {
+    const base = { tier: 1, league: 88, payrollShare: 0.3, staffShare: 0.01 };
+    const onBudget = season(base);
+    const over = season({ ...base, overspend: 0.2 });
+    for (const [index, club] of over.entries())
+      expect(club.margin).toBeLessThan(onBudget[index].margin - 0.05);
+    const input = { annualRevenue: 52_000_000, wageShare: 0.3, spendRatio: 0.94, facilities: 70, academy: 60 };
+    const funded = weeklyOperatingCosts({ ...input, balance: 5_200_000 }).total;
+    const broke = weeklyOperatingCosts({ ...input, balance: 0 }).total;
+    expect(funded - broke).toBeCloseTo(60_000, -1);
+    expect(weeklyOperatingCosts({ ...input, balance: -1_000_000 }).total).toBe(broke);
+  });
+
+  it("draws a stable spend ratio per club within its tier band", () => {
+    for (let id = 1; id <= 500; id++) {
+      expect(spendRatio(id, 1)).toBeGreaterThanOrEqual(0.9);
+      expect(spendRatio(id, 1)).toBeLessThan(0.98);
+      expect(spendRatio(id, 6)).toBeGreaterThanOrEqual(0.855);
+      expect(spendRatio(id, 6)).toBeLessThan(0.935);
+      expect(spendRatio(id, 1)).toBe(spendRatio(id, 1));
+    }
   });
 });

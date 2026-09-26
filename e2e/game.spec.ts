@@ -1,4 +1,11 @@
-import { expect, test, type APIResponse, type Locator, type Page } from "@playwright/test";
+import {
+  expect,
+  test,
+  type APIRequestContext,
+  type APIResponse,
+  type Locator,
+  type Page,
+} from "@playwright/test";
 import type { AcademyData, Bootstrap, PlayerPage, SquadData } from "../shared/api.ts";
 import {
   POSITIONS,
@@ -50,6 +57,11 @@ async function retryBusyResponse(operation: () => Promise<APIResponse>) {
   }
   expect(response.status(), await response.text()).toBe(200);
   return response;
+}
+
+// The UI saves optimistically, so a read right after a click can land inside that save and get 409 world_busy.
+async function bootstrapOf(request: APIRequestContext) {
+  return (await retryBusyResponse(() => request.get("/api/bootstrap"))).json();
 }
 
 test("association rules expose the catalog coverage of every seeded association", async ({
@@ -540,9 +552,10 @@ test("future transfer agreements keep young players at their clubs and reserve m
     await expect(
       page.getByRole("heading", { name: "Make your move", exact: true }),
     ).toBeVisible();
-    expect(
-      (await (await request.get("/api/bootstrap")).json()).club.transfer_budget,
-    ).toBeCloseTo(before.club.transfer_budget, 2);
+    expect((await bootstrapOf(request)).club.transfer_budget).toBeCloseTo(
+      before.club.transfer_budget,
+      2,
+    );
   } finally {
     expect(
       (
@@ -619,9 +632,7 @@ test("the other club evaluates the chosen affiliation type before the agreement 
       .getByRole("button", { name: "Submit board request", exact: true })
       .click();
     await expect(dialog).not.toBeVisible();
-    expect(
-      (await (await request.get("/api/bootstrap")).json()).club.balance,
-    ).toBe(before.club.balance);
+    expect((await bootstrapOf(request)).club.balance).toBe(before.club.balance);
     expect(
       (
         await request.post("/api/advance", {
@@ -668,7 +679,7 @@ test("appearance settings persist the minimal and classic UI themes", async ({
     await expect
       .poll(
         async () =>
-          (await (await request.get("/api/bootstrap")).json()).settings.uiTheme,
+          (await bootstrapOf(request)).settings.uiTheme,
       )
       .toBe("classic");
     await page.reload();
@@ -683,7 +694,7 @@ test("appearance settings persist the minimal and classic UI themes", async ({
     await expect
       .poll(
         async () =>
-          (await (await request.get("/api/bootstrap")).json()).settings.uiTheme,
+          (await bootstrapOf(request)).settings.uiTheme,
       )
       .toBe("minimal");
     await noOverflow(page);
@@ -1628,7 +1639,7 @@ test("appearance settings persist light and dark themes on desktop and mobile", 
   await expect
     .poll(
       async () =>
-        (await (await request.get("/api/bootstrap")).json()).settings.theme,
+        (await bootstrapOf(request)).settings.theme,
     )
     .toBe("dark");
   await page.reload();
@@ -1692,7 +1703,7 @@ test("appearance settings persist light and dark themes on desktop and mobile", 
   await expect
     .poll(
       async () =>
-        (await (await request.get("/api/bootstrap")).json()).settings.theme,
+        (await bootstrapOf(request)).settings.theme,
     )
     .toBe("light");
   await page.reload();
@@ -1728,7 +1739,7 @@ test("custom accent HEX codes validate, apply and persist", async ({
   await expect
     .poll(
       async () =>
-        (await (await request.get("/api/bootstrap")).json()).settings.accent,
+        (await bootstrapOf(request)).settings.accent,
     )
     .toBe("#2452a1");
   await page.reload();
@@ -1737,9 +1748,7 @@ test("custom accent HEX codes validate, apply and persist", async ({
   await code.press("Enter");
   await expect(code).toHaveAttribute("aria-invalid", "true");
   await expect(apply).toBeDisabled();
-  expect(
-    (await (await request.get("/api/bootstrap")).json()).settings.accent,
-  ).toBe("#2452a1");
+  expect((await bootstrapOf(request)).settings.accent).toBe("#2452a1");
   await code.press("Escape");
   await expect(code).toHaveValue("#2452a1");
   await code.fill("#246");
@@ -1748,7 +1757,7 @@ test("custom accent HEX codes validate, apply and persist", async ({
   await expect
     .poll(
       async () =>
-        (await (await request.get("/api/bootstrap")).json()).settings.accent,
+        (await bootstrapOf(request)).settings.accent,
     )
     .toBe("#224466");
   await expect(
@@ -1776,7 +1785,7 @@ test("custom accent HEX codes validate, apply and persist", async ({
   await expect
     .poll(
       async () =>
-        (await (await request.get("/api/bootstrap")).json()).settings.accent,
+        (await bootstrapOf(request)).settings.accent,
     )
     .toBe("#087f6d");
   await request.patch("/api/settings", { data: { theme: "light" } });
@@ -1800,7 +1809,7 @@ test("currency settings convert budget slider previews and compact amounts witho
   await expect
     .poll(
       async () =>
-        (await (await request.get("/api/bootstrap")).json()).settings.currency,
+        (await bootstrapOf(request)).settings.currency,
     )
     .toBe("EUR");
   await page.reload();
@@ -1838,9 +1847,7 @@ test("currency settings convert budget slider previews and compact amounts witho
       .locator("dd"),
   ).toHaveText(/^€[\d,.]+M$/);
   await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
-  expect((await (await request.get("/api/bootstrap")).json()).club).toEqual(
-    before.club,
-  );
+  expect((await bootstrapOf(request)).club).toEqual(before.club);
   await page.goto("/#settings");
   await page
     .getByRole("navigation", { name: "Settings categories" })
@@ -1850,7 +1857,7 @@ test("currency settings convert budget slider previews and compact amounts witho
   await expect
     .poll(
       async () =>
-        (await (await request.get("/api/bootstrap")).json()).settings.currency,
+        (await bootstrapOf(request)).settings.currency,
     )
     .toBe("USD");
   await page.setViewportSize({ width: 390, height: 844 });
@@ -1863,7 +1870,7 @@ test("currency settings convert budget slider previews and compact amounts witho
   await expect
     .poll(
       async () =>
-        (await (await request.get("/api/bootstrap")).json()).settings.currency,
+        (await bootstrapOf(request)).settings.currency,
     )
     .toBe("GBP");
 });
@@ -1911,9 +1918,7 @@ test("budget allocation slider protects committed wages and saves changes in eit
       "aria-valuetext",
       `${money(before.club.transfer_budget - minimum, true, currency)} transfer budget; ${money(before.club.wage_budget + minimum / 52, true, currency)} weekly wage budget`,
     );
-    expect((await (await request.get("/api/bootstrap")).json()).club).toEqual(
-      before.club,
-    );
+    expect((await bootstrapOf(request)).club).toEqual(before.club);
     await page.screenshot({ path: "test-results/budget-slider-desktop.png" });
     await page.setViewportSize({ width: 390, height: 844 });
     await noOverflow(page);
@@ -1925,7 +1930,7 @@ test("budget allocation slider protects committed wages and saves changes in eit
     await page.screenshot({ path: "test-results/budget-slider-mobile.png" });
     await confirm.click();
     await expect(dialog).not.toBeVisible();
-    const transfers = await (await request.get("/api/bootstrap")).json();
+    const transfers = await bootstrapOf(request);
     expect(transfers.club.transfer_budget).toBeCloseTo(
       before.club.transfer_budget - minimum,
       2,
@@ -1955,7 +1960,7 @@ test("budget allocation slider protects committed wages and saves changes in eit
     await expect(
       page.getByRole("heading", { name: "Club finances", exact: true }),
     ).toBeVisible();
-    const wages = await (await request.get("/api/bootstrap")).json();
+    const wages = await bootstrapOf(request);
     expect(wages.club.transfer_budget).toBeCloseTo(
       transfers.club.transfer_budget - maximum,
       2,
@@ -1996,7 +2001,7 @@ test("appearance follows system preferences and rolls back a failed save", async
   await expect
     .poll(
       async () =>
-        (await (await request.get("/api/bootstrap")).json()).settings.theme,
+        (await bootstrapOf(request)).settings.theme,
     )
     .toBe("system");
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
@@ -2022,7 +2027,7 @@ test("appearance follows system preferences and rolls back a failed save", async
   await expect
     .poll(
       async () =>
-        (await (await request.get("/api/bootstrap")).json()).settings.theme,
+        (await bootstrapOf(request)).settings.theme,
     )
     .toBe("light");
 });
@@ -2068,9 +2073,11 @@ test("mobile navigation, settings, accessibility and dossier fit", async ({
     fullPage: true,
   });
   await noOverflow(page);
-  await request.patch("/api/settings", {
-    data: { theme: "light", highContrast: false },
-  });
+  await retryBusyResponse(() =>
+    request.patch("/api/settings", {
+      data: { theme: "light", highContrast: false },
+    }),
+  );
   await page.goto("/#database");
   await page.locator(".player-table .player-name").first().click();
   await expect(page.getByRole("dialog")).toBeVisible();
@@ -2571,7 +2578,8 @@ test("advancing the full world produces coherent match analysis and all eight no
     });
     expect(response.status()).toBe(200);
     const result = await response.json();
-    expect(result.matches).toBeGreaterThan(1000);
+    // v4 leagues start on 8 August; on 11 July every EN, DE and LU senior league plays a pre-season round (126 friendlies).
+    expect(result.matches).toBeGreaterThan(100);
   }
   await page.goto("/#analytics");
   await expect(page.getByLabel("Pitch map type")).toBeVisible({
@@ -2830,9 +2838,7 @@ test("career club picker groups divisions and preserves the selected appointment
     path: "test-results/career-picker-mobile.png",
     fullPage: true,
   });
-  expect((await (await request.get("/api/bootstrap")).json()).state).toEqual(
-    before.state,
-  );
+  expect((await bootstrapOf(request)).state).toEqual(before.state);
 });
 
 test("start menu creates, loads and safely deletes a separate career", async ({
@@ -3036,9 +3042,7 @@ test("start menu creates, loads and safely deletes a separate career", async ({
   expect(
     afterDelete.some((slot: { file: string }) => slot.file === saved.file),
   ).toBe(true);
-  expect((await (await request.get("/api/bootstrap")).json()).state).toEqual(
-    restored.state,
-  );
+  expect((await bootstrapOf(request)).state).toEqual(restored.state);
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.getByLabel("Search saved careers").fill("Career menu regression");
   await noOverflow(page);
