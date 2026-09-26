@@ -39,6 +39,8 @@ export interface PlayerProfile {
     height: number;
     weight: number;
     bodyType: string;
+    /** Adult targets for natural height/weight development (server/growth.ts); maturation -1 early … 1 late. */
+    growth?: { adultHeight: number; adultWeight: number; maturation: number };
   };
   attributes: Record<
     "technical" | "mental" | "physical" | "tactical" | "goalkeeper",
@@ -75,6 +77,17 @@ export interface PlayerProfile {
     workPermitPoints: number;
     adaptedCountries: number[];
     lastAssociationId?: number;
+  };
+  /** Club-less player of a nation without an own league (home-based pool). */
+  homeBased?: { countryId: number; since: string };
+  intake?: {
+    season: number;
+    source: "academy" | "grassroots" | "trial" | "top-up" | "pool";
+  };
+  retirement?: {
+    season: number;
+    date: string;
+    reason: "retired" | "left-football";
   };
 }
 
@@ -136,6 +149,30 @@ export interface Country {
   reputation: number;
   language: string;
   region: string;
+}
+
+/** B-team policy of an association (world audit); built by shared/world-rules.ts from the catalog. */
+export interface ReservePolicy {
+  mode: "pyramid" | "separate" | "none" | "unverified";
+  competition:
+    | "senior-pyramid"
+    | "reserve-league"
+    | "closed-development"
+    | "none"
+    | "unknown";
+  highestTier: number | null;
+  entryTier: number | null;
+  professional: boolean | null;
+  gap: number;
+  naming: "B" | "II" | "2" | "U23" | "Jong" | "Reserves";
+  /** Catalog name template, e.g. "{club} B" or "Jong {club}". */
+  nameTemplate?: string;
+  /** Maximum number of B-teams. */
+  maxTeams?: number;
+  evidence: "documented" | "historical" | "unverified";
+  verification: "official-rule" | "official-participation" | "secondary" | "unverified";
+  summary: string;
+  source: string;
 }
 
 export interface Club {

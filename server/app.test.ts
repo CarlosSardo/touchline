@@ -143,7 +143,7 @@ describe("hosted invitation access (no database)", () => {
 });
 
 describe("per-user HTTP isolation (two isolated SQL schemas)", () => {
-  const fixture = { countryLimit: 2, seniors: 1200, youth: 400, expanded: false };
+  const fixture = { nations: ["SCO"], squads: "minimum" as const };
   let root: Store;
   let schemaOwner: Store;
   let ownerWorld: Store;
@@ -310,7 +310,7 @@ describe("per-user HTTP isolation (two isolated SQL schemas)", () => {
     const prepared = await pending;
     expect(prepared.status).toBe(200);
     expect(prepared.body).toEqual({ created: true });
-    expect(generate).toHaveBeenCalledWith(ownerWorld, { seed: expect.stringMatching(/^touchline-/), expanded: false });
+    expect(generate).toHaveBeenCalledWith(ownerWorld, { seed: expect.stringMatching(/^touchline-/) });
     const state = await stateOf(ownerWorld);
     expect(state.started).toBe(false);
     expect(state.director.name).toBe("Owner Director");
@@ -330,6 +330,13 @@ describe("per-user HTTP isolation (two isolated SQL schemas)", () => {
     expect(await stateOf(ownerWorld)).toMatchObject({ started: true, seed: state.seed, director: { name: "Owner Director" } });
     expect(generate).toHaveBeenCalledOnce();
     expect(clear).not.toHaveBeenCalled();
+    expect(await new Saves(ownerWorld).list()).toHaveLength(1);
+    // A resent start (e.g. after an ingress timeout) returns the finished result instead of another career.
+    const replay = await access("post", "/api/careers").send({
+      careerName: "Owner season", background: "Former scout", clubId: state.clubId,
+    });
+    expect(replay.status).toBe(200);
+    expect(replay.body).toEqual(career.body);
     expect(await new Saves(ownerWorld).list()).toHaveLength(1);
     expect((await ownerWorld.get<{ total: number }>("SELECT COUNT(*) AS total FROM fixtures"))!.total).toBeGreaterThan(0);
     expect((await ownerWorld.get<{ total: number }>("SELECT COUNT(*) AS total FROM news"))!.total).toBeGreaterThan(0);
@@ -647,7 +654,7 @@ describe("game HTTP API and SQL saves", () => {
   let app: Awaited<ReturnType<typeof createApp>>;
   beforeAll(async () => {
     store = await Store.createTest("http-api");
-    await generateWorld(store, { countryLimit: 3, seniors: 1800, youth: 900 });
+    await generateWorld(store, { nations: ["SCO", "IE"], squads: "minimum", seed: "http-api" });
     await createCalendar(store);
     await initialInbox(store);
     await store.setMeta("state", { ...await stateOf(store), started: true });
@@ -1359,102 +1366,13 @@ describe("game HTTP API and SQL saves", () => {
     expect(await store.all("SELECT id,value,wage FROM players ORDER BY id")).toEqual(players);
   });
 
-  it("retains a loadable safety checkpoint when an HTTP world expansion fails", async () => {
+  it("has no world expansion endpoint: one curated world, nothing to expand", async () => {
     const saves = new Saves(store);
-    const expansion = await import("./world-expansion.ts");
-    await saves.create("HTTP expansion regression checkpoint");
     const state = await stateOf(store);
-    const club = await store.get("SELECT * FROM clubs WHERE id = ?", state.clubId);
-    const beforeFiles = new Set((await saves.list()).map((slot) => slot.file));
-    const expand = vi.spyOn(expansion, "expandWorld").mockImplementationOnce(async () => {
-      await store.run("UPDATE clubs SET balance = 0 WHERE id = ?", state.clubId);
-      throw new Error("injected HTTP expansion failure");
-    });
-    try {
-      expect((await request(app).post("/api/world/expand")).status).toBe(500);
-      expect(await stateOf(store)).toEqual(state);
-      expect(await store.get("SELECT * FROM clubs WHERE id = ?", state.clubId)).toEqual(club);
-      const retained = (await saves.list()).filter((slot) => !beforeFiles.has(slot.file));
-      expect(retained).toHaveLength(1);
-      expect(retained[0].name).toBe("Before world expansion");
-      await saves.restore(retained[0].file);
-      expect(await stateOf(store)).toEqual(state);
-      expect(await store.get("SELECT * FROM clubs WHERE id = ?", state.clubId)).toEqual(club);
-    } finally {
-      expand.mockRestore();
-    }
-  });
-
-  it("backs up a mid-season world expansion and preserves contracts, finances and fixtures until new divisions activate", async () => {
-    const saves = new Saves(store);
-    const checkpoint = await saves.create("Expansion regression checkpoint");
-    try {
-      await store.setMeta("state", {
-        ...(await stateOf(store)),
-        date: "2026-11-15",
-      });
-      await store.run(
-        "UPDATE fixtures SET status = 'played',home_goals = 2,away_goals = 1 WHERE id = (SELECT min(id) FROM fixtures)",
-      );
-      const state = await stateOf(store);
-      const fixtures = await store.all("SELECT * FROM fixtures ORDER BY id");
-      const players = await store.all(
-        "SELECT id,club_id,birth_date,ability,potential,wage,contract_end FROM players ORDER BY id",
-      );
-      const clubs = await store.all(
-        "SELECT id,balance,transfer_budget,wage_budget FROM clubs ORDER BY id",
-      );
-      const lastPlayer = (await store.get<{ id: number }>(
-        "SELECT max(id) AS id FROM players",
-      ))!.id;
-      const lastClub = (await store.get<{ id: number }>(
-        "SELECT max(id) AS id FROM clubs",
-      ))!.id;
-      const response = await request(app).post("/api/world/expand");
-      expect(response.status).toBe(200);
-      expect(response.body.changed).toBe(true);
-      expect(response.body.activeFromSeason).toBe(2027);
-      expect(
-        (await saves.list()).some(
-          (slot) => slot.file === response.body.archived,
-        ),
-      ).toBe(true);
-      expect(await stateOf(store)).toEqual(state);
-      expect(await store.all("SELECT * FROM fixtures ORDER BY id")).toEqual(
-        fixtures,
-      );
-      expect(
-        await store.all(
-          "SELECT id,club_id,birth_date,ability,potential,wage,contract_end FROM players WHERE id <= ? ORDER BY id",
-          lastPlayer,
-        ),
-      ).toEqual(players);
-      expect(
-        await store.all(
-          "SELECT id,balance,transfer_budget,wage_budget FROM clubs WHERE id <= ? ORDER BY id",
-          lastClub,
-        ),
-      ).toEqual(clubs);
-      expect((await request(app).get("/api/world/audit")).status).toBe(200);
-      const slots = await saves.list();
-      expect((await request(app).post("/api/world/expand")).body.changed).toBe(
-        false,
-      );
-      expect(await saves.list()).toEqual(slots);
-      await expectSchemaIntegrity(store);
-      await saves.restore(response.body.archived);
-      expect(await stateOf(store)).toEqual(state);
-      expect(await store.all("SELECT * FROM fixtures ORDER BY id")).toEqual(
-        fixtures,
-      );
-      expect(
-        await store.all(
-          "SELECT id,club_id,birth_date,ability,potential,wage,contract_end FROM players ORDER BY id",
-        ),
-      ).toEqual(players);
-    } finally {
-      await saves.restore(checkpoint.file);
-    }
+    const slots = await saves.list();
+    expect((await request(app).post("/api/world/expand")).status).toBe(404);
+    expect(await stateOf(store)).toEqual(state);
+    expect(await saves.list()).toEqual(slots);
   });
 
   it("restores empty clause schedules and older settings while preserving its career", async () => {

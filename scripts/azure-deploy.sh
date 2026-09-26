@@ -4,19 +4,22 @@ set +x
 
 deploy_usage() {
   printf '%s\n' \
-    'Usage: bash scripts/azure-deploy.sh --yes [--stage-only | --hold-ingress] [--skip-db-prepare] [--verification full|smoke] [--image ghcr.io/OWNER/IMAGE@sha256:DIGEST]' \
+    'Usage: bash scripts/azure-deploy.sh --yes [--stage-only | --hold-ingress] [--skip-db-prepare] [--empty-worlds] [--verification full|smoke] [--image ghcr.io/OWNER/IMAGE@sha256:DIGEST]' \
     '--stage-only builds/publishes and configures internal-only maintenance mode without opening SQL or enabling gameplay.' \
     '--hold-ingress builds a SQL-configured gameplay candidate but leaves ingress internal, without public probes or promotion.' \
     'Held candidates are recorded in .azure/held-app.json as pendingPromotion; runtime health and human sign-in remain unverified.' \
     'Promote only the inspected revision/digest using the guarded README procedure; rerunning deployment builds a new candidate.' \
     '--skip-db-prepare skips SQL export, migrations and runtime grants; read-only registry and every registered schema check remain mandatory.' \
     'Runs SQL-backed verification first. Without --image, builds locally, pushes privately and resolves the pushed digest.' \
-    'Prebuilt --image digests are maintenance-stage-only until image-bound per-user compatibility proof is available; omit --image for a reviewed source release.' \
+    'A prebuilt --image (for example CI-built) ships gameplay only if its linux/amd64 config label org.opencontainers.image.revision' \
+    'equals the clean checkout HEAD; the check reads GHCR with the pull token and needs no Docker. --hold-ingress still requires a local build.' \
+    '--empty-worlds is for the release after a reviewed world reset: every registered world must be empty; the dbo export is skipped' \
+    'and the smoke checks expect no career. The operator full backup must precede the reset.' \
     '--verification smoke runs a fresh build and read-only live API checks; it does not certify the full regression suite. Default: full.' \
-    'Gameplay deployment requires an explicitly provisioned accounts.users registry, the preserved dbo career, UMI and Consumption environment; other worlds may be empty.' \
+    'Gameplay deployment requires an explicitly provisioned accounts.users registry, the preserved dbo career (or --empty-worlds), UMI and Consumption environment; other worlds may be empty.' \
     'Missing accounts block upgrades: review scripts/accounts-migrate.ts and separately provision with --apply --yes; deployment never binds users or seeds.' \
     'Required env: GHCR_USER, GHCR_PULL_TOKEN (or GHCR_TOKEN), AUTH_CLIENT_ID, AUTH_CLIENT_SECRET.' \
-    'Building also requires GHCR_TOKEN with read:packages/write:packages and working Docker permissions.' \
+    'Building (no --image) also requires GHCR_TOKEN with read:packages/write:packages and working Docker permissions.' \
     'Prefer a separate read:packages-only GHCR_PULL_TOKEN. Supply secrets locally, never in chat or CLI arguments.' \
     'Optional AUTH_SMOKE_TOKEN: owner access token for the configured app audience; never acquired automatically.' \
     'With --skip-db-prepare the authenticated account probe is skipped to avoid profile refresh writes; owner verification remains pending.' \
@@ -64,6 +67,104 @@ try {
   assert.deepEqual(await store.meta('state'),before,'Smoke checks must not alter the career');
   console.log('[smoke] Legacy dbo career unchanged in the internal synthetic app; public authentication was not changed. Complete gameplay/browser regression not rerun.');
 } finally { await store.close(); }
+NODE
+}
+
+deployment_empty_worlds_check() {
+  printf '%s\n' '[verify] --empty-worlds: every registered world must be empty after the reviewed reset.'
+  deployment_sql -- node --import tsx --input-type=module <<'NODE'
+import {Store} from './server/db.ts';
+import {registeredAccountSchemas} from './server/accounts.ts';
+import {tableName} from './server/sql-schema.ts';
+const store=await Store.open();
+try {
+  for(const schema of await registeredAccountSchemas(store)) {
+    const state=await store.get(`SELECT TOP (1) [key] FROM ${tableName(schema,'meta')} WHERE [key] = N'state'`);
+    const club=await store.get(`SELECT TOP (1) [id] FROM ${tableName(schema,'clubs')}`);
+    const player=await store.get(`SELECT TOP (1) [id] FROM ${tableName(schema,'players')}`);
+    if(state || club || player)
+      throw new Error(`--empty-worlds refused: ${schema} still holds a world. Run the reviewed world reset first; deployment never deletes data.`);
+    const slots=await store.get(`SELECT COUNT_BIG(*) AS [total] FROM ${tableName(schema,'save_slots')}`);
+    console.log(`[sql] ${schema}: world empty; ${Number(slots.total)} saved snapshot(s).`);
+  }
+} finally { await store.close(); }
+NODE
+}
+
+deployment_empty_smoke() {
+  deployment_sql -- env -u CONTAINER_APP_NAME -u APP_ORIGIN REQUIRE_AUTH=false API_HOST=127.0.0.1 SQL_SCHEMA=dbo \
+    node --import tsx --input-type=module <<'NODE'
+import assert from 'node:assert/strict';
+import request from 'supertest';
+import {Store} from './server/db.ts';
+import {createApp} from './server/app.ts';
+const store=await Store.open();
+const career=()=>store.get("SELECT TOP (1) [key] FROM meta WHERE [key] = N'state'");
+try {
+  assert.equal(store.schemaName,'dbo');
+  assert.equal(store.testMode,false);
+  assert.equal(await career(),undefined,'The dbo world must be empty before the empty-world smoke.');
+  const app=await createApp(store);
+  for(const path of ['/api/health/details','/api/bootstrap','/api/saves']) {
+    const response=await request(app).get(path);
+    assert.equal(response.status,200,`Read-only ${path} failed`);
+    if(path==='/api/health/details') {
+      assert.equal(response.body.hosted,false);
+      assert.equal(response.body.testCareer,false);
+      assert.equal(response.body.schema,'dbo');
+      assert.equal(response.body.databaseName,process.env.AZURE_SQL_DATABASE);
+      assert.equal(response.body.date,'');
+    }
+    if(path==='/api/bootstrap') assert.equal(response.text,'null','An empty world must not bootstrap a career.');
+    console.log(`[smoke] GET ${path}: 200`);
+  }
+  assert.equal(await career(),undefined,'Smoke checks must not create a career.');
+  console.log('[smoke] Empty dbo world unchanged in the internal synthetic app; New career is verified by the owner after promotion.');
+} finally { await store.close(); }
+NODE
+}
+
+deployment_image_provenance() {
+  local image="$1" pull_token="$2" revision
+  need git
+  [[ -z "$(git status --porcelain --untracked-files=no)" ]] || fail '--image requires a clean tracked checkout of the reviewed commit.'
+  revision="$(git rev-parse HEAD)"
+  [[ "$revision" =~ ^[a-f0-9]{40}$ ]] || fail 'Could not resolve the checkout commit.'
+  printf '[image] Verifying that %s was built from %s (GHCR metadata, no Docker).\n' "$image" "$revision"
+  DEPLOY_IMAGE="$image" DEPLOY_REVISION="$revision" DEPLOY_PULL_TOKEN="$pull_token" node --input-type=module <<'NODE'
+import {createHash} from 'node:crypto';
+const {DEPLOY_IMAGE:image,DEPLOY_REVISION:revision,DEPLOY_PULL_TOKEN:token,GHCR_USER:user,GHCR_IMAGE:reference}=process.env;
+const repository=reference.slice('ghcr.io/'.length), digest=image.slice(image.indexOf('@')+1);
+const login=await fetch(`https://ghcr.io/token?service=ghcr.io&scope=${encodeURIComponent(`repository:${repository}:pull`)}`,
+  {headers:{Authorization:`Basic ${Buffer.from(`${user}:${token}`).toString('base64')}`},signal:AbortSignal.timeout(20000)});
+if(login.status!==200) throw new Error('GHCR pull authentication failed; image provenance could not be checked.');
+const {token:bearer}=await login.json();
+const sha=bytes=>`sha256:${createHash('sha256').update(bytes).digest('hex')}`;
+const fetchVerified=async (path,expected,accept)=>{
+  const response=await fetch(`https://ghcr.io/v2/${repository}/${path}`,
+    {headers:{Authorization:`Bearer ${bearer}`,...(accept?{Accept:accept}:{})},signal:AbortSignal.timeout(60000)});
+  if(response.status!==200) throw new Error(`GHCR returned ${response.status} for ${path.split('/')[0]}.`);
+  const bytes=Buffer.from(await response.arrayBuffer());
+  if(sha(bytes)!==expected) throw new Error('GHCR content does not match its digest.');
+  return JSON.parse(bytes.toString('utf8'));
+};
+const manifestTypes=['application/vnd.oci.image.index.v1+json','application/vnd.docker.distribution.manifest.list.v2+json',
+  'application/vnd.oci.image.manifest.v1+json','application/vnd.docker.distribution.manifest.v2+json'].join(', ');
+let manifest=await fetchVerified(`manifests/${digest}`,digest,manifestTypes);
+if(Array.isArray(manifest.manifests)) {
+  const platforms=manifest.manifests.filter(entry=>entry.platform?.os==='linux' && entry.platform?.architecture==='amd64');
+  if(platforms.length!==1) throw new Error('The image index must contain exactly one linux/amd64 manifest.');
+  manifest=await fetchVerified(`manifests/${platforms[0].digest}`,platforms[0].digest,platforms[0].mediaType);
+}
+if(!manifest.config?.digest) throw new Error('The image manifest has no config.');
+const config=await fetchVerified(`blobs/${manifest.config.digest}`,manifest.config.digest);
+const labels=config.config?.Labels ?? {};
+if(config.os!=='linux' || config.architecture!=='amd64') throw new Error('Azure Container Apps requires a linux/amd64 image.');
+if(labels['org.opencontainers.image.source']?.toLowerCase()!=='https://github.com/carlossardo/touchline')
+  throw new Error('The image source label does not name the Touchline repository.');
+if(labels['org.opencontainers.image.revision']!==revision)
+  throw new Error(`The image was built from ${labels['org.opencontainers.image.revision'] ?? 'an unknown revision'}, not the checkout ${revision}.`);
+console.log('[image] Provenance verified: the digest carries the checkout commit.');
 NODE
 }
 
@@ -309,7 +410,7 @@ NODE
 }
 
 deployment_main() {
-  local consent='' image='' stage_only=false hold_ingress=false verification=full skip_db_prepare=false
+  local consent='' image='' stage_only=false hold_ingress=false verification=full skip_db_prepare=false empty_worlds=false image_verified=false
   while (( $# )); do
     case "$1" in
       --help|-h) deploy_usage; return ;;
@@ -317,6 +418,7 @@ deployment_main() {
       --stage-only) stage_only=true; shift ;;
       --hold-ingress) hold_ingress=true; shift ;;
       --skip-db-prepare) skip_db_prepare=true; shift ;;
+      --empty-worlds) empty_worlds=true; shift ;;
       --verification) [[ $# -ge 2 ]] || { deploy_usage >&2; return 2; }; verification="$2"; shift 2 ;;
       --image) [[ $# -ge 2 ]] || { deploy_usage >&2; return 2; }; image="$2"; shift 2 ;;
       *) deploy_usage >&2; return 2 ;;
@@ -326,6 +428,7 @@ deployment_main() {
   [[ "$verification" == full || "$verification" == smoke ]] || fail '--verification must be full or smoke.'
   [[ "$hold_ingress" != true || "$stage_only" != true ]] || fail '--hold-ingress and --stage-only are mutually exclusive.'
   [[ "$hold_ingress" != true || -z "$image" ]] || fail '--hold-ingress requires a reviewed source build, not a prebuilt --image.'
+  [[ "$empty_worlds" != true || "$stage_only" != true ]] || fail '--empty-worlds applies to gameplay deployments only.'
   [[ "$consent" == --yes ]] || fail 'Deployment requires --yes. Use --help to review prerequisites.'
   [[ "$GHCR_IMAGE" =~ ^ghcr\.io/[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._/-]*$ ]] || fail 'GHCR_IMAGE must be an untagged private ghcr.io repository.'
   if [[ -n "$image" ]]; then
@@ -342,6 +445,14 @@ deployment_main() {
   need node
   need npm
   [[ -f scripts/azure-sql.sh ]] || fail 'Main must provide scripts/azure-sql.sh before deployment.'
+  if [[ -n "$image" && "$stage_only" != true ]]; then
+    deployment_image_provenance "$image" "$pull_token"
+    image_verified=true
+  fi
+  if [[ "$stage_only" != true && "$verification" == smoke ]]; then
+    printf '%s\n' '[verify] Building before any Azure or SQL step, so ingress closes and the database wakes later.'
+    npm run build
+  fi
   printf '%s\n' '[deploy] Checking target, SQL free limits, managed identity and private registry.'
   check_target
   confirm_target "$consent"
@@ -365,6 +476,7 @@ deployment_main() {
   umask 077
   temp_dir="$(mktemp -d)"
   app_id="/subscriptions/$AZURE_SUBSCRIPTION_ID/resourceGroups/$AZURE_RESOURCE_GROUP/providers/Microsoft.App/containerApps/$AZURE_APP"
+  # shellcheck disable=SC2154 # status is assigned inside the trap body.
   trap 'status=$?; trap - EXIT; if [[ "$touched" == true && "$completed" != true ]]; then azure containerapp ingress enable --name "$AZURE_APP" --resource-group "$AZURE_RESOURCE_GROUP" --type internal --target-port 3001 --transport auto --output none >/dev/null 2>&1 || printf "%s\n" "CRITICAL: Could not close ingress after failure; close it manually immediately." >&2; fi; rm -rf -- "$temp_dir"; exit "$status"' EXIT
   azure containerapp list --resource-group "$AZURE_RESOURCE_GROUP" --output json >"$temp_dir/apps.json"
   APP_NAME="$AZURE_APP" DEPLOY_STAGE_ONLY="$stage_only" node --input-type=module - "$temp_dir" <<'NODE'
@@ -393,23 +505,34 @@ NODE
     else
       deployment_schema_check
     fi
-    [[ -z "$image" ]] || fail 'Gameplay deployment with --image is blocked: a digest and schema version do not prove per-user isolation. Omit --image to build the reviewed isolated source, or use --stage-only for internal maintenance without promotion.'
-    printf '%s\n' '[verify] Checking only the preserved dbo career, then running isolated SQL-backed verification; other registered worlds may be empty.'
-    deployment_sql -- node --import tsx --input-type=module -e 'const {Store}=await import("./server/db.ts"); const {stateOf}=await import("./server/systems.ts"); const store=await Store.open(); try { if(!(await stateOf(store))?.date || !(await store.get("SELECT TOP(1) id FROM clubs"))) throw new Error("Load an initialized world before deployment; no seed is performed."); } finally { await store.close(); }'
+    [[ -z "$image" || "$image_verified" == true ]] || fail 'Gameplay deployment with an unverified --image is blocked. Omit --image to build the reviewed source, or use a digest whose revision label equals the clean checkout HEAD.'
+    if [[ "$empty_worlds" == true ]]; then
+      deployment_empty_worlds_check
+    else
+      printf '%s\n' '[verify] Checking only the preserved dbo career, then running isolated SQL-backed verification; other registered worlds may be empty.'
+      deployment_sql -- node --import tsx --input-type=module -e 'const {Store}=await import("./server/db.ts"); const {stateOf}=await import("./server/systems.ts"); const store=await Store.open(); try { if(!(await stateOf(store))?.date || !(await store.get("SELECT TOP(1) id FROM clubs"))) throw new Error("Load an initialized world before deployment; no seed is performed."); } finally { await store.close(); }'
+    fi
     if [[ "$verification" == full ]]; then
       deployment_sql --tests -- npm run verify
     else
       printf '%s\n' '[verify] Focused release checks selected; full gameplay/browser regression will not be rerun.'
-      npm run build
-      deployment_readonly_smoke
+      if [[ "$empty_worlds" == true ]]; then
+        deployment_empty_smoke
+      else
+        deployment_readonly_smoke
+      fi
     fi
     if [[ "$skip_db_prepare" == true ]]; then
       printf '%s\n' '[deploy] Using the prepared database; SQL export, migrations and runtime grants skipped.'
     else
-      backup=".azure/backups/pre-deploy-${stamp}.touchline.gz"
-      mkdir -p .azure/backups
-      printf '%s\n' '[backup] Exporting the legacy dbo active world before migration or permission changes; other worlds and save catalogs require separate operator backups.'
-      deployment_sql -- node --import tsx scripts/data-export.ts --out "$backup"
+      if [[ "$empty_worlds" == true ]]; then
+        printf '%s\n' '[backup] Skipped: registered worlds are empty; the operator full backup must precede the reset.'
+      else
+        backup=".azure/backups/pre-deploy-${stamp}.touchline.gz"
+        mkdir -p .azure/backups
+        printf '%s\n' '[backup] Exporting the legacy dbo active world before migration or permission changes; other worlds and save catalogs require separate operator backups.'
+        deployment_sql -- node --import tsx scripts/data-export.ts --out "$backup"
+      fi
       printf '%s\n' '[migrate] Applying explicit migrations to every registered world, then constrained world and registry-profile runtime grants.'
       deployment_sql -- node --import tsx scripts/db-migrate.ts --registered --apply --yes
       deployment_sql -- node --import tsx scripts/db-authorize.ts --registered --client-id "$identity_client" --name "$AZURE_IDENTITY" --apply --yes
@@ -419,7 +542,8 @@ NODE
     printf '%s\n' '[image] Building locally and pushing to private GHCR.'
     need docker
     docker info >/dev/null 2>&1 || fail 'Docker permission/daemon check failed. No build or push attempted.'
-    local tag="$GHCR_IMAGE:local-$(git rev-parse --short HEAD)-$stamp"
+    local tag
+    tag="$GHCR_IMAGE:local-$(git rev-parse --short HEAD)-$stamp"
     bash scripts/build.sh "$tag"
     mkdir "$temp_dir/docker"
     printf '%s' "$push_token" | DOCKER_CONFIG="$temp_dir/docker" docker login ghcr.io --username "$GHCR_USER" --password-stdin >/dev/null 2>&1 || fail 'Private GHCR login failed.'

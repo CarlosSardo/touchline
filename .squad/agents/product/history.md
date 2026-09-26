@@ -46,3 +46,12 @@ Product owns the playable React experience, responsive organization, accessibili
 - `??` only falls back on null/undefined; a "" careerName made the typed-confirmation target "" so an empty field matched. Use `x?.trim() || fallback` for any user-editable text that gates a destructive action, and require the target to be non-empty (`deleteConfirmed` guards both submit and the button).
 - Covered by a mocked accounts.spec case at 1440/390/320 (blank careerName → must type "Account Fixture FC" exactly; case-mismatch and Enter stay inert).
 - Gotcha: in a shared checkout with parallel agents, sync terminal output can show another agent's lines. Write all output plus the END marker into the /tmp log (`> log 2>&1; echo END >> log`) and read the log, rather than trusting piped stdout.
+
+### 2026-09-24T09:22:15+0200 — VS Code test discovery
+- Workspace recommendations now include `vitest.explorer` and `ms-playwright.playwright`; install them and reload VS Code once when the adapters are absent.
+- Vitest discovery includes server/shared/src `test` and `spec` TS/TSX files while retaining the Node environment and SQL settings. Verified discovery: 304 Vitest tests in 13 files and 65 Playwright tests in 2 files.
+
+### 2026-09-24T09:22:15+0200 — PR #6 package and merge
+
+- Packaged the test-discovery change from an isolated worktree as commit `6f8efc8ffdb3fc12595938c6821c35a8c8ebb961`; PR #6 passed independent Lead and Rai review and merged normally as `38cf8108cae1074847901a655632a7ac825acfba`.
+- Post-merge discovery remained 304 Vitest tests in 13 files and 65 Playwright tests in 2 files. These commands listed tests without executing them. Feature branches and the task worktree were removed, and GitHub identity was restored.

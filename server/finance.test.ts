@@ -11,21 +11,26 @@ import {
   money,
   transferPaymentPlan,
   valuation,
+  VALUE_RANGE,
 } from "../shared/rules.ts";
 import {
   acquirePlayerAsset,
   annualAmortization,
   assessFinances,
   assetAmortization,
+  baseWage,
   clubValuation,
   closeFinancialYear,
   estimateClubRevenue,
   initialClubFinances,
+  marketWage,
+  payrollScale,
   postWeeklyAccounts,
   recordFinancialItem,
   sellPlayerAsset,
   type ClubEconomyInput,
 } from "./finance.ts";
+import type { AgeGroup } from "../shared/types.ts";
 
 describe("currency presentation", () => {
   it("uses compact values without changing accounting amounts", () => {
@@ -100,64 +105,71 @@ describe("heuristic player valuation", () => {
       label: "amateur-level players",
       player: { ability: 25, potential: 30 },
       reputation: 10,
-      minimum: 0,
-      maximum: 500,
+      minimum: 500,
+      maximum: 5000,
     },
     {
       label: "lower-division regulars",
       player: { ability: 45, potential: 50 },
       reputation: 25,
-      minimum: 1000,
-      maximum: 15_000,
+      minimum: 20_000,
+      maximum: 90_000,
     },
     {
       label: "useful modest-league professionals",
       player: { ability: 55, potential: 60 },
       reputation: 45,
-      minimum: 25_000,
-      maximum: 90_000,
+      minimum: 80_000,
+      maximum: 300_000,
     },
     {
       label: "established professionals",
       player: { ability: 65, potential: 70 },
       reputation: 65,
-      minimum: 250_000,
-      maximum: 900_000,
+      minimum: 600_000,
+      maximum: 2_500_000,
     },
     {
       label: "strong top-division players",
       player: { ability: 75, potential: 78 },
       reputation: 80,
-      minimum: 2_000_000,
-      maximum: 8_000_000,
+      minimum: 7_000_000,
+      maximum: 20_000_000,
+    },
+    {
+      label: "mid-table Premier League squad players",
+      player: { ability: 74, potential: 76 },
+      reputation: 92,
+      minimum: 10_000_000,
+      maximum: 25_000_000,
     },
     {
       label: "proven elite young forwards",
       player: { ability: 90, potential: 97, age: 22, position: "ST" },
       reputation: 95,
-      minimum: 50_000_000,
-      maximum: 110_000_000,
+      minimum: 80_000_000,
+      maximum: 180_000_000,
     },
     {
       label: "world-class prime forwards",
       player: { ability: 95, potential: 97, position: "ST" },
       reputation: 99,
-      minimum: 100_000_000,
-      maximum: 200_000_000,
+      minimum: 130_000_000,
+      maximum: 250_000_000,
     },
     {
       label: "unproven academy prospects",
       player: { ability: 45, potential: 99, age: 16 },
       reputation: 85,
-      minimum: 2000,
-      maximum: 50_000,
+      minimum: 150_000,
+      maximum: 800_000,
     },
     {
       label: "older useful professionals",
       player: { ability: 65, potential: 70, age: 35 },
       reputation: 65,
-      minimum: 20_000,
-      maximum: 140_000,
+      minimum: 100_000,
+      maximum: 450_000,
     },
   ] as const)("calibrates $label in GBP", (scenario) => {
     const { value } = estimate(scenario.player, {
@@ -188,13 +200,16 @@ describe("heuristic player valuation", () => {
     );
   });
 
-  it("prices prospects on demonstrated quality with bounded potential upside", () => {
+  it("prices prospects on half their projected upside, fading out by 24", () => {
     const ordinary = estimate({ ability: 45, potential: 45, age: 16 });
     const prospect = estimate({ ability: 45, potential: 99, age: 16 });
-    expect(prospect.value).toBeGreaterThan(ordinary.value);
-    expect(prospect.value).toBeLessThan(ordinary.value * 1.7);
-    expect(prospect.layers["Potential value"]).toBeCloseTo(1.65);
-    expect(prospect.value).toBeLessThan(estimate().value / 10);
+    expect(prospect.value).toBeGreaterThan(ordinary.value * 3);
+    expect(prospect.value).toBeLessThan(ordinary.value * 8);
+    expect(prospect.layers["Potential value"]).toBeGreaterThan(3);
+    expect(prospect.value).toBeLessThan(estimate().value / 2);
+    expect(estimate({ potential: 99, age: 24 }).value).toBe(
+      estimate({ potential: 65, age: 24 }).value,
+    );
     expect(estimate({ potential: 99, age: 30 }).value).toBe(
       estimate({ potential: 65, age: 30 }).value,
     );
@@ -206,7 +221,7 @@ describe("heuristic player valuation", () => {
     expect(estimate({ age: 30 }).value).toBeLessThan(prime);
     expect(veteran).toBeLessThan(prime * 0.25);
     expect(estimate({ age: 40 }).value).toBeLessThan(veteran);
-    expect(estimate({ age: 18 }).value).toBeLessThan(prime);
+    expect(estimate({ age: 18, potential: 65 }).value).toBeLessThan(prime);
     const keeperRetention =
       estimate({ position: "GK", age: 35 }).value /
       estimate({ position: "GK", age: 26 }).value;
@@ -220,7 +235,7 @@ describe("heuristic player valuation", () => {
     expect(striker).toBeLessThan(goalkeeper * 1.5);
   });
 
-  it("declines to zero at contract expiry without a large minimum fee", () => {
+  it("declines to the minimum value at contract expiry without a large minimum fee", () => {
     const contracted = estimate().value;
     let previous = -1;
     for (const months of [0, 1, 6, 12, 24, 36, 60]) {
@@ -230,8 +245,8 @@ describe("heuristic player valuation", () => {
       expect(value).toBeGreaterThan(previous);
       previous = value;
     }
-    expect(estimate({ contract_end: context.date }).value).toBe(0);
-    expect(estimate({ contract_end: "2026-01-01" }).value).toBe(0);
+    expect(estimate({ contract_end: context.date }).value).toBe(VALUE_RANGE.min);
+    expect(estimate({ contract_end: "2026-01-01" }).value).toBe(VALUE_RANGE.min);
     expect(
       estimate(
         {
@@ -243,7 +258,7 @@ describe("heuristic player valuation", () => {
         },
         { leagueReputation: 100, hype: 10000, balance: 1_000_000_000 },
       ).value,
-    ).toBe(0);
+    ).toBe(VALUE_RANGE.min);
     expect(
       estimate({ contract_end: addMonths(context.date, 1) }).value,
     ).toBeLessThan(contracted * 0.05);
@@ -253,7 +268,24 @@ describe("heuristic player valuation", () => {
     expect(
       estimate({ contract_end: addMonths(context.date, 61) }).value,
     ).toBe(estimate({ contract_end: addMonths(context.date, 120) }).value);
-    expect(estimate({ ability: 1, potential: 1, age: 40 }).value).toBe(0);
+    expect(estimate({ ability: 1, potential: 1, age: 40 }).value).toBe(VALUE_RANGE.min);
+  });
+
+  it("keeps every value between 100 and 250M", () => {
+    expect(
+      estimate(
+        { ability: 99, potential: 99, age: 23, position: "ST", form: 10, contract_end: "2035-07-01" },
+        { date: "2030-07-01", leagueReputation: 100, hype: 1000, inflation: 10, balance: 1e9, philosophy: "Win now" },
+      ).value,
+    ).toBe(VALUE_RANGE.max);
+    for (const ability of [1, 20, 40, 60, 80, 99])
+      for (const age of [14, 18, 24, 30, 38])
+        for (const leagueReputation of [0, 50, 100]) {
+          const { value } = estimate({ ability, potential: 99, age }, { leagueReputation });
+          expect(Number.isFinite(value)).toBe(true);
+          expect(value).toBeGreaterThanOrEqual(VALUE_RANGE.min);
+          expect(value).toBeLessThanOrEqual(VALUE_RANGE.max);
+        }
   });
 
   it("bounds hype, form, injuries and selling-club pressure", () => {
@@ -321,6 +353,29 @@ describe("heuristic player valuation", () => {
     expect(valuation(persisted, context)).toEqual(valuation(alternate, context));
     expect(persisted.wage).toBe(1500);
     expect(persisted.value).toBe(8_000_000);
+  });
+});
+
+describe("wage levels", () => {
+  it("scales payroll to 88% of the wage budget within 0.02-4", () => {
+    expect(payrollScale(100_000, 100_000)).toBeCloseTo(0.88);
+    expect(payrollScale(10, 1_000_000)).toBe(0.02);
+    expect(payrollScale(100_000_000, 1)).toBe(4);
+    expect(payrollScale(-5, 100)).toBe(0.02);
+  });
+
+  it("prices weekly wages by ability, club budget and age group, never below 50 or the current wage", () => {
+    const player = { ability: 74, age: 26, age_group: "Senior" as AgeGroup, wage: 0 };
+    // Mid-table Premier League payroll factor ≈ 2.5: about £55k a week for a squad player.
+    expect(marketWage(player, 2.5)).toBeGreaterThan(40_000);
+    expect(marketWage(player, 2.5)).toBeLessThan(80_000);
+    expect(marketWage({ ...player, ability: 92 }, 4)).toBeGreaterThan(250_000);
+    expect(marketWage({ ...player, ability: 99 }, 4)).toBeLessThanOrEqual(1_200_000);
+    expect(marketWage({ ...player, ability: 55 }, 0.3)).toBeLessThan(1500);
+    expect(marketWage({ ...player, ability: 20 }, 0.02)).toBe(50);
+    expect(marketWage({ ...player, age_group: "U19" as AgeGroup }, 2.5)).toBeLessThan(marketWage(player, 2.5) / 3);
+    expect(marketWage({ ...player, wage: 90_000 }, 2.5)).toBe(90_000);
+    expect(baseWage(90)).toBeGreaterThan(baseWage(80) * 2);
   });
 });
 
@@ -520,11 +575,7 @@ describe("financial regulatory accounting", () => {
     store.transaction(async () => {
       await store.clearWorld();
       await store.schema();
-      await generateWorld(store, {
-        countryLimit: 1,
-        seniors: 1200,
-        youth: 500,
-      });
+      await generateWorld(store, { nations: ["EN"] });
     }),
   );
   afterAll(async () => await store?.close());

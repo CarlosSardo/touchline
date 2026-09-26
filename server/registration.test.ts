@@ -31,8 +31,15 @@ import {
 } from "../shared/rules.ts";
 import { advance, seasonRollover } from "./simulation.ts";
 import {
+  clubRegistration,
+  countsTowardQuota,
   endorsementPoints,
+  familyResidence,
+  foreignQuota,
   leagueBand,
+  minorPresenceLegal,
+  minorRoute,
+  residenceYears,
   type EndorsementEvidence,
 } from "./registration.ts";
 
@@ -89,6 +96,88 @@ describe("minor international-transfer exceptions", () => {
   });
 });
 
+describe("Article 19 routes by nationality and ancestry", () => {
+  const club = (code: string) => ({ home: code, association: code });
+  const derry = clubRegistration("NIR", { hosted: { host: "IE", registration: "host" } });
+  const toronto = clubRegistration("CA", { hosted: { host: "US", registration: "host" } });
+  it("treats a minor holding the club's nationality as local for a first registration", () => {
+    expect(minorRoute({ age: 14, nationalities: ["BR", "PT"], destination: club("PT") }).route).toBe("first-registration");
+    expect(minorRoute({ age: 14, nationalities: ["BR"], destination: club("PT") }).route).toBe("blocked");
+    expect(minorRoute({ age: 14, nationalities: ["BR"], destination: club("PT"), residenceYears: 5 }).route).toBe("first-registration");
+    expect(minorRoute({ age: 14, nationalities: ["BR"], destination: club("PT"), parentsMoved: true }).route).toBe("parent-relocation");
+  });
+  it("needs a real exception for international transfers, whatever the passport", () => {
+    const fromFrance = { source: club("FR"), destination: club("PT") };
+    expect(minorRoute({ age: 15, nationalities: ["FR", "PT"], ...fromFrance }).route).toBe("blocked");
+    expect(minorRoute({ age: 16, nationalities: ["FR", "PT"], ...fromFrance }).route).toBe("eu-eea");
+    expect(minorRoute({ age: 16, nationalities: ["BR"], ...fromFrance }).route).toBe("blocked");
+    expect(minorRoute({ age: 16, nationalities: ["BR", "IT"], ...fromFrance }).route).toBe("eu-eea");
+    expect(minorRoute({ age: 17, nationalities: ["FR"], source: club("FR"), destination: club("EN") }).route).toBe("blocked");
+    expect(minorRoute({ age: 16, nationalities: ["SCO"], source: club("SCO"), destination: club("EN") }).route).toBe("same-country");
+    expect(minorRoute({ age: 15, nationalities: ["SCO"], source: club("SCO"), destination: club("EN") }).route).toBe("blocked");
+    expect(minorRoute({ age: 15, nationalities: ["BR"], source: club("BR"), destination: club("PT"), border: { home: 30, club: 20 } }).route).toBe("border");
+    expect(minorRoute({ age: 15, nationalities: ["BR"], source: club("BR"), destination: club("PT"), border: { home: 60, club: 20 } }).route).toBe("blocked");
+    expect(minorRoute({ age: 15, nationalities: ["AF"], source: club("AF"), destination: club("DE"), humanitarian: true }).route).toBe("humanitarian");
+  });
+  it("counts cross-border clubs as local to both nations", () => {
+    expect(derry).toEqual({ home: "NIR", association: "IE" });
+    expect(minorRoute({ age: 14, nationalities: ["NIR"], destination: derry }).route).toBe("first-registration");
+    expect(minorRoute({ age: 14, nationalities: ["IE"], destination: derry }).route).toBe("first-registration");
+    expect(minorRoute({ age: 15, nationalities: ["NIR"], source: club("NIR"), destination: derry }).route).toBe("domestic");
+    expect(minorRoute({ age: 15, nationalities: ["IE"], source: club("IE"), destination: derry }).route).toBe("domestic");
+    expect(minorRoute({ age: 15, nationalities: ["US"], destination: toronto }).route).toBe("first-registration");
+    expect(minorPresenceLegal({ age: 15, nationalities: ["CA"], destination: toronto })).toBe(true);
+  });
+  it("judges an existing minor registration on every nationality held", () => {
+    expect(minorPresenceLegal({ age: 16, nationalities: ["FR"], destination: club("PT") })).toBe(true);
+    expect(minorPresenceLegal({ age: 15, nationalities: ["FR"], destination: club("PT") })).toBe(false);
+    expect(minorPresenceLegal({ age: 15, nationalities: ["FR", "PT"], destination: club("PT") })).toBe(true);
+    expect(minorPresenceLegal({ age: 16, nationalities: ["FR"], destination: club("EN") })).toBe(false);
+    expect(minorPresenceLegal({ age: 16, nationalities: ["WAL"], destination: club("EN") })).toBe(true);
+    expect(minorPresenceLegal({ age: 18, nationalities: ["BR"], destination: club("EN") })).toBe(true);
+  });
+  it("lets a 16-17-year-old move between UK home nations without a British passport", () => {
+    expect(minorRoute({ age: 16, nationalities: ["BR"], source: club("SCO"), destination: club("EN") }).route).toBe("same-country");
+    const scotland = { code: "SCO", years: 16, parentsMoved: false };
+    expect(minorPresenceLegal({ age: 16, nationalities: ["BR"], destination: club("EN"), residence: scotland })).toBe(true);
+    expect(minorPresenceLegal({ age: 17, nationalities: ["US"], destination: clubRegistration("WAL", { hosted: { host: "EN", registration: "host" } }), residence: { code: "NIR", years: 2, parentsMoved: true } })).toBe(true);
+    expect(minorPresenceLegal({ age: 15, nationalities: ["BR"], destination: club("EN"), residence: scotland })).toBe(false);
+    expect(minorPresenceLegal({ age: 17, nationalities: ["BR"], destination: club("EN"), residence: { code: "SCO", years: 3, parentsMoved: false } })).toBe(false);
+    expect(minorPresenceLegal({ age: 17, nationalities: ["BR"], destination: club("EN") })).toBe(false);
+    expect(minorPresenceLegal({ age: 17, nationalities: ["IE"], destination: club("NIR"), residence: { code: "IE", years: 17, parentsMoved: false } })).toBe(false);
+    expect(minorPresenceLegal({ age: 17, nationalities: ["FR"], destination: club("EN"), residence: { code: "FR", years: 17, parentsMoved: false } })).toBe(false);
+  });
+  it("accepts a verified non-football family move to the club's country at any age", () => {
+    expect(minorPresenceLegal({ age: 14, nationalities: ["BR"], destination: club("PT"), residence: { code: "PT", years: 2, parentsMoved: true } })).toBe(true);
+    expect(minorPresenceLegal({ age: 14, nationalities: ["BR"], destination: club("PT"), residence: { code: "PT", years: 2, parentsMoved: false } })).toBe(false);
+    expect(minorPresenceLegal({ age: 14, nationalities: ["BR"], destination: club("PT"), residence: { code: "ES", years: 9, parentsMoved: true } })).toBe(false);
+    expect(minorPresenceLegal({ age: 14, nationalities: ["BR"], destination: club("PT"), residence: { code: "PT", years: 5, parentsMoved: false } })).toBe(true);
+    const swansea = clubRegistration("WAL", { hosted: { host: "EN", registration: "host" } });
+    expect(minorPresenceLegal({ age: 14, nationalities: ["BR"], destination: swansea, residence: { code: "EN", years: 2, parentsMoved: true } })).toBe(true);
+  });
+  it("places the family at the recorded move once made, else at the birthplace", () => {
+    const codes = new Map([[1, "BR"], [2, "SCO"]]);
+    const codeOf = (id: number) => codes.get(id);
+    const move = { countryId: 2, reason: "employment" as const, verified: true, date: "2024-07-01" };
+    expect(familyResidence({ identity: { birthCountryId: 1 }, familyMove: move }, "2010-07-01", "2026-07-01", codeOf)).toEqual({ code: "SCO", years: expect.closeTo(2, 1), parentsMoved: true });
+    expect(familyResidence({ identity: { birthCountryId: 1 }, familyMove: { ...move, reason: "football" } }, "2010-07-01", "2026-07-01", codeOf)?.parentsMoved).toBe(false);
+    expect(familyResidence({ identity: { birthCountryId: 1 }, familyMove: { ...move, date: "2027-01-01" } }, "2010-07-01", "2026-07-01", codeOf)).toEqual({ code: "BR", years: expect.closeTo(16, 1), parentsMoved: false });
+    expect(familyResidence({ identity: {} }, "2010-07-01", "2026-07-01", codeOf)).toBeUndefined();
+    expect(residenceYears({ identity: { birthCountryId: 1 }, familyMove: move }, 1, "2010-07-01", "2026-07-01")).toBe(0);
+  });
+  it("fills foreign-player quotas on all nationalities", () => {
+    const spain = foreignQuota("ES", 1)!;
+    expect(countsTowardQuota(spain, ["BR"], "ES")).toBe(true);
+    expect(countsTowardQuota(spain, ["BR", "IT"], "ES")).toBe(false);
+    expect(countsTowardQuota(spain, ["SN"], "ES")).toBe(false);
+    const mls = foreignQuota("US", 1, "CA")!;
+    expect(countsTowardQuota(mls, ["CA"], "CA")).toBe(false);
+    expect(countsTowardQuota(mls, ["US"], "CA")).toBe(false);
+    expect(countsTowardQuota(mls, ["MX"], "CA")).toBe(true);
+    expect(countsTowardQuota(foreignQuota("US", 1)!, ["CA"], "US")).toBe(true);
+  });
+});
+
 describe("youth recruitment registration", () => {
   let store: Store;
   let player: Player;
@@ -107,11 +196,7 @@ describe("youth recruitment registration", () => {
     store.transaction(async () => {
       await store.clearWorld();
       await store.schema();
-      await generateWorld(store, {
-        countryLimit: 6,
-        seniors: 1200,
-        youth: 600,
-      });
+      await generateWorld(store, { nations: ["EN", "ES", "DE", "IT", "FR", "PT"] });
       const clubs = await store.all<Club>(
         "SELECT clubs.* FROM clubs JOIN countries ON countries.id = clubs.country_id WHERE clubs.type = 'club' AND countries.code IN ('FR','ES','DE','IT','PT','NL') AND clubs.id = (SELECT MIN(candidate.id) FROM clubs AS candidate WHERE candidate.country_id = clubs.country_id AND candidate.type = 'club') ORDER BY clubs.id",
       );

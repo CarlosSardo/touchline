@@ -17,7 +17,6 @@ import {
 import type { Store } from "./db.ts";
 import type { Saves } from "./saves.ts";
 import type { GameState } from "../shared/types.ts";
-import { WORLD_VERSION } from "../shared/world-rules.ts";
 import {
   SAVE_FORMAT_VERSION,
   SAVE_SCHEMA_VERSION,
@@ -444,12 +443,10 @@ if (process.env.SQL_SAVE_TESTS === "true") {
       expect(store.testMode).toBe(true);
       expect(store.schemaName).toMatch(/^touchline_test_/);
       await saveTestStep("verify migration idempotency", () => store.schema());
-      await saveTestStep("generate 2-country / 1600-player test world", () =>
+      await saveTestStep("generate one-nation minimum-squad test world", () =>
         generateWorld(store, {
-          countryLimit: 2,
-          seniors: 1200,
-          youth: 400,
-          expanded: false,
+          nations: ["SCO"],
+          squads: "minimum",
           seed: "save-lifecycle-tests",
         }),
       );
@@ -506,7 +503,7 @@ if (process.env.SQL_SAVE_TESTS === "true") {
         expect(generate).not.toHaveBeenCalled();
         await empty.run("DELETE FROM meta WHERE [key] = 'world'");
         const generateSmallWorld = async (target: Store, options?: Parameters<typeof world.generateWorld>[1]) =>
-          generateWorldFixture(target, { ...options, countryLimit: 2, seniors: 1200, youth: 400, expanded: false });
+          generateWorldFixture(target, { ...options, nations: ["SCO"], squads: "minimum" });
         generate.mockImplementationOnce(async (target, options) => {
           await generateSmallWorld(target, options);
           throw new Error("injected preparation failure");
@@ -621,7 +618,8 @@ if (process.env.SQL_SAVE_TESTS === "true") {
         interrupted.mockRestore();
         expect(await owner.get("SELECT value FROM meta WHERE [key] = 'state'")).toBeUndefined();
         expect(await owner.get("SELECT value FROM meta WHERE [key] = '__touchline_legacy_import'")).toBeDefined();
-        expect((await owner.get<{ total: number }>("SELECT COUNT(*) AS total FROM countries"))!.total).toBe(2);
+        const rowCount = (table: string) => validated.summary.tables.find((entry) => entry.name === table)!.rowCount;
+        expect((await owner.get<{ total: number }>("SELECT COUNT(*) AS total FROM countries"))!.total).toBe(rowCount("countries"));
         expect((await owner.get<{ total: number }>("SELECT COUNT(*) AS total FROM save_slots"))!.total).toBe(1);
         await expect(resumableImport(target, [source], "wrong-fingerprint", async () => {}, () => Store.open())).rejects.toThrow("different source");
         const result = await resumableImport(target, [source], "source-fingerprint", async () => {}, () => Store.open());
@@ -629,7 +627,7 @@ if (process.env.SQL_SAVE_TESTS === "true") {
         expect(await owner.meta("state")).toEqual(validated.state);
         expect(await owner.get("SELECT value FROM meta WHERE [key] = '__touchline_legacy_import'")).toBeUndefined();
         expect((await owner.get<{ total: number }>("SELECT COUNT(*) AS total FROM save_slots"))!.total).toBe(1);
-        expect((await owner.get<{ total: number }>("SELECT COUNT(*) AS total FROM players"))!.total).toBe(1600);
+        expect((await owner.get<{ total: number }>("SELECT COUNT(*) AS total FROM players"))!.total).toBe(rowCount("players"));
       } finally {
         if (previousSchema === undefined) delete process.env.SQL_SCHEMA;
         else process.env.SQL_SCHEMA = previousSchema;
@@ -755,7 +753,7 @@ if (process.env.SQL_SAVE_TESTS === "true") {
       await store.run("DELETE FROM news");
 
       vi.spyOn(world, "generateWorld").mockImplementation((target, options) =>
-        generateWorldFixture(target, { ...options, countryLimit: 2, seniors: 1200, youth: 400, expanded: false }));
+        generateWorldFixture(target, { ...options, nations: ["SCO"], squads: "minimum" }));
       expect(await saves.prepareCareer("Next Director")).toEqual({ created: true });
       expect(await saves.list()).toEqual(kept);
       const prepared = (await saves.currentState())!;
@@ -848,28 +846,53 @@ if (process.env.SQL_SAVE_TESTS === "true") {
       }
     }, 300_000);
 
-    it("allows older expanded careers to upgrade and skips completed upgrades before saving", async () => {
-      const expansion = await import("./world-expansion.ts");
-      const original = await store.meta<{ version?: number }>("world");
-      const before = await saves.list();
-      const expand = vi
-        .spyOn(expansion, "expandWorld")
-        .mockRejectedValueOnce(new Error("older expansion reached"));
+    it("refuses snapshots of worlds before version 4 with a clear message and without clearing the career", async () => {
+      const { MIN_WORLD_VERSION } = await import("./saves.ts");
+      expect(MIN_WORLD_VERSION).toBe(4);
+      const original = await store.meta<Record<string, unknown>>("world");
+      expect(original.version).toBeGreaterThanOrEqual(MIN_WORLD_VERSION);
+      await store.setMeta("world", { ...original, version: 3, expanded: true });
+      const legacySlot = await saves.create("Version 3 snapshot");
+      const legacyExport = await saves.export();
+      await store.setMeta("world", original);
+      const state = await store.meta("state");
+      const slots = await saves.list();
+      const clear = vi.spyOn(store, "clearWorld");
       try {
-        await store.setMeta("world", { ...original, version: WORLD_VERSION - 1 });
-        await expect(saves.expandWorld()).rejects.toThrow("older expansion reached");
-        expect(expand).toHaveBeenCalledOnce();
-        const after = await saves.list();
-        expect(after).toHaveLength(before.length + 1);
-        for (const version of [WORLD_VERSION, WORLD_VERSION + 1]) {
-          await store.setMeta("world", { ...original, version });
-          expect(await saves.expandWorld()).toMatchObject({ changed: false });
-          expect(await saves.list()).toEqual(after);
-        }
-        expect(expand).toHaveBeenCalledOnce();
+        await expect(saves.import(createReadStream(legacyExport.file))).rejects.toThrow(
+          "This save comes from an older Touchline world (version 3).",
+        );
+        await expect(saves.restore(legacySlot.file)).rejects.toThrow("Start a new career instead.");
+        expect(clear).not.toHaveBeenCalled();
+        expect(await store.meta("state")).toEqual(state);
+        expect(await store.meta("world")).toEqual(original);
+        expect(await saves.list()).toEqual(slots);
       } finally {
-        expand.mockRestore();
-        await store.setMeta("world", original);
+        clear.mockRestore();
+        await rm(legacyExport.file, { force: true });
+      }
+    }, 300_000);
+
+    it("keeps the newest ten manual saves per career and never rotates imported ones", async () => {
+      const { SAVE_SLOT_LIMITS } = await import("./saves.ts");
+      const state = await store.meta<GameState>("state");
+      await store.setMeta("state", { ...state, careerId: "manual-cap-career" });
+      try {
+        const imported = await saves.create("Imported archive");
+        await store.run(
+          "UPDATE save_slots SET imported = 1, created_at = '2000-01-01' WHERE id = ?",
+          imported.file.replace(".touchline.gz", ""),
+        );
+        const autosave = await saves.create("Autosave", true);
+        const manual = [];
+        for (let index = 0; index <= SAVE_SLOT_LIMITS.manual; index++)
+          manual.push(await saves.create(`Manual ${index}`));
+        const career = (await saves.list()).filter((slot) => slot.career?.id === "manual-cap-career");
+        expect(career.map((slot) => slot.file).sort()).toEqual(
+          [imported.file, autosave.file, ...manual.slice(1).map((slot) => slot.file)].sort(),
+        );
+      } finally {
+        await store.setMeta("state", state);
       }
     }, 300_000);
 
@@ -887,16 +910,17 @@ if (process.env.SQL_SAVE_TESTS === "true") {
           name: "First Director", careerName: "First career", background: "Former scout", clubId: original.clubId,
         })).rejects.toThrow("fresh generation required");
         expect(generate).toHaveBeenCalledOnce();
-        expect(await store.meta("state")).toEqual(unstarted);
+        // Batched builds commit as they go: the failed build is discarded, leaving no career rather than a partial world.
+        expect(await saves.currentState()).toBeNull();
+        expect(await store.get("SELECT [key] FROM meta WHERE [key] <> 'appearanceIndexVersion'")).toBeUndefined();
         expect(await saves.list()).toEqual(beforeSlots);
       } finally {
         generate.mockRestore();
       }
     }, 300_000);
 
-    it("rolls back failed generation and expansion while retaining their safety checkpoints", async () => {
+    it("discards a failed regeneration while retaining the previous career's safety checkpoint", async () => {
       const world = await import("./world.ts");
-      const expansion = await import("./world-expansion.ts");
       const before = await store.meta<GameState>("state");
       const beforeCount = (await saves.list()).length;
       const generate = vi
@@ -912,36 +936,12 @@ if (process.env.SQL_SAVE_TESTS === "true") {
         }),
       ).rejects.toThrow("injected generation failure");
       generate.mockRestore();
-      expect(await store.meta("state")).toEqual(before);
-      expect((await saves.list()).length).toBe(beforeCount + 1);
-      const expand = vi
-        .spyOn(expansion, "expandWorld")
-        .mockImplementationOnce(async () => {
-          await store.run(
-            "UPDATE clubs SET balance = 0 WHERE id = ?",
-            before.clubId,
-          );
-          throw new Error("injected expansion failure");
-        });
-      const balance = await store.get(
-        "SELECT balance FROM clubs WHERE id = ?",
-        before.clubId,
-      );
-      await expect(saves.expandWorld()).rejects.toThrow(
-        "injected expansion failure",
-      );
-      expand.mockRestore();
-      expect(
-        await store.get(
-          "SELECT balance FROM clubs WHERE id = ?",
-          before.clubId,
-        ),
-      ).toEqual(balance);
-      expect(
-        (await saves.list()).some(
-          (slot) => slot.name === "Before world expansion",
-        ),
-      ).toBe(true);
+      expect(await saves.currentState()).toBeNull();
+      expect(await store.get("SELECT [key] FROM meta WHERE [key] = 'worldBuild'")).toBeUndefined();
+      expect((await store.get<{ total: number }>("SELECT COUNT(*) AS total FROM players"))!.total).toBe(0);
+      const slots = await saves.list();
+      expect(slots.length).toBe(beforeCount + 1);
+      expect(slots[0].career?.id).toBe(before.careerId);
     }, 300_000);
   });
 } else {

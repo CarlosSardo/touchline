@@ -47,11 +47,7 @@ describe("director decisions and ownership boundaries", () => {
     store.transaction(async () => {
       await store.clearWorld();
       await store.schema();
-      await generateWorld(store, {
-        countryLimit: 2,
-        seniors: 1200,
-        youth: 400,
-      });
+      await generateWorld(store, { nations: ["EN", "ES"] });
       await store.run(
         "UPDATE clubs SET transfer_budget = 100000000, wage_budget = 10000000, balance = 200000000",
       );
@@ -72,12 +68,12 @@ describe("director decisions and ownership boundaries", () => {
         )
       ).lastInsertRowid,
     );
-    for (const age of ["U19", "Senior", "U17"] as const) {
-      await movePlayerSquad(store, player.id, reserveId, age);
-      expect((await playerOf(store, player.id)).squad_club_id).toBe(reserveId);
-      await movePlayerSquad(store, player.id, 1, age);
-      expect((await playerOf(store, player.id)).squad_club_id).toBeNull();
-    }
+    await movePlayerSquad(store, player.id, reserveId, "Senior");
+    expect((await playerOf(store, player.id)).squad_club_id).toBe(reserveId);
+    await movePlayerSquad(store, player.id, 1, "U17");
+    expect((await playerOf(store, player.id)).squad_club_id).toBeNull();
+    for (const age of ["U19", "U17"] as const)
+      await expect(movePlayerSquad(store, player.id, reserveId, age)).rejects.toThrow(/your club/);
     expect(await playerOf(store, player.id)).toMatchObject({
       club_id: 1,
       wage: player.wage,
@@ -92,13 +88,24 @@ describe("director decisions and ownership boundaries", () => {
       player.id,
     );
     await expect(movePlayerSquad(store, player.id, 1, "U17")).rejects.toThrow(
-      /birth date/,
+      /under 17 at the start of the season/,
     );
     expect(
       (await squadDestinations(store, await playerOf(store, player.id)))
         .filter((entry) => entry.ageGroup === "Senior")
         .every((entry) => entry.eligible),
     ).toBe(true);
+    const ageRule = (overage: number) =>
+      store.run(
+        "UPDATE clubs SET data = ? WHERE id = ?",
+        JSON.stringify({ reservePolicy: { ageRule: { maxAge: 23, overage } } }),
+        reserveId,
+      );
+    await ageRule(0);
+    await expect(
+      movePlayerSquad(store, player.id, reserveId, "Senior"),
+    ).rejects.toThrow(/only 0 players over 23/);
+    await ageRule(1);
     await movePlayerSquad(store, player.id, reserveId, "Senior");
     await store.run("UPDATE players SET club_id = 2 WHERE id = ?", player.id);
     expect((await playerOf(store, player.id)).squad_club_id).toBeNull();

@@ -1,6 +1,7 @@
+import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { open, readFile, readdir, rm } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { join, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import type { Store } from "../server/db.ts";
@@ -8,6 +9,10 @@ import {
   validateCheckpoint,
   type CheckpointSummary,
 } from "../server/save-format.ts";
+import { tableName } from "../server/sql-schema.ts";
+
+const SCHEMA_NAME = /^[A-Za-z][A-Za-z0-9_]{0,127}$/;
+const masked = (text: string) => text.replace(/(touchline_user_)([a-z0-9]{4})[a-z0-9_]*([a-z0-9]{4})/gi, "$1$2***$3");
 
 export function isMain(moduleUrl: string) {
   return Boolean(
@@ -177,6 +182,226 @@ export async function backupBeforeReplace(
   };
 }
 
+export interface EverythingOptions {
+  outDir: string;
+  accountSchema?: string;
+  snapshots?: boolean;
+  log?: (line: string) => void;
+}
+
+interface BackupItem {
+  kind: "registry" | "world" | "snapshot";
+  schema: string;
+  file: string;
+  bytes: number;
+  sha256: string;
+  /** Rows per table (world checkpoints) or accounts (registry). */
+  rows?: Record<string, number>;
+}
+
+interface BackupManifest {
+  format: "touchline-backup";
+  version: 1;
+  database: string;
+  startedAt: string;
+  updatedAt: string;
+  complete: boolean;
+  items: Record<string, BackupItem>;
+  failures: Record<string, string>;
+}
+
+const RESTORE_NOTE = `Touchline full backup (npm run data:export -- --everything).
+manifest.json lists every file with its byte length and SHA-256; "complete": true means nothing failed.
+<schema>/world.touchline.gz is that schema's live world; <schema>/snapshots/<id>.touchline.gz are its saved
+checkpoints, described in <schema>/snapshots.json. accounts-users.json is the account registry: personal data,
+keep it private and never commit it. The world reset keeps the registry in SQL, so it is evidence, not a restore input.
+These checkpoints predate the rebuilt world (version 4) and the rebuilt game refuses them by design. To restore:
+  1. Check out the last commit before the world rebuild (git worktree add ../touchline-restore <commit>), npm ci.
+  2. Point SQL_* at the database and SQL_SCHEMA at the schema, then npm run db:migrate.
+  3. Start that build and use Saves -> Import for world.touchline.gz or any snapshot, then load it.
+Re-running the same command with the same --out-dir resumes: finished files are kept, partial files are redone.
+Check a copy offline (no SQL): npm run data:export -- --verify <this directory>
+`;
+
+async function writeJson(file: string, value: unknown) {
+  const partial = `${file}.partial`;
+  await writeFile(partial, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
+  await rename(partial, file);
+}
+
+async function hashFile(file: string) {
+  const hash = createHash("sha256");
+  let bytes = 0;
+  for await (const chunk of createReadStream(file) as AsyncIterable<Buffer>) {
+    hash.update(chunk);
+    bytes += chunk.length;
+  }
+  return { bytes, sha256: hash.digest("hex") };
+}
+
+/** Every world schema, snapshot and the account registry to local files; re-runs resume from manifest.json. */
+export async function exportEverything(root: Store, options: EverythingOptions) {
+  const started = performance.now();
+  const log = options.log ?? ((line: string) => console.error(line));
+  const directory = resolve(options.outDir);
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  const manifestFile = join(directory, "manifest.json");
+  const previous = await readFile(manifestFile, "utf8").then((text) => JSON.parse(text) as BackupManifest, () => undefined);
+  if (previous && (previous.format !== "touchline-backup" || previous.database !== root.database))
+    throw new Error("The output directory holds a different backup; choose a new --out-dir.");
+  const manifest: BackupManifest = previous ?? {
+    format: "touchline-backup",
+    version: 1,
+    database: root.database,
+    startedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    complete: false,
+    items: {},
+    failures: {},
+  };
+  manifest.failures = {};
+  await writeFile(join(directory, "RESTORE.txt"), RESTORE_NOTE, { mode: 0o600 });
+  const save = async () => {
+    manifest.updatedAt = new Date().toISOString();
+    await writeJson(manifestFile, manifest);
+  };
+  const done = async (key: string) => {
+    const item = manifest.items[key];
+    if (!item) return false;
+    const actual = await stat(join(directory, item.file)).then((info) => info.size, () => -1);
+    if (actual === item.bytes) return true;
+    delete manifest.items[key];
+    return false;
+  };
+  const record = async (key: string, item: BackupItem) => {
+    manifest.items[key] = item;
+    await save();
+    log(`Backed up ${masked(key)} (${Math.round(item.bytes / 1024)} KB).`);
+  };
+  const attempt = async (key: string, work: () => Promise<void>) => {
+    try {
+      if (!(await done(key))) await work();
+    } catch (error) {
+      manifest.failures[key] = error instanceof Error ? error.message : String(error);
+      log(`FAILED ${masked(key)}: ${masked(manifest.failures[key])}`);
+      await save();
+    }
+  };
+  const accountSchema = options.accountSchema ?? "accounts";
+  if (!SCHEMA_NAME.test(accountSchema)) throw new Error("Invalid --account-schema.");
+  const registryTable = tableName(accountSchema, "users");
+  if ((await root.get<{ id: number | null }>("SELECT OBJECT_ID(?, N'U') AS [id]", registryTable))?.id)
+    await attempt("registry", async () => {
+      const rows = await root.forSchema(accountSchema).all(`SELECT * FROM ${registryTable} ORDER BY [created_at], [id]`);
+      const file = "accounts-users.json";
+      await writeJson(join(directory, file), { schema: accountSchema, accounts: rows });
+      await record("registry", { kind: "registry", schema: accountSchema, file, rows: { users: rows.length }, ...(await hashFile(join(directory, file))) });
+    });
+  const schemas = (await root.all<{ name: string }>(
+    `SELECT schema_row.[name] FROM sys.tables AS table_row
+    INNER JOIN sys.schemas AS schema_row ON schema_row.[schema_id] = table_row.[schema_id]
+    WHERE table_row.[name] = N'schema_migrations' ORDER BY schema_row.[name]`,
+  )).map((row) => row.name).filter((name) => SCHEMA_NAME.test(name) && !/^touchline_test_/i.test(name));
+  for (const schema of schemas) {
+    const world = root.forSchema(schema);
+    await mkdir(join(directory, schema, "snapshots"), { recursive: true, mode: 0o700 });
+    await attempt(`${schema}/world`, async () => {
+      const file = join(schema, "world.touchline.gz");
+      const partial = join(directory, schema, "world.partial.touchline.gz");
+      await rm(partial, { force: true });
+      const summary = await exportData(world, partial);
+      await rename(partial, join(directory, file));
+      await record(`${schema}/world`, { kind: "world", schema, file, bytes: summary.byteLength, sha256: summary.sha256,
+        rows: Object.fromEntries(summary.tables.map((table) => [table.name, table.rowCount])) });
+    });
+    if (options.snapshots === false) continue;
+    await attempt(`${schema}/snapshots`, async () => {
+      const { storedChunks } = await import("../server/saves.ts");
+      const slots = await world.all<{ id: string; name: string; career_id: string | null; career_metadata: string | null;
+        created_at: Date | string; automatic: boolean; imported: boolean; format_version: number;
+        byte_length: number | string; sha256: string | null; complete: boolean }>(
+        `SELECT [id], [name], [career_id], [career_metadata], [created_at], [automatic], [imported], [format_version],
+          [byte_length], [sha256], [complete] FROM ${tableName(schema, "save_slots")} ORDER BY [created_at], [id]`,
+      );
+      await writeJson(join(directory, schema, "snapshots.json"), slots);
+      for (const slot of slots) {
+        const id = String(slot.id).toLowerCase();
+        if (!/^[a-f0-9-]{36}$/.test(id) || !slot.complete) continue;
+        await attempt(`${schema}/snapshots/${id}`, async () => {
+          const file = join(schema, "snapshots", `${id}.touchline.gz`);
+          const partial = join(directory, `${file}.partial`);
+          const hash = createHash("sha256");
+          let bytes = 0;
+          const handle = await open(partial, "w", 0o600);
+          try {
+            for await (const chunk of storedChunks(world, slot)) {
+              hash.update(chunk);
+              bytes += chunk.length;
+              await handle.write(chunk);
+            }
+            await handle.sync();
+          } finally {
+            await handle.close();
+          }
+          const sha256 = hash.digest("hex");
+          if (slot.sha256 && sha256 !== slot.sha256.toLowerCase())
+            throw new Error("Snapshot bytes differ from their catalog SHA-256.");
+          await rename(partial, join(directory, file));
+          await record(`${schema}/snapshots/${id}`, { kind: "snapshot", schema, file, bytes, sha256 });
+        });
+      }
+    });
+  }
+  manifest.complete = !Object.keys(manifest.failures).length;
+  await save();
+  const items = Object.values(manifest.items);
+  return {
+    directory,
+    complete: manifest.complete,
+    schemas: schemas.length,
+    worlds: items.filter((item) => item.kind === "world").length,
+    snapshots: items.filter((item) => item.kind === "snapshot").length,
+    bytes: items.reduce((total, item) => total + item.bytes, 0),
+    seconds: Math.round((performance.now() - started) / 100) / 10,
+    failures: manifest.failures,
+  };
+}
+
+/** Offline check of a --everything backup (no SQL): complete manifest, every file's size and SHA-256. */
+export async function verifyBackup(outDir: string) {
+  const directory = resolve(outDir);
+  const manifest = JSON.parse(await readFile(join(directory, "manifest.json"), "utf8")) as BackupManifest;
+  if (manifest.format !== "touchline-backup") throw new Error("manifest.json is not a Touchline backup.");
+  const problems: string[] = [];
+  if (!manifest.complete || Object.keys(manifest.failures).length)
+    problems.push(`backup incomplete: ${Object.keys(manifest.failures).map(masked).join(", ") || "not finished"}`);
+  const items = Object.entries(manifest.items);
+  for (const [key, item] of items) {
+    const path = resolve(directory, item.file);
+    if (!path.startsWith(`${directory}${sep}`)) {
+      problems.push(`${masked(key)}: path outside the backup`);
+      continue;
+    }
+    const actual = await hashFile(path).catch(() => undefined);
+    if (!actual) problems.push(`${masked(key)}: missing`);
+    else if (actual.bytes !== item.bytes || actual.sha256 !== item.sha256) problems.push(`${masked(key)}: size or SHA-256 differs`);
+  }
+  const schemas = new Set(items.filter(([, item]) => item.kind === "snapshot").map(([, item]) => item.schema));
+  for (const schema of schemas)
+    if (!manifest.items[`${schema}/world`]) problems.push(`${masked(schema)}: snapshots without its world file`);
+  return {
+    directory,
+    ok: problems.length === 0,
+    database: manifest.database,
+    updatedAt: manifest.updatedAt,
+    files: items.length,
+    worlds: items.filter(([, item]) => item.kind === "world").length,
+    snapshots: items.filter(([, item]) => item.kind === "snapshot").length,
+    bytes: items.reduce((total, [, item]) => total + item.bytes, 0),
+    problems,
+  };
+}
+
 export async function main(args = process.argv.slice(2)) {
   const { values } = parseArgs({
     args,
@@ -186,20 +411,42 @@ export async function main(args = process.argv.slice(2)) {
       out: { type: "string" },
       "dry-run": { type: "boolean" },
       "verify-staging": { type: "string" },
+      everything: { type: "boolean" },
+      "out-dir": { type: "string" },
+      "account-schema": { type: "string" },
+      "skip-snapshots": { type: "boolean" },
+      verify: { type: "string" },
     },
   });
   if (values.help) {
     console.log(
-      "Usage: tsx scripts/data-export.ts --out <new-file.touchline.gz> [--database NAME]\n       tsx scripts/data-export.ts --dry-run [--database NAME]\n       tsx scripts/data-export.ts --verify-staging <converted-checkpoint-directory>\nExports or read-only verifies the active SQL world, without migrating or seeding. Existing output files are refused. Catalog snapshots stay in SQL. Uses SQL_* connection settings.",
+      "Usage: tsx scripts/data-export.ts --out <new-file.touchline.gz> [--database NAME]\n       tsx scripts/data-export.ts --dry-run [--database NAME]\n       tsx scripts/data-export.ts --verify-staging <converted-checkpoint-directory>\n       tsx scripts/data-export.ts --everything --out-dir <directory> [--account-schema accounts] [--skip-snapshots]\nExports or read-only verifies the active SQL world, without migrating or seeding. Existing output files are refused. Catalog snapshots stay in SQL. Uses SQL_* connection settings.\n--everything backs up every world schema (legacy dbo and each account world), every complete snapshot and the account registry\nto a local directory with manifest.json and RESTORE.txt; re-running it with the same --out-dir resumes. Stop the app first.\n--verify <directory> checks a --everything backup offline (no SQL): complete manifest, every file's size and SHA-256.",
     );
     return;
   }
-  if ([values.out, values["dry-run"], values["verify-staging"]].filter(Boolean).length !== 1)
-    throw new Error("Choose exactly one of --out, --dry-run, or --verify-staging.");
+  if ([values.out, values["dry-run"], values["verify-staging"], values.everything, values.verify].filter(Boolean).length !== 1)
+    throw new Error("Choose exactly one of --out, --dry-run, --verify-staging, --everything, or --verify.");
+  if (values.everything !== Boolean(values["out-dir"]))
+    throw new Error("--everything requires --out-dir <directory>, and --out-dir is only for --everything.");
+  if (values.verify) {
+    const result = await verifyBackup(values.verify);
+    console.log(JSON.stringify(result, null, 2));
+    if (!result.ok) process.exitCode = 1;
+    return;
+  }
   const { Store } = await import("../server/db.ts");
   const store = await Store.open(values.database);
   try {
-    if (values["verify-staging"])
+    if (values.everything) {
+      const result = await exportEverything(store, {
+        outDir: values["out-dir"]!,
+        accountSchema: values["account-schema"],
+        snapshots: !values["skip-snapshots"],
+      });
+      console.log(JSON.stringify({ ...result, failures: Object.fromEntries(
+        Object.entries(result.failures).map(([key, message]) => [masked(key), masked(message)])) }, null, 2));
+      if (!result.complete) process.exitCode = 1;
+    } else if (values["verify-staging"])
       console.log(JSON.stringify(await verifyImportedData(store, values["verify-staging"]), null, 2));
     else if (values["dry-run"])
       console.log(JSON.stringify(await targetInventory(store), null, 2));

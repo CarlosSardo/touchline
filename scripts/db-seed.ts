@@ -2,16 +2,6 @@ import { parseArgs } from "node:util";
 import { backupBeforeReplace, isMain } from "./data-export.ts";
 import type { WorldOptions } from "../server/world.ts";
 
-function positiveInteger(value: string | undefined, maximum: number) {
-  if (value === undefined) return undefined;
-  const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > maximum)
-    throw new Error(
-      `World counts must be whole numbers between 1 and ${maximum}.`,
-    );
-  return parsed;
-}
-
 export async function main(args = process.argv.slice(2)) {
   const { values } = parseArgs({
     args,
@@ -24,15 +14,13 @@ export async function main(args = process.argv.slice(2)) {
       replace: { type: "boolean" },
       backup: { type: "string" },
       seed: { type: "string" },
-      countries: { type: "string" },
-      seniors: { type: "string" },
-      youth: { type: "string" },
-      expanded: { type: "boolean" },
+      nations: { type: "string" },
+      squads: { type: "string" },
     },
   });
   if (values.help) {
     console.log(
-      "Usage: tsx scripts/db-seed.ts --seed TEXT [--dry-run] [--database NAME]\n       tsx scripts/db-seed.ts --seed TEXT --apply --yes [--countries N --seniors N --youth N --expanded]\n       Add --replace --backup <new-file.touchline.gz> to replace a nonempty world. Saved checkpoints remain intact.\nRun db-migrate explicitly first. Uses SQL_* connection settings; never starts the app.",
+      "Usage: tsx scripts/db-seed.ts --seed TEXT [--dry-run] [--database NAME]\n       tsx scripts/db-seed.ts --seed TEXT --apply --yes [--nations PT,IE,NIR --squads full|minimum]\n       Add --replace --backup <new-file.touchline.gz> to replace a nonempty world. Saved checkpoints remain intact.\n--nations limits the world to those catalog nation codes (tests and tools); the default is the full world.\nRun db-migrate explicitly first. Uses SQL_* connection settings; never starts the app.",
     );
     return;
   }
@@ -40,12 +28,15 @@ export async function main(args = process.argv.slice(2)) {
     throw new Error("Choose --apply or --dry-run, not both.");
   if (!values.seed || values.seed.length > 100)
     throw new Error("Supply --seed with 1 to 100 characters.");
+  const nations = values.nations?.split(",").map((code) => code.trim().toUpperCase()).filter(Boolean);
+  if (nations && (!nations.length || nations.some((code) => !/^[A-Z]{2,4}$/.test(code))))
+    throw new Error("--nations takes comma-separated catalog nation codes, e.g. PT,IE,NIR.");
+  if (values.squads !== undefined && values.squads !== "full" && values.squads !== "minimum")
+    throw new Error("--squads must be full or minimum.");
   const options: WorldOptions = {
     seed: values.seed,
-    countryLimit: positiveInteger(values.countries, 243),
-    seniors: positiveInteger(values.seniors, 2_000_000),
-    youth: positiveInteger(values.youth, 2_000_000),
-    expanded: values.expanded,
+    ...(nations ? { nations } : {}),
+    ...(values.squads ? { squads: values.squads as "full" | "minimum" } : {}),
   };
   if (!values.apply) {
     console.log(

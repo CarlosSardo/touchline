@@ -7,8 +7,17 @@ import { generateWorld } from "./world.ts";
 import { checkSqlConstraints } from "./check-world.ts";
 import { advance } from "./simulation.ts";
 import { stateOf } from "./systems.ts";
-import { daysBetween } from "../shared/rules.ts";
-import type { MatchTeam, Position } from "../shared/types.ts";
+import { firstTeamCap, INTAKE, SQUAD_CAPS } from "./youth.ts";
+import {
+  clubRegistration,
+  familyResidence,
+  heldNationalities,
+  minorPresenceLegal,
+} from "./registration.ts";
+import { databaseFootprint, FOOTPRINT_BUDGET } from "./retention.ts";
+import { ageOn, daysBetween, VALUE_RANGE } from "../shared/rules.ts";
+import { MIN_GOALKEEPERS, SQUAD_MINIMUMS } from "../shared/world-rules.ts";
+import type { MatchTeam, PlayerProfile, Position } from "../shared/types.ts";
 
 export const CALIBRATION_REFERENCE = {
   source: "openfootball/football.json",
@@ -175,7 +184,148 @@ export function calibrationSample(matches = 600) {
   return report;
 }
 
-export async function seasonSoak(seasons: number, fullWorld = false) {
+/** Default soak subset: B-teams and EU rules (PT), a cross-border club (NIR → IE), UK rules (SCO), a home pool (FO). */
+export const SOAK_NATIONS = ["PT", "IE", "NIR", "SCO", "FO"] as const;
+
+const activePlayers = async (store: Store) =>
+  (await store.get<{ total: number }>(
+    "SELECT count(*) AS total FROM players WHERE role != 'Retired'",
+  ))!.total;
+
+/** Same report as `npm run db:footprint`; a season growing the world by more than the budget is flagged. */
+export async function reportFootprint(store: Store, label: string, previousMB?: number) {
+  const [footprint] = await databaseFootprint(store);
+  const seasonMB = previousMB === undefined ? undefined : Math.round((footprint.worldMB - previousMB) * 10) / 10;
+  const over = seasonMB !== undefined && seasonMB > FOOTPRINT_BUDGET.seasonMB;
+  const largest = footprint.tables.slice(0, 4).map((table) => `${table.table} ${table.reservedMB}`).join(", ");
+  console.log(
+    `Footprint ${label}: world ${footprint.worldMB} MB, ${footprint.rows} rows` +
+      (seasonMB === undefined ? "" : `, ${seasonMB >= 0 ? "+" : ""}${seasonMB} MB this season`) +
+      (over ? ` OVER the ${FOOTPRINT_BUDGET.seasonMB} MB season budget` : "") +
+      ` (largest: ${largest})`,
+  );
+  if (over && process.env.GITHUB_ACTIONS === "true")
+    console.log(`::warning title=DB footprint::${label} added ${seasonMB} MB (budget ${FOOTPRINT_BUDGET.seasonMB} MB).`);
+  return { worldMB: footprint.worldMB, seasonMB };
+}
+
+/** Section 8 squad invariant: minimums with two goalkeepers everywhere, youth and AI first-team caps. */
+export async function checkSquads(store: Store, label: string) {
+  const state = await stateOf(store);
+  const rows = await store.all<{
+    id: number;
+    type: string;
+    parent_id: number | null;
+    league_code: string | null;
+    tier: number | null;
+    squad: "Senior" | "U19" | "U17";
+    players: number;
+    keepers: number;
+    contracted: number;
+  }>(
+    "SELECT clubs.id,clubs.type,clubs.parent_id,league_country.code AS league_code,leagues.tier,squads.squad,count(players.id) AS players,coalesce(sum(CASE WHEN players.position = 'GK' THEN 1 ELSE 0 END),0) AS keepers,coalesce(sum(CASE WHEN players.parent_club_id IS NULL THEN 1 ELSE 0 END),0) AS contracted FROM clubs CROSS APPLY (VALUES ('Senior'),('U19'),('U17')) AS squads(squad) LEFT JOIN leagues ON leagues.id = clubs.league_id LEFT JOIN countries AS league_country ON league_country.id = leagues.country_id LEFT JOIN players ON coalesce(players.squad_club_id,players.club_id) = clubs.id AND players.age_group = squads.squad AND players.role != 'Retired' WHERE clubs.type = 'club' OR (clubs.type = 'bteam' AND squads.squad = 'Senior') GROUP BY clubs.id,clubs.type,clubs.parent_id,league_country.code,leagues.tier,squads.squad",
+  );
+  const failures: string[] = [];
+  for (const row of rows) {
+    const minimum = row.type === "bteam" ? SQUAD_MINIMUMS.BTeam : SQUAD_MINIMUMS[row.squad];
+    if (row.players < minimum || row.keepers < MIN_GOALKEEPERS)
+      failures.push(`${row.type} ${row.id} ${row.squad}: ${row.players} players, ${row.keepers} GK`);
+    const ai = row.id !== state.clubId && row.parent_id !== state.clubId;
+    if (ai && row.squad !== "Senior" && row.contracted > SQUAD_CAPS.youth)
+      failures.push(`club ${row.id} ${row.squad}: ${row.contracted} over the youth cap`);
+    if (ai && row.type === "club" && row.squad === "Senior" && row.contracted > firstTeamCap(row.league_code, row.tier))
+      failures.push(`club ${row.id}: ${row.contracted} seniors over the AI cap`);
+  }
+  assert.equal(failures.length, 0, `Squad invariants failed (${label}): ${failures.slice(0, 8).join("; ")}`);
+  return rows.length;
+}
+
+/** Every minor's registration could have been made under Article 19 (nationality, residence, family move, 16+ EU/UK). */
+export async function checkMinors(store: Store, date: string) {
+  const cutoff = `${Number(date.slice(0, 4)) - 18}${date.slice(4)}`;
+  const codes = new Map((await store.all<{ id: number; code: string }>("SELECT id,code FROM countries")).map((row) => [row.id, row.code]));
+  const minors = await store.all<{
+    id: number;
+    birth_date: string;
+    code: string;
+    club_code: string;
+    club_data: string;
+    identity: string;
+    family: string | null;
+  }>(
+    "SELECT players.id,players.birth_date,countries.code,club_country.code AS club_code,clubs.data AS club_data,JSON_QUERY(players.profile,'$.identity') AS identity,JSON_QUERY(players.profile,'$.familyMove') AS family FROM players JOIN countries ON countries.id = players.country_id JOIN clubs ON clubs.id = players.club_id JOIN countries AS club_country ON club_country.id = clubs.country_id WHERE players.birth_date > ? AND players.role != 'Retired' AND clubs.type != 'national'",
+    cutoff,
+  );
+  const illegal = minors.filter((minor) => {
+    const profile = {
+      identity: JSON.parse(minor.identity) as PlayerProfile["identity"],
+      ...(minor.family ? { familyMove: JSON.parse(minor.family) as PlayerProfile["familyMove"] } : {}),
+    };
+    return !minorPresenceLegal({
+      age: ageOn(minor.birth_date, date),
+      nationalities: heldNationalities(minor.code, profile),
+      destination: clubRegistration(minor.club_code, minor.club_data),
+      residence: familyResidence(profile, minor.birth_date, date, (id) => codes.get(id)),
+    });
+  });
+  assert.equal(illegal.length, 0, `Illegal U18 registrations on ${date}: players ${illegal.slice(0, 10).map((minor) => minor.id).join(",")}`);
+  return minors.length;
+}
+
+/** Heights of players under 21: within bounds, and never lower than at the previous check. */
+export async function checkYouthHeights(store: Store, date: string, previous: ReadonlyMap<number, number>) {
+  const cutoff = `${Number(date.slice(0, 4)) - 21}${date.slice(4)}`;
+  const rows = await store.all<{ id: number; height: number | null }>(
+    "SELECT id,TRY_CONVERT(float,JSON_VALUE(profile,'$.identity.height')) AS height FROM players WHERE birth_date > ? AND role != 'Retired'",
+    cutoff,
+  );
+  const failures = rows.filter(
+    (row) => row.height === null || row.height < 125 || row.height > 210 || row.height < (previous.get(row.id) ?? 0),
+  );
+  assert.equal(failures.length, 0, `Youth height invariants failed on ${date}: players ${failures.slice(0, 10).map((row) => `${row.id}=${row.height}`).join(",")}`);
+  return new Map(rows.map((row) => [row.id, row.height!]));
+}
+
+/** Rollover checks: intake 5-12 per club aged 14-15, squads, population ±10%, values and wages in bounds. */
+export async function checkRollover(store: Store, initialPlayers: number, heights: ReadonlyMap<number, number>) {
+  const state = await stateOf(store);
+  const intake = await store.meta<{ season: number; clubs: Record<string, number> }>("youthIntake");
+  assert.equal(intake.season, state.season, "Youth intake did not run for the new season");
+  const clubs = await store.all<{ id: number }>("SELECT id FROM clubs WHERE type = 'club'");
+  const outside = clubs.filter((club) => {
+    const count = intake.clubs[club.id] ?? 0;
+    return count < INTAKE.min || count > INTAKE.max;
+  });
+  assert.equal(outside.length, 0, `Intake outside ${INTAKE.min}-${INTAKE.max} at clubs ${outside.slice(0, 10).map((club) => club.id).join(",")}`);
+  const cutoff = (years: number) => `${Number(state.date.slice(0, 4)) - years}${state.date.slice(4)}`;
+  const wrongAge = (await store.get<{ total: number }>(
+    "SELECT count(*) AS total FROM players WHERE JSON_VALUE(profile,'$.intake.source') = 'academy' AND JSON_VALUE(profile,'$.intake.season') = ? AND (birth_date > ? OR birth_date <= ?)",
+    String(state.season),
+    cutoff(14),
+    cutoff(16),
+  ))!.total;
+  assert.equal(wrongAge, 0, "Academy intake players must be aged 14-15");
+  await checkSquads(store, `after the ${state.season} rollover`);
+  const players = await activePlayers(store);
+  assert(
+    Math.abs(players - initialPlayers) <= initialPlayers * 0.1,
+    `Population ${players} is more than 10% from the initial ${initialPlayers}`,
+  );
+  const badMoney = (await store.get<{ total: number }>(
+    `SELECT count(*) AS total FROM players WHERE role != 'Retired' AND (value IS NULL OR value < ${VALUE_RANGE.min} OR value > ${VALUE_RANGE.max} OR wage IS NULL OR wage < 0 OR wage > 1200000)`,
+  ))!.total;
+  assert.equal(badMoney, 0, "Player values or wages outside the section 8 bounds");
+  const minors = await checkMinors(store, state.date);
+  return {
+    season: state.season,
+    players,
+    academy: Object.values(intake.clubs).reduce((total, count) => total + count, 0),
+    minors,
+    heights: await checkYouthHeights(store, state.date, heights),
+  };
+}
+
+export async function seasonSoak(seasons: number, fullWorld = false, nations: readonly string[] = SOAK_NATIONS) {
   assert(
     Number.isInteger(seasons) && seasons > 0,
     "Choose a positive number of seasons",
@@ -187,31 +337,42 @@ export async function seasonSoak(seasons: number, fullWorld = false) {
       "Simulation checks cannot use gameplay schemas",
     );
     await store.schema();
-    await generateWorld(
-      store,
-      fullWorld ? {} : { countryLimit: 2, seniors: 2200, youth: 800 },
-    );
+    await generateWorld(store, fullWorld ? {} : { nations: [...nations] });
     await store.setMeta("settings", {
       ...(await store.meta<Record<string, unknown>>("settings")),
       autosave: "off",
     });
     const end = `${2026 + seasons}-07-02`;
-    let expectedPlayers = (await store.get<{ total: number }>(
-      "SELECT count(*) AS total FROM players",
-    ))!.total;
+    const initialPlayers = await activePlayers(store);
+    const generated = await reportFootprint(store, "after generation");
+    let worldMB = generated.worldMB;
+    await checkSquads(store, "world start");
+    await checkMinors(store, (await stateOf(store)).date);
+    let heights = await checkYouthHeights(store, (await stateOf(store)).date, new Map());
+    const rollovers: (Omit<Awaited<ReturnType<typeof checkRollover>>, "heights"> & { worldMB: number; seasonMB: number | undefined })[] = [];
     let simulated = 0;
     let weeks = 0;
     while ((await stateOf(store)).date < end) {
       const current = await stateOf(store);
       if (current.gameOver)
         await store.setMeta("state", { ...current, gameOver: false });
+      // Steps end on 1 July so every rollover is checked on the day it runs.
       const result = await advance(
         store,
-        Math.min(7, daysBetween(current.date, end)),
+        Math.min(
+          7,
+          daysBetween(current.date, end),
+          Math.max(1, daysBetween(current.date, `${current.season + 1}-07-01`)),
+        ),
       );
-      if ((await stateOf(store)).season !== current.season)
-        expectedPlayers += (await store.meta<{ count: number }>("lastIntake"))
-          .count;
+      if ((await stateOf(store)).season !== current.season) {
+        const { heights: next, ...summary } = await checkRollover(store, initialPlayers, heights);
+        heights = next;
+        console.log(`Rollover ${summary.season}: ${summary.players} players, ${summary.academy} academy intake, ${summary.minors} minors checked`);
+        const footprint = await reportFootprint(store, `after the ${summary.season} rollover`, worldMB);
+        worldMB = footprint.worldMB;
+        rollovers.push({ ...summary, ...footprint });
+      }
       simulated += result.matches;
       weeks++;
       const invalid = (await store.get<{ total: number }>(
@@ -224,24 +385,21 @@ export async function seasonSoak(seasons: number, fullWorld = false) {
       assert.equal(badTable, 0, `Table conservation failed on ${result.date}`);
       if (weeks % 13 === 0)
         console.log(
-          `Soak ${result.date}: ${simulated} matches; ${(await store.get<{ total: number }>("SELECT count(*) AS total FROM players"))!.total} player records`,
+          `Soak ${result.date}: ${simulated} matches; ${await activePlayers(store)} active players`,
         );
     }
-    assert.equal(
-      (await store.get<{ total: number }>(
-        "SELECT count(*) AS total FROM players",
-      ))!.total,
-      expectedPlayers,
-    );
+    assert.equal(rollovers.length, seasons, "Every season must roll over");
     await checkSqlConstraints(store);
     const result = {
       seasons,
       fullWorld,
+      nations: fullWorld ? "all" : nations.join(","),
       date: (await stateOf(store)).date,
       matches: simulated,
-      players: (await store.get<{ total: number }>(
-        "SELECT count(*) AS total FROM players",
-      ))!.total,
+      initialPlayers,
+      players: await activePlayers(store),
+      generatedWorldMB: generated.worldMB,
+      rollovers,
       archivedLeagueSeasons: (await store.get<{ total: number }>(
         "SELECT count(*) AS total FROM history WHERE entity_type = 'league'",
       ))!.total,
@@ -266,12 +424,17 @@ if (
       ?.split("=")[1] ?? 0,
   );
   const fullWorld = process.argv.includes("--full-world");
+  const nations = process.argv
+    .find((value) => value.startsWith("--nations="))
+    ?.split("=")[1]
+    ?.split(",")
+    .filter(Boolean);
   const start = performance.now();
   console.log(
     JSON.stringify(
       {
         calibration: calibrationSample(),
-        ...(seasons > 0 ? { soak: await seasonSoak(seasons, fullWorld) } : {}),
+        ...(seasons > 0 ? { soak: await seasonSoak(seasons, fullWorld, nations?.length ? nations : SOAK_NATIONS) } : {}),
         seconds: Math.round((performance.now() - start) / 1000),
       },
       null,

@@ -543,6 +543,7 @@ export class Store {
   readonly schemaName: string;
   readonly testMode: boolean;
   private readonly context = new AsyncLocalStorage<TransactionContext>();
+  private readonly batchContext = new AsyncLocalStorage<boolean>();
   private readonly activeTransactions = new Set<Promise<unknown>>();
   private readonly columnCache = new Map<string, ColumnInfo[]>();
   private readonly scopedStores = new Set<Store>();
@@ -702,7 +703,7 @@ export class Store {
         this.bind(request, prepared.parameters);
         return (await request.query<Result>(prepared.sql)).recordset ?? [];
       });
-    return prepared.writes ? this.transaction(execute) : execute();
+    return prepared.writes ? this.atomic(execute) : execute();
   }
 
   async get<Result>(
@@ -714,7 +715,7 @@ export class Store {
 
   async run(sql: string, ...params: SqlParameter[]): Promise<RunResult> {
     const prepared = bindSql(sql, params, this.schemaName);
-    return this.transaction(async () =>
+    return this.atomic(async () =>
       this.request(async (request) => {
         this.bind(request, prepared.parameters);
         const result = await request.query<{
@@ -734,7 +735,7 @@ export class Store {
 
   async exec(sql: string, ...params: SqlParameter[]): Promise<void> {
     const prepared = bindSql(sql, params, this.schemaName);
-    await this.transaction(async () =>
+    await this.atomic(async () =>
       this.request(async (request) => {
         this.bind(request, prepared.parameters);
         if (prepared.parameters.length) await request.query(prepared.sql);
@@ -767,6 +768,50 @@ export class Store {
   }
 
   async transaction<Result>(callback: () => Promise<Result>): Promise<Result> {
+    // Inside batched(), a transaction() block is a unit of work; each of its statements commits on its own.
+    if (this.batchContext.getStore() && !this.context.getStore()) {
+      this.assertOpen();
+      return callback();
+    }
+    return this.atomic(callback);
+  }
+
+  /**
+   * Runs a large write, such as building a new career world, as many short transactions instead of one, so a
+   * full world never needs a single multi-hundred-megabyte log. One idle transaction holds the world writer lock
+   * for the whole callback, so no other writer interleaves; the callback must mark its result complete last and
+   * clean up if it fails, because statements already committed stay committed.
+   */
+  async batched<Result>(callback: () => Promise<Result>): Promise<Result> {
+    this.assertOpen();
+    // Already inside a transaction (one atomic unit, as before) or another batched() call: just run it.
+    if (this.context.getStore() || this.batchContext.getStore()) return callback();
+    const holder = new this.driver.Transaction(this.pool);
+    const operation = (async () => {
+      await holder.begin(this.driver.ISOLATION_LEVEL.READ_COMMITTED);
+      try {
+        const request = new this.driver.Request(holder);
+        request.input("worldLock", this.driver.NVarChar(255), `touchline:world:${this.schemaName.toLowerCase()}`);
+        await request.query(`DECLARE @lockResult INT;
+          EXEC @lockResult = sys.sp_getapplock @Resource = @worldLock, @LockMode = N'Exclusive',
+            @LockOwner = N'Transaction', @LockTimeout = 30000;
+          IF @lockResult < 0 THROW 51000, N'Touchline world writer lock could not be acquired.', 1;`);
+        return await this.batchContext.run(true, callback);
+      } finally {
+        // The holder wrote nothing; ending it only releases the lock (a dropped connection releases it too).
+        await holder.rollback().catch(() => undefined);
+      }
+    })();
+    this.activeTransactions.add(operation);
+    try {
+      return await operation;
+    } finally {
+      this.activeTransactions.delete(operation);
+    }
+  }
+
+  /** One SQL transaction: joins the current one, or starts one under the world writer lock. */
+  private async atomic<Result>(callback: () => Promise<Result>): Promise<Result> {
     this.assertOpen();
     const existing = this.context.getStore();
     if (existing) {
@@ -784,7 +829,7 @@ export class Store {
         throw error;
       }
     }
-    const operation = this.startTransaction(callback);
+    const operation = this.startTransaction(callback, !this.batchContext.getStore());
     this.activeTransactions.add(operation);
     try {
       return await operation;
@@ -795,6 +840,7 @@ export class Store {
 
   private async startTransaction<Result>(
     callback: () => Promise<Result>,
+    acquireLock = true,
   ): Promise<Result> {
     const transaction = new this.driver.Transaction(this.pool);
     const context: TransactionContext = {
@@ -812,6 +858,10 @@ export class Store {
     return this.context.run(context, async () => {
       try {
         await this.request(async (request) => {
+          if (!acquireLock) {
+            await request.batch("SET XACT_ABORT ON;");
+            return;
+          }
           request.input(
             "worldLock",
             this.driver.NVarChar(255),
@@ -852,7 +902,7 @@ export class Store {
   }
 
   async schema(): Promise<void> {
-    await this.transaction(async () => {
+    await this.atomic(async () => {
       await this.lockSchemaMaintenance();
       if (
         this.schemaName.toLowerCase() === "accounts" ||
@@ -981,7 +1031,7 @@ export class Store {
   async bulkInsert(table: string, rows: readonly object[]): Promise<void> {
     table = this.knownTable(table);
     if (!rows.length) return;
-    await this.transaction(async () => {
+    await this.atomic(async () => {
       const metadata = await this.columnInfo(table);
       const known = new Set(metadata.map((column) => column.name));
       const keys = Object.keys(rows[0]);
@@ -1066,22 +1116,15 @@ export class Store {
       throw new Error(
         "clearWorld() requires an active Store.transaction() writer lock.",
       );
-    for (const table of (await this.worldTables()).reverse()) {
-      const target = tableName(this.schemaName, table);
-      await this.exec(`DELETE FROM ${target};`);
-      if (IDENTITY_TABLES.has(table))
-        await this.exec(
-          `EXEC ${tableName(this.schemaName, "reseed_world_identity")} @table = ?;`,
-          table,
-        );
-    }
+    await this.discardWorld();
   }
 
-  /** clearWorld() that TRUNCATEs unreferenced tables (deallocation-only logging) and range-deletes referenced ones. */
+  /** Empties the world: TRUNCATE where nothing references a table (deallocation-only logging), range deletes elsewhere. */
   async discardWorld(): Promise<{ truncated: string[]; deleted: string[] }> {
     this.assertOpen();
     const context = this.context.getStore();
-    if (!context?.active || !context.locked)
+    // Inside batched() every TRUNCATE and range delete commits on its own under the holder's writer lock.
+    if (!this.batchContext.getStore() && (!context?.active || !context.locked))
       throw new Error(
         "discardWorld() requires an active Store.transaction() writer lock.",
       );
@@ -1107,12 +1150,12 @@ export class Store {
     const deleted: string[] = [];
     for (const table of tables) {
       const row = metadata.get(table);
-      if (!row || row.referenced || row.can_alter !== 1) continue;
+      if (table === "meta" || !row || row.referenced || row.can_alter !== 1) continue;
       await this.exec(`TRUNCATE TABLE ${tableName(this.schemaName, table)};`);
       truncated.push(table);
     }
     for (const table of [...tables].reverse()) {
-      if (truncated.includes(table)) continue;
+      if (table === "meta" || truncated.includes(table)) continue;
       const target = tableName(this.schemaName, table);
       // A self-referencing table must be emptied in one statement so no range deletes a parent before its child.
       if (IDENTITY_TABLES.has(table) && !metadata.get(table)?.self_referenced) {
@@ -1133,6 +1176,18 @@ export class Store {
           table,
         );
       deleted.push(table);
+    }
+    // meta goes last, so an interrupted batched() discard keeps its 'worldBuild' marker and is retried.
+    if (tables.includes("meta")) {
+      const row = metadata.get("meta");
+      const target = tableName(this.schemaName, "meta");
+      if (row && !row.referenced && row.can_alter === 1) {
+        await this.exec(`TRUNCATE TABLE ${target};`);
+        truncated.push("meta");
+      } else {
+        await this.exec(`DELETE FROM ${target};`);
+        deleted.push("meta");
+      }
     }
     return { truncated, deleted };
   }

@@ -1,6 +1,7 @@
-import { expect, test, type APIResponse, type Page } from "@playwright/test";
+import { expect, test, type APIResponse, type Locator, type Page } from "@playwright/test";
 import type { AcademyData, Bootstrap, PlayerPage, SquadData } from "../shared/api.ts";
 import {
+  POSITIONS,
   compactNumber,
   currencyCode,
   adultTransferArrival,
@@ -1266,7 +1267,11 @@ test("database filter groups reset dependent fields, clear chips and restart pag
       result.players.map((player) => String(player.age)),
     );
     await expect(rows.locator(".club-cell")).toHaveText(
-      result.players.map((player) => player.club_name ?? "Free agent"),
+      result.players.map(
+        (player) =>
+          player.club_name ??
+          ((player as { home_based?: number }).home_based ? "Home-based" : "Free agent"),
+      ),
     );
     await expect(page.locator(".filter-summary")).toContainText("in your selection");
     await expect(page.locator(".pagination-actions > span")).toHaveText(
@@ -3020,4 +3025,181 @@ test("start menu creates, loads and safely deletes a separate career", async ({
     path: "test-results/career-saves-desktop.png",
     fullPage: true,
   });
+});
+
+type Direction = "asc" | "desc";
+const ariaSortOf = (direction: Direction) =>
+  direction === "asc" ? "ascending" : "descending";
+
+/** Cell texts of one column, split into the table's row groups. */
+async function columnGroups(table: Locator, label: string) {
+  return await table.evaluate((element, text) => {
+    const headers = [...element.querySelectorAll("thead th")];
+    const index = headers.findIndex(
+      (header) => header.querySelector(".sort-button > span")?.textContent === text,
+    );
+    const groups: string[][] = [[]];
+    for (const row of element.querySelectorAll("tbody tr")) {
+      if (row.classList.contains("roster-group-row")) groups.push([]);
+      else groups[groups.length - 1].push(row.children[index]?.textContent?.trim() ?? "");
+    }
+    return groups.filter((group) => group.length);
+  }, label);
+}
+
+function expectOrdered(values: number[], direction: Direction) {
+  for (let index = 1; index < values.length; index++)
+    if (direction === "asc") expect(values[index]).toBeGreaterThanOrEqual(values[index - 1]);
+    else expect(values[index]).toBeLessThanOrEqual(values[index - 1]);
+}
+
+/** Clicks a column header (or presses Enter on it) and checks aria-sort plus the order in every group. */
+async function sortByHeader(
+  table: Locator,
+  label: string,
+  direction: Direction,
+  toNumber: (text: string) => number,
+  keyboard = false,
+) {
+  const header = table.getByRole("columnheader", { name: label, exact: true });
+  const button = header.getByRole("button");
+  if (keyboard) {
+    await button.focus();
+    await button.press("Enter");
+  } else await button.click();
+  await expect(header).toHaveAttribute("aria-sort", ariaSortOf(direction));
+  const groups = await columnGroups(table, label);
+  expect(groups.flat().length).toBeGreaterThan(1);
+  for (const group of groups) expectOrdered(group.map(toNumber), direction);
+}
+
+const positionIndex = (text: string) => (POSITIONS as readonly string[]).indexOf(text);
+
+test("paginated database sorts on the server from its column headers", async ({ page }) => {
+  const table = page.locator(".database-workspace .player-table");
+  const header = table.getByRole("columnheader", { name: "Age", exact: true });
+  async function search(action: () => Promise<unknown>, parameters: Record<string, string>) {
+    const pending = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return (
+        url.pathname === "/api/players" &&
+        Object.entries(parameters).every(([key, value]) => url.searchParams.get(key) === value)
+      );
+    });
+    await action();
+    const response = await pending;
+    expect(response.ok()).toBe(true);
+    const result: PlayerPage = await response.json();
+    await expect(table.locator("tbody tr .player-name strong")).toHaveText(
+      result.players.map((player) => player.name),
+    );
+    return result;
+  }
+  await search(() => page.goto("/#database"), { page: "1" });
+  await expect(header).not.toHaveAttribute("aria-sort", /./);
+  for (const direction of ["asc", "desc"] as const) {
+    const first = await search(() => header.getByRole("button").click(), {
+      sort: "age",
+      direction,
+    });
+    await expect(header).toHaveAttribute("aria-sort", ariaSortOf(direction));
+    expect(first.pages).toBeGreaterThan(1);
+    expectOrdered(first.players.map((player) => player.age), direction);
+    const second = await search(
+      () => page.getByRole("button", { name: "Next player page", exact: true }).click(),
+      { sort: "age", direction, page: "2" },
+    );
+    expectOrdered(
+      [...first.players, ...second.players].map((player) => player.age),
+      direction,
+    );
+    await search(
+      () => page.getByRole("button", { name: "Previous player page", exact: true }).click(),
+      { sort: "age", direction, page: "1" },
+    );
+  }
+  const position = table.getByRole("columnheader", { name: "Pos", exact: true });
+  const byPosition = await search(() => position.getByRole("button").click(), {
+    sort: "position",
+    direction: "asc",
+  });
+  await expect(position).toHaveAttribute("aria-sort", "ascending");
+  await expect(header).not.toHaveAttribute("aria-sort", /./);
+  expectOrdered(byPosition.players.map((player) => positionIndex(player.position)), "asc");
+});
+
+test("squad table headers sort within position groups by mouse and keyboard", async ({ page }) => {
+  await page.goto("/#squad");
+  const roster = page.getByRole("region", { name: "Squad players", exact: true });
+  await expect(roster).toHaveAttribute("aria-busy", "false");
+  const table = roster.locator("table");
+  await sortByHeader(table, "Pos", "asc", positionIndex);
+  await sortByHeader(table, "Pos", "desc", positionIndex, true);
+  await sortByHeader(table, "Apps", "desc", Number);
+  await sortByHeader(table, "Apps", "asc", Number, true);
+});
+
+test("shortlist groups, filters and sorts targets without overflow at every width", async ({
+  page,
+  request,
+}) => {
+  const bootstrap: Bootstrap = await (await request.get("/api/bootstrap")).json();
+  const candidates: PlayerPage = await (
+    await request.get("/api/players?sort=ability&direction=desc&pageSize=60")
+  ).json();
+  const targets = candidates.players
+    .filter((player) => player.club_id && player.club_id !== bootstrap.club.id && !player.shortlisted)
+    .slice(0, 6);
+  expect(targets.length).toBe(6);
+  const shortlist = async (active: boolean) => {
+    for (const player of targets)
+      await retryBusyResponse(() =>
+        request.post("/api/action", { data: { type: "shortlist", playerId: player.id, active } }),
+      );
+  };
+  await shortlist(true);
+  try {
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await page.goto("/#scouting");
+    await page.getByRole("tab", { name: /^Shortlist/ }).click();
+    const region = page.getByRole("region", { name: "Shortlisted players", exact: true });
+    const table = region.locator("table");
+    const rows = table.locator("tbody tr:not(.roster-group-row)");
+    await expect(region).toBeVisible();
+    const total = await rows.count();
+    expect(total).toBeGreaterThanOrEqual(targets.length);
+    await expect(table.locator(".roster-group-row").first()).toBeVisible();
+    await page.locator(".segmented-control label", { hasText: "Single list" }).click();
+    await expect(table.locator(".roster-group-row")).toHaveCount(0);
+    await sortByHeader(table, "Age", "asc", Number);
+    await sortByHeader(table, "Age", "desc", Number, true);
+    await sortByHeader(table, "Pos", "asc", positionIndex);
+    await page.locator(".segmented-control label", { hasText: "Position line" }).click();
+    await expect(table.getByRole("columnheader", { name: "Pos", exact: true })).toHaveAttribute(
+      "aria-sort",
+      "ascending",
+    );
+    await page.getByRole("textbox", { name: "Search shortlist", exact: true }).fill(targets[0].name);
+    await expect(rows.locator(".player-name strong").first()).toHaveText(targets[0].name);
+    await expect(page.getByRole("status").filter({ hasText: /of \d+ players/ })).toContainText(
+      `of ${total} players`,
+    );
+    await page.getByRole("button", { name: "Clear shortlist filters", exact: true }).click();
+    await expect(rows).toHaveCount(total);
+    const status = page.getByRole("group", { name: "Shortlist status", exact: true });
+    await expect(status.getByRole("button", { name: /^All statuses/ })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    for (const width of [1440, 390, 320]) {
+      await page.setViewportSize({ width, height: 844 });
+      await expect(region).toBeVisible();
+      await expect(status).toBeVisible();
+      await noOverflow(page);
+      await page.screenshot({ path: `test-results/shortlist-${width}.png`, fullPage: true });
+    }
+  } finally {
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await shortlist(false);
+  }
 });

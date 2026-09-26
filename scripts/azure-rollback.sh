@@ -44,6 +44,7 @@ printf '%s\n' '[rollback] Checking free limits, private registry and candidate s
 sql_environment
 verify_free_database
 deployment_private_registry
+# shellcheck disable=SC2034 # read by deployment_firewall and deployment_wait from azure-deploy.sh.
 app_id="/subscriptions/$AZURE_SUBSCRIPTION_ID/resourceGroups/$AZURE_RESOURCE_GROUP/providers/Microsoft.App/containerApps/$AZURE_APP"
 candidate="$(azure containerapp revision show --name "$AZURE_APP" --resource-group "$AZURE_RESOURCE_GROUP" --revision "$revision" --output json)"
 schema_version="$(printf '%s' "$candidate" | node -e 'let text=""; process.stdin.on("data",chunk=>text+=chunk); process.stdin.on("end",()=>{const revision=JSON.parse(text), containers=revision.properties.template.containers; if(containers.length!==1) process.exit(1); const container=containers[0]; if(!container.image.startsWith(`${process.env.GHCR_IMAGE}@sha256:`) || !/@sha256:[a-f0-9]{64}$/.test(container.image)) process.exit(1); const version=container.env.find(item=>item.name==="TOUCHLINE_SCHEMA_VERSION")?.value; if(!/^\d+$/.test(version)) process.exit(1); process.stdout.write(version);});')" || fail 'Rollback requires a private digest and recorded schema version.'
@@ -53,6 +54,7 @@ public_domain="$(azure containerapp env show --resource-group "$AZURE_RESOURCE_G
 origin="https://$AZURE_APP.$public_domain"
 deployment_auth_check
 completed=false
+# shellcheck disable=SC2154 # status is assigned inside the trap body.
 trap 'status=$?; trap - EXIT; if [[ "$completed" != true ]]; then azure containerapp ingress enable --name "$AZURE_APP" --resource-group "$AZURE_RESOURCE_GROUP" --type internal --target-port 3001 --transport auto --output none >/dev/null 2>&1 || printf "%s\n" "CRITICAL: Failed to close ingress; close it manually immediately." >&2; fi; exit "$status"' EXIT
 printf '%s\n' '[rollback] Closing ingress before validating and selecting the cold candidate.'
 azure containerapp ingress enable --name "$AZURE_APP" --resource-group "$AZURE_RESOURCE_GROUP" --type internal --target-port 3001 --transport auto --output none

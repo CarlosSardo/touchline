@@ -59,4 +59,26 @@ verify_free_database() {
   [[ "$(printf '%s' "$database" | json_value useFreeLimit)" == "true" ]] || fail "Database is not on the SQL free offer. No changes made to its billing mode."
   [[ "$(printf '%s' "$database" | json_value freeLimitExhaustionBehavior)" == "AutoPause" ]] || fail "Database is configured for paid overage. Refusing to continue."
   [[ "$(printf '%s' "$database" | json_value maxSizeBytes)" -le 34359738368 ]] || fail "SQL storage exceeds the free-offer limit."
+  verify_free_allowance "$(printf '%s' "$database" | json_value status)"
+}
+# Reads the Azure Monitor metric through ARM, so the check never wakes the serverless database.
+verify_free_allowance() {
+  local status="$1" floor="${AZURE_SQL_MIN_FREE_VCORE_SECONDS:-2000}" window remaining
+  [[ "$floor" =~ ^[0-9]+$ ]] || fail "AZURE_SQL_MIN_FREE_VCORE_SECONDS must be a whole number."
+  window="$(node -e 'const now=new Date(); process.stdout.write(`${new Date(Date.UTC(now.getUTCFullYear(),now.getUTCMonth(),1)).toISOString()} ${now.toISOString()}`)')"
+  remaining="$(azure monitor metrics list \
+    --resource "/subscriptions/$AZURE_SUBSCRIPTION_ID/resourceGroups/$AZURE_RESOURCE_GROUP/providers/Microsoft.Sql/servers/$AZURE_SQL_SERVER/databases/$AZURE_SQL_DATABASE" \
+    --metrics free_amount_remaining --aggregation Minimum --interval PT1H \
+    --start-time "${window% *}" --end-time "${window#* }" \
+    --query 'value[0].timeseries[0].data[?minimum!=null] | [-1].minimum' --output tsv)" ||
+    fail "Could not read the SQL free vCore allowance. No SQL connection was opened."
+  if [[ -z "$remaining" ]]; then
+    # The metric is only emitted while the database is online: no point this month means a new month or a new database.
+    printf 'No SQL free-allowance data point yet this month (database %s); assuming the monthly reset.\n' "${status:-unknown}"
+    remaining=100000
+  fi
+  [[ "$remaining" =~ ^[0-9]+(\.[0-9]+)?$ ]] || fail "Unexpected SQL free-allowance value. No SQL connection was opened."
+  remaining="${remaining%.*}"
+  printf 'SQL free allowance: about %s vCore-seconds left this month (floor %s; the metric can lag by several minutes).\n' "$remaining" "$floor"
+  (( remaining >= floor )) || fail "SQL free allowance is below the floor. Refusing to wake the database; wait for the monthly reset."
 }

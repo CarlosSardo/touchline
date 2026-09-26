@@ -32,16 +32,27 @@ import {
   PageHeading,
   Panel,
   PlayerName,
-  PlayerTable,
   Rating,
   SectionHeading,
+  SortDirectionButton,
+  SortHeader,
   Stat,
   Tabs,
-  TextLink,
 } from "../ui.tsx";
 import { dateLabel, label, POSITIONS } from "../../shared/rules.ts";
 import type { ScoutingData, SquadData } from "../../shared/api.ts";
 import type { Player, Staff } from "../../shared/types.ts";
+import {
+  dateValue,
+  PLAYER_COLUMNS,
+  PLAYER_TIE_BREAKERS,
+  positionRank,
+  rankOf,
+  type SortColumn,
+} from "../sort.ts";
+import { useSortableRows } from "../useSortableRows.ts";
+import { POSITION_LINES } from "../players.ts";
+import Shortlist from "./Shortlist.tsx";
 
 const roles = [
   "Captain",
@@ -50,6 +61,80 @@ const roles = [
   "Squad player",
   "Fringe player",
   "Prospect",
+];
+
+type SquadSortKey =
+  | "name"
+  | "position"
+  | "age"
+  | "status"
+  | "ability"
+  | "potential"
+  | "role"
+  | "fitness"
+  | "morale"
+  | "appearances"
+  | "goals"
+  | "wage"
+  | "availability";
+const SQUAD_SORT_OPTIONS: [SquadSortKey, string][] = [
+  ["ability", "Ability"],
+  ["potential", "Potential"],
+  ["fitness", "Fitness"],
+  ["age", "Age"],
+  ["name", "Name"],
+  ["position", "Position"],
+  ["status", "Readiness"],
+  ["role", "Squad role"],
+  ["morale", "Morale"],
+  ["appearances", "Appearances"],
+  ["goals", "Goals / assists"],
+  ["wage", "Wage"],
+  ["availability", "Availability"],
+];
+const SUCCESSION_RISKS = ["Vacant", "Plan succession", "No young cover", "Covered"];
+const SUCCESSION_COLUMNS: SortColumn<
+  SquadData["succession"][number],
+  "position" | "current" | "age" | "prospect" | "potential" | "risk"
+>[] = [
+  { key: "position", value: (item) => positionRank(item.position), defaultDirection: "asc" },
+  { key: "current", value: (item) => item.current, defaultDirection: "asc" },
+  { key: "age", value: (item) => item.age, defaultDirection: "asc" },
+  { key: "prospect", value: (item) => item.prospect?.name, defaultDirection: "asc" },
+  { key: "potential", value: (item) => item.prospect?.potential, defaultDirection: "desc" },
+  { key: "risk", value: (item) => rankOf(SUCCESSION_RISKS, item.risk), defaultDirection: "asc" },
+];
+type Report = ScoutingData["reports"][number];
+const REPORT_COLUMNS: SortColumn<
+  Report,
+  "name" | "position" | "age" | "ability" | "potential" | "fit" | "risk" | "accuracy" | "date"
+>[] = [
+  { key: "name", value: (report) => report.player_name, defaultDirection: "asc" },
+  { key: "position", value: (report) => positionRank(report.position), defaultDirection: "asc" },
+  { key: "age", value: (report) => report.age, defaultDirection: "asc" },
+  { key: "ability", value: (report) => [(report.ability_low + report.ability_high) / 2, report.ability_high], defaultDirection: "desc" },
+  { key: "potential", value: (report) => [(report.potential_low + report.potential_high) / 2, report.potential_high], defaultDirection: "desc" },
+  { key: "fit", value: (report) => report.fit, defaultDirection: "desc" },
+  { key: "risk", value: (report) => report.risk, defaultDirection: "asc" },
+  { key: "accuracy", value: (report) => report.accuracy, defaultDirection: "desc" },
+  { key: "date", value: (report) => dateValue(report.date), defaultDirection: "desc" },
+];
+const REPORT_TIE_BREAKERS: SortColumn<Report>[] = [
+  { key: "name", value: (report) => report.player_name },
+  { key: "id", value: (report) => report.id, defaultDirection: "desc" },
+];
+type AssignmentRow = ScoutingData["assignments"][number];
+const ASSIGNMENT_COLUMNS: SortColumn<
+  AssignmentRow,
+  "scout" | "brief" | "position" | "age" | "budget" | "due" | "status"
+>[] = [
+  { key: "scout", value: (assignment) => assignment.scout_name, defaultDirection: "asc" },
+  { key: "brief", value: (assignment) => assignment.player_name ?? assignment.country_name ?? "Worldwide search", defaultDirection: "asc" },
+  { key: "position", value: (assignment) => positionRank(assignment.position), defaultDirection: "asc" },
+  { key: "age", value: (assignment) => assignment.max_age, defaultDirection: "asc" },
+  { key: "budget", value: (assignment) => assignment.budget, defaultDirection: "desc" },
+  { key: "due", value: (assignment) => dateValue(assignment.due_date), defaultDirection: "desc" },
+  { key: "status", value: (assignment) => rankOf(["active", "complete"], assignment.status) ?? 2, defaultDirection: "asc" },
 ];
 
 export function Squad() {
@@ -65,41 +150,59 @@ export function Squad() {
   const [filter, setFilter] = useState("");
   const [query, setQuery] = useState("");
   const [readiness, setReadiness] = useState("");
-  const [sort, setSort] = useState("ability");
-  if (error) return <ErrorState message={error} />;
-  if (!data || !bootstrap) return <Loading />;
-  const selectedClub = data.clubs.find((club) => club.id === data.selectedClubId) ?? bootstrap.club;
-  const scopeLabel = data.ageGroup === "Senior"
-    ? selectedClub.type === "bteam" ? "Reserve team" : "First team"
-    : data.ageGroup;
+  const [grouped, setGrouped] = useState(true);
+  const today = bootstrap?.state.date ?? "";
   const isInjured = (player: Player) =>
-    !!player.injury_until && player.injury_until > bootstrap.state.date;
-  const availableCount = data.players.filter((player) => !isInjured(player) && player.fitness >= 60).length;
-  const injuredCount = data.players.filter(isInjured).length;
-  const lowFitnessCount = data.players.filter((player) => !isInjured(player) && player.fitness < 60).length;
-  const groups = [...new Set(data.matrix.map((player) => player.group))];
-  const filtered = data.players.filter((player) =>
+    !!player.injury_until && player.injury_until > today;
+  const filtered = (data?.players ?? []).filter((player) =>
     (!filter || player.position === filter) &&
     (!query || `${player.name} ${player.nationality} ${player.role}`.toLowerCase().includes(query.trim().toLowerCase())) &&
     (!readiness || (readiness === "injured" ? isInjured(player)
       : readiness === "low" ? !isInjured(player) && player.fitness < 60
         : !isInjured(player) && player.fitness >= 60)),
-  ).sort((first, second) =>
-    sort === "name" ? first.name.localeCompare(second.name)
-      : sort === "age" ? first.age - second.age
-        : sort === "potential" ? second.potential - first.potential
-          : sort === "fitness" ? second.fitness - first.fitness
-            : second.ability - first.ability,
   );
-  const sections = [
-    { label: "Goalkeepers", positions: ["GK"] },
-    { label: "Defenders", positions: ["CB", "LB", "RB"] },
-    { label: "Midfielders", positions: ["DM", "CM", "AM"] },
-    { label: "Forwards", positions: ["LW", "RW", "ST"] },
-  ].map((section) => ({
-    ...section,
-    players: filtered.filter((player) => section.positions.includes(player.position)),
-  })).filter((section) => section.players.length);
+  const squadColumns: SortColumn<Player, SquadSortKey>[] = [
+    PLAYER_COLUMNS.name,
+    PLAYER_COLUMNS.position,
+    PLAYER_COLUMNS.age,
+    { key: "status", value: (player) => (isInjured(player) ? 2 : player.fitness < 60 ? 1 : 0), defaultDirection: "asc" },
+    PLAYER_COLUMNS.ability,
+    PLAYER_COLUMNS.potential,
+    { key: "role", value: (player) => rankOf(roles, roles.includes(player.role) ? player.role : "Squad player"), defaultDirection: "asc" },
+    PLAYER_COLUMNS.fitness,
+    PLAYER_COLUMNS.morale,
+    PLAYER_COLUMNS.appearances,
+    PLAYER_COLUMNS.goals,
+    PLAYER_COLUMNS.wage,
+    { key: "availability", value: (player) => (player.listed ? 1 : player.available_loan ? 2 : 0), defaultDirection: "asc" },
+  ];
+  const sorting = useSortableRows(filtered, squadColumns, {
+    initial: { key: "ability", direction: "desc" },
+    tieBreakers: PLAYER_TIE_BREAKERS,
+  });
+  const succession = useSortableRows(data?.succession ?? [], SUCCESSION_COLUMNS, {
+    initial: { key: "position", direction: "asc" },
+    tieBreakers: [SUCCESSION_COLUMNS[0]],
+  });
+  if (error) return <ErrorState message={error} />;
+  if (!data || !bootstrap) return <Loading />;
+  const selectedClub = data.clubs.find((club) => club.id === data.selectedClubId) ?? bootstrap.club;
+  const reserveScope = data.clubs.find((club) => String(club.id) === String(squadClub || data.selectedClubId))?.type === "bteam";
+  const scopeLabel = data.ageGroup === "Senior"
+    ? selectedClub.type === "bteam" ? "Reserve team" : "First team"
+    : data.ageGroup;
+  const availableCount = data.players.filter((player) => !isInjured(player) && player.fitness >= 60).length;
+  const injuredCount = data.players.filter(isInjured).length;
+  const lowFitnessCount = data.players.filter((player) => !isInjured(player) && player.fitness < 60).length;
+  const groups = [...new Set(data.matrix.map((player) => player.group))];
+  const sections = grouped
+    ? POSITION_LINES.map((section) => ({
+        label: section.label,
+        players: sorting.rows.filter((player) =>
+          (section.positions as readonly string[]).includes(player.position),
+        ),
+      })).filter((section) => section.players.length)
+    : [{ label: "", players: sorting.rows }];
   const matrix = data.matrix.slice(0, 18);
   return (
     <div className="page">
@@ -121,7 +224,10 @@ export function Squad() {
           <select
             aria-label="Club squad"
             value={squadClub || data.selectedClubId}
-            onChange={(event) => setSquadClub(event.target.value)}
+            onChange={(event) => {
+              setSquadClub(event.target.value);
+              if (data.clubs.find((club) => String(club.id) === event.target.value)?.type === "bteam") setAgeGroup("Senior");
+            }}
           >
             {data.clubs.map((club) => (
               <option key={club.id} value={club.id}>
@@ -131,10 +237,10 @@ export function Squad() {
           </select>
         </Field>
         <Field label="Age group">
-          <select aria-label="Squad age group" value={ageGroup} onChange={(event) => setAgeGroup(event.target.value)}>
+          <select aria-label="Squad age group" value={reserveScope ? "Senior" : ageGroup} onChange={(event) => setAgeGroup(event.target.value)}>
             <option value="Senior">Senior</option>
-            <option value="U19">U19</option>
-            <option value="U17">U17</option>
+            {!reserveScope && <option value="U19">U19</option>}
+            {!reserveScope && <option value="U17">U17</option>}
           </select>
         </Field>
         <div className="scope-context" role="status">
@@ -224,14 +330,28 @@ export function Squad() {
                 </select>
               </Field>
               <Field label="Sort by">
-                <select aria-label="Sort squad players" value={sort} onChange={(event) => setSort(event.target.value)}>
-                  <option value="ability">Ability</option>
-                  <option value="potential">Potential</option>
-                  <option value="fitness">Fitness</option>
-                  <option value="age">Age: youngest first</option>
-                  <option value="name">Name</option>
+                <select
+                  aria-label="Sort squad players"
+                  value={sorting.sort?.key ?? ""}
+                  onChange={(event) => {
+                    const key = event.target.value as SquadSortKey;
+                    sorting.setSort({ key, direction: sorting.defaultDirection(key) });
+                  }}
+                >
+                  {SQUAD_SORT_OPTIONS.map(([key, text]) => (
+                    <option key={key} value={key}>{text}</option>
+                  ))}
                 </select>
               </Field>
+              <SortDirectionButton
+                subject="squad players"
+                direction={sorting.sort?.direction}
+                onToggle={() => sorting.sort && sorting.toggle(sorting.sort.key)}
+              />
+              <label className="filter-check group-toggle">
+                <input type="checkbox" checked={grouped} onChange={(event) => setGrouped(event.target.checked)} />
+                Group by position line
+              </label>
               {(query || filter || readiness) && (
                 <IconButton icon={X} label="Clear squad filters" onClick={() => { setQuery(""); setFilter(""); setReadiness(""); }} />
               )}
@@ -252,23 +372,23 @@ export function Squad() {
                 <caption className="sr-only">{scopeLabel}: roles, readiness and availability</caption>
                 <thead>
                   <tr>
-                    <th>Player</th>
-                    <th>Pos</th>
-                    <th>Status</th>
-                    <th>Ability</th>
-                    <th>Potential</th>
-                    <th>Squad role</th>
-                    <th>Fitness</th>
-                    <th>Morale</th>
-                    <th>Apps</th>
-                    <th>G / A</th>
-                    <th>Wage / wk</th>
-                    <th>Availability</th>
+                    <SortHeader {...sorting.header("name")} label="Player" />
+                    <SortHeader {...sorting.header("position")} label="Pos" title="Position" />
+                    <SortHeader {...sorting.header("status")} label="Status" title="Readiness" />
+                    <SortHeader {...sorting.header("ability")} label="Ability" title="Current ability" />
+                    <SortHeader {...sorting.header("potential")} label="Potential" title="Current dynamic potential" />
+                    <SortHeader {...sorting.header("role")} label="Squad role" />
+                    <SortHeader {...sorting.header("fitness")} label="Fitness" />
+                    <SortHeader {...sorting.header("morale")} label="Morale" />
+                    <SortHeader {...sorting.header("appearances")} label="Apps" title="Appearances" />
+                    <SortHeader {...sorting.header("goals")} label="G / A" title="Goals, then assists" />
+                    <SortHeader {...sorting.header("wage")} label="Wage / wk" />
+                    <SortHeader {...sorting.header("availability")} label="Availability" />
                   </tr>
                 </thead>
                 {sections.map((section) => (
-                <tbody key={section.label}>
-                  <tr className="roster-group-row"><th scope="rowgroup" colSpan={12}>{section.label} <span>{section.players.length}</span></th></tr>
+                <tbody key={section.label || "all"}>
+                  {grouped && <tr className="roster-group-row"><th scope="rowgroup" colSpan={12}>{section.label} <span>{section.players.length}</span></th></tr>}
                   {section.players.map((player) => (
                     <tr key={player.id}>
                       <td>
@@ -480,20 +600,20 @@ export function Squad() {
               title="Build beyond this season"
               subtitle="Current starters, emerging cover and recruitment gaps"
             />
-            <div className="table-scroll">
+            <div className="table-scroll" role="region" aria-label="Succession plan" tabIndex={0}>
               <table className="data-table">
                 <thead>
                   <tr>
-                    <th>Position</th>
-                    <th>Current option</th>
-                    <th>Age</th>
-                    <th>Next generation</th>
-                    <th>Potential</th>
-                    <th>Status</th>
+                    <SortHeader {...succession.header("position")} label="Position" />
+                    <SortHeader {...succession.header("current")} label="Current option" />
+                    <SortHeader {...succession.header("age")} label="Age" />
+                    <SortHeader {...succession.header("prospect")} label="Next generation" />
+                    <SortHeader {...succession.header("potential")} label="Potential" title="Prospect potential" />
+                    <SortHeader {...succession.header("risk")} label="Status" />
                   </tr>
                 </thead>
                 <tbody>
-                  {data.succession.map((item) => (
+                  {succession.rows.map((item) => (
                     <tr key={item.position}>
                       <td>
                         <span className="position-tag">{item.position}</span>
@@ -696,6 +816,14 @@ export function Scouting() {
   const { data, error } = useResource<ScoutingData>("scouting");
   const [tab, setTab] = useState("reports");
   const [assign, setAssign] = useState(false);
+  const reports = useSortableRows(data?.reports ?? [], REPORT_COLUMNS, {
+    initial: { key: "date", direction: "desc" },
+    tieBreakers: REPORT_TIE_BREAKERS,
+  });
+  const assignments = useSortableRows(data?.assignments ?? [], ASSIGNMENT_COLUMNS, {
+    initial: { key: "due", direction: "desc" },
+    tieBreakers: [{ value: (assignment) => assignment.id, defaultDirection: "desc" }],
+  });
   if (error) return <ErrorState message={error} />;
   if (!data || !bootstrap) return <Loading />;
   const active = data.assignments.filter(
@@ -763,23 +891,24 @@ export function Scouting() {
         />
         {tab === "reports" &&
           (data.reports.length ? (
-            <div className="table-scroll">
+            <div className="table-scroll" role="region" aria-label="Scout reports" tabIndex={0}>
               <table className="data-table">
                 <thead>
                   <tr>
-                    <th>Player</th>
-                    <th>Position</th>
-                    <th>Age</th>
-                    <th>Ability range</th>
-                    <th>Potential range</th>
-                    <th>Tactical fit</th>
-                    <th>Risk</th>
-                    <th>Confidence</th>
+                    <SortHeader {...reports.header("name")} label="Player" />
+                    <SortHeader {...reports.header("position")} label="Position" />
+                    <SortHeader {...reports.header("age")} label="Age" />
+                    <SortHeader {...reports.header("ability")} label="Ability range" title="Estimated ability, by midpoint" />
+                    <SortHeader {...reports.header("potential")} label="Potential range" title="Estimated potential, by midpoint" />
+                    <SortHeader {...reports.header("fit")} label="Tactical fit" />
+                    <SortHeader {...reports.header("risk")} label="Risk" />
+                    <SortHeader {...reports.header("accuracy")} label="Confidence" />
+                    <SortHeader {...reports.header("date")} label="Reported" />
                     <th>Report</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {data.reports.map((report) => (
+                  {reports.rows.map((report) => (
                     <tr key={report.id}>
                       <td>
                         <div className="report-player">
@@ -792,7 +921,7 @@ export function Scouting() {
                           <small>
                             <ClubLink
                               id={report.club_id}
-                              name={report.club_name ?? "Free agent"}
+                              name={report.club_name ?? "No club"}
                             />
                           </small>
                         </div>
@@ -835,6 +964,7 @@ export function Scouting() {
                         </Badge>
                       </td>
                       <td>{report.accuracy}%</td>
+                      <td>{dateLabel(report.date)}</td>
                       <td>
                         <IconButton
                           icon={ArrowUpRight}
@@ -854,33 +984,24 @@ export function Scouting() {
               detail="Set the brief and send your first assignment."
             />
           ))}
-        {tab === "shortlist" && (
-          <>
-            <SectionHeading title="Priority targets">
-              <TextLink onClick={() => navigate("database")}>
-                Search the database
-              </TextLink>
-            </SectionHeading>
-            <PlayerTable players={data.shortlist} />
-          </>
-        )}
+        {tab === "shortlist" && <Shortlist players={data.shortlist} />}
         {tab === "assignments" &&
           (data.assignments.length ? (
-            <div className="table-scroll">
+            <div className="table-scroll" role="region" aria-label="Scouting assignments" tabIndex={0}>
               <table className="data-table">
                 <thead>
                   <tr>
-                    <th>Scout</th>
-                    <th>Brief</th>
-                    <th>Position</th>
-                    <th>Age limit</th>
-                    <th>Budget</th>
-                    <th>Due</th>
-                    <th>Status</th>
+                    <SortHeader {...assignments.header("scout")} label="Scout" />
+                    <SortHeader {...assignments.header("brief")} label="Brief" />
+                    <SortHeader {...assignments.header("position")} label="Position" />
+                    <SortHeader {...assignments.header("age")} label="Age limit" />
+                    <SortHeader {...assignments.header("budget")} label="Budget" />
+                    <SortHeader {...assignments.header("due")} label="Due" />
+                    <SortHeader {...assignments.header("status")} label="Status" />
                   </tr>
                 </thead>
                 <tbody>
-                  {data.assignments.map((assignment) => (
+                  {assignments.rows.map((assignment) => (
                     <tr key={assignment.id}>
                       <td>
                         <strong>{assignment.scout_name}</strong>

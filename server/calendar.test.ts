@@ -11,6 +11,7 @@ import { internationalBreak } from "../shared/rules.ts";
 import type { Fixture, League } from "../shared/types.ts";
 import { drawLeaguePhase } from "./draw.ts";
 import { clubCompetitionEligible } from "../shared/competition-rules.ts";
+import { CONTINENTAL } from "../shared/world-catalog/index.ts";
 
 describe("club competition entry rules", () => {
   it("keeps B-team academies in domestic leagues but excludes reserves and inactive additions from cups and continental events", () => {
@@ -32,11 +33,20 @@ describe("club competition entry rules", () => {
   });
 });
 
+// Every UEFA association (Russia included, to prove its exclusion), all of CONMEBOL and the clubs of the other access lists.
+const CALENDAR_NATIONS = [
+  ..."EN ES DE IT FR PT NL BE TR CZ AT CH LI LU SCO DK GR NO PL HR RS UA SE HU IL RO CY SK SI BG IE IS FI KZ AZ GE AM MD BA AL MK ME XK MT GI AD SM FO EE LV LT WAL NIR BY RU".split(" "),
+  ..."BR AR UY CO VE EC PE BO PY CL".split(" "),
+  ..."SA QA AE IR UZ IQ IN JP KR CN AU TH VN ID PH".split(" "),
+  ..."MA EG NG SN DZ TN CI CM CD ZA GH AO".split(" "),
+  ..."US CA MX PA CR HN SV GT JM HT DO PR NZ".split(" "),
+];
+
 describe("football calendar", () => {
   let store: Store;
   beforeAll(async () => {
     store = await Store.createTest("calendar");
-    await generateWorld(store, { countryLimit: 160, seniors: 400, youth: 200 });
+    await generateWorld(store, { nations: CALENDAR_NATIONS, structureOnly: true });
     await store.run(
       "INSERT INTO standings(league_id,club_id) SELECT leagues.id,clubs.id FROM clubs JOIN leagues ON leagues.country_id = clubs.country_id WHERE clubs.type = 'bteam' AND leagues.kind = 'league' AND leagues.age_group IN ('U19','U17') AND NOT EXISTS (SELECT 1 FROM standings WHERE standings.league_id = leagues.id AND standings.club_id = clubs.id)",
     );
@@ -48,16 +58,7 @@ describe("football calendar", () => {
 
   it("contains all required continental, national youth and invitational competitions", () => {
     for (const name of [
-      "UEFA Champions League",
-      "UEFA Europa League",
-      "UEFA Conference League",
-      "UEFA Youth League",
-      "Copa Libertadores",
-      "Copa Sudamericana",
-      "AFC Champions League",
-      "CAF Champions League",
-      "CONCACAF Champions League",
-      "OFC Champions League",
+      ...CONTINENTAL.competitions.map((competition) => competition.name),
       "FIFA U17 World Cup",
       "FIFA U20 World Cup",
       "MIC",
@@ -71,11 +72,16 @@ describe("football calendar", () => {
     expect(
       COMPETITIONS.filter((spec) => spec.name.endsWith("Championship")),
     ).toHaveLength(12);
+    expect(COMPETITIONS.some((spec) => spec.confederation === "OFC" && spec.kind === "continental")).toBe(false);
   });
 
   it("creates a double round-robin with no self-matches or domestic matches in international breaks", async () => {
+    const premier = (await store.get<League>(
+      "SELECT * FROM leagues WHERE JSON_VALUE(data,'$.catalogKey') = 'L:EN:1'",
+    ))!;
     const fixtures = await store.all<Fixture>(
-      "SELECT * FROM fixtures WHERE league_id = 1 AND stage = 'League'",
+      "SELECT * FROM fixtures WHERE league_id = ? AND stage = 'League'",
+      premier.id,
     );
     expect(fixtures).toHaveLength(20 * 19);
     expect(
@@ -93,7 +99,8 @@ describe("football calendar", () => {
     await createCalendar(store);
     expect(
       await store.all(
-        "SELECT id FROM fixtures WHERE league_id = 1 AND stage = 'League'",
+        "SELECT id FROM fixtures WHERE league_id = ? AND stage = 'League'",
+        premier.id,
       ),
     ).toHaveLength(count);
   });
@@ -150,7 +157,8 @@ describe("football calendar", () => {
       expect(new Set(clubs)).toEqual(
         new Set(qualification.map((entry) => entry.clubId)),
       );
-      expect(clubs.some((clubId) => luxembourgClubs.has(clubId))).toBe(true);
+      // Luxembourg enters the Champions and Conference League qualifiers; the Europa League only receives drop-downs.
+      expect(clubs.some((clubId) => luxembourgClubs.has(clubId))).toBe(name !== "UEFA Europa League");
       for (const clubId of clubs) {
         expect(entered.has(clubId)).toBe(false);
         entered.add(clubId);
@@ -215,6 +223,62 @@ describe("football calendar", () => {
     );
     expect(collisions).toHaveLength(0);
   });
+
+  it("enters access-list clubs in every continental competition: no Russian club, no club twice, no OFC club event", async () => {
+    const byCode = async (code: string) =>
+      new Set(
+        (
+          await store.all<{ id: number }>(
+            "SELECT clubs.id FROM clubs JOIN countries ON countries.id = clubs.country_id WHERE countries.code = ?",
+            code,
+          )
+        ).map((club) => club.id),
+      );
+    const russian = await byCode("RU");
+    const liechtenstein = await byCode("LI");
+    expect(russian.size).toBeGreaterThan(0);
+    const entered = new Map<number, string>();
+    for (const competition of CONTINENTAL.competitions) {
+      const main = await store.get<League>(
+        "SELECT * FROM leagues WHERE name = ? AND country_id IS NULL",
+        competition.name,
+      );
+      const entries = (JSON.parse(main?.data ?? "{}").qualification ?? []) as { clubId: number; stage: string }[];
+      if (competition.kind === "club" && competition.age === "Senior") expect(entries.length).toBeGreaterThan(1);
+      expect(new Set(entries.map((entry) => entry.clubId)).size).toBe(entries.length);
+      expect(entries.filter((entry) => russian.has(entry.clubId))).toEqual([]);
+      expect(entries.filter((entry) => entry.stage === "main").length).toBeLessThanOrEqual(competition.teams);
+      const qualifying = await store.get<League>(
+        "SELECT * FROM leagues WHERE name = ? AND country_id IS NULL",
+        `${competition.name} Qualifying`,
+      );
+      if (entries.some((entry) => entry.stage !== "main")) expect(qualifying).toBeTruthy();
+      if (competition.feeder || competition.kind === "super" || competition.age !== "Senior") continue;
+      for (const entry of entries) {
+        expect(entered.get(entry.clubId)).toBeUndefined();
+        entered.set(entry.clubId, competition.name);
+      }
+    }
+    const conference = JSON.parse(
+      (await store.get<League>("SELECT * FROM leagues WHERE name = 'UEFA Conference League'"))!.data,
+    ).qualification as { clubId: number; stage: string }[];
+    expect(conference.filter((entry) => liechtenstein.has(entry.clubId)).map((entry) => entry.stage)).toEqual(["q1"]);
+    expect(
+      await store.all("SELECT id FROM leagues WHERE kind = 'continental' AND confederation = 'OFC'"),
+    ).toEqual([]);
+  });
+
+  it("keeps every fixture of the season, continental rounds included, inside July–June", async () => {
+    const season = (await store.meta<{ season: number }>("state")).season;
+    expect(
+      await store.all(
+        "SELECT TOP (5) id,date,league_id FROM fixtures WHERE season = ? AND (date < ? OR date > ?)",
+        season,
+        `${season}-07-01`,
+        `${season + 1}-06-30`,
+      ),
+    ).toEqual([]);
+  });
 });
 
 describe("competition-specific knockout regulations", () => {
@@ -222,7 +286,7 @@ describe("competition-specific knockout regulations", () => {
   let leagueId: number;
   beforeAll(async () => {
     store = await Store.createTest("knockout-regulations");
-    await generateWorld(store, { countryLimit: 1, seniors: 1200, youth: 400 });
+    await generateWorld(store, { nations: ["EN"], structureOnly: true });
     const spec = COMPETITIONS.find(
       (competition) => competition.name === "UEFA Champions League",
     )!;
@@ -346,5 +410,112 @@ describe("UEFA league phase draw rules", () => {
         "invalid",
       ),
     ).toThrow("association restrictions");
+  });
+});
+
+describe("world v4 domestic formats and cups (structureOnly)", () => {
+  let store: Store;
+  let season: number;
+  const leagueOf = async (catalogKey: string) =>
+    (await store.get<League>(
+      "SELECT * FROM leagues WHERE JSON_VALUE(data,'$.catalogKey') = ?",
+      catalogKey,
+    ))!;
+  const perClub = (fixtures: Fixture[]) => {
+    const counts = new Map<number, number>();
+    for (const fixture of fixtures)
+      for (const clubId of [fixture.home_id, fixture.away_id])
+        counts.set(clubId, (counts.get(clubId) ?? 0) + 1);
+    return counts;
+  };
+  const playAll = async (leagueId: number) => {
+    await store.run(
+      "UPDATE fixtures SET status = 'played', home_goals = 1, away_goals = 0 WHERE league_id = ? AND status = 'scheduled'",
+      leagueId,
+    );
+    await store.run("UPDATE standings SET points = 1000 - club_id % 1000 WHERE league_id = ?", leagueId);
+  };
+  beforeAll(async () => {
+    store = await Store.createTest("calendar-v4");
+    await generateWorld(store, { nations: ["US", "CA", "EG", "CD", "CH", "LI"], structureOnly: true });
+    season = (await store.meta<{ season: number }>("state")).season;
+    await createCalendar(store);
+  }, 600000);
+  afterAll(async () => {
+    await store?.close();
+  });
+
+  it("plays MLS conferences plus six inter-conference games (34 per club)", async () => {
+    const mls = await leagueOf("L:US:1");
+    const counts = perClub(
+      await store.all<Fixture>("SELECT * FROM fixtures WHERE league_id = ? AND stage = 'League'", mls.id),
+    );
+    expect(counts.size).toBe(30);
+    expect([...counts.values()].every((count) => count === 34)).toBe(true);
+  });
+
+  it("keeps every fixture inside July–June with no 48-hour collisions per club and age group", async () => {
+    const rows = await store.all<Fixture & { age_group: string }>(
+      "SELECT fixtures.*, coalesce(leagues.age_group,'Senior') AS age_group FROM fixtures LEFT JOIN leagues ON leagues.id = fixtures.league_id WHERE fixtures.season = ?",
+      season,
+    );
+    const seen = new Map<string, number[]>();
+    for (const fixture of rows) {
+      expect(fixture.date >= `${season}-07-01` && fixture.date <= `${season + 1}-06-30`).toBe(true);
+      const day = Date.parse(`${fixture.date}T12:00:00Z`) / 86400000;
+      for (const clubId of [fixture.home_id, fixture.away_id]) {
+        const key = `${fixture.age_group}:${clubId}`;
+        const days = seen.get(key) ?? [];
+        expect(days.some((other) => Math.abs(other - day) < 3)).toBe(false);
+        seen.set(key, [...days, day]);
+      }
+    }
+  });
+
+  it("splits the Egyptian Premier League after one round-robin into groups of 7 and 14", async () => {
+    const egypt = await leagueOf("L:EG:1");
+    const base = perClub(await store.all<Fixture>("SELECT * FROM fixtures WHERE league_id = ?", egypt.id));
+    expect([...base.values()].every((count) => count === 20)).toBe(true);
+    await playAll(egypt.id);
+    await progressCompetitions(store, `${season + 1}-03-01`);
+    const split = await store.all<Fixture>(
+      "SELECT * FROM fixtures WHERE league_id = ? AND status = 'scheduled'",
+      egypt.id,
+    );
+    expect(split.filter((fixture) => fixture.group_name === "Championship Group")).toHaveLength(42);
+    expect(split.filter((fixture) => fixture.group_name === "Relegation Group")).toHaveLength(91);
+    expect(split.every((fixture) => fixture.date <= `${season + 1}-06-30`)).toBe(true);
+  });
+
+  it("starts the Linafoot title mini-league on reserved dates and records the Liechtensteiner Cup walkover", async () => {
+    const linafoot = await leagueOf("L:CD:1");
+    await playAll(linafoot.id);
+    await progressCompetitions(store, `${season + 1}-03-01`);
+    const playoff = (await store.get<League>("SELECT * FROM leagues WHERE name = ?", `${linafoot.name} Play-offs`))!;
+    expect(JSON.parse(playoff.data)).toMatchObject({ key: "title", phase: "playoff", season });
+    const counts = perClub(await store.all<Fixture>("SELECT * FROM fixtures WHERE league_id = ?", playoff.id));
+    expect(counts.size).toBe(8);
+    expect([...counts.values()].every((count) => count === 14)).toBe(true);
+    const cup = await store.get<{ data: string }>(
+      "SELECT history.data FROM history JOIN leagues ON leagues.id = history.entity_id WHERE history.entity_type = 'champion' AND leagues.name = 'Liechtensteiner Cup' AND history.season = ?",
+      season,
+    );
+    expect(JSON.parse(cup!.data)).toMatchObject({ walkover: true });
+  });
+
+  it("opens the Swiss cross-tier play-off once both tiers (split included) have finished", async () => {
+    const tiers = [await leagueOf("L:CH:1"), await leagueOf("L:CH:2")];
+    for (let pass = 0; pass < 3; pass++) {
+      for (const tier of tiers) await playAll(tier.id);
+      await progressCompetitions(store, `${season + 1}-05-20`);
+    }
+    const playoff = await store.get<League>(
+      "SELECT * FROM leagues WHERE kind = 'cup' AND country_id = ? AND JSON_VALUE(data,'$.key') = '1:0'",
+      tiers[0].country_id,
+    );
+    expect(JSON.parse(playoff!.data)).toMatchObject({ season, leagueId: tiers[0].id });
+    const legs = await store.all<Fixture>("SELECT * FROM fixtures WHERE league_id = ? ORDER BY date", playoff!.id);
+    expect(legs).toHaveLength(2);
+    expect(legs.every((fixture) => fixture.date > `${season + 1}-05-20` && fixture.date <= `${season + 1}-06-30`)).toBe(true);
   });
 });

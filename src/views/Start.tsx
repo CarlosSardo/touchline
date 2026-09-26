@@ -648,7 +648,10 @@ export default function Start() {
                   <select
                     aria-label="Career club country"
                     value={country}
-                    onChange={(event) => setCountry(event.target.value)}
+                    onChange={(event) => {
+                      setCountry(event.target.value);
+                      setTier("");
+                    }}
                   >
                     <option value="">All countries</option>
                     {bootstrap.countries.map((entry) => (
@@ -665,7 +668,12 @@ export default function Start() {
                     onChange={(event) => setTier(event.target.value)}
                   >
                     <option value="">All senior divisions</option>
-                    {[1, 2, 3].map((level) => (
+                    {(country && divisions
+                      ? [...new Set(divisions.map((league) => league.tier))]
+                          .filter((level) => level >= 1)
+                          .sort((first, second) => first - second)
+                      : [1, 2, 3, 4, 5, 6]
+                    ).map((level) => (
                       <option key={level} value={level}>
                         {divisions?.find((league) => league.tier === level)
                           ?.name ?? `Division ${level}`}{" "}

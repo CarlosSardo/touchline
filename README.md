@@ -31,7 +31,7 @@ docker compose exec sql /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -C -Q "
 set -a; . ./.env; set +a    # load .env without printing it
 npm run db:migrate          # review the plan, then:
 npm run db:migrate -- --apply --yes
-npm run db:seed -- --seed touchline-2026 --expanded --apply --yes # new, empty database only
+npm run db:seed -- --seed touchline-2026 --apply --yes # new, empty database only; add --nations PT,IE for a small world
 npm run dev
 ```
 
@@ -51,7 +51,10 @@ Open [http://127.0.0.1:5173](http://127.0.0.1:5173); the API runs on `127.0.0.1:
 | `npm run db:migrate`                | Show pending schema migrations; add `-- --apply --yes` to apply         |
 | `npm run db:seed -- ...`            | Generate a world in a new, empty database                               |
 | `npm run data:export -- --out FILE` | Export the active world to a portable `.touchline.gz` file              |
-| `npm run world:check`               | Check squads, youth membership, SQL integrity and prospect search       |
+| `npm run data:export -- --everything --out-dir DIR` | Back up the registry, every world and snapshot with `manifest.json`; `--verify DIR` checks it offline |
+| `npm run world:reset -- --all`      | Dry run of emptying every world and snapshot; `--apply --yes` performs it (keeps accounts and migrations) |
+| `npm run db:footprint`              | Read-only per-table size report; flags worlds over 1.6 GB                |
+| `npm run world:check`               | Generate the world in a test schema and check its invariants; prints one JSON line, exits 1 on a violation (`-- --nations=EN,ES`) |
 | `npm run simulation:check`          | Compare a 600-match sample with real aggregates (`-- --seasons=3` soak) |
 
 If ports are taken: `API_PORT=3011 UI_PORT=5181 npm run dev`. `npm run preview` serves only the static build, not the game engine.
@@ -86,7 +89,7 @@ Release safety rules (full rules in [CONTRIBUTING.md](CONTRIBUTING.md)):
 
 - Careers save to SQL as you play. **Settings > Saves** manages snapshot slots and `.touchline.gz` imports/exports; imports run in a single transaction.
 - Restore and import replace the active world, so make a named save first.
-- Deploying does not upgrade a career. Use **World > Expand career world**, which backs up first and preserves existing data.
+- Deploying does not upgrade a career. Worlds before version 4 cannot be imported; start a new career instead.
 - Old SQLite careers can be imported once with `npm run data:migrate`; keep the originals offline. Options are in [scripts/data-migrate.ts](scripts/data-migrate.ts).
 
 ## Game rules

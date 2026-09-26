@@ -67,6 +67,7 @@ import {
 import { assessRegistration } from "./registration.ts";
 import { assessPlayerInterest, assessYouthTransfer } from "./recruitment.ts";
 import { clubAffiliates } from "./club-support.ts";
+import { describeIdentity, peopleContext } from "./people.ts";
 import { associationNotes, reservePolicy } from "../shared/world-rules.ts";
 import { notificationFeed, notificationVisibility } from "./notifications.ts";
 
@@ -400,17 +401,74 @@ export const playerFilter = z.object({
       "value",
       "age",
       "name",
+      "position",
+      "nationality",
+      "club",
       "wage",
       "form",
+      "fitness",
+      "morale",
+      "appearances",
       "goals",
       "minutes",
+      "contract",
       "contract_end",
+      "height",
+      "weight",
     ])
     .default("ability"),
   direction: z.enum(["asc", "desc"]).default("desc"),
   page: z.coerce.number().int().min(1).max(100000).default(1),
   pageSize: z.coerce.number().int().min(10).max(100).default(30),
 });
+
+const sortName = "COLLATE Latin1_General_100_CI_AI";
+/** ORDER BY for the player search: missing values last in both directions, ties by name then id. */
+function playerOrder(
+  sort: z.infer<typeof playerFilter>["sort"],
+  direction: "asc" | "desc",
+) {
+  const order = direction === "asc" ? "ASC" : "DESC";
+  const reverse = direction === "asc" ? "DESC" : "ASC";
+  const missingLast = (value: string, sql = value) =>
+    `CASE WHEN ${value} IS NULL THEN 1 ELSE 0 END,${sql} ${order}`;
+  const height = "TRY_CONVERT(float, JSON_VALUE(players.profile,'$.identity.height'))";
+  const weight = "TRY_CONVERT(float, JSON_VALUE(players.profile,'$.identity.weight'))";
+  const contract = `CASE WHEN players.club_id IS NULL THEN 1 ELSE 0 END,players.contract_end ${order}`;
+  const keys: Record<typeof sort, string> = {
+    name: `players.name ${sortName} ${order}`,
+    position: `CASE players.position ${POSITIONS.map((position, index) => `WHEN '${position}' THEN ${index}`).join(" ")} ELSE ${POSITIONS.length} END ${order}`,
+    age: `players.age ${order},players.birth_date ${reverse}`,
+    nationality: `players.nationality ${sortName} ${order}`,
+    club: missingLast("clubs.name", `clubs.name ${sortName}`),
+    ability: `players.ability ${order}`,
+    potential: `players.potential ${order}`,
+    value: `players.value ${order}`,
+    wage: `players.wage ${order}`,
+    form: `players.form ${order}`,
+    fitness: `players.fitness ${order}`,
+    morale: `players.morale ${order}`,
+    appearances: `players.appearances ${order}`,
+    goals: `players.goals ${order},players.assists ${order}`,
+    minutes: `players.minutes ${order}`,
+    contract,
+    contract_end: contract,
+    height: missingLast(height),
+    weight: missingLast(weight),
+  };
+  return `${keys[sort]},players.name ${sortName} ASC,players.id ASC`;
+}
+
+/** Search rows also carry the current body and whether a club-less player belongs to a home-based pool. */
+function searchRow(player: Player) {
+  const profile = JSON.parse(player.profile) as PlayerProfile;
+  return {
+    ...withoutProfile(player),
+    height: profile.identity.height ?? null,
+    weight: profile.identity.weight ?? null,
+    home_based: player.club_id === null && profile.homeBased ? 1 : 0,
+  };
+}
 
 export async function players(
   store: Store,
@@ -533,12 +591,12 @@ export async function players(
   return {
     players: (
       await store.all<Player>(
-        `${playerSelect} WHERE ${where} ORDER BY players.${filter.sort} ${filter.direction}, players.id OFFSET ? ROWS FETCH NEXT ? ROWS ONLY`,
+        `${playerSelect} WHERE ${where} ORDER BY ${playerOrder(filter.sort, filter.direction)} OFFSET ? ROWS FETCH NEXT ? ROWS ONLY`,
         ...params,
         (page - 1) * filter.pageSize,
         filter.pageSize,
       )
-    ).map(withoutProfile),
+    ).map(searchRow),
     total,
     page,
     pageSize: filter.pageSize,
@@ -556,9 +614,21 @@ export async function playerDetail(
     id,
   ))!;
   const profile = JSON.parse(player.profile) as PlayerProfile;
+  if (!profile.identity.biography?.length)
+    profile.identity.biography = describeIdentity(
+      profile.identity,
+      peopleContext(await store.all<Country>("SELECT * FROM countries")),
+    );
   const club = player.club_id
     ? await clubOf(store, player.club_id)
     : await clubOf(store);
+  // Same context as the weekly revaluation: the club's league, or the nation's league for club-less players.
+  const market = await store.get<{ reputation: number }>(
+    player.club_id
+      ? "SELECT COALESCE(leagues.reputation, clubs.reputation) AS reputation FROM clubs LEFT JOIN leagues ON leagues.id = clubs.league_id WHERE clubs.id = ?"
+      : "SELECT reputation FROM countries WHERE id = ?",
+    player.club_id ?? profile.homeBased?.countryId ?? profile.registration?.lastAssociationId ?? player.country_id,
+  );
   const state = await stateOf(store);
   const settings = await settingsOf(store);
   const staff = (await store.get<{ ability: number }>(
@@ -593,12 +663,12 @@ export async function playerDetail(
       )) ?? null,
     value: valuation(player, {
       date: state.date,
-      leagueReputation: club.reputation,
-      balance: club.balance,
-      philosophy: club.philosophy,
+      leagueReputation: Number(market?.reputation ?? club.reputation),
+      balance: player.club_id ? club.balance : 0,
+      philosophy: player.club_id ? club.philosophy : "",
       inflation: Number(settings.transferInflation),
-      crisis: club.crisis,
-      hype: club.hype,
+      crisis: player.club_id ? club.crisis : 0,
+      hype: player.club_id ? club.hype : 0,
     }),
     development: potentialInfluences(player, profile, {
       staff,
@@ -933,22 +1003,28 @@ export async function matchDetail(
   if (!fixture) throw new Error("Fixture not found.");
   if (fixture.status !== "played") return { fixture };
   const data = JSON.parse(fixture.data) as {
-    snapshot: MatchSnapshot;
+    snapshot?: MatchSnapshot;
     penalties: { home: number; away: number } | null;
     winnerId: number;
     aggregate?: { home: number; away: number };
     tie?: { id: string; leg: number; legs: number };
     awarded?: { home: number; away: number; reason: string } | null;
+    compact?: boolean;
   };
-  return {
-    fixture: { ...fixture, data: "" },
-    snapshot: data.snapshot,
-    result: simulateMatch(data.snapshot, fixture.seed),
+  const summary = {
     penalties: data.penalties,
     winnerId: data.winnerId,
     aggregate: data.aggregate,
     tie: data.tie,
     awarded: data.awarded,
+  };
+  // Compacted non-user fixtures keep the result and scorers (in data) but no snapshot to replay.
+  if (!data.snapshot) return { fixture: { ...fixture, data: data.compact ? fixture.data : "" }, ...summary };
+  return {
+    fixture: { ...fixture, data: "" },
+    snapshot: data.snapshot,
+    result: simulateMatch(data.snapshot, fixture.seed),
+    ...summary,
   };
 }
 

@@ -13,7 +13,7 @@ on:
         type: number
         default: 3
       full_world:
-        description: "Run the season soak on the full world instead of the two-country world (much slower)"
+        description: "Also run the season soak on the full world after the default subset (much slower)"
         type: boolean
         default: false
   pull_request:
@@ -185,18 +185,44 @@ jobs:
       - name: Start disposable SQL Server (test-local equivalent)
         id: sql
         uses: ./.github/actions/disposable-sql
+      - name: Catalog test (shared/world-catalog)
+        run: npx vitest run shared/world-catalog 2>&1 | tee ci-logs/catalog-test.log
       - name: World check (npm run world:check)
+        if: ${{ !cancelled() && steps.sql.outcome == 'success' }}
         timeout-minutes: 150
         run: npm run world:check 2>&1 | tee ci-logs/world-check.log
-      - name: Simulation check (npm run simulation:check)
+      - name: Simulation check on the default subset (npm run simulation:check)
         if: ${{ !cancelled() && steps.sql.outcome == 'success' }}
         env:
           SEASONS: ${{ needs.plan.outputs.seasons }}
-          FULL_WORLD: ${{ needs.plan.outputs.full_world }}
+        run: npm run simulation:check -- "--seasons=${SEASONS}" --nations=PT,IE,NIR,SCO,FO 2>&1 | tee ci-logs/simulation-check.log
+      - name: Full-world season soak (full_world)
+        if: ${{ !cancelled() && steps.sql.outcome == 'success' && needs.plan.outputs.full_world == 'true' }}
+        env:
+          SEASONS: ${{ needs.plan.outputs.seasons }}
+        run: npm run simulation:check -- "--seasons=${SEASONS}" --full-world 2>&1 | tee ci-logs/simulation-full-world.log
+      - name: Database footprint (npm run db:footprint)
+        if: ${{ !cancelled() && steps.sql.outcome == 'success' }}
         run: |
-          args=("--seasons=${SEASONS}")
-          if [[ "$FULL_WORLD" == true ]]; then args+=(--full-world); fi
-          npm run simulation:check -- "${args[@]}" 2>&1 | tee ci-logs/simulation-check.log
+          npm run --silent db:footprint -- --all 2>&1 | tee ci-logs/footprint.log
+          { echo '### Database footprint'; echo '```'; grep -E '^[A-Za-z0-9_]+: [0-9.]+ MB reserved' ci-logs/footprint.log || true; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - name: Backup and world reset smoke (legacy dbo world and the CI schema)
+        if: ${{ !cancelled() && steps.sql.outcome == 'success' }}
+        run: |
+          set -o pipefail
+          backup="$RUNNER_TEMP/touchline-backup"
+          # dbo stands in for the legacy world: the full backup skips test schemas and test mode only allows them.
+          SQL_TEST_MODE=false SQL_SCHEMA=dbo npm run --silent db:migrate -- --apply --yes > ci-logs/dbo-migrate.log 2>&1
+          SQL_TEST_MODE=false SQL_SCHEMA=dbo npm run --silent db:seed -- --seed ci-reset --nations FO --squads minimum --apply --yes > ci-logs/dbo-seed.log 2>&1
+          SQL_TEST_MODE=false npm run --silent data:export -- --everything --out-dir "$backup" 2>&1 | tee ci-logs/backup.log
+          npm run --silent data:export -- --verify "$backup" 2>&1 | tee ci-logs/backup-verify.log
+          reset() { SQL_TEST_MODE=false npm run --silent world:reset -- --schema dbo --schema "$SQL_SCHEMA" "$@"; }
+          reset 2>&1 | tee ci-logs/world-reset-dry-run.log
+          reset --apply --yes 2>&1 | tee ci-logs/world-reset.log
+          reset 2>&1 | tee ci-logs/world-reset-after.log
+          if grep -Eq '"truncate": \[$|"snapshots": [1-9]' ci-logs/world-reset-after.log; then
+            echo "::error::world:reset left rows or snapshots behind"; exit 1
+          fi
       - name: Collect SQL Server log
         if: failure()
         run: docker logs touchline-sql > ci-logs/sql-server.log 2>&1 || true

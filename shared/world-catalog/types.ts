@@ -103,6 +103,17 @@ export interface NameConfig {
   secondFamilyRate?: number;
   /** Chance the player is known by a single name (Brazil, Lusophone Africa), 0–0.5. */
   mononymRate?: number;
+  /**
+   * Chance (0–1) that the family name's culture is drawn independently of the given name's (melting-pot nations).
+   * Default 0: given and family names share a culture wherever both lists name the same source; list the same
+   * sources on both sides to pair cultures (IN, MY, SG). Both marginal weightings are always preserved.
+   */
+  mixRate?: number;
+  /**
+   * Regional cultures: people born in one of `regions` (CitySpec.region) draw from these lists instead of the
+   * national ones (Catalan in Catalunya, Basque in País Vasco); an omitted side keeps the national list.
+   */
+  regional?: { regions: string[]; given?: WeightedNameSource[]; family?: WeightedNameSource[] }[];
 }
 
 // ---------------------------------------------------------- nationality
@@ -163,6 +174,17 @@ export interface CitySpec {
   maxClubs?: number;
   /** Real districts/suburbs used as the identity of extra clubs in the same city. */
   districts?: string[];
+  /** cities.json admin1 code for a name shared across states or provinces (US "OR", GeoNames codes elsewhere). */
+  admin1?: string;
+  /** Coordinates for a city missing from cities.json (both or neither). */
+  lat?: number;
+  lng?: number;
+  /** Adjective for residents used by the {demonym} club-name token ("Ituano", "Luqueño"). */
+  demonym?: string;
+  /** Attributive form of the city name used by the {cityAdj} token (Hungarian "Debreceni", "Győri"). */
+  adjective?: string;
+  /** Form of "of" before the city name for the {of} token (Portuguese "do" Porto, "da" Maia); default "de". */
+  preposition?: string;
 }
 export interface CityCatalog {
   /** Curated real cities and towns, biggest first. */
@@ -178,7 +200,11 @@ export interface CityCatalog {
 
 // ---------------------------------------------------------------- clubs
 
-/** Tokens: {city} (or a district), {region}, {founded} (1899), {founded2} (99). Needs {city} or {region}. */
+/**
+ * Tokens: {city} (or a district), {region}, {demonym} (the city's demonym; skipped for cities without one),
+ * {cityAdj} (CitySpec.adjective; skipped likewise and for district clubs), {of} (CitySpec.preposition, "de" for
+ * districts and by default), {founded} (1899), {founded2} (99). Needs {city}, {region}, {demonym} or {cityAdj}.
+ */
 export interface ClubNameTemplate {
   pattern: string;
   weight: number;
@@ -193,6 +219,11 @@ export interface ClubNamingSpec {
   founded: { top: [number, number]; bottom: [number, number] };
   /** Short-name style; default "city" (first three letters). */
   shortName?: "city" | "initials";
+  /**
+   * Real club names the generator must never produce (decision 5). Matching ignores case, diacritics, punctuation
+   * and a leading or trailing club affix (FC, AFC, CF, SC, AC, FK, SK, IF, FF, BK, IK), so "Malmö FF" also blocks "Malmo".
+   */
+  avoid?: string[];
   /** Typical kit colours (#RRGGBB). */
   colors?: string[];
 }
@@ -234,6 +265,10 @@ export interface ChampionshipPlayoffSpec {
   positions: [number, number];
   /** Qualification per conference instead of the combined table. */
   perConference?: boolean;
+  /** "round-robin": the qualified clubs play a mini-league (Linafoot, Cape Verde); default knockout with byes for top seeds. */
+  format?: "knockout" | "round-robin";
+  /** Mini-league cycles; default 2. */
+  roundRobins?: 1 | 2;
   legs: 1 | 2;
   finalLegs?: 1 | 2;
   neutralFinal?: boolean;
@@ -244,17 +279,19 @@ export interface LeagueTierSpec {
   /** Real name without sponsor, e.g. "LaLiga", "Segunda División". */
   name: string;
   shortName: string;
-  /** Teams incl. B-teams and hosted cross-border clubs. Regional real tiers are merged into one division (decision 4). */
+  /** Teams incl. B-teams and hosted cross-border clubs, 6–48 (≤ 24 per conference). Regional real tiers are merged into one division (decision 4). */
   size: number;
   status: LeagueStatus;
   /** League reputation 1–99. */
   reputation: number;
   /** No promotion/relegation into or out of this tier (MLS/USL, A-League, Liga MX while suspended). */
   closed?: boolean;
-  /** Base round-robins; default 2. */
-  roundRobins?: 2 | 3 | 4;
+  /** Base round-robins; default 2. 1 only before a split (Egyptian Premier League). */
+  roundRobins?: 1 | 2 | 3 | 4;
   /** Equal-size conferences; each plays roundRobins internally. Required above 24 teams. */
   conferences?: string[];
+  /** Extra matches per club against other conferences (MLS: 28 conference + 6 = 34). */
+  interConference?: number;
   split?: LeagueSplitSpec;
   championship?: ChampionshipPlayoffSpec;
   /** B-teams occupying slots at world start (pyramid reserve policy only). */
@@ -298,6 +335,17 @@ export interface TierBoundarySpec {
   /** Automatic relegations: bottom N of the upper tier. */
   relegated: number;
   playoffs?: MovementPlayoffSpec[];
+  /**
+   * Movement per conference on whichever side has conferences (National League North/South): `promoted`,
+   * `relegated` and play-off `places` are totals split evenly across its conferences, and that side's positions
+   * are ranks within each conference. Cross-tier play-offs are not supported per conference.
+   */
+  perConference?: boolean;
+  /**
+   * The lower tier's title play-off winner takes the first automatic place; everyone else (the beaten finalist
+   * included) keeps table order for the remaining places and play-offs (Primera Nacional final, then Reducido).
+   */
+  championPromoted?: boolean;
 }
 
 // ------------------------------------------------------ cups and youth
@@ -480,6 +528,8 @@ export interface AccessEntry {
 export interface AccessRule {
   competition: string;
   basis: "association-rank" | "fixed";
+  /** Ranks count only this zone's associations (AFC East/West). */
+  zone?: string;
   /** Association-rank bands (UEFA, AFC, CAF). */
   bands?: { ranks: [number, number]; entries: AccessEntry[] }[];
   /** Fixed entries per nation (CONMEBOL, CONCACAF). */
@@ -512,6 +562,14 @@ export interface ContinentalCompetitionSpec {
   titleholders?: { from: string; stage: ContinentalStage }[];
   /** Regional routes, e.g. Central American Cup top 6 → Champions Cup. */
   feeds?: { to: string; positions: [number, number]; stage: ContinentalStage }[];
+  /** Regional qualifier: its entrants may also hold a direct place elsewhere. */
+  feeder?: boolean;
+  /** Entrants are the youth teams of this competition's main-phase clubs (UEFA Youth League). */
+  mirrors?: string;
+  /** Main-phase places that skip the knockout play-off round (UEFA 1st–8th). */
+  byes?: number;
+  /** Qualifying losers moving to another competition (UCL Q3 losers → UEL). */
+  drops?: { from: ContinentalStage; path?: "champions" | "league"; to: string; stage: ContinentalStage }[];
 }
 export interface ContinentalCatalog {
   competitions: ContinentalCompetitionSpec[];
@@ -526,6 +584,8 @@ export interface CatalogFileData {
   file: CatalogFile;
   nations: NationSpec[];
   namePools: NamePool[];
+  /** File-level real club names per nation, merged with each nation's `clubNaming.avoid`. */
+  realClubNames?: Readonly<Record<NationCode, readonly string[]>>;
 }
 export interface WorldCatalog {
   files: readonly CatalogFileData[];

@@ -16,6 +16,16 @@ import type {
   Settings,
 } from "../shared/types.ts";
 import type { YouthTransferAssessment } from "../shared/api.ts";
+import {
+  clubRegistration,
+  heldNationalities,
+  minorRoute,
+  passportGroup,
+  residenceYears,
+  type MinorRoute,
+  type MinorRouteResult,
+} from "./registration.ts";
+import { baseWage, wageScale } from "./finance.ts";
 
 export const YOUTH_TRANSFER_SOURCE =
   "FIFA RSTP January 2025, articles 2, 18, 19 and 20, Annexe 4; simplified game implementation";
@@ -174,9 +184,25 @@ export async function assessPlayerInterest(
     profile.identity.languages.find(
       (entry) => entry.language === destination.language,
     )?.fluency ?? 0;
+  const nationality = (await store.get<{ code: string }>(
+    "SELECT code FROM countries WHERE id = ?",
+    player.country_id,
+  ))?.code;
+  // Cross-border clubs (Derry, Toronto, Monaco) play in their host league, which is familiar ground too.
+  const market = buyer.league_id
+    ? await store.get<{ id: number; code: string }>(
+        "SELECT countries.id,countries.code FROM leagues JOIN countries ON countries.id = leagues.country_id WHERE leagues.id = ?",
+        buyer.league_id,
+      )
+    : undefined;
+  const destinationGroups = new Set([destination.code, market?.code ?? destination.code].map(passportGroup));
   const familiar =
     seller?.country_id === buyer.country_id ||
-    player.country_id === buyer.country_id;
+    (!!market && seller?.country_id === market.id) ||
+    player.country_id === buyer.country_id ||
+    profile.identity.birthCountryId === buyer.country_id ||
+    (!!nationality &&
+      heldNationalities(nationality, profile).some((code) => destinationGroups.has(passportGroup(code))));
   const family =
     profile.familyMove?.verified &&
     profile.familyMove.reason !== "football" &&
@@ -243,10 +269,11 @@ export async function assessPlayerInterest(
       : settings.negotiationDifficulty === "ruthless"
         ? 0.07
         : 0;
-  const expectedBase = Math.max(
-    player.wage,
-    Math.round(((player.ability / 100) ** 7 * 190000) / 10) * 10 + 50,
-  );
+  // Club-less players have no wage to defend and expect the destination's going rate for their level.
+  const expectedBase =
+    player.club_id === null
+      ? Math.max(50, Math.round((baseWage(player.ability) * (await wageScale(store, buyer.id))) / 10) * 10)
+      : Math.max(player.wage, baseWage(player.ability));
   const expectedWage = Math.round(
     expectedBase *
       (offer.loan
@@ -335,39 +362,6 @@ export async function assessPlayerInterest(
       .map((entry) => entry.reason),
   };
 }
-const EEA = new Set([
-  "AT",
-  "BE",
-  "BG",
-  "HR",
-  "CY",
-  "CZ",
-  "DK",
-  "EE",
-  "FI",
-  "FR",
-  "DE",
-  "GR",
-  "HU",
-  "IE",
-  "IT",
-  "LV",
-  "LT",
-  "LU",
-  "MT",
-  "NL",
-  "PL",
-  "PT",
-  "RO",
-  "SK",
-  "SI",
-  "ES",
-  "SE",
-  "IS",
-  "LI",
-  "NO",
-]);
-const HOME_ASSOCIATIONS = new Set(["EN", "SCO", "WAL", "NIR"]);
 const SAFEGUARDS = [
   "football",
   "education",
@@ -376,76 +370,93 @@ const SAFEGUARDS = [
   "parentalConsent",
 ] as const;
 
+// The shared API union has no "first-registration"/"border"/"humanitarian" values yet (shared/api.ts is Data's).
+const API_ROUTE: Record<MinorRoute, YouthTransferAssessment["route"]> = {
+  adult: "adult",
+  domestic: "domestic",
+  "first-registration": "domestic",
+  "eu-eea": "eu-eea",
+  "same-country": "same-country",
+  "parent-relocation": "parent-relocation",
+  border: "same-country",
+  humanitarian: "parent-relocation",
+  blocked: "blocked",
+};
+
+type RouteAssessment = Pick<
+  YouthTransferAssessment,
+  "route" | "reasons" | "minor" | "international" | "eligibleToApply"
+>;
+const apiRoute = (route: MinorRouteResult): RouteAssessment => ({
+  ...route,
+  route: API_ROUTE[route.route],
+});
+
+/** Association-level route for a national of `source` (see registration.minorRoute for nationality-aware rules). */
 export function minorTransferRoute(
   age: number,
   source: string,
   destination: string,
   independentParentMove = false,
-): Pick<
-  YouthTransferAssessment,
-  "route" | "reasons" | "minor" | "international" | "eligibleToApply"
-> {
-  if (age >= 18)
-    return {
-      route: "adult",
-      reasons: ["Adult player; minor-transfer restrictions do not apply."],
-      minor: false,
-      international: source !== destination,
-      eligibleToApply: true,
-    };
-  if (source === destination)
-    return {
-      route: "domestic",
-      reasons: [
-        "Same-association move. Domestic youth registration rules still apply.",
-      ],
-      minor: true,
-      international: false,
-      eligibleToApply: true,
-    };
-  if (independentParentMove)
-    return {
-      route: "parent-relocation",
-      reasons: [
-        "An independently recorded parental move for non-football reasons is available. Prior minor-registration approval is required.",
-      ],
-      minor: true,
-      international: true,
-      eligibleToApply: true,
-    };
-  if (age >= 16 && EEA.has(source) && EEA.has(destination))
-    return {
-      route: "eu-eea",
-      reasons: [
-        "Age 16-17 and both associations are in the EU/EEA. Football training, academic education, accommodation/care and a mentor must be provided, with prior approval.",
-      ],
-      minor: true,
-      international: true,
-      eligibleToApply: true,
-    };
-  if (
-    age >= 16 &&
-    HOME_ASSOCIATIONS.has(source) &&
-    HOME_ASSOCIATIONS.has(destination)
-  )
-    return {
-      route: "same-country",
-      reasons: [
-        "Age 16-17 and moving between associations within the same country. Education, welfare and prior approval are required.",
-      ],
-      minor: true,
-      international: true,
-      eligibleToApply: true,
-    };
-  return {
-    route: "blocked",
-    reasons: [
-      "No supported exception to the under-18 international-transfer restriction is recorded. Parents merely accompanying a football move does not qualify; EU nationality alone is not enough.",
-    ],
-    minor: true,
-    international: true,
-    eligibleToApply: false,
-  };
+): RouteAssessment {
+  return apiRoute(
+    minorRoute({
+      age,
+      nationalities: [source],
+      source: { home: source, association: source },
+      destination: { home: destination, association: destination },
+      parentsMoved: independentParentMove,
+    }),
+  );
+}
+
+/** Nationality-aware Article 19 route for moving `player` to `buyer` (or registering a club-less player there). */
+export async function playerMinorRoute(
+  store: Store,
+  player: Player,
+  buyer: Club,
+  date: string,
+) {
+  const profile = JSON.parse(player.profile) as PlayerProfile;
+  const countries = new Map(
+    (
+      await store.all<Country>(
+        "SELECT * FROM countries WHERE id IN (?,?,?,?)",
+        player.country_id,
+        buyer.country_id,
+        profile.registration?.lastAssociationId ?? player.country_id,
+        profile.homeBased?.countryId ?? player.country_id,
+      )
+    ).map((country) => [country.id, country]),
+  );
+  const current = player.club_id
+    ? await store.get<Club & { code: string }>(
+        "SELECT clubs.*,countries.code FROM clubs JOIN countries ON countries.id = clubs.country_id WHERE clubs.id = ?",
+        player.parent_club_id ?? player.club_id,
+      )
+    : undefined;
+  const lastCode = countries.get(
+    profile.registration?.lastAssociationId ?? profile.homeBased?.countryId ?? -1,
+  )?.code;
+  const source = current
+    ? clubRegistration(current.code, current.data)
+    : lastCode
+      ? { home: lastCode, association: lastCode }
+      : null;
+  const family = profile.familyMove;
+  return minorRoute({
+    age: player.age,
+    nationalities: heldNationalities(countries.get(player.country_id)!.code, profile),
+    source,
+    destination: clubRegistration(countries.get(buyer.country_id)!.code, buyer.data),
+    residenceYears: residenceYears(profile, buyer.country_id, player.birth_date, date),
+    parentsMoved:
+      !!family &&
+      family.verified &&
+      family.reason !== "football" &&
+      family.countryId === buyer.country_id &&
+      family.date <= date,
+  });
 }
 
 export async function assessYouthTransfer(
@@ -465,25 +476,7 @@ export async function assessYouthTransfer(
     currentClub?.country_id ??
     profile.registration?.lastAssociationId ??
     player.country_id;
-  const source = (await store.get<Country>(
-    "SELECT * FROM countries WHERE id = ?",
-    sourceCountryId,
-  ))!;
-  const destination = (await store.get<Country>(
-    "SELECT * FROM countries WHERE id = ?",
-    buyer.country_id,
-  ))!;
-  const family = profile.familyMove;
-  const route = minorTransferRoute(
-    player.age,
-    source.code,
-    destination.code,
-    !!family &&
-      family.verified &&
-      family.reason !== "football" &&
-      family.countryId === buyer.country_id &&
-      family.date <= state.date,
-  );
+  const route = apiRoute(await playerMinorRoute(store, player, buyer, state.date));
   const application = await store.get<{
     id: number;
     status: string;

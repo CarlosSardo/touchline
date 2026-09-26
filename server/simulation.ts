@@ -3,7 +3,18 @@ import { Store } from "./db.ts";
 import { processAffiliateRequests, processAssistant } from "./club-support.ts";
 import { processUnexpectedEvents } from "./events.ts";
 import { processCompetitionNotifications } from "./notifications.ts";
-import { createCalendar, progressCompetitions } from "./calendar.ts";
+import {
+  countryPyramid,
+  createCalendar,
+  progressCompetitions,
+  type PlayoffData,
+} from "./calendar.ts";
+import {
+  planMovement,
+  rankTable,
+  resolvePlayoffBySeed,
+  type PlayoffResult,
+} from "../shared/league-rules.ts";
 import { simulateMatch } from "./match.ts";
 import {
   aggregateScore,
@@ -11,6 +22,7 @@ import {
   type KnockoutTie,
 } from "../shared/competition-rules.ts";
 import { recordAssociationCoefficients } from "./qualification.ts";
+import { pruneSeason, storedAppearanceStats, storedMatchData } from "./retention.ts";
 import { assessRegistration } from "./registration.ts";
 import { processMinorApplications } from "./recruitment.ts";
 import {
@@ -25,8 +37,11 @@ import {
   estimateClubRevenue,
   postWeeklyAccounts,
 } from "./finance.ts";
-import { ensureClubRosters, generatePlayers, personName } from "./world.ts";
-import { planPyramidMoves } from "../shared/world-rules.ts";
+import { personName } from "./people.ts";
+import { runYouthIntake, signClublessPlayers } from "./youth.ts";
+import { developBody } from "./growth.ts";
+import { nationByCode } from "../shared/world-catalog/index.ts";
+import { SQUAD_MINIMUMS } from "../shared/world-rules.ts";
 import {
   clubOf,
   closeNegotiation,
@@ -57,7 +72,6 @@ import {
   tacticalFit,
   transferWindow,
   valuation,
-  WORLD_COUNTS,
 } from "../shared/rules.ts";
 import type {
   AgeGroup,
@@ -544,29 +558,8 @@ export async function playFixture(store: Store, fixture: Fixture) {
       "SELECT * FROM countries WHERE id = ?",
       homeClub.country_id,
     ))!;
-    const latitudes: Record<string, number> = {
-      EN: 52,
-      ES: 40,
-      DE: 51,
-      FR: 47,
-      IT: 43,
-      PT: 39,
-      NL: 52,
-      BR: -12,
-      AR: -34,
-      AU: -25,
-      NZ: -41,
-      ZA: -29,
-      JP: 36,
-      US: 39,
-      CA: 53,
-      SA: 24,
-      NO: 62,
-      SE: 60,
-      EG: 27,
-    };
     const latitude =
-      latitudes[country.code] ??
+      nationByCode(country.code)?.latitude ??
       { EU: 48, AS: 28, AF: 8, NA: 25, SA: -15, OC: -18 }[country.continent] ??
       15;
     const month = Number(state.date.slice(5, 7));
@@ -676,13 +669,14 @@ export async function playFixture(store: Store, fixture: Fixture) {
           }
         : undefined,
     };
+    const detailedMatch = [fixture.home_id, fixture.away_id, homeClub.parent_id, awayClub.parent_id].includes(state.clubId);
     const saved = await store.run(
       "UPDATE fixtures SET status = 'played', home_goals = ?, away_goals = ?, home_xg = ?, away_xg = ?, data = ? WHERE id = ? AND status = 'scheduled'",
       officialResult.homeGoals,
       officialResult.awayGoals,
       result.homeXg,
       result.awayXg,
-      JSON.stringify(payload),
+      storedMatchData(payload, detailedMatch),
       fixture.id,
     );
     if (!saved.changes) return;
@@ -694,14 +688,16 @@ export async function playFixture(store: Store, fixture: Fixture) {
       state.clubId,
     );
     const participantIds = Object.keys(result.players).map(Number);
-    const loanedPlayers = new Set(
+    // Every active loan needs appearance history for loan reviews; only the user's loans keep full detail.
+    const loanedPlayers = new Map(
       (!managedMatch && participantIds.length
-        ? await store.all<{ player_id: number }>(
-            `SELECT player_id FROM loans WHERE status = 'active' AND player_id IN (${participantIds.map(() => "?").join(",")})`,
+        ? await store.all<{ player_id: number; followed: number }>(
+            `SELECT loans.player_id, CASE WHEN ? IN (loans.parent_id, parent.parent_id) THEN 1 ELSE 0 END AS followed FROM loans JOIN clubs AS parent ON parent.id = loans.parent_id WHERE loans.status = 'active' AND loans.player_id IN (${participantIds.map(() => "?").join(",")})`,
+            state.clubId,
             ...participantIds,
           )
         : []
-      ).map((loan) => loan.player_id),
+      ).map((loan) => [loan.player_id, Boolean(loan.followed)]),
     );
     for (const team of [snapshot.home, snapshot.away]) {
       for (const player of [...team.lineup, ...(team.bench ?? [])]) {
@@ -734,7 +730,7 @@ export async function playFixture(store: Store, fixture: Fixture) {
           rating: stats.rating,
           goals: stats.goals,
           assists: stats.assists,
-          stats: JSON.stringify(stats),
+          stats: storedAppearanceStats(stats, detailedMatch || loanedPlayers.get(player.id) === true),
         });
         playerUpdates.push({
           id: player.id,
@@ -758,7 +754,9 @@ export async function playFixture(store: Store, fixture: Fixture) {
             entity_id: player.id,
             date: state.date,
             data: JSON.stringify({
-              ...stats,
+              ...(managedMatch || loanedPlayers.get(player.id)
+                ? stats
+                : { minutes: stats.minutes, rating: stats.rating, goals: stats.goals, assists: stats.assists }),
               fixtureId: fixture.id,
               position: player.position,
               clubId: team.id,
@@ -850,6 +848,25 @@ export async function developPlayers(store: Store, random: seedrandom.PRNG) {
     ).map((club) => [club.id, club]),
   );
   const fallback = clubs.values().next().value!;
+  // Free agents and home-based pool players train in amateur football at home.
+  const amateurContext: DevelopmentClub = {
+    ...fallback,
+    staff_ability: 35,
+    rehab_ability: 35,
+    academy: 35,
+    facilities: 30,
+    chemistry: 50,
+    crisis: 0,
+    hype: 0,
+    momentum: 0,
+    plan_focus: "Balanced",
+    plan_youth: "Technical",
+    plan_intensity: 50,
+  };
+  const bodyRandom = seedrandom(`${state.seed}:body:${state.week}`);
+  const nationReputation = new Map(
+    (await store.all<{ id: number; reputation: number }>("SELECT id,reputation FROM countries")).map((row) => [row.id, row.reputation]),
+  );
   let cursor = 0;
   while (true) {
     const batch = await store.all<Player>(
@@ -888,7 +905,7 @@ export async function developPlayers(store: Store, random: seedrandom.PRNG) {
       cursor = player.id;
       const club = player.club_id
         ? (clubs.get(player.club_id) ?? fallback)
-        : fallback;
+        : amateurContext;
       const profile = profiles.get(player.id)!;
       let secondaryPosition: string | null = null;
       const age = ageOn(player.birth_date, state.date);
@@ -997,27 +1014,26 @@ export async function developPlayers(store: Store, random: seedrandom.PRNG) {
         }
         profileChanged = true;
       }
-      if (
-        age < 19 &&
-        !profile.development.growthSpurt &&
-        random() < (0.012 * Number(settings.youthRealism)) / 75
-      ) {
-        profile.identity.height += 2 + Math.floor(random() * 3);
-        profile.identity.weight += 2;
-        profile.development.growthSpurt = true;
-        profile.attributes.physical.strength = clamp(
-          profile.attributes.physical.strength + 3,
-        );
-        profile.attributes.physical.balance = clamp(
-          profile.attributes.physical.balance - 1,
-        );
-        profileChanged = true;
-        if (ownClub)
+      // Own-club bodies grow weekly; others every four weeks, when their profiles are rewritten anyway.
+      if (ownClub || state.week % 4 === 0) {
+        const wasSpurting = profile.development.growthSpurt;
+        const body = developBody(profile.identity, {
+          birthDate: player.birth_date,
+          from: addDays(state.date, ownClub ? -7 : -28),
+          to: state.date,
+          random: bodyRandom,
+          physicalTraining: effectiveFocus === "Physical",
+          fitness: player.fitness,
+          injured: Boolean(player.injury_until && player.injury_until > state.date),
+        });
+        profile.development.growthSpurt = body.spurt;
+        if (body.changed || body.spurt !== wasSpurting) profileChanged = true;
+        if (ownClub && body.spurt && !wasSpurting)
           await news(
             store,
             "Academy",
             `${player.name}: growth spurt`,
-            "Physical development has accelerated. Strength is improving, but coordination and training load need careful monitoring.",
+            `Now ${profile.identity.height} cm and growing quickly. Coordination and training load need careful monitoring until the spurt settles.`,
             "info",
             "academy",
           );
@@ -1079,7 +1095,7 @@ export async function developPlayers(store: Store, random: seedrandom.PRNG) {
               ability: round(ability),
               potential: round(potential),
             },
-          ].slice(-36);
+          ].slice(-24);
         const focus =
           effectiveFocus === "Youth development"
             ? dna === "Physical resilience"
@@ -1167,16 +1183,20 @@ export async function developPlayers(store: Store, random: seedrandom.PRNG) {
         1,
         99,
       );
+      // Club-less players (free agents, home-based pools) are priced in their nation's league market.
+      const clubless = player.club_id === null;
       const value = valuation(
         { ...player, ability, potential, age, injury_until: injury },
         {
           date: state.date,
-          leagueReputation: club.league_reputation,
-          balance: club.balance,
-          philosophy: club.philosophy,
+          leagueReputation: clubless
+            ? (nationReputation.get(profile.homeBased?.countryId ?? profile.registration?.lastAssociationId ?? player.country_id) ?? 30)
+            : club.league_reputation,
+          balance: clubless ? 0 : club.balance,
+          philosophy: clubless ? "" : club.philosophy,
           inflation: Number(settings.transferInflation),
-          crisis: club.crisis,
-          hype: club.hype,
+          crisis: clubless ? 0 : club.crisis,
+          hype: clubless ? 0 : club.hype,
         },
       ).value;
       const updatedProfile = profileChanged ? JSON.stringify(profile) : null;
@@ -1446,7 +1466,7 @@ async function weeklyStaffAndPolitics(store: Store, random: seedrandom.PRNG) {
       "SELECT * FROM countries WHERE id = ?",
       troubled.country_id,
     ))!;
-    const nextManager = personName(random, country.language);
+    const nextManager = personName(random, country.code);
     const data = JSON.parse(troubled.data);
     data.managerCareer = [
       ...(data.managerCareer ?? []),
@@ -1835,7 +1855,7 @@ export async function worldTransfers(store: Store, random: seedrandom.PRNG) {
       "SELECT count(*) AS count FROM players WHERE club_id = ? AND age_group = 'Senior' AND role != 'Retired'",
       player.club_id,
     ))!.count;
-    if (sellerCount <= 18) continue;
+    if (sellerCount <= SQUAD_MINIMUMS.Senior) continue;
     if (
       player.position === "GK" &&
       (await store.get<{ count: number }>(
@@ -1873,7 +1893,7 @@ export async function worldTransfers(store: Store, random: seedrandom.PRNG) {
       buyer.id,
     );
     await store.run(
-      "UPDATE players SET club_id = ?, wage = ?, contract_end = ?, role = 'Squad player', morale = LEAST(99,morale + 4) WHERE id = ?",
+      "UPDATE players SET club_id = ?, squad_club_id = NULL, wage = ?, contract_end = ?, role = 'Squad player', morale = LEAST(99,morale + 4) WHERE id = ?",
       buyer.id,
       newWage,
       `${state.season + 4}-06-30`,
@@ -1904,6 +1924,7 @@ export async function worldTransfers(store: Store, random: seedrandom.PRNG) {
         fee,
       });
   }
+  activity.completed += await signClublessPlayers(store, state, Math.max(1, Math.round(quota / 2)), random);
   const recentOffers = (await store.get<{ total: number }>(
     "SELECT count(*) AS total FROM negotiations WHERE selling_club_id = ? AND buying_club_id != ? AND created >= ?",
     state.clubId,
@@ -2054,6 +2075,27 @@ export async function seasonRollover(store: Store) {
       table.push(entry);
       tables.set(entry.league_id, table);
     }
+    // Play-offs still open at rollover continue by seed from their current round.
+    const playoffResults = new Map<number, Map<string, PlayoffResult>>();
+    const champions = new Map<number, number>();
+    for (const competition of await store.all<League>(
+      "SELECT * FROM leagues WHERE kind = 'cup' AND JSON_VALUE(data,'$.key') IS NOT NULL AND TRY_CONVERT(int, JSON_VALUE(data,'$.season')) = ?",
+      oldSeason,
+    )) {
+      const playoff = JSON.parse(competition.data) as PlayoffData;
+      if (playoff.key === "title") {
+        const champion =
+          playoff.champion ??
+          (playoff.miniLeague
+            ? rankTable(tables.get(competition.id) ?? [])[0]?.club_id
+            : playoff.state && resolvePlayoffBySeed(playoff.state).winners[0]);
+        if (champion) champions.set(playoff.leagueId, champion);
+      } else if (playoff.state) {
+        const results = playoffResults.get(competition.country_id!) ?? new Map<string, PlayoffResult>();
+        results.set(playoff.key, playoff.state.result ?? resolvePlayoffBySeed(playoff.state));
+        playoffResults.set(competition.country_id!, results);
+      }
+    }
     const lastHistoryId = (await store.get<{ id: number }>(
       "SELECT coalesce(max(id),0) AS id FROM history WITH (UPDLOCK,HOLDLOCK)",
     ))!.id;
@@ -2069,7 +2111,8 @@ export async function seasonRollover(store: Store) {
       date: state.date,
       data: JSON.stringify({
         name: league.name,
-        table: tables.get(league.id) ?? [],
+        table: rankTable(tables.get(league.id) ?? [], JSON.parse(league.data).split),
+        ...(champions.has(league.id) ? { champion: champions.get(league.id) } : {}),
       }),
     }));
     for (let offset = 0; offset < archives.length; offset += 1000)
@@ -2077,80 +2120,42 @@ export async function seasonRollover(store: Store) {
     for (const country of await store.all<Country>(
       "SELECT * FROM countries ORDER BY id",
     )) {
-      const divisions = await store.all<League>(
-        "SELECT * FROM leagues WHERE country_id = ? AND kind = 'league' AND age_group = 'Senior' AND tier > 0 AND coalesce(JSON_VALUE(data,'$.reserveOnly'),'false') NOT IN ('true','1') ORDER BY tier",
-        country.id,
-      );
-      const orderedEntries = await store.all<{
-        league_id: number;
-        clubId: number;
-        parentId: number | null;
-      }>(
-        "SELECT standings.league_id,standings.club_id AS clubId,clubs.parent_id AS parentId FROM standings JOIN clubs ON clubs.id = standings.club_id JOIN leagues ON leagues.id = standings.league_id WHERE leagues.country_id = ? ORDER BY standings.league_id,points DESC,(gf-ga) DESC,gf DESC,club_id",
-        country.id,
-      );
-      const moves = planPyramidMoves(
-        country.code,
-        divisions.map((league) => {
-          const data = JSON.parse(league.data);
-          return {
-            id: league.id,
-            tier: league.tier,
-            promotion: Number(data.promotion ?? 2),
-            relegation: Number(data.relegation ?? 2),
-            entries: orderedEntries.filter(
-              (entry) => entry.league_id === league.id,
-            ),
-          };
-        }),
-      );
+      const pyramid = await countryPyramid(store, country.id, oldSeason);
+      const planned = planMovement({
+        ...pyramid,
+        results: playoffResults.get(country.id),
+      });
+      // A B-team with no legal modeled tier (to === null) leaves the senior pyramid rather than share its parent's league.
+      for (const move of planned.filter((item) => item.to === null)) {
+        await store.run("DELETE FROM standings WHERE league_id = ? AND club_id = ?", move.from, move.clubId);
+        await store.run("UPDATE clubs SET league_id = NULL WHERE id = ?", move.clubId);
+      }
+      const moves = planned.filter((move) => move.to !== null);
+      for (const tier of pyramid.tiers)
+        if (JSON.parse(pyramid.leagues.find((league) => league.id === tier.leagueId)!.data).split)
+          await store.run("UPDATE standings SET group_name = '' WHERE league_id = ?", tier.leagueId);
       for (const move of moves) {
-        if (move.to === null) {
-          const name = `${country.name} Development League`;
-          move.to =
-            (
-              await store.get<{ id: number }>(
-                "SELECT id FROM leagues WHERE country_id = ? AND name = ? AND JSON_VALUE(data,'$.reserveOnly') IN ('true','1')",
-                country.id,
-                name,
-              )
-            )?.id ??
-            Number(
-              (
-                await store.run(
-                  "INSERT INTO leagues(name,country_id,confederation,tier,age_group,kind,reputation,format,data) VALUES (?,?,?,0,'Senior','league',?,'Double round-robin',?)",
-                  name,
-                  country.id,
-                  country.confederation,
-                  country.reputation * 0.5,
-                  JSON.stringify({
-                    reserveOnly: true,
-                    promotion: 0,
-                    relegation: 0,
-                  }),
-                )
-              ).lastInsertRowid,
-            );
-        }
+        const club = move.clubId;
+        const to = move.to!;
         await store.run(
           "DELETE FROM standings WHERE league_id = ? AND club_id = ?",
           move.from,
-          move.club,
+          club,
         );
         await store.run(
           "INSERT INTO standings(league_id,club_id) SELECT source.league_id,source.club_id FROM (VALUES (?,?)) AS source(league_id,club_id) WHERE NOT EXISTS (SELECT 1 FROM standings WITH (UPDLOCK,HOLDLOCK) WHERE standings.league_id = source.league_id AND standings.club_id = source.club_id)",
-          move.to,
-          move.club,
+          to,
+          club,
         );
         await store.run(
           "UPDATE clubs SET league_id = ?, reputation = LEAST(99,GREATEST(1,reputation + ?)), transfer_budget = transfer_budget * ?, fan_mood = LEAST(99,GREATEST(1,fan_mood + ?)) WHERE id = ?",
-          move.to,
+          to,
           move.promoted ? 4 : -4,
           move.promoted ? 1.25 : 0.7,
           move.promoted ? 15 : -15,
-          move.club,
+          club,
         );
-        if (move.club === state.clubId)
+        if (club === state.clubId)
           await news(
             store,
             "Club",
@@ -2177,65 +2182,19 @@ export async function seasonRollover(store: Store) {
     await store.run(
       "UPDATE standings SET played = 0, wins = 0, draws = 0, losses = 0, gf = 0, ga = 0, points = 0, xg = 0, xga = 0, xpts = 0, form = '', home_record = '0-0-0', away_record = '0-0-0', deducted = 0",
     );
+    // Age groups follow the age at the season start: U17 until 17, U19 until 19.
+    const ageCutoff = (years: number) =>
+      `${Number(state.date.slice(0, 4)) - years}${state.date.slice(4)}`;
     await store.run(
-      "UPDATE players SET age_group = CASE WHEN age >= 19 THEN 'Senior' WHEN age >= 17 AND age_group = 'U17' THEN 'U19' ELSE age_group END, appearances = 0, minutes = 0, goals = 0, assists = 0 WHERE role != 'Retired'",
-    );
-    const retirements: { id: number }[] = [];
-    for (const player of await store.all<Player>(
-      "SELECT * FROM players WHERE age >= 37 AND role != 'Retired' ORDER BY id",
-    )) {
-      if (
-        random() < 0.25 + (player.age - 37) * 0.15 &&
-        !player.parent_club_id
-      ) {
-        retirements.push({ id: player.id });
-        if (player.club_id === state.clubId)
-          await news(
-            store,
-            "Squad",
-            `${player.name} retires`,
-            "The player has announced retirement. Their career record remains in the database.",
-            "important",
-            "squad",
-          );
-      }
-    }
-    await updateSimulationRows(
-      store,
-      "players",
-      retirements,
-      "id int",
-      "club_id = NULL, wage = 0, value = 0, role = 'Retired'",
+      "UPDATE players SET age_group = CASE WHEN birth_date <= ? THEN 'Senior' WHEN birth_date <= ? AND age_group = 'U17' THEN 'U19' ELSE age_group END, appearances = 0, minutes = 0, goals = 0, assists = 0 WHERE role != 'Retired'",
+      ageCutoff(19),
+      ageCutoff(17),
     );
     await store.run(
       "UPDATE clubs SET season_spend = 0, income = 0, spending = 0, board_confidence = LEAST(90,board_confidence + 5), transfer_budget = GREATEST(0,balance * 0.4 - (SELECT coalesce(sum(TRY_CONVERT(float,JSON_VALUE(data,'$.reservedBudget'))),0) FROM negotiations WHERE buying_club_id = clubs.id AND stage IN ('Scheduled','Medical','Registration'))), momentum = 0, crisis = 0, hype = 0 WHERE type != ?",
       "national",
     );
-    const academyClubs = await store.all<Club>(
-      "SELECT DISTINCT clubs.* FROM clubs JOIN standings ON standings.club_id = clubs.id JOIN leagues ON leagues.id = standings.league_id WHERE leagues.kind = 'league' AND leagues.age_group = 'U17' ORDER BY clubs.id",
-    );
-    const expandedWorld =
-      (await store.meta<{ expanded?: boolean }>("world")).expanded === true;
-    await generatePlayers(store, {
-      count: WORLD_COUNTS.annualRegens,
-      youth: true,
-      random,
-      countries: await store.all<Country>(
-        "SELECT * FROM countries ORDER BY id",
-      ),
-      clubs: academyClubs,
-      startDate: state.date,
-      regenStyle: String((await settingsOf(store)).regenStyle),
-      modernNames: expandedWorld,
-    });
-    const intakeCount =
-      WORLD_COUNTS.annualRegens +
-      (expandedWorld
-        ? await ensureClubRosters(store, {
-            clubs: academyClubs,
-            youthOnly: true,
-          })
-        : 0);
+    const intake = await runYouthIntake(store, oldSeason + 1, state.date, random);
     const latest = await stateOf(store);
     latest.season = oldSeason + 1;
     latest.worldTrend = [
@@ -2248,16 +2207,22 @@ export async function seasonRollover(store: Store) {
     await store.setMeta("state", latest);
     await store.setMeta("lastIntake", {
       date: state.date,
-      count: intakeCount,
+      count: intake.created,
+      academy: intake.academy,
+      topUps: intake.topUps,
+      pools: intake.pools,
+      retired: intake.retired,
+      leftFootball: intake.leftFootball,
     });
     await news(
       store,
       "World",
       `Welcome to ${latest.season}/${String(latest.season + 1).slice(-2)}`,
-      `${intakeCount.toLocaleString("en-US")} new academy players have entered the world. Promotions, relegations, league reputations and club budgets have been updated.`,
+      `${intake.academy.toLocaleString("en-US")} academy players aged 14-15 and ${intake.pools.toLocaleString("en-US")} home-based youngsters have entered the world, and ${intake.retired.toLocaleString("en-US")} players have retired. Promotions, relegations, league reputations and club budgets have been updated.`,
       "success",
       "academy",
     );
+    await pruneSeason(store, oldSeason, state.date);
   });
 }
 
@@ -2387,7 +2352,7 @@ export async function advance(store: Store, days: number) {
         "players",
         expired.map((player) => ({ id: player.id })),
         "id int",
-        "profile = JSON_MODIFY(JSON_MODIFY(target.profile,'$.registration',JSON_QUERY(coalesce(JSON_QUERY(target.profile,'$.registration'),N'{}'))),'$.registration.lastAssociationId',(SELECT country_id FROM clubs WHERE id = target.club_id)), club_id = NULL, wage = 0, value = 0, role = 'Free agent'",
+        "profile = JSON_MODIFY(JSON_MODIFY(target.profile,'$.registration',JSON_QUERY(coalesce(JSON_QUERY(target.profile,'$.registration'),N'{}'))),'$.registration.lastAssociationId',(SELECT CASE WHEN JSON_VALUE(clubs.data,'$.hosted.registration') = 'host' THEN coalesce((SELECT id FROM countries WHERE code = JSON_VALUE(clubs.data,'$.hosted.host')),clubs.country_id) ELSE clubs.country_id END FROM clubs WHERE clubs.id = target.club_id)), club_id = NULL, squad_club_id = NULL, wage = 0, value = 100, listed = 0, available_loan = 0, role = 'Free agent'",
       );
       for (const player of expired) {
         if (player.club_id === state.clubId)

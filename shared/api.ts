@@ -40,7 +40,6 @@ export type WorldOperation =
   | "restore_save"
   | "export_save"
   | "import_save"
-  | "expand_world"
   | "game_action"
   | "update_settings"
   | "favorite_competition";
@@ -201,7 +200,7 @@ export interface WorldAudit {
     seniorDivisions: number;
     clubs: number;
     reserves: number;
-    reservePolicy: import("./world-rules.ts").ReservePolicy;
+    reservePolicy: import("./types.ts").ReservePolicy;
     notes: string[];
   }[];
 }

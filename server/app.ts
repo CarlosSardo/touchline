@@ -1354,12 +1354,6 @@ function createWorldRouter(
     "/api/world/audit",
     read(() => query.worldAudit(store)),
   );
-  app.post(
-    "/api/world/expand",
-    mutation("expand_world", async (_request, response) =>
-      response.json(await saves.expandWorld()),
-    ),
-  );
   app.get(
     "/api/clubs/:id",
     read((request) =>
@@ -1525,6 +1519,7 @@ function createWorldRouter(
       response.json(await saves.prepareCareer((response.locals.user as AccountUser).displayName));
     }),
   );
+  let lastStart: { key: string; careerId: string; date: string | undefined; at: number; result: unknown } | undefined;
   app.post(
     "/api/careers",
     mutation("start_career", async (request, response) => {
@@ -1543,7 +1538,17 @@ function createWorldRouter(
           seed: z.string().min(1).max(100).optional(),
         })
         .parse(request.body);
-      response.json(await store.transaction(() => saves.startCareer(input)));
+      // A replay of a start that already finished (e.g. resent after the 240 s ingress cut) returns that result.
+      const key = JSON.stringify(input);
+      if (lastStart?.key === key && Date.now() - lastStart.at < 15 * 60_000) {
+        const current = await saves.currentState();
+        if (current?.careerId === lastStart.careerId && current.date === lastStart.date)
+          return void response.json(lastStart.result);
+      }
+      // Not one transaction: a regenerated world commits in batches; `activity` keeps polls on world_busy until done.
+      const result = await saves.startCareer(input);
+      lastStart = { key, careerId: result.careerId, date: (await saves.currentState())?.date, at: Date.now(), result };
+      response.json(result);
     }),
   );
   app.post(

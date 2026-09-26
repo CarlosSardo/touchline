@@ -38,6 +38,26 @@ import type {
 } from "../../shared/api.ts";
 import type { League } from "../../shared/types.ts";
 
+/** Title and movement play-offs are stored as cups: `data.playoff`, or the play-off shape (`key` + `leagueId`). */
+function isPlayoff(league: Pick<League, "kind" | "format" | "data">) {
+  if (league.kind !== "cup") return false;
+  try {
+    const data = JSON.parse(league.data || "{}") as Record<string, unknown>;
+    if (typeof data.playoff === "boolean") return data.playoff;
+    if (typeof data.key === "string" && typeof data.leagueId === "number")
+      return true;
+  } catch {
+    // Unreadable data: fall back to the stored format.
+  }
+  return /play-?(off|out)/i.test(league.format);
+}
+
+const kindLabel = (league: League) =>
+  isPlayoff(league) ? "Play-offs" : label(league.kind);
+
+const phaseLabel = (phase: string) =>
+  phase === "playoff" ? "Play-offs" : label(phase);
+
 export default function Competitions() {
   const { bootstrap, leagueId, openLeague, openMatch, refresh, notify } =
     useGame();
@@ -119,7 +139,14 @@ export default function Competitions() {
   const groups = [
     ...new Set(data?.table.map((entry) => entry.group_name) ?? []),
   ];
-  const currentGroup = groups.includes(group) ? group : groups[0];
+  const ownGroup = data?.table.find(
+    (entry) => entry.club_id === bootstrap.club.id,
+  )?.group_name;
+  const currentGroup = groups.includes(group)
+    ? group
+    : ownGroup !== undefined
+      ? ownGroup
+      : groups[0];
   const competitionData = data ? JSON.parse(data.league.data) : {};
   const fixtures =
     data?.fixtures.filter((fixture) =>
@@ -177,7 +204,7 @@ export default function Competitions() {
             <option value="continental">Continental</option>
             <option value="international">International</option>
             <option value="youth">Youth tournaments</option>
-            <option value="cup">Domestic cups</option>
+            <option value="cup">Domestic cups & play-offs</option>
           </select>
           <select
             aria-label="Competition age group"
@@ -235,7 +262,7 @@ export default function Competitions() {
                   <strong>{league.name}</strong>
                   <small>
                     {league.confederation} / {league.age_group} /{" "}
-                    {label(league.kind)}
+                    {kindLabel(league)}
                   </small>
                 </button>
                 <IconButton
@@ -308,7 +335,7 @@ export default function Competitions() {
                   />
                   <Badge tone="green">
                     {competitionData.phase
-                      ? label(competitionData.phase)
+                      ? phaseLabel(competitionData.phase)
                       : "Season league"}
                   </Badge>
                 </SectionHeading>
@@ -382,6 +409,12 @@ export default function Competitions() {
                             entry.group_name === currentGroup,
                         )}
                         ownId={bootstrap.club.id}
+                      />
+                    ) : data.fixtures.length ? (
+                      <Empty
+                        icon={Trophy}
+                        title="Knockout competition"
+                        detail="There is no table: the ties are under Fixtures & results."
                       />
                     ) : (
                       <Empty
@@ -472,14 +505,16 @@ export default function Competitions() {
                         <dt>Stage</dt>
                         <dd>
                           {competitionData.phase
-                            ? label(competitionData.phase)
+                            ? phaseLabel(competitionData.phase)
                             : "Domestic league"}
                         </dd>
                       </div>
-                      <div>
-                        <dt>Participants</dt>
-                        <dd>{data.table.length}</dd>
-                      </div>
+                      {data.table.length > 0 && (
+                        <div>
+                          <dt>Participants</dt>
+                          <dd>{data.table.length}</dd>
+                        </div>
+                      )}
                       {competitionData.spec && (
                         <>
                           <div>
@@ -511,6 +546,48 @@ export default function Competitions() {
                             <dd>{competitionData.continental ?? 0} places</dd>
                           </div>
                         </>
+                      )}
+                      {competitionData.conferences?.length > 0 && (
+                        <div>
+                          <dt>Conferences</dt>
+                          <dd>{competitionData.conferences.join(", ")}</dd>
+                        </div>
+                      )}
+                      {competitionData.split?.groups?.length > 0 && (
+                        <div>
+                          <dt>Split</dt>
+                          <dd>
+                            {(
+                              competitionData.split.groups as {
+                                name: string;
+                                positions: [number, number];
+                                points: string;
+                              }[]
+                            )
+                              .map(
+                                (split) =>
+                                  `${split.name} (${split.positions[0]}–${split.positions[1]}, points ${split.points === "halved" ? "halved" : "kept"})`,
+                              )
+                              .join("; ")}
+                          </dd>
+                        </div>
+                      )}
+                      {competitionData.championship?.positions && (
+                        <div>
+                          <dt>Title play-offs</dt>
+                          <dd>
+                            Places {competitionData.championship.positions[0]}–
+                            {competitionData.championship.positions[1]}
+                            {competitionData.championship.perConference
+                              ? " per conference"
+                              : ""}{" "}
+                            /{" "}
+                            {competitionData.championship.format ===
+                            "round-robin"
+                              ? "mini-league"
+                              : "knockout"}
+                          </dd>
+                        </div>
                       )}
                     </dl>
                     {data.qualifiers.length > 0 && (
@@ -570,7 +647,9 @@ export default function Competitions() {
                             <p>{record.competition ?? record.name}</p>
                           </span>
                           <Badge tone="green">
-                            {record.clubId ? record.name : "Season archived"}
+                            {record.clubId
+                              ? `${record.name}${record.walkover ? " (walkover)" : ""}`
+                              : "Season archived"}
                           </Badge>
                         </div>
                       );

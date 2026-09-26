@@ -7,7 +7,7 @@ import {
   recordFinancialItem,
   sellPlayerAsset,
 } from "./finance.ts";
-import { assessRegistration } from "./registration.ts";
+import { assessRegistration, registrationAssociationId } from "./registration.ts";
 import { assessPlayerInterest, assessYouthTransfer } from "./recruitment.ts";
 import {
   publishPlayerCoverage,
@@ -136,12 +136,29 @@ export async function squadDestinations(store: Store, player: Player) {
     "SELECT * FROM loans WHERE player_id = ? AND status = 'active'",
     player.id,
   );
-  return (await clubSquads(store)).flatMap((club) =>
-    (["Senior", "U19", "U17"] as const).map((ageGroup) => {
-      const cutoff =
-        ageGroup === "Senior"
-          ? null
-          : `${state.season - (ageGroup === "U17" ? 16 : 18)}-01-01`;
+  // Age groups and reserve-team age rules use the age at the start of the season (the rollover rule).
+  const seasonStart = `${state.season}-07-01`;
+  const startAge = ageOn(player.birth_date, seasonStart);
+  const squads = await clubSquads(store);
+  const overage = new Map<number, number>();
+  for (const club of squads) {
+    const rule = reserveAgeRule(club);
+    if (club.type !== "bteam" || !rule) continue;
+    overage.set(
+      club.id,
+      (await store.get<{ count: number }>(
+        "SELECT count(*) AS count FROM players WHERE (squad_club_id = ? OR (club_id = ? AND squad_club_id IS NULL)) AND id != ? AND age_group = 'Senior' AND role != 'Retired' AND birth_date <= ?",
+        club.id,
+        club.id,
+        player.id,
+        `${state.season - rule.maxAge - 1}-07-01`,
+      ))!.count,
+    );
+  }
+  return squads.flatMap((club) =>
+    (club.type === "bteam" ? (["Senior"] as const) : (["Senior", "U19", "U17"] as const)).map((ageGroup) => {
+      const limit = ageGroup === "U17" ? 17 : ageGroup === "U19" ? 19 : null;
+      const rule = club.type === "bteam" ? reserveAgeRule(club) : undefined;
       const reason =
         player.role === "Retired"
           ? "Retired players cannot change squad."
@@ -149,9 +166,11 @@ export async function squadDestinations(store: Store, player: Player) {
             ? "Return this player from their active loan first."
             : loan && club.id !== loan.destination_id
               ? "The loan agreement only permits the borrowing club's own squads."
-              : cutoff && player.birth_date < cutoff
-                ? `${ageGroup} requires a birth date on or after ${cutoff} for this season.`
-                : null;
+              : limit !== null && startAge >= limit
+                ? `${ageGroup} is for players under ${limit} at the start of the season.`
+                : rule && startAge > rule.maxAge && (overage.get(club.id) ?? 0) >= rule.overage
+                  ? `The reserve team may register only ${rule.overage} players over ${rule.maxAge}.`
+                  : null;
       return {
         clubId: club.id,
         ageGroup,
@@ -164,6 +183,13 @@ export async function squadDestinations(store: Store, player: Player) {
       };
     }),
   );
+}
+
+/** B-team age rule from the reserve policy snapshotted into club.data at generation. */
+export function reserveAgeRule(club: Pick<Club, "data">) {
+  return (JSON.parse(club.data || "{}").reservePolicy?.ageRule ?? undefined) as
+    | { maxAge: number; overage: number }
+    | undefined;
 }
 
 export async function movePlayerSquad(
@@ -2161,7 +2187,7 @@ export async function completeNegotiation(
       loanEndDate(negotiation.type, state.date, duration),
     );
     await store.run(
-      "UPDATE players SET parent_club_id = club_id, club_id = ?, role = ?, training = ?, morale = LEAST(99, morale + 3), loan_progress = 0 WHERE id = ?",
+      "UPDATE players SET parent_club_id = club_id, club_id = ?, squad_club_id = NULL, role = ?, training = ?, morale = LEAST(99, morale + 3), loan_progress = 0 WHERE id = ?",
       buyer.id,
       terms.role,
       terms.developmentPlan,
@@ -2187,7 +2213,8 @@ export async function completeNegotiation(
         `${Number(state.date.slice(0, 4)) + data.years}-06-30`,
       );
     await store.run(
-      "UPDATE players SET club_id = ?, parent_club_id = NULL, wage = ?, contract_end = ?, role = ?, listed = 0, available_loan = 0, morale = LEAST(99, morale + 7) WHERE id = ?",
+      "UPDATE players SET club_id = ?, squad_club_id = CASE WHEN club_id = ? THEN squad_club_id END, parent_club_id = NULL, wage = ?, contract_end = ?, role = ?, listed = 0, available_loan = 0, morale = LEAST(99, morale + 7) WHERE id = ?",
+      buyer.id,
       buyer.id,
       negotiation.wage,
       `${Number(state.date.slice(0, 4)) + data.years}-06-30`,
@@ -2203,8 +2230,9 @@ export async function completeNegotiation(
     playerProfile.registration = {
       workPermitPoints: playerProfile.registration?.workPermitPoints ?? 0,
       adaptedCountries: playerProfile.registration?.adaptedCountries ?? [],
-      lastAssociationId: buyer.country_id,
+      lastAssociationId: await registrationAssociationId(store, buyer),
     };
+    delete playerProfile.homeBased;
     await store.run(
       "UPDATE players SET profile = ? WHERE id = ?",
       JSON.stringify(playerProfile),

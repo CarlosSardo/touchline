@@ -11,6 +11,7 @@ import type {
   DomesticFootballSpec,
   FakerNameLocale,
   LeagueTierSpec,
+  NameConfig,
   NamePool,
   NationSpec,
   Span,
@@ -144,8 +145,10 @@ const CITY_CAPACITY = { mega: 6, large: 3, medium: 2, small: 1, town: 1 };
 const LATIN_NAME = /^[\p{Script=Latin}\p{M}'’ʻ .-]+$/u;
 const LATIN_PLACE = /^[\p{Script=Latin}\p{M}\d'’ʻ .,()/-]+$/u;
 const MONTH_DAY = /^(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/;
-const TEMPLATE_TOKEN = /\{([a-z0-9]+)\}/g;
-const TEMPLATE_TOKENS = new Set(["city", "region", "founded", "founded2"]);
+const TEMPLATE_TOKEN = /\{([a-zA-Z0-9]+)\}/g;
+const TEMPLATE_TOKENS = new Set(["city", "region", "demonym", "cityAdj", "of", "founded", "founded2"]);
+/** Tokens skipped for cities without the matching CitySpec field. */
+const OPTIONAL_TOKENS = ["{demonym}", "{cityAdj}"];
 const MAX_MATCHDAYS = 46;
 
 const isInt = (value: unknown): value is number => Number.isInteger(value);
@@ -156,16 +159,17 @@ const rounds = (teams: number, roundRobins: number) =>
 const placeKey = (name: string) =>
   name.normalize("NFKD").replace(/\p{M}/gu, "").toLowerCase();
 
-/** League matchdays: base round-robins (within conferences) plus the longest split group. */
+/** League matchdays: base round-robins (within conferences), inter-conference games, plus the longest split group. */
 export function tierMatchdays(
-  tier: Pick<LeagueTierSpec, "size" | "roundRobins" | "conferences" | "split">,
+  tier: Pick<LeagueTierSpec, "size" | "roundRobins" | "conferences" | "split"> &
+    Partial<Pick<LeagueTierSpec, "interConference">>,
 ): number {
   const conferences = tier.conferences?.length ?? 0;
   const teams = conferences > 1 ? Math.ceil(tier.size / conferences) : tier.size;
   const split = (tier.split?.groups ?? []).map((group) =>
     rounds(group.positions[1] - group.positions[0] + 1, group.roundRobins),
   );
-  return rounds(teams, tier.roundRobins ?? 2) + Math.max(0, ...split);
+  return rounds(teams, tier.roundRobins ?? 2) + (tier.interConference ?? 0) + Math.max(0, ...split);
 }
 
 export interface CatalogSummary {
@@ -225,6 +229,8 @@ export function summarizeCatalog(catalog: WorldCatalog): CatalogSummary {
 export interface ValidateOptions {
   /** Limit presence checks to these files while authors work in parallel; other files are checked against the assignment only. */
   scope?: readonly CatalogFile[];
+  /** Subset worlds: check only these nations (their files form the default scope); other nations may be missing. */
+  nations?: readonly string[];
 }
 
 export function validateCatalog(
@@ -232,12 +238,20 @@ export function validateCatalog(
   options: ValidateOptions = {},
 ): CatalogIssue[] {
   const issues: CatalogIssue[] = [];
-  const scope = new Set<CatalogFile>(
-    options.scope?.length ? options.scope : CATALOG_FILE_KEYS,
-  );
   const assignment = new Map(
     CATALOG_ASSIGNMENT.map((entry) => [entry.code, entry]),
   );
+  const subset = options.nations?.length ? new Set(options.nations) : undefined;
+  const scope = new Set<CatalogFile>(
+    options.scope?.length
+      ? options.scope
+      : subset
+        ? [...subset].flatMap((code) => assignment.get(code)?.file ?? [])
+        : CATALOG_FILE_KEYS,
+  );
+  for (const code of subset ?? [])
+    if (!assignment.has(code))
+      issues.push({ level: "error", path: code, message: "not a FIFA member in CATALOG_ASSIGNMENT" });
   const nations = new Map<string, NationSpec>();
   const pools = new Map<string, NamePool>();
   const hostedIn = new Map<string, number[]>();
@@ -251,7 +265,7 @@ export function validateCatalog(
   }
   function inScope(code: string) {
     const entry = assignment.get(code);
-    return Boolean(entry && scope.has(entry.file));
+    return Boolean(entry && scope.has(entry.file) && (!subset || subset.has(code)));
   }
   function reference(path: string, code: string, what: string, needsLeague = false) {
     const entry = assignment.get(code);
@@ -305,14 +319,16 @@ export function validateCatalog(
     const config = nation.names;
     const counts = { given: 0, family: 0 };
     let unknown = false;
-    for (const side of ["given", "family"] as const) {
-      if (!config[side].length) error(path, `${side} needs at least one source`);
-      for (const { source, weight } of config[side]) {
+    const checkSources = (list: NameConfig["given"], side: "given" | "family") => {
+      let count = 0;
+      for (const { source, weight } of list) {
         if (!(weight > 0)) error(path, `${source} needs a positive weight`);
         if (source.startsWith("faker:")) {
           const size = FAKER_NAME_COUNTS[source.slice(6) as FakerNameLocale];
-          if (size) counts[side] += side === "given" ? size[0] : size[1];
+          if (size) count += side === "given" ? size[0] : size[1];
           else error(path, `${source} is not a Latin-script faker locale`);
+          if (side === "family" && source === "faker:fr_BE")
+            warn(path, "faker fr_BE family names are mostly English placeholders (Abbott, Altenwerth); use faker:fr");
           continue;
         }
         const id = source.slice(5);
@@ -324,8 +340,21 @@ export function validateCatalog(
             error(path, `unknown pool ${id}`);
           else unknown = true;
         } else if (!pool[side]?.length) error(path, `pool ${id} has no ${side} names`);
-        else counts[side] += new Set(pool[side]).size;
+        else count += new Set(pool[side]).size;
       }
+      return count;
+    };
+    for (const side of ["given", "family"] as const) {
+      if (!config[side].length) error(path, `${side} needs at least one source`);
+      counts[side] = checkSources(config[side], side);
+    }
+    const cityRegions = new Set(nation.cities.major.map((city) => city.region));
+    for (const rule of config.regional ?? []) {
+      if (!rule.regions.length || (!rule.given?.length && !rule.family?.length))
+        error(path, "regional name rules need regions and a given or family list");
+      for (const region of rule.regions)
+        if (!cityRegions.has(region)) error(path, `regional names: no city has region "${region}"`);
+      for (const side of ["given", "family"] as const) if (rule[side]) checkSources(rule[side], side);
     }
     const [given, family] = leagueNation ? [60, 100] : [30, 40];
     if (!unknown && (counts.given < given || counts.family < family))
@@ -338,6 +367,8 @@ export function validateCatalog(
     ] as const)
       if (rate !== undefined && !within(rate, 0, 0.5))
         error(path, `${label} must be 0-0.5`);
+    if (config.mixRate !== undefined && !within(config.mixRate, 0, 1))
+      error(path, "mixRate must be 0-1");
   }
 
   function checkNationality(nation: NationSpec, path: string) {
@@ -383,6 +414,17 @@ export function validateCatalog(
       const districts = city.districts ?? [];
       if (new Set(districts).size !== districts.length || districts.some((name) => !LATIN_PLACE.test(name)))
         error(path, `${city.name} districts must be unique Latin-script names`);
+      if (city.admin1 !== undefined && !/^[A-Z0-9]{1,8}$/.test(city.admin1))
+        error(path, `${city.name}.admin1 must be a cities.json admin1 code`);
+      if ((city.lat === undefined) !== (city.lng === undefined) ||
+        (city.lat !== undefined && !(Math.abs(city.lat) <= 90 && Math.abs(city.lng!) <= 180)))
+        error(path, `${city.name} needs both lat (±90) and lng (±180) or neither`);
+      if (city.demonym !== undefined && !(LATIN_PLACE.test(city.demonym) && city.demonym.length <= 30))
+        error(path, `${city.name}.demonym must be a Latin-script word of up to 30 characters`);
+      if (city.adjective !== undefined && !(LATIN_PLACE.test(city.adjective) && city.adjective.length <= 30))
+        error(path, `${city.name}.adjective must be a Latin-script word of up to 30 characters`);
+      if (city.preposition !== undefined && !/^\p{Ll}{1,6}$/u.test(city.preposition))
+        error(path, `${city.name}.preposition must be one lowercase word ("do", "da")`);
       capacity += city.maxClubs ?? CITY_CAPACITY[city.size] ?? 1;
     }
     const extra = nation.cities.extra;
@@ -400,8 +442,8 @@ export function validateCatalog(
     if (!["professional", "semi-professional", "amateur"].includes(tier.status))
       error(path, "invalid status");
     if (!within(tier.reputation, 1, 99)) error(path, "reputation must be 1-99");
-    if (!isInt(tier.size) || tier.size < 6 || tier.size > 40) {
-      error(path, "size must be 6-40");
+    if (!isInt(tier.size) || tier.size < 6 || tier.size > 48) {
+      error(path, "size must be 6-48");
       return;
     }
     const conferences = tier.conferences?.length ?? 0;
@@ -409,8 +451,16 @@ export function validateCatalog(
     if (tier.size > 24 && conferences < 2) error(path, "tiers above 24 teams need conferences");
     if (conferences > 1 && tier.size % conferences)
       error(path, "conferences must be equal in size");
-    if (tier.roundRobins !== undefined && ![2, 3, 4].includes(tier.roundRobins))
-      error(path, "roundRobins must be 2, 3 or 4");
+    else if (conferences > 1 && tier.size / conferences > 24)
+      error(path, "conferences hold at most 24 teams");
+    if (tier.roundRobins !== undefined && ![1, 2, 3, 4].includes(tier.roundRobins))
+      error(path, "roundRobins must be 1, 2, 3 or 4");
+    if (tier.roundRobins === 1 && !tier.split) error(path, "a single round-robin needs a split");
+    if (tier.interConference !== undefined) {
+      const others = conferences > 1 ? tier.size - tier.size / conferences : 0;
+      if (!isInt(tier.interConference) || tier.interConference < 1 || tier.interConference > others)
+        error(path, `interConference needs conferences and 1..${others} games`);
+    }
     if (tier.split) {
       let next = 1;
       for (const group of tier.split.groups) {
@@ -429,9 +479,16 @@ export function validateCatalog(
     if (tier.championship) {
       const { positions, perConference, legs, finalLegs } = tier.championship;
       const limit = perConference && conferences > 1 ? tier.size / conferences : tier.size;
-      if (!isInt(positions[0]) || !isInt(positions[1]) || positions[0] < 1 || positions[1] > limit || positions[0] >= positions[1])
+      // [1, 1] per conference is a final between the conference winners (Primera Nacional).
+      const single = positions[0] === positions[1] && perConference && conferences > 1;
+      if (!isInt(positions[0]) || !isInt(positions[1]) || positions[0] < 1 || positions[1] > limit || (positions[0] >= positions[1] && !single))
         error(path, `championship positions must lie within 1..${limit}`);
       if (!legsValid(legs, finalLegs)) error(path, "championship legs must be 1 or 2");
+      const { format, roundRobins } = tier.championship;
+      if (format !== undefined && !["knockout", "round-robin"].includes(format))
+        error(path, "championship format must be knockout or round-robin");
+      if (roundRobins !== undefined && (format !== "round-robin" || ![1, 2].includes(roundRobins)))
+        error(path, "championship roundRobins (1-2) needs format round-robin");
     }
     const bTeams = tier.bTeams ?? 0;
     if (!isInt(bTeams) || bTeams < 0) error(path, "bTeams must be a non-negative integer");
@@ -482,13 +539,29 @@ export function validateCatalog(
           error(at, "closed tiers exchange no clubs");
         continue;
       }
-      if (boundary.relegated > upper.size - 2 || boundary.promoted > lower.size - 2)
+      const groupsOf = (tier: LeagueTierSpec) =>
+        boundary.perConference && (tier.conferences?.length ?? 0) > 1 ? tier.conferences!.length : 1;
+      const upperGroups = groupsOf(upper);
+      const lowerGroups = groupsOf(lower);
+      if (boundary.perConference && upperGroups === 1 && lowerGroups === 1)
+        error(at, "perConference needs a tier with conferences");
+      if (boundary.championPromoted && (!lower.championship || boundary.promoted < 1 || lowerGroups > 1))
+        error(at, "championPromoted needs a lower-tier championship, promoted ≥ 1 and no per-conference split below");
+      const upperSize = upper.size / upperGroups;
+      const lowerSize = lower.size / lowerGroups;
+      const each = (total: number, groups: number, what: string) => {
+        if (total % groups) error(at, `${what} (${total}) must split evenly across ${groups} conferences`);
+        return Math.floor(total / groups);
+      };
+      const relegatedEach = each(boundary.relegated, upperGroups, "relegated");
+      const promotedEach = each(boundary.promoted, lowerGroups, "promoted");
+      if (relegatedEach > upperSize - 2 || promotedEach > lowerSize - 2)
         error(at, "too many automatic moves");
       const upperTaken = new Set<number>();
       const lowerTaken = new Set<number>();
-      for (let rank = upper.size - boundary.relegated + 1; rank <= upper.size; rank++)
+      for (let rank = upperSize - relegatedEach + 1; rank <= upperSize; rank++)
         upperTaken.add(rank);
-      for (let rank = 1; rank <= boundary.promoted; rank++) lowerTaken.add(rank);
+      for (let rank = 1; rank <= promotedEach; rank++) lowerTaken.add(rank);
       const claim = (taken: Set<number>, ranks: number[], size: number, where: string) => {
         for (const rank of ranks) {
           if (!isInt(rank) || rank < 1 || rank > size)
@@ -505,10 +578,11 @@ export function validateCatalog(
         if (!legsValid(playoff.legs, "finalLegs" in playoff ? playoff.finalLegs : undefined))
           error(where, "legs must be 1 or 2");
         if (playoff.type === "cross-tier") {
+          if (boundary.perConference) error(where, "cross-tier play-offs are not supported per conference");
           if (!playoff.upperPositions.length || playoff.lowerPositions.length < playoff.upperPositions.length)
             error(where, "each upper position needs at least one lower-tier challenger");
-          claim(upperTaken, playoff.upperPositions, upper.size, where);
-          claim(lowerTaken, playoff.lowerPositions, lower.size, where);
+          claim(upperTaken, playoff.upperPositions, upperSize, where);
+          claim(lowerTaken, playoff.lowerPositions, lowerSize, where);
           continue;
         }
         const [first, last] = playoff.positions;
@@ -517,13 +591,15 @@ export function validateCatalog(
           continue;
         }
         const ranks = Array.from({ length: last - first + 1 }, (_, offset) => first + offset);
-        if (!isInt(playoff.places) || playoff.places < 1 || playoff.places >= ranks.length)
+        const groups = playoff.type === "promotion" ? lowerGroups : upperGroups;
+        const places = isInt(playoff.places) ? each(playoff.places, groups, "play-off places") : 0;
+        if (places < 1 || places >= ranks.length)
           error(where, "places must be between 1 and the number of play-off teams minus one");
         if (playoff.type === "promotion") {
-          claim(lowerTaken, ranks, lower.size, where);
+          claim(lowerTaken, ranks, lowerSize, where);
           up += playoff.places;
         } else {
-          claim(upperTaken, ranks, upper.size, where);
+          claim(upperTaken, ranks, upperSize, where);
           down += playoff.places;
         }
       }
@@ -536,7 +612,8 @@ export function validateCatalog(
   function checkCups(football: DomesticFootballSpec, path: string) {
     const cups = football.cups;
     const count = (kind: CupSpec["kind"]) => cups.filter((cup) => cup.kind === kind).length;
-    if (count("national") !== 1) error(path, "needs exactly one national cup");
+    // Zero is allowed: Mexico, Peru, Venezuela and Bolivia have no national cup in 2025/26.
+    if (count("national") > 1) error(path, "at most one national cup");
     if (count("league") > 1 || count("super") > 1)
       error(path, "at most one league cup and one super cup");
     if (new Set(cups.map((cup) => cup.name)).size !== cups.length)
@@ -683,8 +760,8 @@ export function validateCatalog(
 
   function checkTemplate(template: ClubNameTemplate, own: number, path: string) {
     const tokens = [...template.pattern.matchAll(TEMPLATE_TOKEN)].map((match) => match[1]);
-    if (!tokens.includes("city") && !tokens.includes("region"))
-      error(path, `template "${template.pattern}" needs {city} or {region}`);
+    if (!["city", "region", "demonym", "cityAdj"].some((token) => tokens.includes(token)))
+      error(path, `template "${template.pattern}" needs {city}, {region}, {demonym} or {cityAdj}`);
     const unknown = tokens.filter((token) => !TEMPLATE_TOKENS.has(token));
     if (unknown.length)
       error(path, `template "${template.pattern}" uses unknown tokens ${unknown.join(", ")}`);
@@ -696,10 +773,17 @@ export function validateCatalog(
 
   function checkNaming(naming: ClubNamingSpec, own: number, path: string) {
     if (naming.templates.length < 3) error(path, "needs at least 3 templates");
+    for (const name of naming.avoid ?? [])
+      if (typeof name !== "string" || !name.trim() || name.length > 60)
+        error(path, `avoid entry "${name}" must be a club name of 1-60 characters`);
     for (const template of naming.templates) checkTemplate(template, own, path);
+    const plain = (templates: ClubNameTemplate[]) =>
+      templates.some((template) => !OPTIONAL_TOKENS.some((token) => template.pattern.includes(token)));
+    if (!plain(naming.templates)) error(path, "needs a template without {demonym} and {cityAdj} for cities without them");
     for (const rule of naming.regional ?? []) {
       if (!rule.regions.length || !rule.templates.length)
         error(path, "regional rules need regions and templates");
+      else if (!plain(rule.templates)) error(path, "regional rules need a template without {demonym} and {cityAdj}");
       for (const template of rule.templates) checkTemplate(template, own, path);
     }
     for (const [label, range] of [
@@ -846,7 +930,7 @@ export function validateCatalog(
     }
   }
   for (const entry of CATALOG_ASSIGNMENT)
-    if (scope.has(entry.file) && !nations.has(entry.code))
+    if (inScope(entry.code) && !nations.has(entry.code))
       error(`${entry.file}/${entry.code}`, "missing nation");
   for (const nation of nations.values()) {
     for (const spec of nation.hostedAbroad ?? [])
@@ -895,10 +979,17 @@ export function validateCatalog(
       if (!ids.has(holder.from)) error(at, `unknown titleholder competition ${holder.from}`);
     for (const feed of competition.feeds ?? [])
       if (!ids.has(feed.to)) error(at, `unknown feed target ${feed.to}`);
+    for (const drop of competition.drops ?? [])
+      if (!ids.has(drop.to)) error(at, `unknown drop target ${drop.to}`);
+    if (competition.mirrors && !ids.has(competition.mirrors)) error(at, `unknown mirrored competition ${competition.mirrors}`);
+    if (competition.byes !== undefined && (!isInt(competition.byes) || competition.byes < 0 || competition.byes > competition.advance))
+      error(at, "byes must be 0..advance");
   });
   continental.access.forEach((rule, index) => {
     const at = `continental.access[${index}]`;
     if (!ids.has(rule.competition)) error(at, `unknown competition ${rule.competition}`);
+    if (rule.zone && !continental.competitions.find((item) => item.id === rule.competition)?.zones?.some((zone) => zone.name === rule.zone))
+      error(at, `unknown zone ${rule.zone}`);
     if (rule.basis === "association-rank" ? !rule.bands?.length : !rule.fixed?.length)
       error(at, `${rule.basis} rules need ${rule.basis === "fixed" ? "fixed" : "bands"}`);
     for (const band of rule.bands ?? []) {
@@ -916,7 +1007,7 @@ export function validateCatalog(
     }
   });
 
-  if (scope.size === CATALOG_FILE_KEYS.length) {
+  if (scope.size === CATALOG_FILE_KEYS.length && !subset) {
     const summary = summarizeCatalog(catalog);
     if (summary.firstTeamClubs > 2600)
       warn("catalog", `${summary.firstTeamClubs} first-team clubs exceed the 2,600 budget`);

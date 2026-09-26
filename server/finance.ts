@@ -1,6 +1,62 @@
 import { Store } from "./db.ts";
 import { addDays, clamp, daysBetween, round } from "../shared/rules.ts";
-import type { Club, GameState, League } from "../shared/types.ts";
+import type { Club, GameState, League, Player } from "../shared/types.ts";
+
+/** Section 5 base weekly wage (GBP) before a club's payroll calibration. */
+export const baseWage = (ability: number) =>
+  Math.round(((clamp(ability) / 100) ** 7 * 190_000) / 10) * 10 + 50;
+
+const BASE_WAGE_SQL =
+  "ROUND(POWER(CONVERT(float, players.ability) / 100.0, 7) * 19000, 0) * 10 + 50";
+const PROFESSIONAL_SENIORS =
+  "players.club_id IS NOT NULL AND players.role != 'Retired' AND players.age_group = 'Senior' AND coalesce(JSON_VALUE(players.profile,'$.contract.status'),'professional') = 'professional'";
+
+/** Section 5 payroll calibration: professional wages ≈ 88% of the weekly wage budget, factor 0.02–4 as generated. */
+export const payrollScale = (wageBudget: number, baseTotal: number) =>
+  clamp((0.88 * Math.max(0, wageBudget)) / Math.max(1, baseTotal), 0.02, 4);
+
+export async function wageScale(store: Store, clubId: number) {
+  const row = (await store.get<{ budget: number; base: number }>(
+    `SELECT clubs.wage_budget AS budget,(SELECT coalesce(sum(${BASE_WAGE_SQL}),0) FROM players WHERE ((players.club_id = clubs.id AND players.parent_club_id IS NULL) OR players.parent_club_id = clubs.id) AND ${PROFESSIONAL_SENIORS}) AS base FROM clubs WHERE clubs.id = ?`,
+    clubId,
+  ))!;
+  return payrollScale(row.budget, row.base);
+}
+
+/** payrollScale for every non-national club in one pass. */
+export async function wageScales(store: Store) {
+  const base = new Map(
+    (
+      await store.all<{ club_id: number; base: number }>(
+        `SELECT coalesce(players.parent_club_id,players.club_id) AS club_id,sum(${BASE_WAGE_SQL}) AS base FROM players WHERE ${PROFESSIONAL_SENIORS} GROUP BY coalesce(players.parent_club_id,players.club_id)`,
+      )
+    ).map((row) => [row.club_id, row.base]),
+  );
+  return new Map(
+    (
+      await store.all<{ id: number; wage_budget: number }>(
+        "SELECT id,wage_budget FROM clubs WHERE type != 'national'",
+      )
+    ).map((club) => [
+      club.id,
+      payrollScale(club.wage_budget, base.get(club.id) ?? 0),
+    ]),
+  );
+}
+
+/** What a club with payroll factor `scale` pays for this player; never below the current wage. */
+export function marketWage(
+  player: Pick<Player, "ability" | "age" | "age_group" | "wage">,
+  scale: number,
+) {
+  const stage =
+    player.age_group !== "Senior" ? 0.25 : player.age <= 20 ? 0.75 : 1;
+  return Math.max(
+    player.wage,
+    50,
+    Math.round((baseWage(player.ability) * scale * stage) / 10) * 10,
+  );
+}
 
 export interface FinancialPeriod {
   club_id: number;

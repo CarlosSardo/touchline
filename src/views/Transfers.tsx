@@ -32,6 +32,7 @@ import {
   PlayerTable,
   Rating,
   SectionHeading,
+  SortHeader,
   Stat,
   Tabs,
   TextLink,
@@ -50,14 +51,65 @@ import {
 } from "../../shared/rules.ts";
 import type { PlayerDetail, TransferDesk } from "../../shared/api.ts";
 import type {
+  BuyBackClause,
   LoanTerms,
   Negotiation,
   NegotiationData,
   Position,
+  SellOnClause,
   TransferTerms,
   TransferPayment,
   PlayerInterest,
 } from "../../shared/types.ts";
+import { dateValue, rankOf, type SortColumn } from "../sort.ts";
+import { useSortableRows } from "../useSortableRows.ts";
+import { clubLabel, isMissingPlayer } from "../players.ts";
+
+const PAYMENT_COLUMNS: SortColumn<
+  TransferPayment,
+  "due" | "player" | "from" | "to" | "amount" | "kind"
+>[] = [
+  { key: "due", value: (payment) => dateValue(payment.due_date), defaultDirection: "asc" },
+  { key: "player", value: (payment) => payment.player_name, defaultDirection: "asc" },
+  { key: "from", value: (payment) => payment.payer_name, defaultDirection: "asc" },
+  { key: "to", value: (payment) => payment.payee_name, defaultDirection: "asc" },
+  { key: "amount", value: (payment) => payment.amount, defaultDirection: "desc" },
+  { key: "kind", value: (payment) => rankOf(["fee", "sell-on"], payment.kind), defaultDirection: "asc" },
+];
+const BUY_BACK_COLUMNS: SortColumn<
+  BuyBackClause,
+  "player" | "owner" | "holder" | "fee" | "expires"
+>[] = [
+  { key: "player", value: (clause) => clause.player_name, defaultDirection: "asc" },
+  { key: "owner", value: (clause) => clause.owner_name, defaultDirection: "asc" },
+  { key: "holder", value: (clause) => clause.beneficiary_name, defaultDirection: "asc" },
+  { key: "fee", value: (clause) => clause.fee, defaultDirection: "desc" },
+  { key: "expires", value: (clause) => dateValue(clause.expires), defaultDirection: "asc" },
+];
+const SELL_ON_COLUMNS: SortColumn<
+  SellOnClause,
+  "player" | "owner" | "beneficiary" | "percentage" | "paid" | "status"
+>[] = [
+  { key: "player", value: (clause) => clause.player_name, defaultDirection: "asc" },
+  { key: "owner", value: (clause) => clause.owner_name, defaultDirection: "asc" },
+  { key: "beneficiary", value: (clause) => clause.beneficiary_name, defaultDirection: "asc" },
+  { key: "percentage", value: (clause) => clause.percentage, defaultDirection: "desc" },
+  { key: "paid", value: (clause) => clause.paid, defaultDirection: "desc" },
+  { key: "status", value: (clause) => rankOf(["active", "triggered"], clause.status), defaultDirection: "asc" },
+];
+type MarketMove = TransferDesk["market"][number] & {
+  move: { name?: string; club?: string; fee?: number; playerId?: number; to?: number };
+};
+const MARKET_COLUMNS: SortColumn<
+  MarketMove,
+  "player" | "destination" | "fee" | "date"
+>[] = [
+  { key: "player", value: (event) => event.move.name, defaultDirection: "asc" },
+  { key: "destination", value: (event) => event.move.club, defaultDirection: "asc" },
+  { key: "fee", value: (event) => event.move.fee, defaultDirection: "desc" },
+  { key: "date", value: (event) => dateValue(event.date), defaultDirection: "desc" },
+];
+const ID_TIE_BREAKER = [{ value: (row: { id: number }) => row.id }];
 
 export function OfferBuilder() {
   const { offerPlayerId } = useGame();
@@ -92,6 +144,21 @@ function OfferPage() {
       <div className="page">
         <PageHeading title="Make an offer" eyebrow="RECRUITMENT" />
         <Empty icon={Search} title="Choose a player">
+          <Button icon={Search} onClick={() => navigate("database")}>
+            Find a player
+          </Button>
+        </Empty>
+      </div>
+    );
+  if (isMissingPlayer(error))
+    return (
+      <div className="page">
+        <PageHeading title="Make an offer" eyebrow="RECRUITMENT" />
+        <Empty
+          icon={Search}
+          title="This player is no longer in the database"
+          detail="They left football at the end of a season. Choose another target."
+        >
           <Button icon={Search} onClick={() => navigate("database")}>
             Find a player
           </Button>
@@ -190,7 +257,7 @@ function OfferPage() {
             {player.position} / {player.age} years /{" "}
             <ClubLink
               id={player.club_id}
-              name={player.club_name ?? "Free agent"}
+              name={clubLabel(player, data.profile)}
             />
           </p>
         </div>
@@ -614,21 +681,25 @@ export function TransferPaymentTable({
   clubId: number;
 }) {
   const { money } = useCurrency();
+  const sorting = useSortableRows(payments, PAYMENT_COLUMNS, {
+    initial: { key: "due", direction: "asc" },
+    tieBreakers: ID_TIE_BREAKER,
+  });
   return payments.length ? (
-    <div className="table-scroll">
+    <div className="table-scroll" role="region" aria-label="Outstanding transfer payments" tabIndex={0}>
       <table className="data-table">
         <thead>
           <tr>
-            <th>Due</th>
-            <th>Player</th>
-            <th>From</th>
-            <th>To</th>
-            <th>Amount</th>
-            <th>Agreement</th>
+            <SortHeader {...sorting.header("due")} label="Due" />
+            <SortHeader {...sorting.header("player")} label="Player" />
+            <SortHeader {...sorting.header("from")} label="From" />
+            <SortHeader {...sorting.header("to")} label="To" />
+            <SortHeader {...sorting.header("amount")} label="Amount" />
+            <SortHeader {...sorting.header("kind")} label="Agreement" />
           </tr>
         </thead>
         <tbody>
-          {payments.map((payment) => (
+          {sorting.rows.map((payment) => (
             <tr key={payment.id}>
               <td>{dateLabel(payment.due_date)}</td>
               <td>
@@ -1054,7 +1125,7 @@ function NegotiationSheet({
             <h3>
               <ClubLink
                 id={negotiation.selling_club_id}
-                name={negotiation.seller_name ?? "Free agent"}
+                name={negotiation.seller_name ?? "No club"}
               />{" "}
               <ArrowUpRight size={15} />{" "}
               <ClubLink
@@ -1630,6 +1701,18 @@ export default function Transfers() {
   const { data, error } = useResource<TransferDesk>("transfers");
   const [tab, setTab] = useState("active");
   const [selected, setSelected] = useState<number | null>(null);
+  const buyBacks = useSortableRows(data?.buyBackClauses ?? [], BUY_BACK_COLUMNS, {
+    initial: { key: "expires", direction: "asc" },
+    tieBreakers: ID_TIE_BREAKER,
+  });
+  const sellOns = useSortableRows(data?.sellOnClauses ?? [], SELL_ON_COLUMNS, {
+    tieBreakers: ID_TIE_BREAKER,
+  });
+  const market = useSortableRows(
+    (data?.market ?? []).map((event) => ({ ...event, move: JSON.parse(event.data) })),
+    MARKET_COLUMNS,
+    { initial: { key: "date", direction: "desc" }, tieBreakers: ID_TIE_BREAKER },
+  );
   if (error) return <ErrorState message={error} />;
   if (!data || !bootstrap) return <Loading />;
   const activeStages = ACTIVE_TRANSFER_STAGES;
@@ -1782,7 +1865,7 @@ export default function Transfers() {
                               }
                               name={
                                 negotiation.buying_club_id === bootstrap.club.id
-                                  ? (negotiation.seller_name ?? "Free agent")
+                                  ? (negotiation.seller_name ?? "No club")
                                   : (negotiation.buyer_name ?? "Club")
                               }
                             />,
@@ -1874,20 +1957,20 @@ export default function Transfers() {
             />
             <SectionHeading title="Buy-back clauses" />
             {data.buyBackClauses.length ? (
-              <div className="table-scroll">
+              <div className="table-scroll" role="region" aria-label="Buy-back clauses" tabIndex={0}>
                 <table className="data-table">
                   <thead>
                     <tr>
-                      <th>Player</th>
-                      <th>Current owner</th>
-                      <th>Right held by</th>
-                      <th>Fixed fee</th>
-                      <th>Expires</th>
+                      <SortHeader {...buyBacks.header("player")} label="Player" />
+                      <SortHeader {...buyBacks.header("owner")} label="Current owner" />
+                      <SortHeader {...buyBacks.header("holder")} label="Right held by" />
+                      <SortHeader {...buyBacks.header("fee")} label="Fixed fee" />
+                      <SortHeader {...buyBacks.header("expires")} label="Expires" />
                       <th>Action</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {data.buyBackClauses.map((clause) => (
+                    {buyBacks.rows.map((clause) => (
                       <tr key={clause.id}>
                         <td>
                           <PlayerLink
@@ -1948,20 +2031,20 @@ export default function Transfers() {
             )}
             <SectionHeading title="Sell-on clauses" />
             {data.sellOnClauses.length ? (
-              <div className="table-scroll">
+              <div className="table-scroll" role="region" aria-label="Sell-on clauses" tabIndex={0}>
                 <table className="data-table">
                   <thead>
                     <tr>
-                      <th>Player</th>
-                      <th>Club owing</th>
-                      <th>Beneficiary</th>
-                      <th>Next sale</th>
-                      <th>Paid</th>
-                      <th>Status</th>
+                      <SortHeader {...sellOns.header("player")} label="Player" />
+                      <SortHeader {...sellOns.header("owner")} label="Club owing" />
+                      <SortHeader {...sellOns.header("beneficiary")} label="Beneficiary" />
+                      <SortHeader {...sellOns.header("percentage")} label="Next sale" />
+                      <SortHeader {...sellOns.header("paid")} label="Paid" />
+                      <SortHeader {...sellOns.header("status")} label="Status" />
                     </tr>
                   </thead>
                   <tbody>
-                    {data.sellOnClauses.map((clause) => (
+                    {sellOns.rows.map((clause) => (
                       <tr key={clause.id}>
                         <td>
                           <PlayerLink
@@ -2022,19 +2105,19 @@ export default function Transfers() {
         )}
         {tab === "market" &&
           (data.market.length ? (
-            <div className="table-scroll">
+            <div className="table-scroll" role="region" aria-label="World transfer market" tabIndex={0}>
               <table className="data-table">
                 <thead>
                   <tr>
-                    <th>Player</th>
-                    <th>Destination</th>
-                    <th>Fee</th>
-                    <th>Completed</th>
+                    <SortHeader {...market.header("player")} label="Player" />
+                    <SortHeader {...market.header("destination")} label="Destination" />
+                    <SortHeader {...market.header("fee")} label="Fee" />
+                    <SortHeader {...market.header("date")} label="Completed" />
                   </tr>
                 </thead>
                 <tbody>
-                  {data.market.map((event) => {
-                    const move = JSON.parse(event.data);
+                  {market.rows.map((event) => {
+                    const move = event.move;
                     return (
                       <tr key={event.id}>
                         <td>

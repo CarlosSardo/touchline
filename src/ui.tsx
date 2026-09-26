@@ -12,7 +12,10 @@ import {
 import { createPortal } from "react-dom";
 import {
   ArrowDown,
+  ArrowDownWideNarrow,
   ArrowUp,
+  ArrowUpDown,
+  ArrowUpNarrowWide,
   ArrowUpRight,
   Bookmark,
   Check,
@@ -25,8 +28,25 @@ import {
 } from "lucide-react";
 import clsx from "clsx";
 import { useCurrency, useGame } from "./game-context.tsx";
-import { compactNumber, dateLabel } from "../shared/rules.ts";
+import { addDays, compactNumber, dateLabel } from "../shared/rules.ts";
 import type { Fixture, Player, Standing } from "../shared/types.ts";
+import {
+  ariaSort,
+  PLAYER_COLUMNS,
+  PLAYER_TIE_BREAKERS,
+  type PlayerSortKey,
+  type SortDirection,
+  type SortState,
+} from "./sort.ts";
+import { useSortableRows } from "./useSortableRows.ts";
+import {
+  bodyLabel,
+  bodyOf,
+  clubLabel,
+  flagEmoji,
+  nationalitiesOf,
+  type ListedPlayer,
+} from "./players.ts";
 
 export function MoneyInput({
   value,
@@ -434,10 +454,12 @@ export function PlayerName({
   player,
   compact = false,
   showClub = false,
+  detail,
 }: {
   player: Player;
   compact?: boolean;
   showClub?: boolean;
+  detail?: ReactNode;
 }) {
   const { setPlayer } = useGame();
   return (
@@ -449,12 +471,42 @@ export function PlayerName({
       <span>
         <strong>{player.name}</strong>
         <small>
-          {showClub
-            ? (player.club_name ?? "Free agent")
-            : `${player.nationality} / ${player.age}`}
+          {detail ??
+            (showClub
+              ? clubLabel(player)
+              : `${player.nationality} / ${player.age}`)}
         </small>
       </span>
     </button>
+  );
+}
+
+export function Nationalities({ player }: { player: Player }) {
+  const { bootstrap } = useGame();
+  const [primary, ...others] = nationalitiesOf(player, bootstrap?.countries ?? []);
+  const primaryFlag = flagEmoji(primary.code);
+  return (
+    <span className="nationality-cell">
+      <span className={clsx("flag", !primaryFlag && "flag-code")} aria-hidden="true">
+        {primaryFlag ?? primary.code ?? "-"}
+      </span>
+      <span className="nationality-name">{primary.name}</span>
+      {others.length > 0 && (
+        <span
+          className="dual-nationality"
+          title={`Also holds: ${others.map((entry) => entry.name).join(", ")}`}
+        >
+          {others.map((entry) => (
+            <span key={entry.name} aria-hidden="true">
+              {flagEmoji(entry.code) ?? entry.code ?? entry.name.slice(0, 3)}
+            </span>
+          ))}
+          <span className="sr-only">
+            Also holds {others.map((entry) => entry.name).join(", ")}
+          </span>
+        </span>
+      )}
+    </span>
   );
 }
 
@@ -517,77 +569,244 @@ export function ShortlistButton({ player }: { player: Player }) {
   );
 }
 
+export function SortHeader<Key extends string>({
+  column,
+  label,
+  sort,
+  onSort,
+  title,
+  className,
+  leading,
+}: {
+  column: Key;
+  label: string;
+  sort: SortState<Key> | null;
+  onSort: (key: Key) => void;
+  title?: string;
+  className?: string;
+  /** Control rendered before the sort button, e.g. a select-all checkbox. */
+  leading?: ReactNode;
+}) {
+  const state = ariaSort(sort, column);
+  const Icon =
+    state === "ascending" ? ArrowUp : state === "descending" ? ArrowDown : ArrowUpDown;
+  const button = (
+    <button
+      type="button"
+      className="sort-button"
+      title={`${title ?? label}. Click to ${state ? "reverse the order" : "sort"}.`}
+      onClick={() => onSort(column)}
+    >
+      <span>{label}</span>
+      <Icon className="sort-icon" size={12} strokeWidth={2} aria-hidden="true" />
+    </button>
+  );
+  return (
+    <th scope="col" className={clsx("sortable", state && "sorted", className)} aria-sort={state}>
+      {leading ? (
+        <div className="sort-header-leading">
+          {leading}
+          {button}
+        </div>
+      ) : (
+        button
+      )}
+    </th>
+  );
+}
+
+export function SortDirectionButton({
+  direction,
+  subject,
+  onToggle,
+  disabled = false,
+}: {
+  direction: SortDirection | undefined;
+  subject: string;
+  onToggle: () => void;
+  disabled?: boolean;
+}) {
+  return (
+    <IconButton
+      icon={direction === "asc" ? ArrowUpNarrowWide : ArrowDownWideNarrow}
+      label={`Sort ${subject} ${direction === "asc" ? "descending" : "ascending"}`}
+      className="bordered sort-direction"
+      disabled={disabled || !direction}
+      onClick={onToggle}
+    />
+  );
+}
+
+export type PlayerTableColumn =
+  | "position"
+  | "age"
+  | "nationality"
+  | "ability"
+  | "potential"
+  | "club"
+  | "value"
+  | "wage"
+  | "contract"
+  | "height"
+  | "form";
+
+const PLAYER_TABLE_HEADERS: Record<
+  PlayerTableColumn,
+  { label: string; title?: string; className?: string }
+> = {
+  position: { label: "Pos", title: "Position" },
+  age: { label: "Age" },
+  nationality: { label: "Nationality", title: "Sporting nationality and other passports" },
+  ability: { label: "Ability", title: "Current ability" },
+  potential: { label: "Potential", title: "Current dynamic potential" },
+  club: { label: "Club" },
+  value: { label: "Value", className: "number" },
+  wage: { label: "Wage / wk", className: "number" },
+  contract: { label: "Contract", title: "Contract end" },
+  height: { label: "Height", title: "Current height and weight" },
+  form: { label: "Form", title: "Average match rating" },
+};
+
+export function ContractCell({ player, date }: { player: Player; date?: string }) {
+  if (!player.club_id) return <span className="muted">No contract</span>;
+  return (
+    <span className="contract-cell">
+      {dateLabel(player.contract_end)}
+      {date && player.contract_end <= date && <small>Expiring</small>}
+    </span>
+  );
+}
+
+export function BodyCell({ player }: { player: ListedPlayer }) {
+  const body = bodyOf(player);
+  if (body.height === null) return <span className="muted">-</span>;
+  return (
+    <span className="body-cell">
+      {bodyLabel(body)}
+      {body.growing && <small>Still growing</small>}
+    </span>
+  );
+}
+
 export function PlayerTable({
   players,
   compact = false,
   wages = false,
+  columns,
   children,
   label = "Player results",
+  initialSort = null,
+  sort,
+  onSortChange,
 }: {
   players: Player[];
   compact?: boolean;
   wages?: boolean;
+  /** Columns after the player name, in order; overrides `compact` and `wages`. */
+  columns?: readonly PlayerTableColumn[];
   children?: (player: Player) => ReactNode;
   label?: string;
+  initialSort?: SortState<PlayerSortKey> | null;
+  /** Server-side sort: rows are shown in the given order and header clicks call onSortChange. */
+  sort?: SortState<PlayerSortKey> | null;
+  onSortChange?: (sort: SortState<PlayerSortKey>) => void;
 }) {
   const { money } = useCurrency();
+  const { bootstrap } = useGame();
+  const visible =
+    columns ??
+    ([
+      "position",
+      "age",
+      "ability",
+      "potential",
+      ...(compact ? [] : ["club"]),
+      "value",
+      ...(wages ? ["wage"] : []),
+      ...(compact ? [] : ["form"]),
+    ] as PlayerTableColumn[]);
+  const sorting = useSortableRows(
+    players,
+    [PLAYER_COLUMNS.name, ...visible.map((key) => PLAYER_COLUMNS[key])],
+    {
+      initial: initialSort,
+      sort,
+      presorted: sort !== undefined,
+      onSortChange,
+      tieBreakers: PLAYER_TIE_BREAKERS,
+    },
+  );
+  const expiry = bootstrap ? addDays(bootstrap.state.date, 365) : undefined;
+  function cell(player: Player, key: PlayerTableColumn) {
+    switch (key) {
+      case "position":
+        return <span className="position-tag">{player.position}</span>;
+      case "age":
+        return player.age;
+      case "nationality":
+        return <Nationalities player={player} />;
+      case "ability":
+        return <Rating value={player.ability} />;
+      case "potential":
+        return <Rating value={player.potential} potential />;
+      case "club":
+        return (
+          <>
+            <span className="club-dot" style={{ background: player.club_color }} />
+            <ClubLink id={player.club_id} name={clubLabel(player)} />
+          </>
+        );
+      case "value":
+        return money(player.value);
+      case "wage":
+        return money(player.wage);
+      case "contract":
+        return <ContractCell player={player} date={expiry} />;
+      case "height":
+        return <BodyCell player={player} />;
+      case "form":
+        return (
+          <span className={player.form >= 7 ? "positive" : "muted"}>
+            {player.form.toFixed(1)}
+          </span>
+        );
+    }
+  }
+  const cellClass: Partial<Record<PlayerTableColumn, string>> = {
+    club: "club-cell",
+    value: "number money",
+    wage: "number muted",
+  };
   return (
     <div className="table-scroll" data-no-swipe role="region" aria-label={label} tabIndex={0}>
       <table className="data-table player-table">
       <caption className="sr-only">{label}</caption>
         <thead>
           <tr>
-            <th>Player</th>
-            <th>Pos</th>
-            <th>Age</th>
-            <th title="Current ability">Ability</th>
-            <th title="Current dynamic potential">Potential</th>
-            {!compact && <th>Club</th>}
-            <th className="number">Value</th>
-            {wages && <th className="number">Wage / wk</th>}
-            {!compact && <th>Form</th>}
+            <SortHeader {...sorting.header("name")} label="Player" />
+            {visible.map((key) => (
+              <SortHeader
+                key={key}
+                {...sorting.header(key)}
+                {...PLAYER_TABLE_HEADERS[key]}
+              />
+            ))}
             <th>
               <span className="sr-only">Actions</span>
             </th>
           </tr>
         </thead>
         <tbody>
-          {players.map((player) => (
+          {sorting.rows.map((player) => (
             <tr key={player.id}>
               <td>
                 <PlayerName player={player} compact />
               </td>
-              <td>
-                <span className="position-tag">{player.position}</span>
-              </td>
-              <td>{player.age}</td>
-              <td>
-                <Rating value={player.ability} />
-              </td>
-              <td>
-                <Rating value={player.potential} potential />
-              </td>
-              {!compact && (
-                <td className="club-cell">
-                  <span
-                    className="club-dot"
-                    style={{ background: player.club_color }}
-                  />
-                  <ClubLink
-                    id={player.club_id}
-                    name={player.club_name ?? "Free agent"}
-                  />
+              {visible.map((key) => (
+                <td key={key} className={cellClass[key]}>
+                  {cell(player, key)}
                 </td>
-              )}
-              <td className="number money">{money(player.value)}</td>
-              {wages && <td className="number muted">{money(player.wage)}</td>}
-              {!compact && (
-                <td>
-                  <span className={player.form >= 7 ? "positive" : "muted"}>
-                    {player.form.toFixed(1)}
-                  </span>
-                </td>
-              )}
+              ))}
               <td>
                 {children?.(player) ?? <ShortlistButton player={player} />}
               </td>
