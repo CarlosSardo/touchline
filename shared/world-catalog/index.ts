@@ -61,80 +61,124 @@ export interface CatalogLookup {
   isSuspended(code: string, scope: "club" | "national"): boolean;
   /** clubNameKey()s of real clubs the generator must not reproduce for this nation. */
   avoidedClubNames(code: string): ReadonlySet<string>;
-  /** True when `name` has the identity core of one of this nation's real clubs (CD Valencia, Roma Calcio, SV Utrecht). */
-  copiesRealClub(code: string, name: string): boolean;
+  /**
+   * True when `name` copies one of this nation's real clubs: the same identity (CD Valencia, Roma Calcio, Kickers
+   * Stuttgart), that identity less one word (Hove Albion), or a bare place a real club is known by (Birmingham FC).
+   * `place` is the town the name was rendered from; curated cities and districts count as places anyway.
+   */
+  copiesRealClub(code: string, name: string, place?: string): boolean;
 }
 
 const CLUB_AFFIX = "(?:a?fc|cf|sc|ac|fk|sk|if|ff|bk|ik)";
 const LEADING_AFFIX = new RegExp(`^(?:${CLUB_AFFIX} )+`);
 const TRAILING_AFFIX = new RegExp(`(?: ${CLUB_AFFIX})+$`);
 const FOLDED: Record<string, string> = { ø: "o", æ: "ae", œ: "oe", ß: "ss", ı: "i", đ: "d", ł: "l", þ: "th", ð: "d", ħ: "h" };
-/** Comparison key for club names: case, diacritics, punctuation and a leading/trailing club affix ignored. */
-export function clubNameKey(name: string): string {
-  const words = name
+const plainWords = (name: string) =>
+  name
     .normalize("NFKD")
     .replace(/\p{M}/gu, "")
     .toLowerCase()
     .replace(/[øæœßıđłþðħ]/g, (letter) => FOLDED[letter])
     .replace(/[^\p{L}\p{N}]+/gu, " ")
     .trim();
+/** Comparison key for club names: case, diacritics, punctuation and a leading/trailing club affix ignored. */
+export function clubNameKey(name: string): string {
+  const words = plainWords(name);
   const bare = words.replace(LEADING_AFFIX, "").replace(TRAILING_AFFIX, "").trim();
   return bare || words;
 }
 
 const CONNECTORS = ["de", "da", "do", "das", "dos", "di", "del", "della", "du", "des", "la", "le", "el", "the", "of"];
 const CORE_CONNECTORS = new Set([...CONNECTORS, "al", "las", "los", "les", "lo", "il", "den", "het", "der", "am", "an", "im", "and", "et", "und", "upon", "on", "sur", "en"]);
-// Words that name the kind of club, not the club: legal forms and their initials, club/sport/football/royal/union in
-// the catalog languages, sports societies (Dinamo, Lokomotiv, Borussia) and the English town suffixes.
-const GENERIC_CLUB_WORDS = new Set(
+// Words that only give a club's legal form: initials (FC, CD, SV, AC, SK…), club/sport/football/society in the catalog
+// languages. Distinctive words (Town, United, Rovers, Real, Racing, Dinamo, Kickers…) are part of the identity.
+const CLUB_FORM_WORDS = new Set(
   [
     "ac acd acf acs ad ae afc aif aik aj ak ao as asc asd asv bfc bk bsc bv ca cd cdf ce cf cfc cp cpd cr crb cs csd csm css",
-    "ea ec es ess esv fa fb fbc fc fcv fk ff fsv fv gd gf gfc gif gks hnk ib if ifk ik il is jk js kaa kf kfc kks krc ks ksc",
-    "kse ksv kv kvc lks mc mfc mfk mks mte nk ofk ogc oks pfc ps rc rcd rfc rkc rks rsc sad sc sco sd se sfc sg sk sks sl sm",
-    "sp spvgg ss ssc ssd ssv sv te tj ts tsg tsv tus ud ue umf us usd usm usv vfb vfl vfr vsc vse vv wks",
+    "ea ec es ess esv fa fb fbc fc fcv fk ff fsv fv gd gf gfc gif gks hnk ib if ifk ik il is jk js kaa kf kfc kks kmsk krc ks",
+    "ksc kse ksk ksv kv kvc kvk lks mc mfc mfk mks mte nk ofk ogc oks pfc ps rc rcd rfc rkc rks rsc sad sc scp sco sd se sfc",
+    "sg sk sks sl sm sp spvgg ss ssc ssd ssv sv te tj ts tsg tsv tus ud ue umf us usd usm usv vfb vfl vfr vsc vse vv wks",
     "club clube clubul klub kulubu nadi sport sports sportif sportive sportiva sportivo sportiv sportowy sportski sportclub",
     "sportklub sportverein sportfreunde deportivo deportiva deportes deportiu desportivo desportiva esporte esportivo",
-    "esportiva esportiu polideportivo athletic athletico atletico atletica atletic athletik football futbol futebol fussball",
-    "voetbal fotball fotboll fodbold fotbal futbal fudbal fudbalski nogomet nogometni labdarugo pilkarski calcio balompie",
-    "foot soccer real royal royale reale koninklijke sporting racing olympique olympic olympia olimpija olimpik stade union",
-    "unione uniao unio unia associazione associacao asociacion association asociatia societa sociedad sociedade societe",
-    "grupo entente social spor belediye buyuksehir",
-    "dinamo dynamo spartak lokomotiv lokomotiva lokomotive locomotive torpedo cska metallurg metalurh metalurg khimik",
-    "chemik shakhtar shakhter banik rudar gornik banyasz zeljeznicar radnik radnicki traktor energetik neftchi stal dukla",
-    "sokol slavia slovan sloga jedinstvo buducnost sloboda borac iskra hutnik borussia eintracht fortuna viktoria kickers",
-    "alemannia germania teutonia preussen arminia concordia wacker",
-    "united city town county borough rovers wanderers albion",
+    "esportiva esportiu polideportivo football futbol futebol fussball voetbal fotball fotboll fodbold fotbal futbal fudbal",
+    "fudbalski nogomet nogometni labdarugo pilkarski calcio balompie foot soccer associazione associacao asociacion",
+    "association asociatia societa sociedad sociedade societe grupo entente social spor boldklub bollklubb",
   ].join(" ").split(" "),
 );
+// Spellings of one distinctive word: Atlético ~ Athletic, Real ~ Royal, Dinamo ~ Dynamo, União ~ Union.
+const CLUB_WORD_FORMS: Record<string, string> = {
+  atletico: "athletic", atletica: "athletic", atletic: "athletic", athletico: "athletic", athletik: "athletic",
+  real: "royal", reale: "royal", royale: "royal", koninklijke: "royal",
+  olympique: "olympic", olympia: "olympic", olimpija: "olympic", olimpik: "olympic", olimpico: "olympic",
+  unione: "union", uniao: "union", unio: "union", unia: "union",
+  dinamo: "dynamo", lokomotiva: "lokomotiv", lokomotive: "lokomotiv", locomotive: "lokomotiv",
+  metalurh: "metallurg", metalurg: "metallurg", shakhter: "shakhtar", utd: "united",
+};
+// Initials that spell out a distinctive word, so RC Lens also blocks Racing Lens and SC Braga Sporting Braga.
+const FORM_EXPANSIONS: Record<string, string[]> = {
+  rc: ["racing", "royal"], rcd: ["royal"], rsc: ["royal", "sporting"], krc: ["royal", "racing"], rfc: ["royal"],
+  rkc: ["royal"], ksc: ["royal", "sporting"], kv: ["royal"], kvc: ["royal"], kaa: ["royal"], ksv: ["royal"],
+  ksk: ["royal"], kvk: ["royal"], kmsk: ["royal"], sc: ["sporting"], scp: ["sporting"], ca: ["athletic"],
+  ac: ["athletic"], ud: ["union"], ue: ["union"], us: ["union"], usd: ["union"], usm: ["union"], ogc: ["olympic"],
+};
 const looseWord = (word: string) => {
   const singular = word.length >= 6 ? word.replace(/s$/, "") : word;
   return singular.length >= 5 ? singular.replace(/o$/, "") : singular;
 };
+const identityWord = (word: string) => looseWord(CLUB_WORD_FORMS[word] ?? word);
 
-/**
- * Identity core of a club name: generic club words, numbers, initials and connectors dropped, a glued Turkish "spor"
- * split off, endings loosened (Milano ~ Milan, Helsingborgs ~ Helsingborg), words sorted, so CD Valencia ~ Valencia CF,
- * Roma Calcio ~ AS Roma, 1. FC Stuttgart ~ VfB Stuttgart. `aliases` maps a city demonym to the city (rennais → rennes).
- * A name made only of generic words keeps them (Athletic Club, Racing Club).
- */
-export function clubCoreKey(name: string, aliases?: ReadonlyMap<string, string>): string {
-  const words = clubNameKey(name)
+function nameWords(name: string, aliases?: ReadonlyMap<string, string>): string[] {
+  return plainWords(name)
     .split(" ")
     .flatMap((word) => (aliases?.get(word) ?? word).split(" "))
     .map((word) => (word.length > 6 && word.endsWith("spor") ? word.slice(0, -4) : word))
     .filter((word) => word.length > 1 && !/^\d+$/.test(word) && !CORE_CONNECTORS.has(word));
-  const core = words.filter((word) => !GENERIC_CLUB_WORDS.has(word));
-  return (core.length ? core : words).map(looseWord).sort().join(" ");
 }
 
-/** Single-word city demonyms and adjectives of a nation's curated cities, keyed like clubNameKey(). */
+/**
+ * Identity of a club name: legal forms, numbers and connectors dropped, a glued Turkish "spor" split off, spellings
+ * folded (Atlético ~ Athletic), endings loosened (Milano ~ Milan), words sorted, so CD Valencia ~ Valencia CF,
+ * 1. FC Stuttgart ~ VfB Stuttgart, while Birmingham Town ≠ Birmingham City. `aliases` maps a city demonym to the city
+ * (stuttgarter → stuttgart). A name made only of form words keeps them.
+ */
+export function clubCoreKey(name: string, aliases?: ReadonlyMap<string, string>): string {
+  const words = nameWords(name, aliases);
+  const core = words.filter((word) => !CLUB_FORM_WORDS.has(word));
+  return [...new Set((core.length ? core : words).map(identityWord))].sort().join(" ");
+}
+
+/** Identities of a real club: its own, plus each spelled-out form initial (RCD Mallorca ~ Real Mallorca). */
+function realClubKeys(name: string, aliases: ReadonlyMap<string, string>): string[] {
+  const words = nameWords(name, aliases);
+  const base = clubCoreKey(name, aliases);
+  let keys = [base ? base.split(" ") : []];
+  for (const word of words)
+    for (const expansion of words.length > 1 ? (FORM_EXPANSIONS[word] ?? []) : [])
+      keys = [...keys, ...keys.map((key) => [...key, identityWord(expansion)])];
+  return [...new Set(keys.map((key) => [...new Set(key)].sort().join(" ")))].filter(Boolean);
+}
+
+/** Every non-empty word subset of an identity key, marking the ones exactly one word shorter. */
+function identitySubsets(key: string, into: Set<string>, shorter: Set<string>) {
+  const words = key.split(" ");
+  for (let mask = 1; mask < 1 << Math.min(words.length, 8); mask++) {
+    const subset = words.filter((_, index) => mask & (1 << index));
+    into.add(subset.join(" "));
+    if (subset.length === words.length - 1) shorter.add(subset.join(" "));
+  }
+}
+
+/** Single-word city demonyms and adjectives of a nation's curated cities, keyed like clubNameKey(); "-er" forms too (Stuttgarter). */
 function clubNameAliases(nation: NationSpec | undefined): Map<string, string> {
   const aliases = new Map<string, string>();
-  for (const city of nation?.cities.major ?? [])
+  for (const city of nation?.cities.major ?? []) {
+    const cityKey = clubNameKey(city.name);
+    if (!cityKey.includes(" ")) for (const form of [`${cityKey}er`, ...(cityKey.endsWith("e") ? [`${cityKey}r`] : [])]) aliases.set(form, cityKey);
     for (const form of [city.demonym, city.adjective]) {
       const key = form ? clubNameKey(form) : "";
-      if (key && !key.includes(" ")) aliases.set(key, clubNameKey(city.name));
+      if (key && !key.includes(" ")) aliases.set(key, cityKey);
     }
+  }
   return aliases;
 }
 
@@ -149,19 +193,43 @@ export function catalogLookup(catalog: WorldCatalog): CatalogLookup {
       fileNames.set(code, [...(fileNames.get(code) ?? []), ...names]);
   }
   const avoided = new Map<string, ReadonlySet<string>>();
-  const realCores = new Map<string, { aliases: Map<string, string>; cores: Set<string> }>();
+  interface RealClubs {
+    aliases: Map<string, string>;
+    exact: Set<string>;
+    /** Real identities less one word (Hove Albion for Brighton & Hove Albion). */
+    shorter: Set<string>;
+    /** Every part of a real identity, for bare places (Birmingham for Birmingham City). */
+    parts: Set<string>;
+    places: Set<string>;
+  }
+  const realClubs = new Map<string, RealClubs>();
   const citizenshipGroup = (code: string): string =>
     nationIndex.get(code)?.nationality.citizenship.group ?? code;
+  const realClubNames = (code: string) => [
+    ...(nationIndex.get(code)?.football?.clubNaming.avoid ?? []),
+    ...(fileNames.get(code) ?? []),
+  ];
   const avoidedClubNames = (code: string): ReadonlySet<string> => {
     let keys = avoided.get(code);
-    if (!keys) {
-      const names = [
-        ...(nationIndex.get(code)?.football?.clubNaming.avoid ?? []),
-        ...(fileNames.get(code) ?? []),
-      ];
-      avoided.set(code, (keys = new Set(names.map(clubNameKey).filter(Boolean))));
-    }
+    if (!keys) avoided.set(code, (keys = new Set(realClubNames(code).map(clubNameKey).filter(Boolean))));
     return keys;
+  };
+  const realClubsOf = (code: string): RealClubs => {
+    let real = realClubs.get(code);
+    if (!real) {
+      const nation = nationIndex.get(code);
+      const aliases = clubNameAliases(nation);
+      real = { aliases, exact: new Set(), shorter: new Set(), parts: new Set(), places: new Set() };
+      for (const name of realClubNames(code))
+        for (const key of realClubKeys(name, aliases)) {
+          real.exact.add(key);
+          identitySubsets(key, real.parts, real.shorter);
+        }
+      for (const city of nation?.cities.major ?? [])
+        for (const place of [city.name, ...(city.districts ?? [])]) real.places.add(clubCoreKey(place, aliases));
+      realClubs.set(code, real);
+    }
+    return real;
   };
   return {
     catalog,
@@ -198,14 +266,12 @@ export function catalogLookup(catalog: WorldCatalog): CatalogLookup {
     isSuspended: (code, scope) =>
       Boolean(nationIndex.get(code)?.suspended?.[scope]),
     avoidedClubNames,
-    copiesRealClub(code, name) {
-      let real = realCores.get(code);
-      if (!real) {
-        const aliases = clubNameAliases(nationIndex.get(code));
-        const cores = new Set([...avoidedClubNames(code)].map((key) => clubCoreKey(key, aliases)));
-        realCores.set(code, (real = { aliases, cores }));
-      }
-      return real.cores.has(clubCoreKey(name, real.aliases));
+    copiesRealClub(code, name, place) {
+      const real = realClubsOf(code);
+      const key = clubCoreKey(name, real.aliases);
+      if (real.exact.has(key) || real.shorter.has(key)) return true;
+      const bare = real.places.has(key) || (place !== undefined && clubCoreKey(place, real.aliases) === key);
+      return bare && real.parts.has(key);
     },
   };
 }

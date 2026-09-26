@@ -4,6 +4,7 @@ import type { Store } from "./db.ts";
 import { ensureClubSupport } from "./club-support.ts";
 import { initialClubFinances } from "./finance.ts";
 import { seedAssociationCoefficients } from "./qualification.ts";
+import { youthBirthCutoff } from "./youth.ts";
 import {
   amateurAllowance,
   birthDateForAge,
@@ -157,6 +158,8 @@ const DISTINCT_FORMS: Record<string, string[]> = {
 
 const integer = (random: Rng, min: number, max: number) =>
   Math.floor(random() * (max - min + 1)) + min;
+/** A template may exceed its weight share of a nation's club names by this factor (plus one name). */
+const FORM_SLACK = 1.25;
 const pick = <Value>(random: Rng, values: readonly Value[]) =>
   values[Math.floor(random() * values.length)];
 const lerp = (from: number, to: number, share: number) => from + (to - from) * share;
@@ -290,8 +293,11 @@ interface NationState {
   extraIndex: number;
   /** clubNameKey()s already used in this nation. */
   names: Set<string>;
-  /** lookup.copiesRealClub() for this nation. */
-  copiesRealClub: (name: string) => boolean;
+  /** Names accepted so far and uses per template pattern, so no form outgrows its catalog weight. */
+  named: number;
+  forms: Map<string, number>;
+  /** lookup.copiesRealClub() for this nation; `place` is the town the name was rendered from. */
+  copiesRealClub: (name: string, place: string) => boolean;
   /** Unlisted towns already lent to a club of a city whose own forms are real clubs. */
   lent: Set<string>;
 }
@@ -360,7 +366,7 @@ export function isAvoidedClubKey(key: string, avoided: ReadonlySet<string>): boo
   return avoided.has(clubCoreKey(key));
 }
 
-/** Unique per nation, never a real club: weighted templates, all templates and identity words, districts, a nearby town, then a year. */
+/** Unique per nation, never a real club: weighted templates within their share, districts, a nearby town, then any form, then a year. */
 function uniqueClubName(
   state: NationState,
   naming: ClubNamingSpec,
@@ -392,53 +398,69 @@ function uniqueClubName(
     founded2: String(founded).slice(-2),
   });
   const tokens = tokensFor(token);
-  const taken = (name: string) => {
+  const taken = (name: string, place = token) => {
     const key = clubNameKey(name);
-    return !key || state.names.has(key) || state.copiesRealClub(name);
+    return !key || state.names.has(key) || state.copiesRealClub(name, place);
   };
-  const accept = (name: string, used = token) => {
+  const accept = (name: string, used = token, pattern?: string) => {
     state.names.add(clubNameKey(name));
+    state.named++;
+    if (pattern) state.forms.set(pattern, (state.forms.get(pattern) ?? 0) + 1);
     return { name, token: used };
   };
-  const weights = templates.map((template) => template.weight);
-  for (let attempt = 0; attempt < templates.length * 3; attempt++) {
-    const name = renderName(templates[weightedIndex(weights, state.nameRandom())].pattern, tokens);
-    if (name && !taken(name)) return accept(name);
-  }
-  // In random order, so a city whose usual forms are real clubs spreads over the rarer templates and identity words.
-  const patterns = shuffle(state.nameRandom, [
-    ...templates.map((template) => template.pattern),
-    ...(DISTINCT_FORMS[state.nation.languages[0]?.code ?? ""] ?? []),
-  ]);
-  for (const pattern of patterns) {
-    const name = renderName(pattern, tokens);
-    if (name && !taken(name)) return accept(name);
-  }
-  while (city?.districts.length) {
-    const district = city.districts.shift()!;
-    for (const template of templates) {
-      if (template.pattern.includes("{cityAdj}")) continue;
-      const name = renderName(template.pattern, tokensFor(district));
-      if (name && !taken(name)) return accept(name, district);
-    }
-  }
-  // Every form of the city is a real club (Ipswich, Valencia): name the club after a town of its region, like a district.
-  for (let index = state.extra.length - 1; index >= state.extraIndex; index--) {
-    const place = state.extra[index];
-    if (place.region !== region || state.lent.has(place.name)) continue;
-    for (const template of templates) {
-      if (/\{(cityAdj|demonym)\}/.test(template.pattern)) continue;
-      const name = renderName(template.pattern, tokensFor(place.name));
-      if (name && !taken(name)) {
-        state.lent.add(place.name);
-        return accept(name, place.name);
+  const total = templates.reduce((sum, template) => sum + template.weight, 0);
+  // A form stays near its catalog share; past it the club takes a district or a nearby town with a usual form first.
+  const withinShare = (template: ClubNamingSpec["templates"][number]) =>
+    (state.forms.get(template.pattern) ?? 0) < FORM_SLACK * (template.weight / total) * (state.named + 1) + 1;
+  // Identity words (weighted like the rarest template) share the overflow once every form is past its share.
+  const rarest = Math.min(...templates.map((template) => template.weight));
+  const identityForms = (DISTINCT_FORMS[state.nation.languages[0]?.code ?? ""] ?? []).map((pattern) => ({ pattern, weight: rarest }));
+  const first = (place: string, within: boolean) => {
+    const own = place === token;
+    const candidates = [...templates, ...(within || !own ? [] : identityForms)].filter(
+      (template) => (own || !/\{(cityAdj|demonym)\}/.test(template.pattern)) && (!within || withinShare(template)),
+    );
+    if (!within) {
+      // Overflow goes to the form furthest below its weight, so no single form absorbs every blocked city.
+      const load = (template: { pattern: string; weight: number }) => ((state.forms.get(template.pattern) ?? 0) + 1) / template.weight;
+      for (const template of candidates.sort((left, right) => load(left) - load(right) || right.weight - left.weight)) {
+        const name = renderName(template.pattern, tokensFor(place));
+        if (name && !taken(name, place)) return { name, pattern: template.pattern };
       }
+      return undefined;
+    }
+    const weights = candidates.map((template) => template.weight);
+    while (weights.some((weight) => weight > 0)) {
+      const index = weightedIndex(weights, state.nameRandom());
+      if (!weights[index]) continue;
+      weights[index] = 0;
+      const name = renderName(candidates[index].pattern, tokensFor(place));
+      if (name && !taken(name, place)) return { name, pattern: candidates[index].pattern };
+    }
+  };
+  for (const within of [true, false]) {
+    const own = first(token, within);
+    if (own) return accept(own.name, token, own.pattern);
+    for (const [index, district] of (city?.districts ?? []).entries()) {
+      const found = first(district, within);
+      if (!found) continue;
+      city!.districts.splice(index, 1);
+      return accept(found.name, district, found.pattern);
+    }
+    // Every usual form of the city is a real club (Ipswich, Valencia): name the club after a town of its region.
+    for (let index = state.extra.length - 1; index >= state.extraIndex; index--) {
+      const place = state.extra[index];
+      if (place.region !== region || state.lent.has(place.name)) continue;
+      const found = first(place.name, within);
+      if (!found) continue;
+      state.lent.add(place.name);
+      return accept(found.name, place.name, found.pattern);
     }
   }
   // A number never clears a real club, so the base must be clear on its own; then only uniqueness can fail.
   const base =
     [...templates.map((template) => renderName(template.pattern, tokens)), token, `${token} ${region}`].find(
-      (name) => name && !state.copiesRealClub(name),
+      (name) => name && !state.copiesRealClub(name, token),
     ) ?? `${token} ${region}`;
   for (const suffix of [tokens.founded, tokens.founded2])
     if (!taken(`${base} ${suffix}`)) return accept(`${base} ${suffix}`);
@@ -735,7 +757,9 @@ export function planWorld(
         extra: places.extra,
         extraIndex: 0,
         names: new Set(),
-        copiesRealClub: (name) => lookup.copiesRealClub(nation.code, name),
+        named: 0,
+        forms: new Map(),
+        copiesRealClub: (name, place) => lookup.copiesRealClub(nation.code, name, place),
         lent: new Set(),
       };
       states.set(nation.code, state);
@@ -1451,6 +1475,17 @@ function planSlots(plan: WorldPlan, random: Rng) {
   return { byClub, pools };
 }
 
+/** Youths are born on or after their group's competition cutoff (youth.ts), so none is over-age at world start. */
+function slotBirthDate(random: Rng, age: number, group: Slot["ageGroup"]) {
+  const born = birthDateForAge(random, age, START_DATE);
+  if (group === "Senior") return born;
+  const cutoff = youthBirthCutoff(group, Number(START_DATE.slice(0, 4)));
+  if (born >= cutoff) return born;
+  // Born in the cutoff year before the start date's month instead, keeping the age where it can.
+  const months = Math.max(1, Number(START_DATE.slice(5, 7)) - 1);
+  return `${cutoff.slice(0, 4)}-${pad(1 + Math.floor(random() * months))}-${pad(1 + Math.floor(random() * 28))}`;
+}
+
 function abilityFor(reputation: number, age: number, youth: boolean, foreign: boolean, random: Rng) {
   const anchor = reputation * 0.66 + 22 + integer(random, -11, 9);
   const penalty = youth
@@ -1538,7 +1573,7 @@ function* clubPlayers(club: PlanClub, slots: Slot[], people: PeopleContext, rand
       contextCode: slot.context,
       ageGroup: slot.ageGroup,
       position: slot.position,
-      birthDate: birthDateForAge(random, slot.age, START_DATE),
+      birthDate: slotBirthDate(random, slot.age, slot.ageGroup),
       date: START_DATE,
       ability: draft.ability,
       potential: draft.potential,
@@ -1574,7 +1609,7 @@ export function* worldPlayers(plan: WorldPlan): Generator<PlayerRow> {
       contextCode: slot.context,
       ageGroup: slot.ageGroup,
       position: slot.position,
-      birthDate: birthDateForAge(random, slot.age, START_DATE),
+      birthDate: slotBirthDate(random, slot.age, slot.ageGroup),
       date: START_DATE,
       ability,
       potential: potentialFor(ability, slot.age, youth, random),
