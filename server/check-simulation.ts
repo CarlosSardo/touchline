@@ -308,9 +308,9 @@ export const leagueSizes = (places: readonly SeniorPlace[]) => {
 };
 
 /**
- * Section 8 invariant 6 after a rollover: league sizes as at world start, closed tiers unchanged, moves per boundary
- * equal to the movement spec (less the planner's recorded shortfalls, plus B-team ceiling swaps), B-teams below
- * their parent.
+ * Section 8 invariant 6 after a rollover: league sizes as at world start less one per parked B-team, closed tiers
+ * unchanged, moves per boundary equal to the movement spec (less the planner's recorded shortfalls, plus B-team
+ * ceiling swaps), B-teams below their parent, parked B-teams without a league place.
  */
 export async function checkMovement(store: Store, before: readonly SeniorPlace[], initialSizes: ReadonlyMap<number, number>) {
   const state = await stateOf(store);
@@ -322,9 +322,18 @@ export async function checkMovement(store: Store, before: readonly SeniorPlace[]
   );
   const failures: string[] = [];
   const sizes = leagueSizes(after);
+  const parked = (
+    await store.all<{ id: number; parent_id: number | null; league_id: number | null; data: string }>(
+      "SELECT id,parent_id,league_id,data FROM clubs WHERE type = 'bteam' AND JSON_VALUE(data,'$.parkedLeagueId') IS NOT NULL",
+    )
+  ).map((club) => ({ ...club, leagueId: Number(JSON.parse(club.data).parkedLeagueId) }));
+  const parkedIn = new Map<number, number>();
+  for (const club of parked) parkedIn.set(club.leagueId, (parkedIn.get(club.leagueId) ?? 0) + 1);
   for (const league of leagues)
-    if ((sizes.get(league.id) ?? 0) !== (initialSizes.get(league.id) ?? 0))
-      failures.push(`${league.name} has ${sizes.get(league.id) ?? 0} clubs (${initialSizes.get(league.id) ?? 0} at world start)`);
+    if ((sizes.get(league.id) ?? 0) !== (initialSizes.get(league.id) ?? 0) - (parkedIn.get(league.id) ?? 0))
+      failures.push(
+        `${league.name} has ${sizes.get(league.id) ?? 0} clubs (${initialSizes.get(league.id) ?? 0} at world start, ${parkedIn.get(league.id) ?? 0} B-teams parked)`,
+      );
   const raw = new Map(leagues.map((league) => [league.id, JSON.parse(league.data) as Record<string, unknown>]));
   const own = leagues.filter((league) => league.tier > 0 && !["true", true, 1].includes(raw.get(league.id)!.reserveOnly as string));
   const byId = new Map(leagues.map((league) => [league.id, league]));
@@ -390,6 +399,30 @@ export async function checkMovement(store: Store, before: readonly SeniorPlace[]
         )
       : league.tier > parent.tier;
     if (!legal) failures.push(`B-team ${club.id} in ${league.name} (tier ${league.tier}), parent in ${parent.name} (tier ${parent.tier})`);
+  }
+  // Parked B-teams hold no league place and stay parked only while their parent's division rules their league out.
+  for (const club of parked) {
+    const league = byId.get(club.leagueId);
+    if (club.league_id !== null || to.has(club.id)) {
+      failures.push(`parked B-team ${club.id} still has a league place`);
+      continue;
+    }
+    if (!league) {
+      failures.push(`parked B-team ${club.id} left unknown league ${club.leagueId}`);
+      continue;
+    }
+    const parent = byId.get(to.get(club.parent_id ?? 0) ?? 0);
+    const pyramid = JSON.parse(club.data).reservePolicy?.pyramid;
+    const parentTier = parent && parent.country_id === league.country_id && own.includes(parent) ? parent.tier : undefined;
+    if (
+      !pyramid ||
+      reserveTierAllowed(
+        { parentId: club.parent_id ?? 0, highestTier: Number(pyramid.highestTier), minGapBelowParent: Number(pyramid.minGapBelowParent) },
+        league.tier,
+        parentTier,
+      )
+    )
+      failures.push(`parked B-team ${club.id} was not re-admitted to ${league.name} (parent tier ${parentTier ?? "none"})`);
   }
   assert.equal(failures.length, 0, `Movement invariants failed after the ${state.season} rollover: ${failures.slice(0, 8).join("; ")}`);
   return { leagues: leagues.length, moved: [...to].filter(([clubId, leagueId]) => from.get(clubId) !== leagueId).length };

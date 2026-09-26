@@ -2731,12 +2731,43 @@ export async function seasonRollover(store: Store) {
         countryShortfalls,
       );
       for (const [leagueId, short] of countryShortfalls) shortfalls[leagueId] = short;
-      // Only when a relegated parent cannot stay up either: the B-team leaves the senior pyramid (to === null).
-      for (const move of planned.filter((item) => item.to === null)) {
-        await store.run("DELETE FROM standings WHERE league_id = ? AND club_id = ?", move.from, move.clubId);
-        await store.run("UPDATE clubs SET league_id = NULL WHERE id = ?", move.clubId);
+      // A B-team with no legal modeled tier is parked: squad and registrations stay, no league place until its
+      // parent's division allows it back into the league it left.
+      for (const move of planned.filter((item) => item.reason === "parked" || item.reason === "readmitted")) {
+        const parked = move.reason === "parked";
+        if (parked) {
+          await store.run("DELETE FROM standings WHERE league_id = ? AND club_id = ?", move.from, move.clubId);
+          await store.run(
+            "UPDATE clubs SET league_id = NULL, data = JSON_MODIFY(data,'$.parkedLeagueId',CAST(? AS int)) WHERE id = ?",
+            move.parkedIn ?? move.from,
+            move.clubId,
+          );
+        } else {
+          await store.run(
+            "INSERT INTO standings(league_id,club_id) SELECT source.league_id,source.club_id FROM (VALUES (?,?)) AS source(league_id,club_id) WHERE NOT EXISTS (SELECT 1 FROM standings WITH (UPDLOCK,HOLDLOCK) WHERE standings.league_id = source.league_id AND standings.club_id = source.club_id)",
+            move.to,
+            move.clubId,
+          );
+          await store.run(
+            "UPDATE clubs SET league_id = ?, data = JSON_MODIFY(data,'$.parkedLeagueId',NULL) WHERE id = ?",
+            move.to,
+            move.clubId,
+          );
+        }
+        const owner = await store.get<{ parent_id: number | null }>("SELECT parent_id FROM clubs WHERE id = ?", move.clubId);
+        if (owner?.parent_id === state.clubId)
+          await news(
+            store,
+            "Club",
+            parked ? "B-team withdrawn from league play" : "B-team re-admitted",
+            parked
+              ? "With the first team now in its division and no lower league available, the B-team plays no league football this season. Its squad and registrations are unchanged; it returns once the first team goes up."
+              : "The first team's promotion lets the B-team return to its league this season.",
+            parked ? "warning" : "success",
+            "competitions",
+          );
       }
-      const moves = planned.filter((move) => move.to !== null);
+      const moves = planned.filter((move) => move.from !== null && move.to !== null);
       for (const tier of pyramid.tiers)
         if (JSON.parse(pyramid.leagues.find((league) => league.id === tier.leagueId)!.data).split)
           await store.run("UPDATE standings SET group_name = '' WHERE league_id = ?", tier.leagueId);
