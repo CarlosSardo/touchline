@@ -9,6 +9,7 @@ import {
   ChevronRight,
   HeartHandshake,
   ScanLine,
+  UserX,
 } from "lucide-react";
 import {
   Area,
@@ -50,6 +51,13 @@ import {
   transferWindow,
 } from "../shared/rules.ts";
 import type { PlayerCareer, PlayerDetail, StaffDesk } from "../shared/api.ts";
+import {
+  bodyLabel,
+  bodyOf,
+  clubLabel,
+  isHomeBased,
+  isMissingPlayer,
+} from "./players.ts";
 
 interface ReportDetails {
   strengths: string[];
@@ -240,9 +248,16 @@ function CareerMatches({ playerId }: { playerId: number }) {
                 <td>
                   {appearance.goals} / {appearance.assists}
                 </td>
-                <td>
-                  {(appearance.stats.xG ?? 0).toFixed(2)} /{" "}
-                  {(appearance.stats.xA ?? 0).toFixed(2)}
+                <td
+                  title={
+                    appearance.stats.xG === undefined
+                      ? "Detailed match stats are kept only for your club's teams and loanees"
+                      : undefined
+                  }
+                >
+                  {appearance.stats.xG === undefined
+                    ? "—"
+                    : `${appearance.stats.xG.toFixed(2)} / ${(appearance.stats.xA ?? 0).toFixed(2)}`}
                 </td>
                 <td>
                   <Button
@@ -307,6 +322,7 @@ export default function PlayerSheet() {
   const targetSquad = data?.squadDestinations.find(
     (entry) => `${entry.clubId}:${entry.ageGroup}` === squadValue,
   );
+  const body = data ? bodyOf(data.player, data.profile) : null;
   async function requestReport() {
     if (!data) return;
     const scout = Number(
@@ -336,7 +352,15 @@ export default function PlayerSheet() {
   ];
   return (
     <Modal title="Player dossier" onClose={() => setPlayer(null)} wide>
-      {error ? (
+      {isMissingPlayer(error) ? (
+        <div className="sheet-body">
+          <Empty
+            icon={UserX}
+            title="Player record archived"
+            detail="This player has left football and is no longer in the database. Results, transfers and news that mention them are kept."
+          />
+        </div>
+      ) : error ? (
         <div className="sheet-body">
           <ErrorState message={error} />
         </div>
@@ -351,12 +375,15 @@ export default function PlayerSheet() {
                 <Badge tone="green">{data.player.position}</Badge>
                 <Badge>{data.player.age_group}</Badge>
                 {data.player.injury_until && <Badge tone="red">Injured</Badge>}
+                {isHomeBased(data.player, data.profile) && (
+                  <Badge tone="blue">Home-based pool</Badge>
+                )}
               </div>
               <h2>{data.player.name}</h2>
               <div className="profile-meta">
                 <ClubLink
                   id={data.player.club_id}
-                  name={data.player.club_name ?? "Free agent"}
+                  name={clubLabel(data.player, data.profile)}
                   color={data.player.club_color}
                   crest
                 />
@@ -430,7 +457,7 @@ export default function PlayerSheet() {
                         ],
                         [
                           "Height / weight",
-                          `${data.profile.identity.height} cm / ${data.profile.identity.weight} kg`,
+                          `${bodyLabel(body!)}${body!.growing ? " / still growing" : ""}`,
                         ],
                         ["Body type", data.profile.identity.bodyType],
                         ["Region", data.profile.identity.region],
@@ -491,12 +518,23 @@ export default function PlayerSheet() {
                                 disabled={!entry.eligible}
                               >
                                 {entry.label}
-                                {entry.reason ? ` - ${entry.reason}` : ""}
+                                {entry.eligible ? "" : " (unavailable)"}
                               </option>
                             ))}
                           </select>
                         </Field>
                       </div>
+                      {data.squadDestinations.some((entry) => entry.reason) && (
+                        <ul className="squad-move-notes" aria-label="Unavailable squads">
+                          {data.squadDestinations
+                            .filter((entry) => entry.reason)
+                            .map((entry) => (
+                              <li key={`${entry.clubId}:${entry.ageGroup}`}>
+                                <strong>{entry.label}</strong> {entry.reason}
+                              </li>
+                            ))}
+                        </ul>
+                      )}
                       <Button
                         icon={ArrowLeftRight}
                         variant="secondary"
@@ -724,10 +762,12 @@ export default function PlayerSheet() {
                         ["Training", data.player.training],
                         ["Training load", `${data.player.intensity}%`],
                         [
-                          "Growth spurt",
+                          "Physical development",
                           data.profile.development.growthSpurt
-                            ? "Under way"
-                            : "Not recorded",
+                            ? "Growth spurt under way"
+                            : body!.growing
+                              ? "Still growing"
+                              : "Fully grown",
                         ],
                         [
                           "Mentorship",

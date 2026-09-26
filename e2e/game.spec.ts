@@ -1,6 +1,14 @@
-import { expect, test, type APIResponse, type Page } from "@playwright/test";
+import {
+  expect,
+  test,
+  type APIRequestContext,
+  type APIResponse,
+  type Locator,
+  type Page,
+} from "@playwright/test";
 import type { AcademyData, Bootstrap, PlayerPage, SquadData } from "../shared/api.ts";
 import {
+  POSITIONS,
   compactNumber,
   currencyCode,
   adultTransferArrival,
@@ -8,6 +16,8 @@ import {
   DEFAULT_ASSISTANT_DUTIES,
   money,
 } from "../shared/rules.ts";
+import { sortPlayers } from "../src/sort.ts";
+import { savesReplacedByManualSave, type ListedSave } from "../src/save-rotation.ts";
 
 test.describe.configure({ mode: "serial" });
 
@@ -50,35 +60,48 @@ async function retryBusyResponse(operation: () => Promise<APIResponse>) {
   return response;
 }
 
-test("association rules expose documented and unverified coverage for every country", async ({
+// The UI saves optimistically, so a read right after a click can land inside that save and get 409 world_busy.
+async function bootstrapOf(request: APIRequestContext) {
+  return (await retryBusyResponse(() => request.get("/api/bootstrap"))).json();
+}
+
+test("association rules expose the catalog coverage of every seeded association", async ({
   page,
   request,
 }) => {
   const audit = await (await request.get("/api/world/audit")).json();
   await page.goto("/#world");
   await page.locator(".association-audit > summary").click();
-  await expect(page.locator(".association-audit-table tbody tr")).toHaveCount(
+  const rules = page.locator(".association-audit-table tbody tr");
+  await expect(rules).toHaveCount(audit.countries.length);
+  // World v4: every catalog association is documented; only the reserve model differs.
+  await expect(rules.filter({ hasText: "Documented" })).toHaveCount(
     audit.countries.length,
   );
-  const germany = audit.countries.find(
-    (entry: { code: string }) => entry.code === "DE",
-  );
-  await page
-    .getByRole("combobox", { name: "World country", exact: true })
-    .selectOption(String(germany.id));
-  const rules = page.locator(".association-audit-table tbody tr");
-  await expect(rules).toHaveCount(1);
-  await expect(rules).toContainText("Documented");
-  await expect(
-    rules.getByRole("link", { name: "Reference source", exact: true }),
-  ).toHaveAttribute("href", germany.reservePolicy.source);
-  const luxembourg = audit.countries.find(
-    (entry: { code: string }) => entry.code === "LU",
-  );
-  await page
-    .getByRole("combobox", { name: "World country", exact: true })
-    .selectOption(String(luxembourg.id));
-  await expect(rules).toContainText("Permission unverified");
+  for (const [code, mode] of [
+    ["DE", "Senior pyramid"],
+    ["LU", "No reserve teams"],
+  ]) {
+    const association = audit.countries.find(
+      (entry: { code: string }) => entry.code === code,
+    );
+    await page
+      .getByRole("combobox", { name: "World country", exact: true })
+      .selectOption(String(association.id));
+    await expect(rules).toHaveCount(1);
+    await expect(rules).toContainText(mode);
+    await expect(rules).toContainText(association.reservePolicy.summary);
+    const source = rules.getByRole("link", {
+      name: "Reference source",
+      exact: true,
+    });
+    if (association.reservePolicy.source)
+      await expect(source).toHaveAttribute(
+        "href",
+        association.reservePolicy.source,
+      );
+    else await expect(source).toHaveCount(0);
+  }
   await rules.getByText("Regulatory limits", { exact: true }).click();
   await expect(rules).toContainText("not a complete federation rulebook");
   await page.setViewportSize({ width: 320, height: 844 });
@@ -404,7 +427,7 @@ test("future transfer agreements keep young players at their clubs and reserve m
   try {
     const before = await (await request.get("/api/bootstrap")).json();
     const country = before.countries.find(
-      (entry: { code: string }) => entry.code === "FR",
+      (entry: { code: string }) => entry.code === "DE",
     );
     const players = await (
       await request.get(
@@ -530,9 +553,10 @@ test("future transfer agreements keep young players at their clubs and reserve m
     await expect(
       page.getByRole("heading", { name: "Make your move", exact: true }),
     ).toBeVisible();
-    expect(
-      (await (await request.get("/api/bootstrap")).json()).club.transfer_budget,
-    ).toBeCloseTo(before.club.transfer_budget, 2);
+    expect((await bootstrapOf(request)).club.transfer_budget).toBeCloseTo(
+      before.club.transfer_budget,
+      2,
+    );
   } finally {
     expect(
       (
@@ -609,9 +633,7 @@ test("the other club evaluates the chosen affiliation type before the agreement 
       .getByRole("button", { name: "Submit board request", exact: true })
       .click();
     await expect(dialog).not.toBeVisible();
-    expect(
-      (await (await request.get("/api/bootstrap")).json()).club.balance,
-    ).toBe(before.club.balance);
+    expect((await bootstrapOf(request)).club.balance).toBe(before.club.balance);
     expect(
       (
         await request.post("/api/advance", {
@@ -658,7 +680,7 @@ test("appearance settings persist the minimal and classic UI themes", async ({
     await expect
       .poll(
         async () =>
-          (await (await request.get("/api/bootstrap")).json()).settings.uiTheme,
+          (await bootstrapOf(request)).settings.uiTheme,
       )
       .toBe("classic");
     await page.reload();
@@ -673,7 +695,7 @@ test("appearance settings persist the minimal and classic UI themes", async ({
     await expect
       .poll(
         async () =>
-          (await (await request.get("/api/bootstrap")).json()).settings.uiTheme,
+          (await bootstrapOf(request)).settings.uiTheme,
       )
       .toBe("minimal");
     await noOverflow(page);
@@ -1111,7 +1133,138 @@ test("career folders keep all autosaves together in the menu and settings", asyn
   }
 });
 
-test("full local world and desktop dashboard", async ({ page, request }) => {
+test("a manual save at the career limit names the save it replaces and waits for confirmation", async ({
+  page,
+  request,
+}) => {
+  let current = await bootstrapOf(request);
+  if (!current.state.careerId) {
+    expect(
+      (
+        await request.post("/api/saves", {
+          data: { name: "Rotation career" },
+          timeout: 180000,
+        })
+      ).status(),
+    ).toBe(200);
+    current = await bootstrapOf(request);
+  }
+  const career = {
+    id: current.state.careerId as string,
+    name: current.state.careerName ?? current.club.name,
+    director: current.state.director.name,
+    club: current.club.name,
+    date: "2026-07-01",
+    season: 2026,
+  };
+  const fake = (
+    index: number,
+    name: string,
+    extra: Partial<ListedSave> = {},
+  ): ListedSave => ({
+    name,
+    file: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}.touchline.gz`,
+    size: 1_000_000,
+    modified: new Date(Date.UTC(2020, 0, 1 + index, 12)).toISOString(),
+    compressed: true,
+    automatic: false,
+    imported: false,
+    career,
+    ...extra,
+  });
+  const files = (slots: ListedSave[]) => slots.map((slot) => slot.file);
+  const real: ListedSave[] = await (
+    await retryBusyResponse(() => request.get("/api/saves"))
+  ).json();
+  // The list is mocked so the check neither depends on nor writes real saves.
+  const others = real.filter(
+    (slot) => slot.automatic || slot.imported || slot.career?.id !== career.id,
+  );
+  const imported = fake(20, "Imported rotation check", {
+    imported: true,
+    modified: "2019-12-01T12:00:00.000Z",
+  });
+  const oldest = fake(0, "Oldest rotation check");
+  const newer = Array.from({ length: 9 }, (_, index) =>
+    fake(index + 1, `Rotation check ${index + 1}`),
+  );
+  let listed = [...others, imported, ...newer];
+  const posted: unknown[] = [];
+  await page.route("**/api/saves", async (route) => {
+    const method = route.request().method();
+    if (method === "GET") return route.fulfill({ json: listed });
+    if (method === "POST") {
+      posted.push(route.request().postDataJSON());
+      return route.fulfill({ json: { file: fake(30, "Posted").file, name: "Posted" } });
+    }
+    return route.fallback();
+  });
+  await page.goto("/#settings");
+  await page
+    .getByRole("navigation", { name: "Settings categories" })
+    .getByRole("button", { name: "Saves", exact: true })
+    .click();
+  const saveName = page.getByLabel("Save name", { exact: true });
+  const saveButton = page.getByRole("button", { name: "Save career", exact: true });
+  const replace = page.getByRole("dialog", { name: "Replace your oldest save?" });
+  await saveName.fill("Under the limit");
+  await saveButton.click();
+  await expect.poll(() => posted.length).toBe(1);
+  expect(posted[0]).toEqual({ name: "Under the limit" });
+  await expect(replace).toHaveCount(0);
+
+  listed = [...others, imported, oldest, ...newer];
+  expect(savesReplacedByManualSave(listed, career.id)).toEqual([oldest]);
+  await saveName.fill("Rotation confirmation");
+  await saveButton.click();
+  await expect(replace).toBeVisible();
+  await expect(replace).toContainText("“Rotation confirmation”");
+  await expect(replace).toContainText("Oldest rotation check");
+  await expect(replace).toContainText("saved 1 Jan 2020");
+  await expect(replace).not.toContainText("Rotation check 1");
+  await expect(replace).not.toContainText("Imported rotation check");
+  await expect(replace).toHaveAccessibleDescription(
+    /permanently deletes the oldest one:.*Oldest rotation check/,
+  );
+  await expect
+    .poll(() =>
+      page.evaluate(() => !!document.activeElement?.closest("dialog[open]")),
+    )
+    .toBe(true);
+  await page.keyboard.press("Escape");
+  await expect(replace).toHaveCount(0);
+  await expect(saveButton).toBeFocused();
+  await expect(saveName).toHaveValue("Rotation confirmation");
+  for (const width of [390, 320]) {
+    await page.setViewportSize({ width, height: 760 });
+    await saveButton.click();
+    await expect(replace).toBeVisible();
+    await noOverflow(page);
+    expect(
+      await replace.evaluate(
+        (dialog) =>
+          dialog.scrollWidth <= dialog.clientWidth + 1 &&
+          dialog.getBoundingClientRect().right <= innerWidth + 1,
+      ),
+    ).toBe(true);
+    await page.screenshot({ path: `test-results/save-replacement-${width}.png` });
+    await replace.getByRole("button", { name: "Cancel", exact: true }).click();
+    await expect(replace).toHaveCount(0);
+  }
+  expect(posted).toHaveLength(1);
+
+  await saveButton.click();
+  await replace.getByRole("button", { name: "Replace and save", exact: true }).click();
+  await expect.poll(() => posted.length).toBe(2);
+  expect(posted[1]).toEqual({ name: "Rotation confirmation" });
+  await expect(replace).toHaveCount(0);
+  await page.unroute("**/api/saves");
+  expect(
+    files(await (await retryBusyResponse(() => request.get("/api/saves"))).json()),
+  ).toEqual(files(real));
+});
+
+test("seeded local world and desktop dashboard", async ({ page, request }) => {
   const failures: string[] = [];
   const external: string[] = [];
   page.on("pageerror", (error) => failures.push(error.message));
@@ -1123,10 +1276,17 @@ test("full local world and desktop dashboard", async ({ page, request }) => {
       external.push(request.url());
   });
   const bootstrap = await (await request.get("/api/bootstrap")).json();
-  expect(bootstrap.world.countries).toBeGreaterThanOrEqual(200);
-  expect(bootstrap.world.leagues).toBeGreaterThanOrEqual(1200);
-  expect(bootstrap.world.clubs).toBeGreaterThanOrEqual(3500);
-  expect(bootstrap.world.players).toBeGreaterThanOrEqual(160000);
+  // scripts/e2e-server.ts seeds EN, DE and LU, not the full 211-nation world.
+  expect(
+    bootstrap.countries.map((country: { code: string }) => country.code).sort(),
+  ).toEqual(["DE", "EN", "LU"]);
+  expect(bootstrap.world.countries).toBe(3);
+  expect(bootstrap.world.version).toBe(4);
+  expect(bootstrap.world.leagues).toBeGreaterThan(bootstrap.world.countries);
+  expect(bootstrap.world.clubs).toBeGreaterThanOrEqual(150);
+  expect(bootstrap.world.players).toBeGreaterThanOrEqual(
+    bootstrap.world.clubs * 20,
+  );
   expect(bootstrap.settings.cloudSync).toBe(false);
   await page.goto("/#office");
   await expect(
@@ -1266,7 +1426,11 @@ test("database filter groups reset dependent fields, clear chips and restart pag
       result.players.map((player) => String(player.age)),
     );
     await expect(rows.locator(".club-cell")).toHaveText(
-      result.players.map((player) => player.club_name ?? "Free agent"),
+      result.players.map(
+        (player) =>
+          player.club_name ??
+          ((player as { home_based?: number }).home_based ? "Home-based" : "Free agent"),
+      ),
     );
     await expect(page.locator(".filter-summary")).toContainText("in your selection");
     await expect(page.locator(".pagination-actions > span")).toHaveText(
@@ -1395,14 +1559,16 @@ test("academy cohort controls filter and sort the stored roster on desktop and m
     });
     await radio.check();
     await expect(radio).toBeChecked();
-    const players = academy.players
-      .filter((player) => group === "all" || player.age_group === group)
-      .sort((first, second) => second.potential - first.potential);
+    // The UI's comparator: column default direction, then the name/id tie rule.
+    const players = sortPlayers(
+      academy.players.filter((player) => group === "all" || player.age_group === group),
+      "potential",
+    );
     await expectProspects(players, players.length);
   }
   const sort = page.getByRole("combobox", { name: "Sort academy players", exact: true });
   await sort.selectOption("name");
-  const byName = [...academy.players].sort((first, second) => first.name.localeCompare(second.name));
+  const byName = sortPlayers(academy.players, "name");
   await expectProspects(byName, academy.players.length);
   const target = byName[0];
   const position = page.getByRole("combobox", { name: "Academy position", exact: true });
@@ -1450,12 +1616,9 @@ test("academy cohort controls filter and sort the stored roster on desktop and m
   await expect(review).toHaveValue("");
   await expect(sort).toHaveValue("name");
   await expectProspects(byName, academy.players.length);
-  for (const order of ["ability", "age"]) {
+  for (const order of ["ability", "age"] as const) {
     await sort.selectOption(order);
-    const expected = [...academy.players].sort((first, second) =>
-      order === "age" ? second.age - first.age : second.ability - first.ability,
-    );
-    await expectProspects(expected, academy.players.length);
+    await expectProspects(sortPlayers(academy.players, order), academy.players.length);
   }
   await noOverflow(page);
   await page.screenshot({ path: "test-results/academy-cohort-controls-desktop.png", fullPage: true });
@@ -1506,7 +1669,7 @@ test("squad cohort controls filter readiness and sort within position groups", a
     }
   }
 
-  const byAbility = [...senior.players].sort((first, second) => second.ability - first.ability);
+  const byAbility = sortPlayers(senior.players, "ability");
   await expectSquad(byAbility, senior.players.length);
   await expect(page.getByRole("combobox", { name: "Club squad", exact: true })).toHaveValue(String(senior.selectedClubId));
   const ageGroup = page.getByRole("combobox", { name: "Squad age group", exact: true });
@@ -1514,16 +1677,13 @@ test("squad cohort controls filter readiness and sort within position groups", a
     const squad: SquadData = await (await request.get(`/api/squad?ageGroup=${group}`)).json();
     await ageGroup.selectOption(group);
     await expect(ageGroup).toHaveValue(group);
-    await expectSquad(
-      [...squad.players].sort((first, second) => second.ability - first.ability),
-      squad.players.length,
-    );
+    await expectSquad(sortPlayers(squad.players, "ability"), squad.players.length);
   }
   await ageGroup.selectOption("Senior");
   await expectSquad(byAbility, senior.players.length);
   const sort = page.getByRole("combobox", { name: "Sort squad players", exact: true });
   await sort.selectOption("name");
-  const byName = [...senior.players].sort((first, second) => first.name.localeCompare(second.name));
+  const byName = sortPlayers(senior.players, "name");
   await expectSquad(byName, senior.players.length);
   const target = byName[0];
   const position = page.getByRole("combobox", { name: "Squad position", exact: true });
@@ -1564,14 +1724,9 @@ test("squad cohort controls filter readiness and sort within position groups", a
   await expect(readiness).toHaveValue("");
   await expect(sort).toHaveValue("name");
   await expectSquad(byName, senior.players.length);
-  for (const order of ["potential", "fitness", "age"]) {
+  for (const order of ["potential", "fitness", "age"] as const) {
     await sort.selectOption(order);
-    const expected = [...senior.players].sort((first, second) =>
-      order === "age" ? first.age - second.age
-        : order === "fitness" ? second.fitness - first.fitness
-          : second.potential - first.potential,
-    );
-    await expectSquad(expected, senior.players.length);
+    await expectSquad(sortPlayers(senior.players, order), senior.players.length);
   }
   await noOverflow(page);
   await page.screenshot({ path: "test-results/squad-cohort-controls-desktop.png", fullPage: true });
@@ -1616,7 +1771,7 @@ test("appearance settings persist light and dark themes on desktop and mobile", 
   await expect
     .poll(
       async () =>
-        (await (await request.get("/api/bootstrap")).json()).settings.theme,
+        (await bootstrapOf(request)).settings.theme,
     )
     .toBe("dark");
   await page.reload();
@@ -1680,7 +1835,7 @@ test("appearance settings persist light and dark themes on desktop and mobile", 
   await expect
     .poll(
       async () =>
-        (await (await request.get("/api/bootstrap")).json()).settings.theme,
+        (await bootstrapOf(request)).settings.theme,
     )
     .toBe("light");
   await page.reload();
@@ -1716,7 +1871,7 @@ test("custom accent HEX codes validate, apply and persist", async ({
   await expect
     .poll(
       async () =>
-        (await (await request.get("/api/bootstrap")).json()).settings.accent,
+        (await bootstrapOf(request)).settings.accent,
     )
     .toBe("#2452a1");
   await page.reload();
@@ -1725,9 +1880,7 @@ test("custom accent HEX codes validate, apply and persist", async ({
   await code.press("Enter");
   await expect(code).toHaveAttribute("aria-invalid", "true");
   await expect(apply).toBeDisabled();
-  expect(
-    (await (await request.get("/api/bootstrap")).json()).settings.accent,
-  ).toBe("#2452a1");
+  expect((await bootstrapOf(request)).settings.accent).toBe("#2452a1");
   await code.press("Escape");
   await expect(code).toHaveValue("#2452a1");
   await code.fill("#246");
@@ -1736,7 +1889,7 @@ test("custom accent HEX codes validate, apply and persist", async ({
   await expect
     .poll(
       async () =>
-        (await (await request.get("/api/bootstrap")).json()).settings.accent,
+        (await bootstrapOf(request)).settings.accent,
     )
     .toBe("#224466");
   await expect(
@@ -1764,7 +1917,7 @@ test("custom accent HEX codes validate, apply and persist", async ({
   await expect
     .poll(
       async () =>
-        (await (await request.get("/api/bootstrap")).json()).settings.accent,
+        (await bootstrapOf(request)).settings.accent,
     )
     .toBe("#087f6d");
   await request.patch("/api/settings", { data: { theme: "light" } });
@@ -1788,7 +1941,7 @@ test("currency settings convert budget slider previews and compact amounts witho
   await expect
     .poll(
       async () =>
-        (await (await request.get("/api/bootstrap")).json()).settings.currency,
+        (await bootstrapOf(request)).settings.currency,
     )
     .toBe("EUR");
   await page.reload();
@@ -1826,9 +1979,7 @@ test("currency settings convert budget slider previews and compact amounts witho
       .locator("dd"),
   ).toHaveText(/^€[\d,.]+M$/);
   await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
-  expect((await (await request.get("/api/bootstrap")).json()).club).toEqual(
-    before.club,
-  );
+  expect((await bootstrapOf(request)).club).toEqual(before.club);
   await page.goto("/#settings");
   await page
     .getByRole("navigation", { name: "Settings categories" })
@@ -1838,7 +1989,7 @@ test("currency settings convert budget slider previews and compact amounts witho
   await expect
     .poll(
       async () =>
-        (await (await request.get("/api/bootstrap")).json()).settings.currency,
+        (await bootstrapOf(request)).settings.currency,
     )
     .toBe("USD");
   await page.setViewportSize({ width: 390, height: 844 });
@@ -1851,7 +2002,7 @@ test("currency settings convert budget slider previews and compact amounts witho
   await expect
     .poll(
       async () =>
-        (await (await request.get("/api/bootstrap")).json()).settings.currency,
+        (await bootstrapOf(request)).settings.currency,
     )
     .toBe("GBP");
 });
@@ -1899,9 +2050,7 @@ test("budget allocation slider protects committed wages and saves changes in eit
       "aria-valuetext",
       `${money(before.club.transfer_budget - minimum, true, currency)} transfer budget; ${money(before.club.wage_budget + minimum / 52, true, currency)} weekly wage budget`,
     );
-    expect((await (await request.get("/api/bootstrap")).json()).club).toEqual(
-      before.club,
-    );
+    expect((await bootstrapOf(request)).club).toEqual(before.club);
     await page.screenshot({ path: "test-results/budget-slider-desktop.png" });
     await page.setViewportSize({ width: 390, height: 844 });
     await noOverflow(page);
@@ -1913,7 +2062,7 @@ test("budget allocation slider protects committed wages and saves changes in eit
     await page.screenshot({ path: "test-results/budget-slider-mobile.png" });
     await confirm.click();
     await expect(dialog).not.toBeVisible();
-    const transfers = await (await request.get("/api/bootstrap")).json();
+    const transfers = await bootstrapOf(request);
     expect(transfers.club.transfer_budget).toBeCloseTo(
       before.club.transfer_budget - minimum,
       2,
@@ -1943,7 +2092,7 @@ test("budget allocation slider protects committed wages and saves changes in eit
     await expect(
       page.getByRole("heading", { name: "Club finances", exact: true }),
     ).toBeVisible();
-    const wages = await (await request.get("/api/bootstrap")).json();
+    const wages = await bootstrapOf(request);
     expect(wages.club.transfer_budget).toBeCloseTo(
       transfers.club.transfer_budget - maximum,
       2,
@@ -1984,7 +2133,7 @@ test("appearance follows system preferences and rolls back a failed save", async
   await expect
     .poll(
       async () =>
-        (await (await request.get("/api/bootstrap")).json()).settings.theme,
+        (await bootstrapOf(request)).settings.theme,
     )
     .toBe("system");
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
@@ -2010,7 +2159,7 @@ test("appearance follows system preferences and rolls back a failed save", async
   await expect
     .poll(
       async () =>
-        (await (await request.get("/api/bootstrap")).json()).settings.theme,
+        (await bootstrapOf(request)).settings.theme,
     )
     .toBe("light");
 });
@@ -2056,9 +2205,11 @@ test("mobile navigation, settings, accessibility and dossier fit", async ({
     fullPage: true,
   });
   await noOverflow(page);
-  await request.patch("/api/settings", {
-    data: { theme: "light", highContrast: false },
-  });
+  await retryBusyResponse(() =>
+    request.patch("/api/settings", {
+      data: { theme: "light", highContrast: false },
+    }),
+  );
   await page.goto("/#database");
   await page.locator(".player-table .player-name").first().click();
   await expect(page.getByRole("dialog")).toBeVisible();
@@ -2559,7 +2710,8 @@ test("advancing the full world produces coherent match analysis and all eight no
     });
     expect(response.status()).toBe(200);
     const result = await response.json();
-    expect(result.matches).toBeGreaterThan(1000);
+    // v4 leagues start on 8 August; on 11 July every EN, DE and LU senior league plays a pre-season round (126 friendlies).
+    expect(result.matches).toBeGreaterThan(100);
   }
   await page.goto("/#analytics");
   await expect(page.getByLabel("Pitch map type")).toBeVisible({
@@ -2646,11 +2798,17 @@ test("world browsing opens any team and linked player profiles", async ({
     "B team",
   );
   await page.getByRole("button", { name: "Reset world filters" }).click();
-  await page.getByLabel("Search world teams").fill("Kingsport City");
-  await page.locator(".world-table tbody .team-link").first().click();
+  // Senior clubs come first in reputation order, so a name search opens the club before its B team.
+  const club = (response.clubs as { name: string; type: string }[]).find(
+    (entry) => entry.type === "club",
+  )!;
+  await page.getByLabel("Search world teams").fill(club.name);
+  const result = page.locator(".world-table tbody .team-link").first();
+  await expect(result).toContainText(club.name);
+  await result.click();
   const team = page.getByRole("dialog", { name: "Team profile" });
   await expect(
-    team.getByRole("heading", { name: "Kingsport City", exact: true }),
+    team.getByRole("heading", { name: club.name, exact: true }),
   ).toBeVisible();
   await team.getByRole("tab", { name: /Squads/ }).click();
   await team.locator(".player-name").first().click();
@@ -2673,15 +2831,17 @@ test("every player's seasonal history opens their complete individual match repo
   page,
   request,
 }) => {
+  // Only the user's club family plays on the full engine and keeps a replayable match snapshot.
+  const clubId = (await (await request.get("/api/bootstrap")).json()).club.id;
   const fixtures = await (
-    await request.get("/api/matches?club=2&status=played&age=Senior")
+    await request.get(`/api/matches?club=${clubId}&status=played&age=Senior`)
   ).json();
   expect(fixtures.length).toBeGreaterThan(0);
   const match = await (
     await request.get(`/api/matches/${fixtures[0].id}`)
   ).json();
   const side =
-    match.snapshot.away.id === 2 ? match.snapshot.away : match.snapshot.home;
+    match.snapshot.away.id === clubId ? match.snapshot.away : match.snapshot.home;
   const player =
     side.bench.find(
       (candidate: { id: number }) =>
@@ -2812,9 +2972,7 @@ test("career club picker groups divisions and preserves the selected appointment
     path: "test-results/career-picker-mobile.png",
     fullPage: true,
   });
-  expect((await (await request.get("/api/bootstrap")).json()).state).toEqual(
-    before.state,
-  );
+  expect((await bootstrapOf(request)).state).toEqual(before.state);
 });
 
 test("start menu creates, loads and safely deletes a separate career", async ({
@@ -2823,6 +2981,14 @@ test("start menu creates, loads and safely deletes a separate career", async ({
 }) => {
   test.setTimeout(720000);
   const before = await (await request.get("/api/bootstrap")).json();
+  // England has no B teams in world v4, so a club name matches exactly one picker entry.
+  const choice = (
+    await (
+      await request.get(
+        `/api/world/clubs?type=club&country=${before.club.country_id}&pageSize=30`,
+      )
+    ).json()
+  ).clubs.find((club: { id: number }) => club.id !== before.club.id);
   const saved = await (
     await request.post("/api/saves", {
       data: { name: "Career menu regression" },
@@ -2845,19 +3011,31 @@ test("start menu creates, loads and safely deletes a separate career", async ({
   await page
     .getByRole("combobox", { name: "Background", exact: true })
     .selectOption("Academy director");
-  await page.getByLabel("Find career club").fill("Kingsport City");
+  await page.getByLabel("Find career club").fill(choice.name);
   await page
     .locator(".club-chooser-list button")
-    .filter({ hasText: "Kingsport City" })
+    .filter({ has: page.getByText(choice.name, { exact: true }) })
     .click();
+  // Archiving the current career rotates its manual saves once it keeps 10.
+  const replaced = savesReplacedByManualSave(
+    await (await retryBusyResponse(() => request.get("/api/saves"))).json(),
+    (await bootstrapOf(request)).state.careerId,
+  );
   await page.getByRole("button", { name: "Start career", exact: true }).click();
+  if (replaced.length) {
+    const replace = page.getByRole("dialog", { name: "Replace your oldest save?" });
+    await expect(replace).toContainText(replaced[0].name);
+    await replace
+      .getByRole("button", { name: "Replace and start", exact: true })
+      .click();
+  }
   await expect(
     page.getByRole("heading", { name: "Good morning, Jamie." }),
   ).toBeVisible({ timeout: 480000 });
   const created = await (await request.get("/api/bootstrap")).json();
   expect(created.state.date).toBe("2026-07-01");
   expect(created.state.careerName).toBe("Second career");
-  expect(created.club.id).toBe(2);
+  expect(created.club.id).toBe(choice.id);
   const localClubs = await (
     await request.get(
       `/api/world/clubs?type=club&country=${created.club.country_id}&pageSize=100`,
@@ -3010,9 +3188,7 @@ test("start menu creates, loads and safely deletes a separate career", async ({
   expect(
     afterDelete.some((slot: { file: string }) => slot.file === saved.file),
   ).toBe(true);
-  expect((await (await request.get("/api/bootstrap")).json()).state).toEqual(
-    restored.state,
-  );
+  expect((await bootstrapOf(request)).state).toEqual(restored.state);
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.getByLabel("Search saved careers").fill("Career menu regression");
   await noOverflow(page);
@@ -3020,4 +3196,181 @@ test("start menu creates, loads and safely deletes a separate career", async ({
     path: "test-results/career-saves-desktop.png",
     fullPage: true,
   });
+});
+
+type Direction = "asc" | "desc";
+const ariaSortOf = (direction: Direction) =>
+  direction === "asc" ? "ascending" : "descending";
+
+/** Cell texts of one column, split into the table's row groups. */
+async function columnGroups(table: Locator, label: string) {
+  return await table.evaluate((element, text) => {
+    const headers = [...element.querySelectorAll("thead th")];
+    const index = headers.findIndex(
+      (header) => header.querySelector(".sort-button > span")?.textContent === text,
+    );
+    const groups: string[][] = [[]];
+    for (const row of element.querySelectorAll("tbody tr")) {
+      if (row.classList.contains("roster-group-row")) groups.push([]);
+      else groups[groups.length - 1].push(row.children[index]?.textContent?.trim() ?? "");
+    }
+    return groups.filter((group) => group.length);
+  }, label);
+}
+
+function expectOrdered(values: number[], direction: Direction) {
+  for (let index = 1; index < values.length; index++)
+    if (direction === "asc") expect(values[index]).toBeGreaterThanOrEqual(values[index - 1]);
+    else expect(values[index]).toBeLessThanOrEqual(values[index - 1]);
+}
+
+/** Clicks a column header (or presses Enter on it) and checks aria-sort plus the order in every group. */
+async function sortByHeader(
+  table: Locator,
+  label: string,
+  direction: Direction,
+  toNumber: (text: string) => number,
+  keyboard = false,
+) {
+  const header = table.getByRole("columnheader", { name: label, exact: true });
+  const button = header.getByRole("button");
+  if (keyboard) {
+    await button.focus();
+    await button.press("Enter");
+  } else await button.click();
+  await expect(header).toHaveAttribute("aria-sort", ariaSortOf(direction));
+  const groups = await columnGroups(table, label);
+  expect(groups.flat().length).toBeGreaterThan(1);
+  for (const group of groups) expectOrdered(group.map(toNumber), direction);
+}
+
+const positionIndex = (text: string) => (POSITIONS as readonly string[]).indexOf(text);
+
+test("paginated database sorts on the server from its column headers", async ({ page }) => {
+  const table = page.locator(".database-workspace .player-table");
+  const header = table.getByRole("columnheader", { name: "Age", exact: true });
+  async function search(action: () => Promise<unknown>, parameters: Record<string, string>) {
+    const pending = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return (
+        url.pathname === "/api/players" &&
+        Object.entries(parameters).every(([key, value]) => url.searchParams.get(key) === value)
+      );
+    });
+    await action();
+    const response = await pending;
+    expect(response.ok()).toBe(true);
+    const result: PlayerPage = await response.json();
+    await expect(table.locator("tbody tr .player-name strong")).toHaveText(
+      result.players.map((player) => player.name),
+    );
+    return result;
+  }
+  await search(() => page.goto("/#database"), { page: "1" });
+  await expect(header).not.toHaveAttribute("aria-sort", /./);
+  for (const direction of ["asc", "desc"] as const) {
+    const first = await search(() => header.getByRole("button").click(), {
+      sort: "age",
+      direction,
+    });
+    await expect(header).toHaveAttribute("aria-sort", ariaSortOf(direction));
+    expect(first.pages).toBeGreaterThan(1);
+    expectOrdered(first.players.map((player) => player.age), direction);
+    const second = await search(
+      () => page.getByRole("button", { name: "Next player page", exact: true }).click(),
+      { sort: "age", direction, page: "2" },
+    );
+    expectOrdered(
+      [...first.players, ...second.players].map((player) => player.age),
+      direction,
+    );
+    await search(
+      () => page.getByRole("button", { name: "Previous player page", exact: true }).click(),
+      { sort: "age", direction, page: "1" },
+    );
+  }
+  const position = table.getByRole("columnheader", { name: "Pos", exact: true });
+  const byPosition = await search(() => position.getByRole("button").click(), {
+    sort: "position",
+    direction: "asc",
+  });
+  await expect(position).toHaveAttribute("aria-sort", "ascending");
+  await expect(header).not.toHaveAttribute("aria-sort", /./);
+  expectOrdered(byPosition.players.map((player) => positionIndex(player.position)), "asc");
+});
+
+test("squad table headers sort within position groups by mouse and keyboard", async ({ page }) => {
+  await page.goto("/#squad");
+  const roster = page.getByRole("region", { name: "Squad players", exact: true });
+  await expect(roster).toHaveAttribute("aria-busy", "false");
+  const table = roster.locator("table");
+  await sortByHeader(table, "Pos", "asc", positionIndex);
+  await sortByHeader(table, "Pos", "desc", positionIndex, true);
+  await sortByHeader(table, "Apps", "desc", Number);
+  await sortByHeader(table, "Apps", "asc", Number, true);
+});
+
+test("shortlist groups, filters and sorts targets without overflow at every width", async ({
+  page,
+  request,
+}) => {
+  const bootstrap: Bootstrap = await (await request.get("/api/bootstrap")).json();
+  const candidates: PlayerPage = await (
+    await request.get("/api/players?sort=ability&direction=desc&pageSize=60")
+  ).json();
+  const targets = candidates.players
+    .filter((player) => player.club_id && player.club_id !== bootstrap.club.id && !player.shortlisted)
+    .slice(0, 6);
+  expect(targets.length).toBe(6);
+  const shortlist = async (active: boolean) => {
+    for (const player of targets)
+      await retryBusyResponse(() =>
+        request.post("/api/action", { data: { type: "shortlist", playerId: player.id, active } }),
+      );
+  };
+  await shortlist(true);
+  try {
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await page.goto("/#scouting");
+    await page.getByRole("tab", { name: /^Shortlist/ }).click();
+    const region = page.getByRole("region", { name: "Shortlisted players", exact: true });
+    const table = region.locator("table");
+    const rows = table.locator("tbody tr:not(.roster-group-row)");
+    await expect(region).toBeVisible();
+    const total = await rows.count();
+    expect(total).toBeGreaterThanOrEqual(targets.length);
+    await expect(table.locator(".roster-group-row").first()).toBeVisible();
+    await page.locator(".segmented-control label", { hasText: "Single list" }).click();
+    await expect(table.locator(".roster-group-row")).toHaveCount(0);
+    await sortByHeader(table, "Age", "asc", Number);
+    await sortByHeader(table, "Age", "desc", Number, true);
+    await sortByHeader(table, "Pos", "asc", positionIndex);
+    await page.locator(".segmented-control label", { hasText: "Position line" }).click();
+    await expect(table.getByRole("columnheader", { name: "Pos", exact: true })).toHaveAttribute(
+      "aria-sort",
+      "ascending",
+    );
+    await page.getByRole("textbox", { name: "Search shortlist", exact: true }).fill(targets[0].name);
+    await expect(rows.locator(".player-name strong").first()).toHaveText(targets[0].name);
+    await expect(page.getByRole("status").filter({ hasText: /of \d+ players/ })).toContainText(
+      `of ${total} players`,
+    );
+    await page.getByRole("button", { name: "Clear shortlist filters", exact: true }).click();
+    await expect(rows).toHaveCount(total);
+    const status = page.getByRole("group", { name: "Shortlist status", exact: true });
+    await expect(status.getByRole("button", { name: /^All statuses/ })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    for (const width of [1440, 390, 320]) {
+      await page.setViewportSize({ width, height: 844 });
+      await expect(region).toBeVisible();
+      await expect(status).toBeVisible();
+      await noOverflow(page);
+      await page.screenshot({ path: `test-results/shortlist-${width}.png`, fullPage: true });
+    }
+  } finally {
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await shortlist(false);
+  }
 });

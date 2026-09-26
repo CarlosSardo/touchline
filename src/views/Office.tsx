@@ -169,8 +169,14 @@ export default function Office() {
       ? `${state.date.slice(0, 4)}-01-31`
       : `${state.date.slice(0, 4)}-09-01`;
   const deadlineDays = Math.max(0, daysBetween(state.date, deadline));
+  const ownGroup = data.table.find((entry) => entry.club_id === club.id)?.group_name;
+  // Conference and split leagues rank clubs within their group.
+  const table =
+    ownGroup !== undefined && new Set(data.table.map((entry) => entry.group_name)).size > 1
+      ? data.table.filter((entry) => entry.group_name === ownGroup)
+      : data.table;
   const ownPosition =
-    data.table.findIndex((entry) => entry.club_id === club.id) + 1;
+    table.findIndex((entry) => entry.club_id === club.id) + 1;
   const newsItems = data.news
     .filter((item) => item.category !== "Match")
     .slice(0, 3);
@@ -399,14 +405,11 @@ export default function Office() {
           </Panel>
           <Panel>
             <SectionHeading
-              title={
-                club.league_name?.replace(`${club.country_name} `, "") ??
-                "League standings"
-              }
+              title={club.league_name ?? "League standings"}
               subtitle={
-                data.table[0]?.played
-                  ? `Matchweek ${Math.max(...data.table.map((entry) => entry.played))} / ${ownPosition}${ownPosition === 1 ? "st" : ownPosition === 2 ? "nd" : ownPosition === 3 ? "rd" : "th"} place`
-                  : "2026/27 season / Kick-off in August"
+                table[0]?.played
+                  ? `Matchweek ${Math.max(...table.map((entry) => entry.played))} / ${ownPosition}${ownPosition === 1 ? "st" : ownPosition === 2 ? "nd" : ownPosition === 3 ? "rd" : "th"} place${table !== data.table && ownGroup ? ` / ${ownGroup}` : ""}`
+                  : `${state.season}/${String(state.season + 1).slice(-2)} season / Kick-off in August`
               }
             >
               <TextLink
@@ -416,13 +419,13 @@ export default function Office() {
               </TextLink>
             </SectionHeading>
             <StandingsTable
-              entries={data.table.slice(0, 6)}
+              entries={table.slice(0, 6)}
               ownId={club.id}
               compact
             />
             <div className="pulse-footer">
               <span className="status-dot positive" />
-              {data.table[0]?.played
+              {table[0]?.played
                 ? "Live standings and expected points"
                 : "A new season. A level playing field."}
             </div>

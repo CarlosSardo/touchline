@@ -3,14 +3,30 @@ import { Store } from "./db.ts";
 import { processAffiliateRequests, processAssistant } from "./club-support.ts";
 import { processUnexpectedEvents } from "./events.ts";
 import { processCompetitionNotifications } from "./notifications.ts";
-import { createCalendar, progressCompetitions } from "./calendar.ts";
-import { simulateMatch } from "./match.ts";
+import {
+  countryPyramid,
+  createCalendar,
+  progressCompetitions,
+  type PlayoffData,
+} from "./calendar.ts";
+import {
+  planMovement,
+  rankTable,
+  resolvePlayoffBySeed,
+  type PlayoffResult,
+} from "../shared/league-rules.ts";
+import {
+  followsFixture,
+  simulateFastMatch,
+  simulateFixture,
+} from "./fast-match.ts";
 import {
   aggregateScore,
   knockoutRules,
   type KnockoutTie,
 } from "../shared/competition-rules.ts";
 import { recordAssociationCoefficients } from "./qualification.ts";
+import { pruneSeason, storedAppearanceStats, storedMatchData } from "./retention.ts";
 import { assessRegistration } from "./registration.ts";
 import { processMinorApplications } from "./recruitment.ts";
 import {
@@ -24,9 +40,15 @@ import {
   closeFinancialYear,
   estimateClubRevenue,
   postWeeklyAccounts,
+  spendRatio,
+  weeklyOperatingCosts,
 } from "./finance.ts";
-import { ensureClubRosters, generatePlayers, personName } from "./world.ts";
-import { planPyramidMoves } from "../shared/world-rules.ts";
+import { personName } from "./people.ts";
+import { runYouthIntake, signClublessPlayers } from "./youth.ts";
+import { developBody } from "./growth.ts";
+import { nationByCode } from "../shared/world-catalog/index.ts";
+import { marketValueFactor } from "../shared/world-catalog/market.ts";
+import { SQUAD_MINIMUMS } from "../shared/world-rules.ts";
 import {
   clubOf,
   closeNegotiation,
@@ -57,7 +79,6 @@ import {
   tacticalFit,
   transferWindow,
   valuation,
-  WORLD_COUNTS,
 } from "../shared/rules.ts";
 import type {
   AgeGroup,
@@ -383,23 +404,16 @@ async function updateTable(
   }
 }
 
-async function standingsConsequences(
-  store: Store,
+function standingOutcome(
   club: Club,
-  league: League,
+  table: Standing[],
+  settings: Awaited<ReturnType<typeof settingsOf>>,
   result: number,
   margin: number,
 ) {
-  if (league.kind !== "league" || league.age_group !== "Senior") return;
-  const state = await stateOf(store);
-  const settings = await settingsOf(store);
-  const table = await store.all<Standing>(
-    "SELECT * FROM standings WHERE league_id = ? ORDER BY points DESC, (gf-ga) DESC, gf DESC, club_id",
-    league.id,
-  );
   const position = table.findIndex((entry) => entry.club_id === club.id) + 1;
   const row = table[position - 1];
-  if (!row) return;
+  if (!row) return undefined;
   const bottom = position > table.length - 3;
   const top = position <= 4;
   const streak = row.form.match(/(W+|L+|D+)$/)?.[0] ?? "";
@@ -452,6 +466,26 @@ async function standingsConsequences(
     100,
   );
   const trust = clamp(club.manager_trust + result * 1.8 - crisis / 180, 0, 100);
+  return { position, streak, crisis, hype, pressure, momentum, confidence, mood, trust };
+}
+
+async function standingsConsequences(
+  store: Store,
+  club: Club,
+  league: League,
+  result: number,
+  margin: number,
+) {
+  if (league.kind !== "league" || league.age_group !== "Senior") return;
+  const state = await stateOf(store);
+  const settings = await settingsOf(store);
+  const table = await store.all<Standing>(
+    "SELECT * FROM standings WHERE league_id = ? ORDER BY points DESC, (gf-ga) DESC, gf DESC, club_id",
+    league.id,
+  );
+  const outcome = standingOutcome(club, table, settings, result, margin);
+  if (!outcome) return;
+  const { position, streak, crisis, hype, pressure, momentum, confidence, mood, trust } = outcome;
   await store.run(
     "UPDATE clubs SET momentum = ?, crisis = ?, hype = ?, board_pressure = ?, board_confidence = ?, fan_mood = ?, manager_trust = ?, reputation = LEAST(99,GREATEST(1,reputation + ?)) WHERE id = ?",
     momentum,
@@ -544,29 +578,8 @@ export async function playFixture(store: Store, fixture: Fixture) {
       "SELECT * FROM countries WHERE id = ?",
       homeClub.country_id,
     ))!;
-    const latitudes: Record<string, number> = {
-      EN: 52,
-      ES: 40,
-      DE: 51,
-      FR: 47,
-      IT: 43,
-      PT: 39,
-      NL: 52,
-      BR: -12,
-      AR: -34,
-      AU: -25,
-      NZ: -41,
-      ZA: -29,
-      JP: 36,
-      US: 39,
-      CA: 53,
-      SA: 24,
-      NO: 62,
-      SE: 60,
-      EG: 27,
-    };
     const latitude =
-      latitudes[country.code] ??
+      nationByCode(country.code)?.latitude ??
       { EU: 48, AS: 28, AF: 8, NA: 25, SA: -15, OC: -18 }[country.continent] ??
       15;
     const month = Number(state.date.slice(5, 7));
@@ -634,7 +647,9 @@ export async function playFixture(store: Store, fixture: Fixture) {
         injuryFrequency: Number(settings.injuryFrequency),
       },
     };
-    const result = simulateMatch(snapshot, fixture.seed, false);
+    const detailedMatch = [fixture.home_id, fixture.away_id, homeClub.parent_id, awayClub.parent_id].includes(state.clubId);
+    // Only fixtures of the user's club family pay for the full engine.
+    const result = simulateFixture(snapshot, fixture.seed, detailedMatch);
     const winnerId = result.abandoned
       ? result.abandoned.teamId === fixture.home_id
         ? fixture.away_id
@@ -682,7 +697,7 @@ export async function playFixture(store: Store, fixture: Fixture) {
       officialResult.awayGoals,
       result.homeXg,
       result.awayXg,
-      JSON.stringify(payload),
+      storedMatchData(payload, detailedMatch),
       fixture.id,
     );
     if (!saved.changes) return;
@@ -694,14 +709,16 @@ export async function playFixture(store: Store, fixture: Fixture) {
       state.clubId,
     );
     const participantIds = Object.keys(result.players).map(Number);
-    const loanedPlayers = new Set(
+    // Every active loan needs appearance history for loan reviews; only the user's loans keep full detail.
+    const loanedPlayers = new Map(
       (!managedMatch && participantIds.length
-        ? await store.all<{ player_id: number }>(
-            `SELECT player_id FROM loans WHERE status = 'active' AND player_id IN (${participantIds.map(() => "?").join(",")})`,
+        ? await store.all<{ player_id: number; followed: number }>(
+            `SELECT loans.player_id, CASE WHEN ? IN (loans.parent_id, parent.parent_id) THEN 1 ELSE 0 END AS followed FROM loans JOIN clubs AS parent ON parent.id = loans.parent_id WHERE loans.status = 'active' AND loans.player_id IN (${participantIds.map(() => "?").join(",")})`,
+            state.clubId,
             ...participantIds,
           )
         : []
-      ).map((loan) => loan.player_id),
+      ).map((loan) => [loan.player_id, Boolean(loan.followed)]),
     );
     for (const team of [snapshot.home, snapshot.away]) {
       for (const player of [...team.lineup, ...(team.bench ?? [])]) {
@@ -734,7 +751,7 @@ export async function playFixture(store: Store, fixture: Fixture) {
           rating: stats.rating,
           goals: stats.goals,
           assists: stats.assists,
-          stats: JSON.stringify(stats),
+          stats: storedAppearanceStats(stats, detailedMatch || loanedPlayers.get(player.id) === true),
         });
         playerUpdates.push({
           id: player.id,
@@ -758,7 +775,9 @@ export async function playFixture(store: Store, fixture: Fixture) {
             entity_id: player.id,
             date: state.date,
             data: JSON.stringify({
-              ...stats,
+              ...(managedMatch || loanedPlayers.get(player.id)
+                ? stats
+                : { minutes: stats.minutes, rating: stats.rating, goals: stats.goals, assists: stats.assists }),
               fixtureId: fixture.id,
               position: player.position,
               clubId: team.id,
@@ -830,6 +849,557 @@ export async function playFixture(store: Store, fixture: Fixture) {
   });
 }
 
+interface BatchCandidate {
+  k: number;
+  id: number;
+  name: string;
+  position: Position;
+  secondary_position: Position | null;
+  ability: number;
+  fitness: number;
+}
+
+const knockoutStage = (stage: string) =>
+  ["Qualifying", "Final", "Semi-final", "Quarter-final"].includes(stage) ||
+  stage.startsWith("Round of");
+
+async function writeChunks<Row>(
+  rows: Row[],
+  size: number,
+  write: (json: string) => Promise<unknown>,
+) {
+  for (let offset = 0; offset < rows.length; offset += size)
+    await write(JSON.stringify(rows.slice(offset, offset + size)));
+}
+
+/**
+ * Plays fixtures outside the user's club family with the fast result model and set-based
+ * statements. Returns the fixtures it cannot handle (two-leg ties, national teams, friendlies).
+ */
+export async function playFixtureBatch(store: Store, fixtures: Fixture[]) {
+  if (!fixtures.length) return [];
+  const state = await stateOf(store);
+  const settings = await settingsOf(store);
+  const idList = (values: (number | null)[]) =>
+    JSON.stringify([...new Set(values.filter((value) => value !== null))]);
+  const inList = "IN (SELECT [id] FROM OPENJSON(?) WITH ([id] INT '$'))";
+  const clubs = new Map(
+    (
+      await store.all<Club>(
+        `SELECT * FROM clubs WHERE id ${inList}`,
+        idList(fixtures.flatMap((fixture) => [fixture.home_id, fixture.away_id])),
+      )
+    ).map((club) => [club.id, club]),
+  );
+  const leagues = new Map(
+    (
+      await store.all<League>(
+        `SELECT * FROM leagues WHERE id ${inList}`,
+        idList(fixtures.map((fixture) => fixture.league_id)),
+      )
+    ).map((league) => [league.id, league]),
+  );
+  const leftover: Fixture[] = [];
+  const squads = new Set<string>();
+  const batch = fixtures.filter((fixture) => {
+    const league = fixture.league_id === null ? undefined : leagues.get(fixture.league_id);
+    // One fixture per squad per batch keeps table and squad updates order-free.
+    const keys = [fixture.home_id, fixture.away_id].map((id) => `${id}:${league?.age_group}`);
+    const handled =
+      league !== undefined &&
+      !JSON.parse(fixture.data).tie &&
+      keys.every((key) => !squads.has(key)) &&
+      [fixture.home_id, fixture.away_id].every(
+        (id) => clubs.has(id) && clubs.get(id)!.type !== "national",
+      );
+    if (handled) for (const key of keys) squads.add(key);
+    else leftover.push(fixture);
+    return handled;
+  });
+  const sides = batch.flatMap((fixture, index) => {
+    const league = leagues.get(fixture.league_id!)!;
+    const limit =
+      ({ U17: 17, U19: 19, U20: 20 } as Record<string, number>)[league.age_group] ?? 100;
+    const year = Number((limit < 100 ? String(state.season) : state.date).slice(0, 4));
+    return [fixture.home_id, fixture.away_id].map((clubId, side) => ({
+      k: index * 2 + side,
+      club_id: clubId,
+      age_group: league.age_group,
+      scope: disciplineScope(league, clubs.get(clubId)!),
+      cutoff: `${year - limit + 1}-01-01`,
+    }));
+  });
+  const candidates = new Map<number, BatchCandidate[]>();
+  await writeChunks(sides, 1000, async (json) => {
+    for (const row of await store.all<BatchCandidate>(
+      `SELECT side.k, pick.id, pick.name, pick.position, pick.secondary_position, pick.ability, pick.fitness
+       FROM OPENJSON(?) WITH (k int, club_id int, age_group nvarchar(10), scope nvarchar(100), cutoff nvarchar(10)) AS side
+       CROSS APPLY (SELECT TOP (26) players.id, players.name, players.position, players.secondary_position, players.ability, players.fitness FROM players
+         WHERE players.playing_club_id = side.club_id AND players.age_group = side.age_group AND players.birth_date >= side.cutoff AND players.role != 'Retired' AND (players.injury_until IS NULL OR players.injury_until <= ?)
+         AND NOT EXISTS(SELECT 1 FROM discipline WHERE discipline.player_id = players.id AND discipline.scope = side.scope AND discipline.suspension > 0)
+         AND NOT EXISTS(SELECT 1 FROM player_match_appearances WHERE player_match_appearances.player_id = players.id AND player_match_appearances.date = ? AND player_match_appearances.minutes > 0)
+         ORDER BY players.ability + players.fitness * 0.3 + CASE players.role WHEN 'Key player' THEN 5 WHEN 'Captain' THEN 6 WHEN 'Regular starter' THEN 3 ELSE 0 END + coalesce((SELECT TRY_CONVERT(float,JSON_VALUE(loans.terms,'$.playingTime')) / 15.0 FROM loans WHERE loans.player_id = players.id AND loans.status = 'active'),0) DESC) AS pick`,
+      json,
+      state.date,
+      state.date,
+    ))
+      candidates.set(row.k, [...(candidates.get(row.k) ?? []), row]);
+  });
+  const used = new Set<number>();
+  const team = (club: Club, rows: BatchCandidate[]): MatchTeam => {
+    const pool = rows.filter((row) => !used.has(row.id));
+    const player = (row: BatchCandidate, position = row.position): MatchPlayer => ({
+      id: row.id,
+      name: row.name,
+      position,
+      ability: round(
+        row.ability *
+          (row.position === position ? 1 : row.secondary_position === position ? 0.94 : 0.8),
+      ),
+      fitness: row.fitness,
+      confidence: 65,
+    });
+    const lineup: MatchPlayer[] = [];
+    for (const position of formations[club.formation] ?? formations["4-3-3"]) {
+      const available = pool.filter((row) => !lineup.some((selected) => selected.id === row.id));
+      const pick =
+        available.find((row) => row.position === position) ??
+        available.find((row) => row.secondary_position === position) ??
+        available.find((row) => position === "GK" || row.position !== "GK") ??
+        available[0];
+      if (pick) lineup.push(player(pick, position));
+    }
+    const remaining = pool.filter((row) => !lineup.some((selected) => selected.id === row.id));
+    const keeper = remaining.find((row) => row.position === "GK");
+    const bench = [...(keeper ? [keeper] : []), ...remaining.filter((row) => row.id !== keeper?.id)]
+      .slice(0, 12)
+      .map((row) => player(row));
+    for (const selected of [...lineup, ...bench]) used.add(selected.id);
+    return {
+      id: club.id,
+      name: club.name,
+      color: club.color,
+      ability: lineup.length ? lineup.reduce((sum, entry) => sum + entry.ability, 0) / lineup.length : 20,
+      style: club.tactical_style,
+      formation: club.formation,
+      chemistry: club.chemistry,
+      momentum: club.momentum,
+      pressure: club.board_pressure,
+      lineup,
+      bench,
+      setPieces: { routine: "Near post", target: "Centre-back", risk: 50 },
+    };
+  };
+  const matches = batch.map((fixture, index) => {
+    const league = leagues.get(fixture.league_id!)!;
+    const rules = knockoutRules(league.name, fixture.stage);
+    const snapshot: MatchSnapshot = {
+      rulesVersion: 3,
+      home: team(clubs.get(fixture.home_id)!, candidates.get(index * 2) ?? []),
+      away: team(clubs.get(fixture.away_id)!, candidates.get(index * 2 + 1) ?? []),
+      weather: "Clear",
+      importance: fixture.stage === "Final" ? 100 : league.kind === "league" ? 65 : 78,
+      detail: String(settings.matchDetail),
+      rules: {
+        decisive: knockoutStage(fixture.stage),
+        extraTime: rules.extraTime,
+        neutral: rules.neutral,
+        awayGoals: rules.awayGoals,
+        substitutions: 5,
+        substitutionWindows: 3,
+        extraSubstitution: true,
+        aggregate: { home: 0, away: 0, homeAwayGoals: 0, awayAwayGoals: 0 },
+        injuryFrequency: Number(settings.injuryFrequency),
+      },
+    };
+    return {
+      fixture,
+      league,
+      snapshot,
+      scopes: [fixture.home_id, fixture.away_id].map((id) => disciplineScope(league, clubs.get(id)!)),
+      result: simulateFastMatch(snapshot, fixture.seed),
+    };
+  });
+  await writeMatchBatch(store, state, settings, matches);
+  return leftover;
+}
+
+interface BatchMatch {
+  fixture: Fixture;
+  league: League;
+  snapshot: MatchSnapshot;
+  scopes: string[];
+  result: MatchResult;
+}
+
+async function writeMatchBatch(
+  store: Store,
+  state: Awaited<ReturnType<typeof stateOf>>,
+  settings: Awaited<ReturnType<typeof settingsOf>>,
+  matches: BatchMatch[],
+) {
+  if (!matches.length) return;
+  const participantIds = matches.flatMap(({ result }) =>
+    Object.entries(result.players)
+      .filter(([, stats]) => stats.minutes > 0)
+      .map(([id]) => Number(id)),
+  );
+  const loanedPlayers = new Map(
+    (participantIds.length
+      ? await store.all<{ player_id: number; followed: number }>(
+          "SELECT loans.player_id, CASE WHEN ? IN (loans.parent_id, parent.parent_id) THEN 1 ELSE 0 END AS followed FROM loans JOIN clubs AS parent ON parent.id = loans.parent_id WHERE loans.status = 'active' AND loans.player_id IN (SELECT [id] FROM OPENJSON(?) WITH ([id] INT '$'))",
+          state.clubId,
+          JSON.stringify(participantIds),
+        )
+      : []
+    ).map((loan) => [loan.player_id, Boolean(loan.followed)]),
+  );
+  const fixtureRows: Record<string, string | number>[] = [];
+  const tableRows = new Map<string, { league_id: number; club_id: number; own: number; against: number; xg: number; xga: number; xpts: number; home: boolean }>();
+  const appearances: Record<string, string | number | null>[] = [];
+  const playerUpdates: Record<string, string | number | null>[] = [];
+  const history: Record<string, string | number>[] = [];
+  const disciplineTeams: { club_id: number; scope: string }[] = [];
+  const participants: { player: MatchPlayer; stats: Record<string, number>; team: MatchTeam; match: BatchMatch; scope: string }[] = [];
+  const injuries: { id: number; until: string }[] = [];
+  const senior: { club_id: number; league_id: number; result: number; margin: number }[] = [];
+  for (const match of matches) {
+    const { fixture, league, snapshot, result } = match;
+    const awarded = result.abandoned
+      ? {
+          home: result.abandoned.teamId === fixture.home_id ? 0 : 3,
+          away: result.abandoned.teamId === fixture.away_id ? 0 : 3,
+          reason: result.abandoned.reason,
+        }
+      : null;
+    const homeGoals = awarded ? awarded.home : result.homeGoals;
+    const awayGoals = awarded ? awarded.away : result.awayGoals;
+    fixtureRows.push({
+      id: fixture.id,
+      home_goals: homeGoals,
+      away_goals: awayGoals,
+      home_xg: result.homeXg,
+      away_xg: result.awayXg,
+      data: storedMatchData(
+        {
+          ...JSON.parse(fixture.data),
+          snapshot,
+          players: result.players,
+          events: result.events,
+          winnerId: result.abandoned
+            ? result.abandoned.teamId === fixture.home_id
+              ? fixture.away_id
+              : fixture.home_id
+            : result.winnerId,
+          penalties: result.shootout
+            ? { home: result.shootout.home, away: result.shootout.away }
+            : null,
+          awarded,
+          regulationScore: result.regulationScore,
+          wentToExtraTime: result.wentToExtraTime,
+          shootout: result.shootout,
+          duration: result.duration,
+        },
+        false,
+      ),
+    });
+    for (const home of [true, false])
+      tableRows.set(`${fixture.league_id}:${home ? fixture.home_id : fixture.away_id}`, {
+        league_id: fixture.league_id!,
+        club_id: home ? fixture.home_id : fixture.away_id,
+        own: home ? homeGoals : awayGoals,
+        against: home ? awayGoals : homeGoals,
+        xg: home ? result.homeXg : result.awayXg,
+        xga: home ? result.awayXg : result.homeXg,
+        xpts: home ? result.homeXpts : result.awayXpts,
+        home,
+      });
+    if (league.kind === "league" && league.age_group === "Senior")
+      for (const home of [true, false]) {
+        const margin = home ? result.homeGoals - result.awayGoals : result.awayGoals - result.homeGoals;
+        senior.push({ club_id: home ? fixture.home_id : fixture.away_id, league_id: league.id, result: Math.sign(margin), margin });
+      }
+    for (const injury of result.injuries ?? [])
+      injuries.push({ id: injury.playerId, until: addDays(fixture.date, injury.days) });
+    for (const team of [snapshot.home, snapshot.away]) {
+      const scope = match.scopes[team.id === fixture.home_id ? 0 : 1];
+      disciplineTeams.push({ club_id: team.id, scope });
+      for (const player of [...team.lineup, ...(team.bench ?? [])]) {
+        const stats = result.players[player.id];
+        if (!stats?.minutes) continue;
+        participants.push({ player, stats, team, match, scope });
+        const on = result.substitutions?.find((change) => change.onId === player.id);
+        const off = result.substitutions?.find((change) => change.offId === player.id);
+        const exit = result.events.find(
+          (event) => event.playerId === player.id && ["red card", "injury"].includes(event.type),
+        );
+        const followed = loanedPlayers.get(player.id) === true;
+        appearances.push({
+          fixture_id: fixture.id,
+          player_id: player.id,
+          club_id: team.id,
+          season: fixture.season,
+          date: fixture.date,
+          position: player.position,
+          started: team.lineup.some((starter) => starter.id === player.id) ? 1 : 0,
+          minutes: stats.minutes,
+          minute_on: on?.minute ?? 0,
+          minute_off: off?.minute ?? exit?.minute ?? null,
+          rating: stats.rating,
+          goals: stats.goals,
+          assists: stats.assists,
+          stats: storedAppearanceStats(stats, followed),
+        });
+        playerUpdates.push({
+          id: player.id,
+          minutes: stats.minutes,
+          goals: stats.goals,
+          assists: stats.assists,
+          form: round(stats.rating),
+          fatigue: ((team.style === "High press" ? 20 : 15) * stats.minutes) / 90,
+          potential_bank:
+            league.age_group !== "Senior" && stats.rating > 7 ? 0.07 : stats.rating > 8 ? 0.035 : 0,
+        });
+        if (loanedPlayers.has(player.id))
+          history.push({
+            season: state.season,
+            entity_type: "appearance",
+            entity_id: player.id,
+            date: state.date,
+            data: JSON.stringify({
+              ...(followed
+                ? stats
+                : { minutes: stats.minutes, rating: stats.rating, goals: stats.goals, assists: stats.assists }),
+              fixtureId: fixture.id,
+              position: player.position,
+              clubId: team.id,
+            }),
+          });
+      }
+    }
+  }
+  await writeChunks(fixtureRows, 500, (json) =>
+    store.run(
+      "UPDATE target SET status = 'played', home_goals = changes.home_goals, away_goals = changes.away_goals, home_xg = changes.home_xg, away_xg = changes.away_xg, data = changes.data FROM fixtures AS target JOIN OPENJSON(?) WITH (id int, home_goals int, away_goals int, home_xg float, away_xg float, data nvarchar(max)) AS changes ON changes.id = target.id WHERE target.status = 'scheduled'",
+      json,
+    ),
+  );
+  const pairs = [...tableRows.values()];
+  const current = new Map<string, Standing>();
+  await writeChunks(
+    pairs.map(({ league_id, club_id }) => ({ league_id, club_id })),
+    2000,
+    async (json) => {
+      for (const row of await store.all<Standing>(
+        "SELECT standings.* FROM standings JOIN OPENJSON(?) WITH (league_id int, club_id int) AS pair ON pair.league_id = standings.league_id AND pair.club_id = standings.club_id",
+        json,
+      ))
+        current.set(`${row.league_id}:${row.club_id}`, row);
+    },
+  );
+  const standingRows = pairs.flatMap((pair) => {
+    const entry = current.get(`${pair.league_id}:${pair.club_id}`);
+    if (!entry) return [];
+    const outcome = pair.own > pair.against ? "W" : pair.own < pair.against ? "L" : "D";
+    const record = (pair.home ? entry.home_record : entry.away_record).split("-").map(Number);
+    record[outcome === "W" ? 0 : outcome === "D" ? 1 : 2]++;
+    return [
+      {
+        league_id: pair.league_id,
+        club_id: pair.club_id,
+        wins: outcome === "W" ? 1 : 0,
+        draws: outcome === "D" ? 1 : 0,
+        losses: outcome === "L" ? 1 : 0,
+        gf: pair.own,
+        ga: pair.against,
+        points: outcome === "W" ? 3 : outcome === "D" ? 1 : 0,
+        xg: pair.xg,
+        xga: pair.xga,
+        xpts: pair.xpts,
+        form: (entry.form + outcome).slice(-5),
+        home_record: pair.home ? record.join("-") : entry.home_record,
+        away_record: pair.home ? entry.away_record : record.join("-"),
+      },
+    ];
+  });
+  await writeChunks(standingRows, 2000, (json) =>
+    store.run(
+      "UPDATE target SET played = target.played + 1, wins = target.wins + changes.wins, draws = target.draws + changes.draws, losses = target.losses + changes.losses, gf = target.gf + changes.gf, ga = target.ga + changes.ga, points = target.points + changes.points, xg = target.xg + changes.xg, xga = target.xga + changes.xga, xpts = target.xpts + changes.xpts, form = changes.form, home_record = changes.home_record, away_record = changes.away_record FROM standings AS target JOIN OPENJSON(?) WITH (league_id int, club_id int, wins int, draws int, losses int, gf int, ga int, points int, xg float, xga float, xpts float, form nvarchar(20), home_record nvarchar(40), away_record nvarchar(40)) AS changes ON changes.league_id = target.league_id AND changes.club_id = target.club_id",
+      json,
+    ),
+  );
+  await writeChunks(appearances, 2000, (json) =>
+    store.run(
+      `INSERT INTO player_match_appearances(fixture_id,player_id,club_id,season,date,position,started,minutes,minute_on,minute_off,rating,goals,assists,stats)
+     SELECT source.fixture_id,source.player_id,source.club_id,source.season,source.date,source.position,source.started,source.minutes,source.minute_on,source.minute_off,source.rating,source.goals,source.assists,source.stats
+     FROM OPENJSON(?) WITH (fixture_id int,player_id int,club_id int,season int,date nvarchar(10),position nvarchar(10),started int,minutes int,minute_on int,minute_off int,rating float,goals int,assists int,stats nvarchar(max)) AS source
+     WHERE NOT EXISTS (SELECT 1 FROM player_match_appearances WITH (UPDLOCK,HOLDLOCK) WHERE fixture_id = source.fixture_id AND player_id = source.player_id)`,
+      json,
+    ),
+  );
+  await updateSimulationRows(
+    store,
+    "players",
+    playerUpdates,
+    "id int,minutes int,goals int,assists int,form float,fatigue float,potential_bank float",
+    "appearances = target.appearances + 1, minutes = target.minutes + changes.minutes, goals = target.goals + changes.goals, assists = target.assists + changes.assists, form = changes.form, fitness = GREATEST(25,target.fitness - changes.fatigue), potential_bank = target.potential_bank + changes.potential_bank",
+  );
+  if (history.length) {
+    const lastId = (await store.get<{ id: number }>(
+      "SELECT coalesce(max(id),0) AS id FROM history WITH (UPDLOCK,HOLDLOCK)",
+    ))!.id;
+    await store.bulkInsert(
+      "history",
+      history.map((row, index) => ({ id: lastId + index + 1, ...row })),
+    );
+  }
+  await writeBatchDiscipline(store, state, disciplineTeams, participants);
+  await writeChunks(injuries, 2000, (json) =>
+    store.run(
+      "UPDATE target SET injury_until = changes.until, training = 'Injury rehab' FROM players AS target JOIN OPENJSON(?) WITH (id int, until nvarchar(10)) AS changes ON changes.id = target.id",
+      json,
+    ),
+  );
+  await writeTableConsequences(store, settings, senior);
+}
+
+async function writeBatchDiscipline(
+  store: Store,
+  state: Awaited<ReturnType<typeof stateOf>>,
+  teams: { club_id: number; scope: string }[],
+  participants: { player: MatchPlayer; stats: Record<string, number>; team: MatchTeam; match: BatchMatch; scope: string }[],
+) {
+  await writeChunks(teams, 2000, (json) =>
+    store.run(
+      "UPDATE target SET suspension = target.suspension - 1 FROM discipline AS target JOIN players ON players.id = target.player_id JOIN OPENJSON(?) WITH (club_id int, scope nvarchar(100)) AS team ON team.club_id = players.club_id AND team.scope = target.scope WHERE target.suspension > 0",
+      json,
+    ),
+  );
+  const previous = new Map<string, { yellow_cards: number; season: number }>();
+  await writeChunks(
+    participants.map(({ player, scope }) => ({ player_id: player.id, scope })),
+    2000,
+    async (json) => {
+      for (const row of await store.all<{ player_id: number; scope: string; yellow_cards: number; season: number }>(
+        "SELECT discipline.player_id, discipline.scope, discipline.yellow_cards, discipline.season FROM discipline JOIN OPENJSON(?) WITH (player_id int, scope nvarchar(100)) AS source ON source.player_id = discipline.player_id AND source.scope = discipline.scope",
+        json,
+      ))
+        previous.set(`${row.player_id}:${row.scope}`, row);
+    },
+  );
+  const seasonStats: Record<string, string | number>[] = [];
+  const disciplineRows: Record<string, string | number>[] = [];
+  for (const { player, stats, team, match, scope } of participants) {
+    seasonStats.push({
+      player_id: player.id,
+      season: state.season,
+      club_id: team.id,
+      league_id: match.league.id,
+      minutes: stats.minutes,
+      goals: stats.goals,
+      assists: stats.assists,
+    });
+    const prior = previous.get(`${player.id}:${scope}`);
+    const cautions = (prior?.season === state.season ? prior.yellow_cards : 0) + stats.yellowCards;
+    const dismissal = match.result.events.find(
+      (event) => event.playerId === player.id && event.type === "red card",
+    );
+    const ban = dismissal
+      ? dismissal.text.includes("second caution")
+        ? 1
+        : 3
+      : match.league.kind === "continental"
+        ? cautions >= 3 && (cautions - 3) % 2 === 0 && stats.yellowCards > 0
+          ? 1
+          : 0
+        : cautions > 0 && cautions % 5 === 0 && stats.yellowCards > 0
+          ? 1
+          : 0;
+    if (prior || cautions || ban)
+      disciplineRows.push({ player_id: player.id, scope, yellow_cards: cautions, suspension: ban, season: state.season });
+  }
+  await writeChunks(seasonStats, 2000, (json) =>
+    store.run(
+      `MERGE player_season_stats WITH (HOLDLOCK) AS target
+       USING OPENJSON(?) WITH (player_id int,season int,club_id int,league_id int,minutes int,goals int,assists int) AS source
+       ON target.player_id = source.player_id AND target.season = source.season AND target.club_id = source.club_id AND target.league_id = source.league_id
+       WHEN MATCHED THEN UPDATE SET minutes = target.minutes + source.minutes, appearances = target.appearances + 1, goals = target.goals + source.goals, assists = target.assists + source.assists
+       WHEN NOT MATCHED THEN INSERT (player_id,season,club_id,league_id,minutes,appearances,goals,assists)
+       VALUES (source.player_id,source.season,source.club_id,source.league_id,source.minutes,1,source.goals,source.assists);`,
+      json,
+    ),
+  );
+  await writeChunks(disciplineRows, 2000, (json) =>
+    store.run(
+      `MERGE discipline WITH (HOLDLOCK) AS target
+       USING OPENJSON(?) WITH (player_id int,scope nvarchar(100),yellow_cards int,suspension int,season int) AS source
+       ON target.player_id = source.player_id AND target.scope = source.scope
+       WHEN MATCHED THEN UPDATE SET yellow_cards = source.yellow_cards, suspension = target.suspension + source.suspension, season = source.season
+       WHEN NOT MATCHED THEN INSERT (player_id,scope,yellow_cards,suspension,season)
+       VALUES (source.player_id,source.scope,source.yellow_cards,source.suspension,source.season);`,
+      json,
+    ),
+  );
+}
+
+async function writeTableConsequences(
+  store: Store,
+  settings: Awaited<ReturnType<typeof settingsOf>>,
+  results: { club_id: number; league_id: number; result: number; margin: number }[],
+) {
+  if (!results.length) return;
+  const tables = new Map<number, Standing[]>();
+  for (const row of await store.all<Standing>(
+    "SELECT * FROM standings WHERE league_id IN (SELECT [id] FROM OPENJSON(?) WITH ([id] INT '$')) ORDER BY league_id, points DESC, (gf-ga) DESC, gf DESC, club_id",
+    JSON.stringify([...new Set(results.map((entry) => entry.league_id))]),
+  ))
+    tables.set(row.league_id, [...(tables.get(row.league_id) ?? []), row]);
+  const clubs = new Map(
+    (
+      await store.all<Club>(
+        "SELECT * FROM clubs WHERE id IN (SELECT [id] FROM OPENJSON(?) WITH ([id] INT '$'))",
+        JSON.stringify(results.map((entry) => entry.club_id)),
+      )
+    ).map((club) => [club.id, club]),
+  );
+  const clubRows: Record<string, number>[] = [];
+  const squadRows: Record<string, number>[] = [];
+  for (const entry of results) {
+    const club = clubs.get(entry.club_id);
+    const outcome = club && standingOutcome(club, tables.get(entry.league_id) ?? [], settings, entry.result, entry.margin);
+    if (!outcome) continue;
+    clubRows.push({
+      id: entry.club_id,
+      momentum: outcome.momentum,
+      crisis: outcome.crisis,
+      hype: outcome.hype,
+      pressure: outcome.pressure,
+      confidence: outcome.confidence,
+      mood: outcome.mood,
+      trust: outcome.trust,
+      reputation: entry.result * 0.035,
+      reset: outcome.streak === "LLLL" ? 1 : 0,
+    });
+    squadRows.push({
+      club_id: entry.club_id,
+      morale: entry.result * 2 - outcome.crisis / 100,
+      factor: 1 + outcome.hype / 20000 - outcome.crisis / 18000,
+    });
+  }
+  await writeChunks(clubRows, 2000, (json) =>
+    store.run(
+      "UPDATE target SET momentum = changes.momentum, crisis = changes.crisis, hype = changes.hype, board_pressure = changes.pressure, board_confidence = changes.confidence, fan_mood = changes.mood, manager_trust = changes.trust, reputation = LEAST(99,GREATEST(1,target.reputation + changes.reputation)), tactical_style = CASE WHEN changes.reset = 1 THEN CASE target.tactical_style WHEN 'High press' THEN 'Counter attack' ELSE 'Balanced' END ELSE target.tactical_style END, chemistry = CASE WHEN changes.reset = 1 THEN GREATEST(0,target.chemistry - 3) ELSE target.chemistry END FROM clubs AS target JOIN OPENJSON(?) WITH (id int, momentum float, crisis float, hype float, pressure float, confidence float, mood float, trust float, reputation float, reset int) AS changes ON changes.id = target.id",
+      json,
+    ),
+  );
+  await writeChunks(squadRows, 2000, (json) =>
+    store.run(
+      "UPDATE target SET morale = LEAST(99,GREATEST(1,target.morale + changes.morale)), value = target.value * changes.factor FROM players AS target JOIN OPENJSON(?) WITH (club_id int, morale float, factor float) AS changes ON changes.club_id = target.club_id",
+      json,
+    ),
+  );
+}
+
 interface DevelopmentClub extends Club {
   staff_ability: number;
   plan_focus: string;
@@ -837,6 +1407,7 @@ interface DevelopmentClub extends Club {
   plan_intensity: number;
   rehab_ability: number;
   league_reputation: number;
+  league_market: string | null;
 }
 
 export async function developPlayers(store: Store, random: seedrandom.PRNG) {
@@ -845,11 +1416,33 @@ export async function developPlayers(store: Store, random: seedrandom.PRNG) {
   const clubs = new Map(
     (
       await store.all<DevelopmentClub>(
-        `SELECT clubs.*, coalesce((SELECT avg(CONVERT(float,ability)) FROM staff WHERE staff.club_id = clubs.id AND role IN ('Head of youth','Assistant manager','Fitness coach','Goalkeeper coach')),50) AS staff_ability, coalesce((SELECT avg(CONVERT(float,ability)) FROM staff WHERE staff.club_id = clubs.id AND role = 'Physio'),50) AS rehab_ability, coalesce(training_plans.focus,'Balanced') AS plan_focus, coalesce(training_plans.youth_focus,'Technical') AS plan_youth, coalesce(training_plans.intensity,50) AS plan_intensity, coalesce(leagues.reputation,clubs.reputation) AS league_reputation FROM clubs LEFT JOIN training_plans ON training_plans.club_id = clubs.id LEFT JOIN leagues ON leagues.id = clubs.league_id WHERE clubs.type != 'national' ORDER BY clubs.id`,
+        `SELECT clubs.*, coalesce((SELECT avg(CONVERT(float,ability)) FROM staff WHERE staff.club_id = clubs.id AND role IN ('Head of youth','Assistant manager','Fitness coach','Goalkeeper coach')),50) AS staff_ability, coalesce((SELECT avg(CONVERT(float,ability)) FROM staff WHERE staff.club_id = clubs.id AND role = 'Physio'),50) AS rehab_ability, coalesce(training_plans.focus,'Balanced') AS plan_focus, coalesce(training_plans.youth_focus,'Technical') AS plan_youth, coalesce(training_plans.intensity,50) AS plan_intensity, coalesce(leagues.reputation,clubs.reputation) AS league_reputation, (SELECT code FROM countries WHERE countries.id = coalesce(leagues.country_id,clubs.country_id)) AS league_market FROM clubs LEFT JOIN training_plans ON training_plans.club_id = clubs.id LEFT JOIN leagues ON leagues.id = clubs.league_id WHERE clubs.type != 'national' ORDER BY clubs.id`,
       )
     ).map((club) => [club.id, club]),
   );
   const fallback = clubs.values().next().value!;
+  // Free agents and home-based pool players train in amateur football at home.
+  const amateurContext: DevelopmentClub = {
+    ...fallback,
+    staff_ability: 35,
+    rehab_ability: 35,
+    academy: 35,
+    facilities: 30,
+    chemistry: 50,
+    crisis: 0,
+    hype: 0,
+    momentum: 0,
+    plan_focus: "Balanced",
+    plan_youth: "Technical",
+    plan_intensity: 50,
+  };
+  const bodyRandom = seedrandom(`${state.seed}:body:${state.week}`);
+  const nationReputation = new Map(
+    (await store.all<{ id: number; reputation: number }>("SELECT id,reputation FROM countries")).map((row) => [row.id, row.reputation]),
+  );
+  const nationCode = new Map(
+    (await store.all<{ id: number; code: string }>("SELECT id,code FROM countries")).map((row) => [row.id, row.code]),
+  );
   let cursor = 0;
   while (true) {
     const batch = await store.all<Player>(
@@ -888,7 +1481,7 @@ export async function developPlayers(store: Store, random: seedrandom.PRNG) {
       cursor = player.id;
       const club = player.club_id
         ? (clubs.get(player.club_id) ?? fallback)
-        : fallback;
+        : amateurContext;
       const profile = profiles.get(player.id)!;
       let secondaryPosition: string | null = null;
       const age = ageOn(player.birth_date, state.date);
@@ -997,27 +1590,26 @@ export async function developPlayers(store: Store, random: seedrandom.PRNG) {
         }
         profileChanged = true;
       }
-      if (
-        age < 19 &&
-        !profile.development.growthSpurt &&
-        random() < (0.012 * Number(settings.youthRealism)) / 75
-      ) {
-        profile.identity.height += 2 + Math.floor(random() * 3);
-        profile.identity.weight += 2;
-        profile.development.growthSpurt = true;
-        profile.attributes.physical.strength = clamp(
-          profile.attributes.physical.strength + 3,
-        );
-        profile.attributes.physical.balance = clamp(
-          profile.attributes.physical.balance - 1,
-        );
-        profileChanged = true;
-        if (ownClub)
+      // Own-club bodies grow weekly; others every four weeks, when their profiles are rewritten anyway.
+      if (ownClub || state.week % 4 === 0) {
+        const wasSpurting = profile.development.growthSpurt;
+        const body = developBody(profile.identity, {
+          birthDate: player.birth_date,
+          from: addDays(state.date, ownClub ? -7 : -28),
+          to: state.date,
+          random: bodyRandom,
+          physicalTraining: effectiveFocus === "Physical",
+          fitness: player.fitness,
+          injured: Boolean(player.injury_until && player.injury_until > state.date),
+        });
+        profile.development.growthSpurt = body.spurt;
+        if (body.changed || body.spurt !== wasSpurting) profileChanged = true;
+        if (ownClub && body.spurt && !wasSpurting)
           await news(
             store,
             "Academy",
             `${player.name}: growth spurt`,
-            "Physical development has accelerated. Strength is improving, but coordination and training load need careful monitoring.",
+            `Now ${profile.identity.height} cm and growing quickly. Coordination and training load need careful monitoring until the spurt settles.`,
             "info",
             "academy",
           );
@@ -1079,7 +1671,7 @@ export async function developPlayers(store: Store, random: seedrandom.PRNG) {
               ability: round(ability),
               potential: round(potential),
             },
-          ].slice(-36);
+          ].slice(-24);
         const focus =
           effectiveFocus === "Youth development"
             ? dna === "Physical resilience"
@@ -1167,16 +1759,22 @@ export async function developPlayers(store: Store, random: seedrandom.PRNG) {
         1,
         99,
       );
+      // Club-less players (free agents, home-based pools) are priced in their nation's league market.
+      const clubless = player.club_id === null;
+      const market = profile.homeBased?.countryId ?? profile.registration?.lastAssociationId ?? player.country_id;
       const value = valuation(
         { ...player, ability, potential, age, injury_until: injury },
         {
           date: state.date,
-          leagueReputation: club.league_reputation,
-          balance: club.balance,
-          philosophy: club.philosophy,
+          leagueReputation: clubless
+            ? (nationReputation.get(market) ?? 30)
+            : club.league_reputation,
+          marketFactor: marketValueFactor(clubless ? nationCode.get(market) : club.league_market),
+          balance: clubless ? 0 : club.balance,
+          philosophy: clubless ? "" : club.philosophy,
           inflation: Number(settings.transferInflation),
-          crisis: club.crisis,
-          hype: club.hype,
+          crisis: clubless ? 0 : club.crisis,
+          hype: clubless ? 0 : club.hype,
         },
       ).value;
       const updatedProfile = profileChanged ? JSON.stringify(profile) : null;
@@ -1267,14 +1865,36 @@ async function weeklyFinances(store: Store) {
     );
     accountUpdates.length = 0;
   };
-  for (const club of await store.all<Club>(
-    "SELECT * FROM clubs WHERE type != 'national' ORDER BY id",
-  )) {
+  // The first week fixes each club's reference wage budget, so budget rebalancing cannot lower operating costs.
+  await store.run(
+    "UPDATE clubs SET data = JSON_MODIFY(coalesce(data,'{}'),'$.operatingWageBudget',wage_budget) WHERE type != 'national' AND JSON_VALUE(coalesce(data,'{}'),'$.operatingWageBudget') IS NULL",
+  );
+  const clubs = await store.all<Club & { wage_reference: number | null }>(
+    "SELECT *, TRY_CONVERT(float,JSON_VALUE(coalesce(data,'{}'),'$.operatingWageBudget')) AS wage_reference FROM clubs WHERE type != 'national' ORDER BY id",
+  );
+  const leagueSizes = new Map<number, number>();
+  for (const club of clubs)
+    leagueSizes.set(club.league_id ?? -1, (leagueSizes.get(club.league_id ?? -1) ?? 0) + 1);
+  for (const club of clubs) {
     const wages = (salaries.get(club.id) ?? 0) + (staffCosts.get(club.id) ?? 0);
-    const running = Math.round(
-      club.facilities ** 2 * 2.2 + club.academy ** 2 * 1.6,
-    );
     const league = leagues.get(club.league_id ?? -1);
+    const expected = estimateClubRevenue({
+      reputation: club.reputation,
+      leagueReputation: league?.reputation ?? club.reputation,
+      tier: league?.tier ?? 1,
+      capacity: club.capacity,
+      fanMood: 72,
+      homeMatches: Math.max(0, (leagueSizes.get(club.league_id ?? -1) ?? 1) - 1) + 2,
+    }).annualOperatingRevenue;
+    const operating = weeklyOperatingCosts({
+      annualRevenue: expected,
+      wageShare: (0.88 * (club.wage_reference ?? club.wage_budget) * 52) / Math.max(1, expected),
+      spendRatio: spendRatio(club.id, league?.tier ?? 1),
+      facilities: club.facilities,
+      academy: club.academy,
+      balance: club.balance,
+    });
+    const running = operating.total;
     const revenue = estimateClubRevenue({
       reputation: club.reputation,
       leagueReputation: league?.reputation ?? club.reputation,
@@ -1293,8 +1913,8 @@ async function weeklyFinances(store: Store) {
       club.id,
       income,
       wages,
-      club.facilities ** 2 * 2.2,
-      club.academy ** 2 * 1.6,
+      operating.facilities + operating.operations,
+      operating.academy,
     );
     const period = (await store.get<{ deficit: number }>(
       "SELECT GREATEST(0,wages + operating + amortization + agent_fees - revenue - sale_profit) AS deficit FROM financial_periods WHERE club_id = ? AND season = ?",
@@ -1446,7 +2066,7 @@ async function weeklyStaffAndPolitics(store: Store, random: seedrandom.PRNG) {
       "SELECT * FROM countries WHERE id = ?",
       troubled.country_id,
     ))!;
-    const nextManager = personName(random, country.language);
+    const nextManager = personName(random, country.code);
     const data = JSON.parse(troubled.data);
     data.managerCareer = [
       ...(data.managerCareer ?? []),
@@ -1835,7 +2455,7 @@ export async function worldTransfers(store: Store, random: seedrandom.PRNG) {
       "SELECT count(*) AS count FROM players WHERE club_id = ? AND age_group = 'Senior' AND role != 'Retired'",
       player.club_id,
     ))!.count;
-    if (sellerCount <= 18) continue;
+    if (sellerCount <= SQUAD_MINIMUMS.Senior) continue;
     if (
       player.position === "GK" &&
       (await store.get<{ count: number }>(
@@ -1873,7 +2493,7 @@ export async function worldTransfers(store: Store, random: seedrandom.PRNG) {
       buyer.id,
     );
     await store.run(
-      "UPDATE players SET club_id = ?, wage = ?, contract_end = ?, role = 'Squad player', morale = LEAST(99,morale + 4) WHERE id = ?",
+      "UPDATE players SET club_id = ?, squad_club_id = NULL, wage = ?, contract_end = ?, role = 'Squad player', morale = LEAST(99,morale + 4) WHERE id = ?",
       buyer.id,
       newWage,
       `${state.season + 4}-06-30`,
@@ -1904,6 +2524,7 @@ export async function worldTransfers(store: Store, random: seedrandom.PRNG) {
         fee,
       });
   }
+  activity.completed += await signClublessPlayers(store, state, Math.max(1, Math.round(quota / 2)), random);
   const recentOffers = (await store.get<{ total: number }>(
     "SELECT count(*) AS total FROM negotiations WHERE selling_club_id = ? AND buying_club_id != ? AND created >= ?",
     state.clubId,
@@ -2054,6 +2675,27 @@ export async function seasonRollover(store: Store) {
       table.push(entry);
       tables.set(entry.league_id, table);
     }
+    // Play-offs still open at rollover continue by seed from their current round.
+    const playoffResults = new Map<number, Map<string, PlayoffResult>>();
+    const champions = new Map<number, number>();
+    for (const competition of await store.all<League>(
+      "SELECT * FROM leagues WHERE kind = 'cup' AND JSON_VALUE(data,'$.key') IS NOT NULL AND TRY_CONVERT(int, JSON_VALUE(data,'$.season')) = ?",
+      oldSeason,
+    )) {
+      const playoff = JSON.parse(competition.data) as PlayoffData;
+      if (playoff.key === "title") {
+        const champion =
+          playoff.champion ??
+          (playoff.miniLeague
+            ? rankTable(tables.get(competition.id) ?? [])[0]?.club_id
+            : playoff.state && resolvePlayoffBySeed(playoff.state).winners[0]);
+        if (champion) champions.set(playoff.leagueId, champion);
+      } else if (playoff.state) {
+        const results = playoffResults.get(competition.country_id!) ?? new Map<string, PlayoffResult>();
+        results.set(playoff.key, playoff.state.result ?? resolvePlayoffBySeed(playoff.state));
+        playoffResults.set(competition.country_id!, results);
+      }
+    }
     const lastHistoryId = (await store.get<{ id: number }>(
       "SELECT coalesce(max(id),0) AS id FROM history WITH (UPDLOCK,HOLDLOCK)",
     ))!.id;
@@ -2069,88 +2711,57 @@ export async function seasonRollover(store: Store) {
       date: state.date,
       data: JSON.stringify({
         name: league.name,
-        table: tables.get(league.id) ?? [],
+        table: rankTable(tables.get(league.id) ?? [], JSON.parse(league.data).split),
+        ...(champions.has(league.id) ? { champion: champions.get(league.id) } : {}),
       }),
     }));
     for (let offset = 0; offset < archives.length; offset += 1000)
       await store.bulkInsert("history", archives.slice(offset, offset + 1000));
+    const shortfalls: Record<number, number> = {};
     for (const country of await store.all<Country>(
       "SELECT * FROM countries ORDER BY id",
     )) {
-      const divisions = await store.all<League>(
-        "SELECT * FROM leagues WHERE country_id = ? AND kind = 'league' AND age_group = 'Senior' AND tier > 0 AND coalesce(JSON_VALUE(data,'$.reserveOnly'),'false') NOT IN ('true','1') ORDER BY tier",
-        country.id,
+      const pyramid = await countryPyramid(store, country.id, oldSeason);
+      const countryShortfalls = new Map<number, number>();
+      const planned = planMovement(
+        {
+          ...pyramid,
+          results: playoffResults.get(country.id),
+        },
+        countryShortfalls,
       );
-      const orderedEntries = await store.all<{
-        league_id: number;
-        clubId: number;
-        parentId: number | null;
-      }>(
-        "SELECT standings.league_id,standings.club_id AS clubId,clubs.parent_id AS parentId FROM standings JOIN clubs ON clubs.id = standings.club_id JOIN leagues ON leagues.id = standings.league_id WHERE leagues.country_id = ? ORDER BY standings.league_id,points DESC,(gf-ga) DESC,gf DESC,club_id",
-        country.id,
-      );
-      const moves = planPyramidMoves(
-        country.code,
-        divisions.map((league) => {
-          const data = JSON.parse(league.data);
-          return {
-            id: league.id,
-            tier: league.tier,
-            promotion: Number(data.promotion ?? 2),
-            relegation: Number(data.relegation ?? 2),
-            entries: orderedEntries.filter(
-              (entry) => entry.league_id === league.id,
-            ),
-          };
-        }),
-      );
+      for (const [leagueId, short] of countryShortfalls) shortfalls[leagueId] = short;
+      // Only when a relegated parent cannot stay up either: the B-team leaves the senior pyramid (to === null).
+      for (const move of planned.filter((item) => item.to === null)) {
+        await store.run("DELETE FROM standings WHERE league_id = ? AND club_id = ?", move.from, move.clubId);
+        await store.run("UPDATE clubs SET league_id = NULL WHERE id = ?", move.clubId);
+      }
+      const moves = planned.filter((move) => move.to !== null);
+      for (const tier of pyramid.tiers)
+        if (JSON.parse(pyramid.leagues.find((league) => league.id === tier.leagueId)!.data).split)
+          await store.run("UPDATE standings SET group_name = '' WHERE league_id = ?", tier.leagueId);
       for (const move of moves) {
-        if (move.to === null) {
-          const name = `${country.name} Development League`;
-          move.to =
-            (
-              await store.get<{ id: number }>(
-                "SELECT id FROM leagues WHERE country_id = ? AND name = ? AND JSON_VALUE(data,'$.reserveOnly') IN ('true','1')",
-                country.id,
-                name,
-              )
-            )?.id ??
-            Number(
-              (
-                await store.run(
-                  "INSERT INTO leagues(name,country_id,confederation,tier,age_group,kind,reputation,format,data) VALUES (?,?,?,0,'Senior','league',?,'Double round-robin',?)",
-                  name,
-                  country.id,
-                  country.confederation,
-                  country.reputation * 0.5,
-                  JSON.stringify({
-                    reserveOnly: true,
-                    promotion: 0,
-                    relegation: 0,
-                  }),
-                )
-              ).lastInsertRowid,
-            );
-        }
+        const club = move.clubId;
+        const to = move.to!;
         await store.run(
           "DELETE FROM standings WHERE league_id = ? AND club_id = ?",
           move.from,
-          move.club,
+          club,
         );
         await store.run(
           "INSERT INTO standings(league_id,club_id) SELECT source.league_id,source.club_id FROM (VALUES (?,?)) AS source(league_id,club_id) WHERE NOT EXISTS (SELECT 1 FROM standings WITH (UPDLOCK,HOLDLOCK) WHERE standings.league_id = source.league_id AND standings.club_id = source.club_id)",
-          move.to,
-          move.club,
+          to,
+          club,
         );
         await store.run(
           "UPDATE clubs SET league_id = ?, reputation = LEAST(99,GREATEST(1,reputation + ?)), transfer_budget = transfer_budget * ?, fan_mood = LEAST(99,GREATEST(1,fan_mood + ?)) WHERE id = ?",
-          move.to,
+          to,
           move.promoted ? 4 : -4,
           move.promoted ? 1.25 : 0.7,
           move.promoted ? 15 : -15,
-          move.club,
+          club,
         );
-        if (move.club === state.clubId)
+        if (club === state.clubId)
           await news(
             store,
             "Club",
@@ -2174,68 +2785,24 @@ export async function seasonRollover(store: Store) {
         country.id,
       );
     }
+    // Read by the simulation check: boundaries that moved fewer clubs than their spec, per upper league.
+    await store.setMeta("movementAudit", { season: oldSeason + 1, shortfalls });
     await store.run(
       "UPDATE standings SET played = 0, wins = 0, draws = 0, losses = 0, gf = 0, ga = 0, points = 0, xg = 0, xga = 0, xpts = 0, form = '', home_record = '0-0-0', away_record = '0-0-0', deducted = 0",
     );
+    // Age groups follow the age at the season start: U17 until 17, U19 until 19.
+    const ageCutoff = (years: number) =>
+      `${Number(state.date.slice(0, 4)) - years}${state.date.slice(4)}`;
     await store.run(
-      "UPDATE players SET age_group = CASE WHEN age >= 19 THEN 'Senior' WHEN age >= 17 AND age_group = 'U17' THEN 'U19' ELSE age_group END, appearances = 0, minutes = 0, goals = 0, assists = 0 WHERE role != 'Retired'",
-    );
-    const retirements: { id: number }[] = [];
-    for (const player of await store.all<Player>(
-      "SELECT * FROM players WHERE age >= 37 AND role != 'Retired' ORDER BY id",
-    )) {
-      if (
-        random() < 0.25 + (player.age - 37) * 0.15 &&
-        !player.parent_club_id
-      ) {
-        retirements.push({ id: player.id });
-        if (player.club_id === state.clubId)
-          await news(
-            store,
-            "Squad",
-            `${player.name} retires`,
-            "The player has announced retirement. Their career record remains in the database.",
-            "important",
-            "squad",
-          );
-      }
-    }
-    await updateSimulationRows(
-      store,
-      "players",
-      retirements,
-      "id int",
-      "club_id = NULL, wage = 0, value = 0, role = 'Retired'",
+      "UPDATE players SET age_group = CASE WHEN birth_date <= ? THEN 'Senior' WHEN birth_date <= ? AND age_group = 'U17' THEN 'U19' ELSE age_group END, appearances = 0, minutes = 0, goals = 0, assists = 0 WHERE role != 'Retired'",
+      ageCutoff(19),
+      ageCutoff(17),
     );
     await store.run(
       "UPDATE clubs SET season_spend = 0, income = 0, spending = 0, board_confidence = LEAST(90,board_confidence + 5), transfer_budget = GREATEST(0,balance * 0.4 - (SELECT coalesce(sum(TRY_CONVERT(float,JSON_VALUE(data,'$.reservedBudget'))),0) FROM negotiations WHERE buying_club_id = clubs.id AND stage IN ('Scheduled','Medical','Registration'))), momentum = 0, crisis = 0, hype = 0 WHERE type != ?",
       "national",
     );
-    const academyClubs = await store.all<Club>(
-      "SELECT DISTINCT clubs.* FROM clubs JOIN standings ON standings.club_id = clubs.id JOIN leagues ON leagues.id = standings.league_id WHERE leagues.kind = 'league' AND leagues.age_group = 'U17' ORDER BY clubs.id",
-    );
-    const expandedWorld =
-      (await store.meta<{ expanded?: boolean }>("world")).expanded === true;
-    await generatePlayers(store, {
-      count: WORLD_COUNTS.annualRegens,
-      youth: true,
-      random,
-      countries: await store.all<Country>(
-        "SELECT * FROM countries ORDER BY id",
-      ),
-      clubs: academyClubs,
-      startDate: state.date,
-      regenStyle: String((await settingsOf(store)).regenStyle),
-      modernNames: expandedWorld,
-    });
-    const intakeCount =
-      WORLD_COUNTS.annualRegens +
-      (expandedWorld
-        ? await ensureClubRosters(store, {
-            clubs: academyClubs,
-            youthOnly: true,
-          })
-        : 0);
+    const intake = await runYouthIntake(store, oldSeason + 1, state.date, random);
     const latest = await stateOf(store);
     latest.season = oldSeason + 1;
     latest.worldTrend = [
@@ -2248,16 +2815,22 @@ export async function seasonRollover(store: Store) {
     await store.setMeta("state", latest);
     await store.setMeta("lastIntake", {
       date: state.date,
-      count: intakeCount,
+      count: intake.created,
+      academy: intake.academy,
+      topUps: intake.topUps,
+      pools: intake.pools,
+      retired: intake.retired,
+      leftFootball: intake.leftFootball,
     });
     await news(
       store,
       "World",
       `Welcome to ${latest.season}/${String(latest.season + 1).slice(-2)}`,
-      `${intakeCount.toLocaleString("en-US")} new academy players have entered the world. Promotions, relegations, league reputations and club budgets have been updated.`,
+      `${intake.academy.toLocaleString("en-US")} academy players aged 14-15 and ${intake.pools.toLocaleString("en-US")} home-based youngsters have entered the world, and ${intake.retired.toLocaleString("en-US")} players have retired. Promotions, relegations, league reputations and club budgets have been updated.`,
       "success",
       "academy",
     );
+    await pruneSeason(store, oldSeason, state.date);
   });
 }
 
@@ -2339,10 +2912,23 @@ export async function advance(store: Store, days: number) {
         state.date,
         state.season,
       );
-      for (const fixture of fixtures) {
+      const family = new Set(
+        (
+          await store.all<{ id: number }>(
+            "SELECT id FROM clubs WHERE id = ? OR parent_id = ?",
+            state.clubId,
+            state.clubId,
+          )
+        ).map((club) => club.id),
+      );
+      const followed = fixtures.filter((fixture) => followsFixture(fixture, family));
+      for (const fixture of followed) await playFixture(store, fixture);
+      for (const fixture of await playFixtureBatch(
+        store,
+        fixtures.filter((fixture) => !followed.includes(fixture)),
+      ))
         await playFixture(store, fixture);
-        played++;
-      }
+      played += fixtures.length;
       await dailyMedia(store);
       await expireLoans(store);
       await progressCompetitions(store, state.date);
@@ -2387,7 +2973,7 @@ export async function advance(store: Store, days: number) {
         "players",
         expired.map((player) => ({ id: player.id })),
         "id int",
-        "profile = JSON_MODIFY(JSON_MODIFY(target.profile,'$.registration',JSON_QUERY(coalesce(JSON_QUERY(target.profile,'$.registration'),N'{}'))),'$.registration.lastAssociationId',(SELECT country_id FROM clubs WHERE id = target.club_id)), club_id = NULL, wage = 0, value = 0, role = 'Free agent'",
+        "profile = JSON_MODIFY(JSON_MODIFY(target.profile,'$.registration',JSON_QUERY(coalesce(JSON_QUERY(target.profile,'$.registration'),N'{}'))),'$.registration.lastAssociationId',(SELECT CASE WHEN JSON_VALUE(clubs.data,'$.hosted.registration') = 'host' THEN coalesce((SELECT id FROM countries WHERE code = JSON_VALUE(clubs.data,'$.hosted.host')),clubs.country_id) ELSE clubs.country_id END FROM clubs WHERE clubs.id = target.club_id)), club_id = NULL, squad_club_id = NULL, wage = 0, value = 100, listed = 0, available_loan = 0, role = 'Free agent'",
       );
       for (const player of expired) {
         if (player.club_id === state.clubId)

@@ -30,17 +30,42 @@ describe("sporting director assistant", () => {
     store.transaction(async () => {
       await store.clearWorld();
       await store.schema();
-      await generateWorld(store, {
-        countryLimit: 2,
-        seniors: 1200,
-        youth: 400,
-      });
+      await generateWorld(store, { nations: ["EN", "ES"] });
       await store.run(
         "UPDATE clubs SET balance = 100000000, transfer_budget = 100000000, wage_budget = 10000000 WHERE id = 1",
       );
     }),
   );
   afterAll(async () => await store?.close());
+
+  it("gives every first team an assistant and a starter affiliate, and B-teams neither", async () => {
+    const count = async (sql: string) => (await store.get<{ total: number }>(sql))!.total;
+    expect(
+      await count(
+        "SELECT count(*) AS total FROM clubs WHERE type = 'club' AND NOT EXISTS (SELECT 1 FROM partnerships WHERE partnerships.club_id = clubs.id OR partnerships.partner_id = clubs.id)",
+      ),
+    ).toBe(0);
+    expect(
+      await count(
+        "SELECT count(*) AS total FROM partnerships JOIN clubs ON clubs.id = partnerships.club_id OR clubs.id = partnerships.partner_id WHERE clubs.type != 'club'",
+      ),
+    ).toBe(0);
+    expect(
+      await count(
+        "SELECT count(*) AS total FROM clubs WHERE type = 'club' AND NOT EXISTS (SELECT 1 FROM staff WHERE staff.club_id = clubs.id AND staff.role = 'Sporting director assistant')",
+      ),
+    ).toBe(0);
+    expect(
+      await count(
+        "SELECT count(*) AS total FROM staff JOIN clubs ON clubs.id = staff.club_id WHERE clubs.type = 'bteam' AND staff.role = 'Sporting director assistant'",
+      ),
+    ).toBe(0);
+    expect(
+      await count(
+        "SELECT count(*) AS total FROM partnerships WHERE JSON_VALUE(data,'$.origin') = 'initial' AND (JSON_VALUE(data,'$.annualFee') != '0' OR JSON_VALUE(data,'$.since') IS NULL)",
+      ),
+    ).toBe(0);
+  });
 
   it("keeps undelegated decisions with the director", async () => {
     const players = await store.all(
@@ -398,7 +423,7 @@ describe("unexpected club events", () => {
     store.transaction(async () => {
       await store.clearWorld();
       await store.schema();
-      await generateWorld(store, { countryLimit: 1, seniors: 900, youth: 200 });
+      await generateWorld(store, { nations: ["EN"] });
     }),
   );
   afterAll(async () => await store?.close());

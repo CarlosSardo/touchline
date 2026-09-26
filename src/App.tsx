@@ -341,9 +341,7 @@ function Shell() {
             <Crest name={club.name} color={club.color} size={31} />
             <span>
               <strong>{club.name}</strong>
-              <small>
-                {club.league_name?.replace(`${club.country_name} `, "")}
-              </small>
+              <small>{club.league_name}</small>
             </span>
             <ChevronDown size={12} className="muted" />
           </button>

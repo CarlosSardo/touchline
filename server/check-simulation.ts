@@ -7,8 +7,21 @@ import { generateWorld } from "./world.ts";
 import { checkSqlConstraints } from "./check-world.ts";
 import { advance } from "./simulation.ts";
 import { stateOf } from "./systems.ts";
-import { daysBetween } from "../shared/rules.ts";
-import type { MatchTeam, Position } from "../shared/types.ts";
+import { firstTeamCap, INTAKE, SQUAD_CAPS } from "./youth.ts";
+import {
+  clubRegistration,
+  familyResidence,
+  heldNationalities,
+  minorPresenceLegal,
+} from "./registration.ts";
+import { databaseFootprint, FOOTPRINT_BUDGET } from "./retention.ts";
+import { COMPETITIONS } from "./calendar.ts";
+import { continentalEntries } from "./qualification.ts";
+import { ageOn, daysBetween, VALUE_RANGE } from "../shared/rules.ts";
+import { clubCompetitionEligible } from "../shared/competition-rules.ts";
+import { boundaryMoves, readLeagueData, reserveTierAllowed } from "../shared/league-rules.ts";
+import { MIN_GOALKEEPERS, SQUAD_MINIMUMS } from "../shared/world-rules.ts";
+import type { MatchTeam, PlayerProfile, Position } from "../shared/types.ts";
 
 export const CALIBRATION_REFERENCE = {
   source: "openfootball/football.json",
@@ -175,7 +188,352 @@ export function calibrationSample(matches = 600) {
   return report;
 }
 
-export async function seasonSoak(seasons: number, fullWorld = false) {
+/** Default soak subset: B-teams and EU rules (PT), a cross-border club (NIR → IE), UK rules (SCO), a home pool (FO). */
+export const SOAK_NATIONS = ["PT", "IE", "NIR", "SCO", "FO"] as const;
+
+const activePlayers = async (store: Store) =>
+  (await store.get<{ total: number }>(
+    "SELECT count(*) AS total FROM players WHERE role != 'Retired'",
+  ))!.total;
+
+/** Same report as `npm run db:footprint`; a season growing the world by more than the budget is flagged. */
+export async function reportFootprint(store: Store, label: string, previousMB?: number) {
+  const [footprint] = await databaseFootprint(store);
+  const seasonMB = previousMB === undefined ? undefined : Math.round((footprint.worldMB - previousMB) * 10) / 10;
+  const over = seasonMB !== undefined && seasonMB > FOOTPRINT_BUDGET.seasonMB;
+  const largest = footprint.tables.slice(0, 4).map((table) => `${table.table} ${table.reservedMB}`).join(", ");
+  console.log(
+    `Footprint ${label}: world ${footprint.worldMB} MB, ${footprint.rows} rows` +
+      (seasonMB === undefined ? "" : `, ${seasonMB >= 0 ? "+" : ""}${seasonMB} MB this season`) +
+      (over ? ` OVER the ${FOOTPRINT_BUDGET.seasonMB} MB season budget` : "") +
+      ` (largest: ${largest})`,
+  );
+  if (over && process.env.GITHUB_ACTIONS === "true")
+    console.log(`::warning title=DB footprint::${label} added ${seasonMB} MB (budget ${FOOTPRINT_BUDGET.seasonMB} MB).`);
+  return { worldMB: footprint.worldMB, seasonMB };
+}
+
+/** Section 8 squad invariant: minimums with two goalkeepers everywhere, youth and AI first-team caps. */
+export async function checkSquads(store: Store, label: string) {
+  const state = await stateOf(store);
+  const rows = await store.all<{
+    id: number;
+    type: string;
+    parent_id: number | null;
+    league_code: string | null;
+    tier: number | null;
+    squad: "Senior" | "U19" | "U17";
+    players: number;
+    keepers: number;
+    contracted: number;
+  }>(
+    "SELECT clubs.id,clubs.type,clubs.parent_id,league_country.code AS league_code,leagues.tier,squads.squad,count(players.id) AS players,coalesce(sum(CASE WHEN players.position = 'GK' THEN 1 ELSE 0 END),0) AS keepers,coalesce(sum(CASE WHEN players.parent_club_id IS NULL THEN 1 ELSE 0 END),0) AS contracted FROM clubs CROSS APPLY (VALUES ('Senior'),('U19'),('U17')) AS squads(squad) LEFT JOIN leagues ON leagues.id = clubs.league_id LEFT JOIN countries AS league_country ON league_country.id = leagues.country_id LEFT JOIN players ON coalesce(players.squad_club_id,players.club_id) = clubs.id AND players.age_group = squads.squad AND players.role != 'Retired' WHERE clubs.type = 'club' OR (clubs.type = 'bteam' AND squads.squad = 'Senior') GROUP BY clubs.id,clubs.type,clubs.parent_id,league_country.code,leagues.tier,squads.squad",
+  );
+  const failures: string[] = [];
+  for (const row of rows) {
+    const minimum = row.type === "bteam" ? SQUAD_MINIMUMS.BTeam : SQUAD_MINIMUMS[row.squad];
+    if (row.players < minimum || row.keepers < MIN_GOALKEEPERS)
+      failures.push(`${row.type} ${row.id} ${row.squad}: ${row.players} players, ${row.keepers} GK`);
+    const ai = row.id !== state.clubId && row.parent_id !== state.clubId;
+    if (ai && row.squad !== "Senior" && row.contracted > SQUAD_CAPS.youth)
+      failures.push(`club ${row.id} ${row.squad}: ${row.contracted} over the youth cap`);
+    if (ai && row.type === "club" && row.squad === "Senior" && row.contracted > firstTeamCap(row.league_code, row.tier))
+      failures.push(`club ${row.id}: ${row.contracted} seniors over the AI cap`);
+  }
+  assert.equal(failures.length, 0, `Squad invariants failed (${label}): ${failures.slice(0, 8).join("; ")}`);
+  return rows.length;
+}
+
+/** Every minor's registration could have been made under Article 19 (nationality, residence, family move, 16+ EU/UK). */
+export async function checkMinors(store: Store, date: string) {
+  const cutoff = `${Number(date.slice(0, 4)) - 18}${date.slice(4)}`;
+  const codes = new Map((await store.all<{ id: number; code: string }>("SELECT id,code FROM countries")).map((row) => [row.id, row.code]));
+  const minors = await store.all<{
+    id: number;
+    birth_date: string;
+    code: string;
+    club_code: string;
+    club_data: string;
+    identity: string;
+    family: string | null;
+  }>(
+    "SELECT players.id,players.birth_date,countries.code,club_country.code AS club_code,clubs.data AS club_data,JSON_QUERY(players.profile,'$.identity') AS [identity],JSON_QUERY(players.profile,'$.familyMove') AS family FROM players JOIN countries ON countries.id = players.country_id JOIN clubs ON clubs.id = players.club_id JOIN countries AS club_country ON club_country.id = clubs.country_id WHERE players.birth_date > ? AND players.role != 'Retired' AND clubs.type != 'national'",
+    cutoff,
+  );
+  const illegal = minors.filter((minor) => {
+    const profile = {
+      identity: JSON.parse(minor.identity) as PlayerProfile["identity"],
+      ...(minor.family ? { familyMove: JSON.parse(minor.family) as PlayerProfile["familyMove"] } : {}),
+    };
+    return !minorPresenceLegal({
+      age: ageOn(minor.birth_date, date),
+      nationalities: heldNationalities(minor.code, profile),
+      destination: clubRegistration(minor.club_code, minor.club_data),
+      residence: familyResidence(profile, minor.birth_date, date, (id) => codes.get(id)),
+    });
+  });
+  assert.equal(illegal.length, 0, `Illegal U18 registrations on ${date}: players ${illegal.slice(0, 10).map((minor) => minor.id).join(",")}`);
+  return minors.length;
+}
+
+/** Heights of players under 21: within bounds, and never lower than at the previous check. */
+export async function checkYouthHeights(store: Store, date: string, previous: ReadonlyMap<number, number>) {
+  const cutoff = `${Number(date.slice(0, 4)) - 21}${date.slice(4)}`;
+  const rows = await store.all<{ id: number; height: number | null }>(
+    "SELECT id,TRY_CONVERT(float,JSON_VALUE(profile,'$.identity.height')) AS height FROM players WHERE birth_date > ? AND role != 'Retired'",
+    cutoff,
+  );
+  const failures = rows.filter(
+    (row) => row.height === null || row.height < 125 || row.height > 210 || row.height < (previous.get(row.id) ?? 0),
+  );
+  assert.equal(failures.length, 0, `Youth height invariants failed on ${date}: players ${failures.slice(0, 10).map((row) => `${row.id}=${row.height}`).join(",")}`);
+  return new Map(rows.map((row) => [row.id, row.height!]));
+}
+
+export interface SeniorPlace {
+  league_id: number;
+  club_id: number;
+}
+
+/** Senior domestic league place of every club (one standings row per club and league). */
+export const seniorPlaces = (store: Store) =>
+  store.all<SeniorPlace>(
+    "SELECT standings.league_id,standings.club_id FROM standings JOIN leagues ON leagues.id = standings.league_id WHERE leagues.kind = 'league' AND leagues.age_group = 'Senior'",
+  );
+
+export const leagueSizes = (places: readonly SeniorPlace[]) => {
+  const sizes = new Map<number, number>();
+  for (const place of places) sizes.set(place.league_id, (sizes.get(place.league_id) ?? 0) + 1);
+  return sizes;
+};
+
+/**
+ * Section 8 invariant 6 after a rollover: league sizes as at world start, closed tiers unchanged, moves per boundary
+ * equal to the movement spec (less the planner's recorded shortfalls, plus B-team ceiling swaps), B-teams below
+ * their parent.
+ */
+export async function checkMovement(store: Store, before: readonly SeniorPlace[], initialSizes: ReadonlyMap<number, number>) {
+  const state = await stateOf(store);
+  const after = await seniorPlaces(store);
+  const audit = await store.meta<{ season: number; shortfalls: Record<string, number> }>("movementAudit");
+  assert.equal(audit.season, state.season, "The rollover did not record its movement audit");
+  const leagues = await store.all<{ id: number; name: string; country_id: number | null; tier: number; data: string }>(
+    "SELECT id,name,country_id,tier,data FROM leagues WHERE kind = 'league' AND age_group = 'Senior'",
+  );
+  const failures: string[] = [];
+  const sizes = leagueSizes(after);
+  for (const league of leagues)
+    if ((sizes.get(league.id) ?? 0) !== (initialSizes.get(league.id) ?? 0))
+      failures.push(`${league.name} has ${sizes.get(league.id) ?? 0} clubs (${initialSizes.get(league.id) ?? 0} at world start)`);
+  const raw = new Map(leagues.map((league) => [league.id, JSON.parse(league.data) as Record<string, unknown>]));
+  const own = leagues.filter((league) => league.tier > 0 && !["true", true, 1].includes(raw.get(league.id)!.reserveOnly as string));
+  const byId = new Map(leagues.map((league) => [league.id, league]));
+  const from = new Map(before.map((place) => [place.club_id, place.league_id]));
+  const to = new Map(after.map((place) => [place.club_id, place.league_id]));
+  const parents = new Map(
+    (await store.all<{ id: number; parent_id: number; data: string }>(
+      "SELECT id,parent_id,data FROM clubs WHERE type = 'bteam' AND parent_id IS NOT NULL",
+    )).map((club) => [club.id, club]),
+  );
+  const tierAfter = (clubId: number) => byId.get(to.get(clubId) ?? 0)?.tier;
+  for (const league of own) {
+    const neighbour = (tier: number) =>
+      raw.get(own.find((entry) => entry.country_id === league.country_id && entry.tier === tier)?.id ?? 0);
+    const format = readLeagueData(raw.get(league.id)!, league.tier, { above: neighbour(league.tier - 1), below: neighbour(league.tier + 1) });
+    const lower = own.find((entry) => entry.country_id === league.country_id && entry.tier === league.tier + 1);
+    if (format.closed) {
+      const changed = [...from, ...to].filter(
+        ([clubId, leagueId]) => leagueId === league.id && (from.get(clubId) !== league.id || to.get(clubId) !== league.id),
+      );
+      if (changed.length) failures.push(`closed ${league.name} changed: clubs ${[...new Set(changed.map(([clubId]) => clubId))].slice(0, 6).join(",")}`);
+    }
+    if (!lower || !format.movementDown || format.closed || readLeagueData(raw.get(lower.id)!, lower.tier).closed) continue;
+    // Clubs crossing this boundary, whatever tier they came from or went to.
+    const crossing = (downwards: boolean) =>
+      [...to.keys()].filter((clubId) => {
+        const origin = byId.get(from.get(clubId) ?? 0);
+        const destination = byId.get(to.get(clubId)!)!;
+        if (!origin || origin.country_id !== league.country_id || destination.country_id !== league.country_id) return false;
+        return downwards
+          ? origin.tier <= league.tier && destination.tier > league.tier
+          : origin.tier > league.tier && destination.tier <= league.tier;
+      });
+    const up = crossing(false);
+    const down = crossing(true);
+    const pushed = down.filter((clubId) => {
+      const parent = parents.get(clubId)?.parent_id;
+      return parent !== undefined && (tierAfter(parent) ?? 0) >= byId.get(from.get(clubId)!)!.tier;
+    }).length;
+    const fixed = boundaryMoves(format.movementDown);
+    const short = audit.shortfalls[league.id] ?? 0;
+    if (
+      up.length !== down.length ||
+      up.length < fixed.up - short ||
+      down.length < fixed.down - short ||
+      up.length > fixed.up + fixed.cross + pushed ||
+      down.length > fixed.down + fixed.cross + pushed
+    )
+      failures.push(
+        `${league.name} / ${lower.name}: ${up.length} up, ${down.length} down (spec ${fixed.up} up, ${fixed.down} down, ${fixed.cross} cross-tier; recorded shortfall ${short}; ${pushed} B-team ceiling moves)`,
+      );
+  }
+  for (const club of parents.values()) {
+    const league = byId.get(to.get(club.id) ?? 0);
+    const parent = byId.get(to.get(club.parent_id) ?? 0);
+    if (!league || !parent || league.country_id !== parent.country_id || !own.includes(league) || !own.includes(parent)) continue;
+    const pyramid = JSON.parse(club.data).reservePolicy?.pyramid;
+    const legal = pyramid
+      ? reserveTierAllowed(
+          { parentId: club.parent_id, highestTier: Number(pyramid.highestTier), minGapBelowParent: Number(pyramid.minGapBelowParent) },
+          league.tier,
+          parent.tier,
+        )
+      : league.tier > parent.tier;
+    if (!legal) failures.push(`B-team ${club.id} in ${league.name} (tier ${league.tier}), parent in ${parent.name} (tier ${parent.tier})`);
+  }
+  assert.equal(failures.length, 0, `Movement invariants failed after the ${state.season} rollover: ${failures.slice(0, 8).join("; ")}`);
+  return { leagues: leagues.length, moved: [...to].filter(([clubId, leagueId]) => from.get(clubId) !== leagueId).length };
+}
+
+/**
+ * Section 8 invariant 7 for the season the rollover created: entries equal the access lists (recomputed in calendar
+ * order), no Russian club, no OFC club competition, Liechtenstein clubs only as the cup winner in UECL Q1, no club in
+ * two senior club competitions.
+ */
+export async function checkContinentalEntries(store: Store) {
+  const { season } = await stateOf(store);
+  const failures: string[] = [];
+  const codes = new Map(
+    (await store.all<{ id: number; code: string }>(
+      "SELECT clubs.id,countries.code FROM clubs JOIN countries ON countries.id = clubs.country_id",
+    )).map((row) => [row.id, row.code]),
+  );
+  const ofc = await store.all<{ name: string }>("SELECT name FROM leagues WHERE kind = 'continental' AND confederation = 'OFC'");
+  if (ofc.length) failures.push(`OFC club competitions: ${ofc.map((league) => league.name).join(", ")}`);
+  const used = new Set<number>();
+  const entered = new Map<number, string>();
+  let total = 0;
+  for (const spec of COMPETITIONS) {
+    const catalog = spec.catalog;
+    if (!catalog) continue;
+    const separate = Boolean(catalog.feeder) || catalog.kind === "super" || spec.age !== "Senior";
+    const expected = (await continentalEntries(store, catalog.id, season, separate ? new Set() : used)).filter(
+      (entry) => clubCompetitionEligible(entry.club, spec.kind, season),
+    );
+    if (!separate) for (const entry of expected) used.add(entry.club.id);
+    const main = await store.get<{ data: string }>("SELECT data FROM leagues WHERE name = ? AND country_id IS NULL", spec.name);
+    const data = JSON.parse(main?.data ?? "{}") as { season?: number; qualification?: { clubId: number; stage: string }[] };
+    if (data.season !== season) {
+      if (expected.length) failures.push(`${spec.name} was not created for ${season} (${expected.length} clubs qualify)`);
+      continue;
+    }
+    if (!Array.isArray(data.qualification)) continue;
+    const entries = data.qualification;
+    total += entries.length;
+    const want = expected.map((entry) => `${entry.club.id}:${entry.stage}`).sort();
+    const got = entries.map((entry) => `${entry.clubId}:${entry.stage}`).sort();
+    if (want.join() !== got.join())
+      failures.push(
+        `${spec.name}: ${got.length} entries, access list ${want.length} (missing ${want.filter((key) => !got.includes(key)).slice(0, 4).join(",")}; extra ${got.filter((key) => !want.includes(key)).slice(0, 4).join(",")})`,
+      );
+    if (new Set(entries.map((entry) => entry.clubId)).size !== entries.length) failures.push(`${spec.name}: a club is listed twice`);
+    const russian = entries.filter((entry) => codes.get(entry.clubId) === "RU");
+    if (russian.length) failures.push(`${spec.name}: Russian clubs ${russian.map((entry) => entry.clubId).join(",")}`);
+    const liechtenstein = entries.filter((entry) => codes.get(entry.clubId) === "LI");
+    if (liechtenstein.length && (spec.name !== "UEFA Conference League" || liechtenstein.length > 1 || liechtenstein[0].stage !== "q1"))
+      failures.push(`${spec.name}: Liechtenstein entries ${liechtenstein.map((entry) => `${entry.clubId}:${entry.stage}`).join(",")}`);
+    if (entries.filter((entry) => entry.stage === "main").length > catalog.teams)
+      failures.push(`${spec.name}: more direct entrants than its ${catalog.teams} places`);
+    if (separate) continue;
+    for (const entry of entries) {
+      if (entered.has(entry.clubId)) failures.push(`club ${entry.clubId} in ${entered.get(entry.clubId)} and ${spec.name}`);
+      entered.set(entry.clubId, spec.name);
+    }
+  }
+  assert.equal(failures.length, 0, `Continental entries for ${season} failed: ${failures.slice(0, 8).join("; ")}`);
+  return total;
+}
+
+/** Forfeits (sides below seven eligible players) may not exceed this share of the season's played fixtures. */
+export const FORFEIT_LIMIT = 0.005;
+
+/** Forfeits of one finished season, with the worst clubs and age groups. */
+export async function checkForfeits(store: Store, season: number) {
+  const fixtures = (await store.get<{ total: number }>(
+    "SELECT count(*) AS total FROM fixtures WHERE season = ? AND status = 'played'",
+    season,
+  ))!.total;
+  const rows = await store.all<{ club_id: number; name: string; age_group: string; forfeits: number }>(
+    "SELECT forfeited.club_id,clubs.name,forfeited.age_group,count(*) AS forfeits FROM (SELECT CASE WHEN TRY_CONVERT(int,JSON_VALUE(fixtures.data,'$.awarded.home')) = 0 THEN fixtures.home_id ELSE fixtures.away_id END AS club_id,coalesce(leagues.age_group,'Senior') AS age_group FROM fixtures LEFT JOIN leagues ON leagues.id = fixtures.league_id WHERE fixtures.season = ? AND fixtures.status = 'played' AND JSON_QUERY(fixtures.data,'$.awarded') IS NOT NULL) AS forfeited JOIN clubs ON clubs.id = forfeited.club_id GROUP BY forfeited.club_id,clubs.name,forfeited.age_group ORDER BY count(*) DESC,forfeited.club_id",
+    season,
+  );
+  const forfeits = rows.reduce((total, row) => total + row.forfeits, 0);
+  const ageGroups: Record<string, number> = {};
+  for (const row of rows) ageGroups[row.age_group] = (ageGroups[row.age_group] ?? 0) + row.forfeits;
+  const worst = rows.slice(0, 5).map((row) => `${row.name} (${row.club_id}) ${row.age_group} ${row.forfeits}`);
+  const report = { season, fixtures, forfeits, rate: Math.round((forfeits / Math.max(1, fixtures)) * 10_000) / 10_000, ageGroups, worst };
+  assert(
+    forfeits <= fixtures * FORFEIT_LIMIT,
+    `Forfeits in ${season}: ${forfeits} of ${fixtures} fixtures (limit ${FORFEIT_LIMIT * 100}%); by age group ${JSON.stringify(ageGroups)}; worst ${worst.join("; ")}`,
+  );
+  return report;
+}
+
+/**
+ * Rollover checks: movement (invariant 6), the new season's continental entries (7), intake 5-12 per club aged
+ * 14-15, squads, population ±10%, values and wages in bounds, and the finished season's forfeits.
+ */
+export async function checkRollover(
+  store: Store,
+  initialPlayers: number,
+  heights: ReadonlyMap<number, number>,
+  movement: { before: readonly SeniorPlace[]; initialSizes: ReadonlyMap<number, number> },
+) {
+  const state = await stateOf(store);
+  const moved = await checkMovement(store, movement.before, movement.initialSizes);
+  const continental = await checkContinentalEntries(store);
+  const intake = await store.meta<{ season: number; clubs: Record<string, number> }>("youthIntake");
+  assert.equal(intake.season, state.season, "Youth intake did not run for the new season");
+  const clubs = await store.all<{ id: number }>("SELECT id FROM clubs WHERE type = 'club'");
+  const outside = clubs.filter((club) => {
+    const count = intake.clubs[club.id] ?? 0;
+    return count < INTAKE.min || count > INTAKE.max;
+  });
+  assert.equal(outside.length, 0, `Intake outside ${INTAKE.min}-${INTAKE.max} at clubs ${outside.slice(0, 10).map((club) => club.id).join(",")}`);
+  const cutoff = (years: number) => `${Number(state.date.slice(0, 4)) - years}${state.date.slice(4)}`;
+  const wrongAge = (await store.get<{ total: number }>(
+    "SELECT count(*) AS total FROM players WHERE JSON_VALUE(profile,'$.intake.source') = 'academy' AND JSON_VALUE(profile,'$.intake.season') = ? AND (birth_date > ? OR birth_date <= ?)",
+    String(state.season),
+    cutoff(14),
+    cutoff(16),
+  ))!.total;
+  assert.equal(wrongAge, 0, "Academy intake players must be aged 14-15");
+  await checkSquads(store, `after the ${state.season} rollover`);
+  const players = await activePlayers(store);
+  const flows = await store.meta<{ count: number; retired: number; leftFootball: number }>("lastIntake");
+  assert(
+    Math.abs(players - initialPlayers) <= initialPlayers * 0.1,
+    `Population ${players} is more than 10% from the initial ${initialPlayers} (rollover: ${flows.count} created, ${flows.retired} retired, ${flows.leftFootball} left football)`,
+  );
+  const badMoney = (await store.get<{ total: number }>(
+    `SELECT count(*) AS total FROM players WHERE role != 'Retired' AND (value IS NULL OR value < ${VALUE_RANGE.min} OR value > ${VALUE_RANGE.max} OR wage IS NULL OR wage < 0 OR wage > 1200000)`,
+  ))!.total;
+  assert.equal(badMoney, 0, "Player values or wages outside the section 8 bounds");
+  const minors = await checkMinors(store, state.date);
+  const forfeits = await checkForfeits(store, state.season - 1);
+  return {
+    season: state.season,
+    players,
+    academy: Object.values(intake.clubs).reduce((total, count) => total + count, 0),
+    minors,
+    moved: moved.moved,
+    continentalEntries: continental,
+    forfeits,
+    heights: await checkYouthHeights(store, state.date, heights),
+  };
+}
+
+export async function seasonSoak(seasons: number, fullWorld = false, nations: readonly string[] = SOAK_NATIONS) {
   assert(
     Number.isInteger(seasons) && seasons > 0,
     "Choose a positive number of seasons",
@@ -187,32 +545,58 @@ export async function seasonSoak(seasons: number, fullWorld = false) {
       "Simulation checks cannot use gameplay schemas",
     );
     await store.schema();
-    await generateWorld(
-      store,
-      fullWorld ? {} : { countryLimit: 2, seniors: 2200, youth: 800 },
-    );
+    await generateWorld(store, fullWorld ? {} : { nations: [...nations] });
     await store.setMeta("settings", {
       ...(await store.meta<Record<string, unknown>>("settings")),
       autosave: "off",
     });
     const end = `${2026 + seasons}-07-02`;
-    let expectedPlayers = (await store.get<{ total: number }>(
-      "SELECT count(*) AS total FROM players",
-    ))!.total;
+    const initialPlayers = await activePlayers(store);
+    const initialSizes = leagueSizes(await seniorPlaces(store));
+    const generated = await reportFootprint(store, "after generation");
+    let worldMB = generated.worldMB;
+    await checkSquads(store, "world start");
+    await checkMinors(store, (await stateOf(store)).date);
+    let heights = await checkYouthHeights(store, (await stateOf(store)).date, new Map());
+    const rollovers: (Omit<Awaited<ReturnType<typeof checkRollover>>, "heights"> & { worldMB: number; seasonMB: number | undefined })[] = [];
     let simulated = 0;
     let weeks = 0;
+    let advanceSeconds = 0;
+    const timing = () => {
+      const perWeek = advanceSeconds / Math.max(1, weeks);
+      return {
+        matchesPerSecond: Math.round((simulated / Math.max(0.01, advanceSeconds)) * 10) / 10,
+        secondsPerWeek: Math.round(perWeek * 10) / 10,
+        // First-order scaling by fixture volume: ~110k fixtures a season in the full v4 world.
+        fullWorldSecondsPerWeek: Math.round((perWeek * (110_000 / 52)) / Math.max(1, simulated / Math.max(1, weeks))),
+      };
+    };
     while ((await stateOf(store)).date < end) {
       const current = await stateOf(store);
       if (current.gameOver)
         await store.setMeta("state", { ...current, gameOver: false });
-      const result = await advance(
-        store,
-        Math.min(7, daysBetween(current.date, end)),
+      // Steps end on 1 July so every rollover is checked on the day it runs.
+      const step = Math.min(
+        7,
+        daysBetween(current.date, end),
+        Math.max(1, daysBetween(current.date, `${current.season + 1}-07-01`)),
       );
-      if ((await stateOf(store)).season !== current.season)
-        expectedPlayers += (await store.meta<{ count: number }>("lastIntake"))
-          .count;
+      const before =
+        daysBetween(current.date, `${current.season + 1}-07-01`) <= step ? await seniorPlaces(store) : undefined;
+      const result = await advance(store, step);
+      if ((await stateOf(store)).season !== current.season) {
+        assert(before, "A rollover ran before the step that reaches 1 July");
+        const { heights: next, ...summary } = await checkRollover(store, initialPlayers, heights, { before, initialSizes });
+        heights = next;
+        console.log(
+          `Rollover ${summary.season}: ${summary.players} players, ${summary.academy} academy intake, ${summary.minors} minors checked, ${summary.moved} clubs moved, ${summary.continentalEntries} continental entries, ${summary.forfeits.forfeits} forfeits in ${summary.forfeits.fixtures} fixtures`,
+        );
+        const footprint = await reportFootprint(store, `after the ${summary.season} rollover`, worldMB);
+        worldMB = footprint.worldMB;
+        rollovers.push({ ...summary, ...footprint });
+      }
       simulated += result.matches;
+      advanceSeconds += result.seconds;
       weeks++;
       const invalid = (await store.get<{ total: number }>(
         "SELECT count(*) AS total FROM players WHERE ability < 1 OR ability > 99 OR potential < ability OR potential > 99 OR morale < 0 OR morale > 100",
@@ -222,26 +606,26 @@ export async function seasonSoak(seasons: number, fullWorld = false) {
         "SELECT count(*) AS total FROM standings WHERE played != wins + draws + losses OR points != wins * 3 + draws - deducted",
       ))!.total;
       assert.equal(badTable, 0, `Table conservation failed on ${result.date}`);
-      if (weeks % 13 === 0)
+      if (weeks % 13 === 0) {
+        const { matchesPerSecond, secondsPerWeek, fullWorldSecondsPerWeek } = timing();
         console.log(
-          `Soak ${result.date}: ${simulated} matches; ${(await store.get<{ total: number }>("SELECT count(*) AS total FROM players"))!.total} player records`,
+          `Soak ${result.date}: ${simulated} matches; ${await activePlayers(store)} active players; ${matchesPerSecond} matches/s, ${secondsPerWeek} s per simulated week (full world ≈ ${fullWorldSecondsPerWeek} s/week)`,
         );
+      }
     }
-    assert.equal(
-      (await store.get<{ total: number }>(
-        "SELECT count(*) AS total FROM players",
-      ))!.total,
-      expectedPlayers,
-    );
+    assert.equal(rollovers.length, seasons, "Every season must roll over");
     await checkSqlConstraints(store);
     const result = {
       seasons,
       fullWorld,
+      nations: fullWorld ? "all" : nations.join(","),
       date: (await stateOf(store)).date,
       matches: simulated,
-      players: (await store.get<{ total: number }>(
-        "SELECT count(*) AS total FROM players",
-      ))!.total,
+      timing: timing(),
+      initialPlayers,
+      players: await activePlayers(store),
+      generatedWorldMB: generated.worldMB,
+      rollovers,
       archivedLeagueSeasons: (await store.get<{ total: number }>(
         "SELECT count(*) AS total FROM history WHERE entity_type = 'league'",
       ))!.total,
@@ -266,12 +650,17 @@ if (
       ?.split("=")[1] ?? 0,
   );
   const fullWorld = process.argv.includes("--full-world");
+  const nations = process.argv
+    .find((value) => value.startsWith("--nations="))
+    ?.split("=")[1]
+    ?.split(",")
+    .filter(Boolean);
   const start = performance.now();
   console.log(
     JSON.stringify(
       {
         calibration: calibrationSample(),
-        ...(seasons > 0 ? { soak: await seasonSoak(seasons, fullWorld) } : {}),
+        ...(seasons > 0 ? { soak: await seasonSoak(seasons, fullWorld, nations?.length ? nations : SOAK_NATIONS) } : {}),
         seconds: Math.round((performance.now() - start) / 1000),
       },
       null,

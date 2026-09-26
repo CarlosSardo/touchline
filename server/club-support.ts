@@ -1,7 +1,8 @@
 import seedrandom from "seedrandom";
 import { z } from "zod";
 import type { Store } from "./db.ts";
-import { personName } from "./world.ts";
+import { personName, weightedIndex } from "./people.ts";
+import { nationByCode } from "../shared/world-catalog/index.ts";
 import {
   ASSISTANT_DUTIES,
   ASSISTANT_ROLE,
@@ -45,17 +46,18 @@ import {
 export async function ensureClubSupport(store: Store) {
   if (!(await store.get("SELECT [key] FROM meta WHERE [key] = 'state'")))
     return;
-  const clubs = await store.all<Club & { language: string }>(
-    "SELECT clubs.*,countries.language FROM clubs JOIN countries ON countries.id = clubs.country_id WHERE clubs.type != 'national' ORDER BY clubs.id",
+  // First teams only: B-teams share their parent's staff and are never affiliates of it.
+  const clubs = await store.all<SupportClub>(
+    "SELECT clubs.*,countries.code,countries.reputation AS nation_reputation,coalesce(leagues.tier,9) AS tier FROM clubs JOIN countries ON countries.id = clubs.country_id LEFT JOIN leagues ON leagues.id = clubs.league_id WHERE clubs.type = 'club' ORDER BY clubs.reputation DESC,clubs.id",
   );
   if (!clubs.length) return;
   const state = await store.meta<GameState>("state");
-  const countries = new Map<number, Club[]>();
-  for (const club of clubs.filter((entry) => entry.type === "club"))
-    countries.set(club.country_id, [
-      ...(countries.get(club.country_id) ?? []),
-      club,
-    ]);
+  const countries = new Map<number, SupportClub[]>();
+  const byCode = new Map<string, SupportClub[]>();
+  for (const club of clubs) {
+    countries.set(club.country_id, [...(countries.get(club.country_id) ?? []), club]);
+    byCode.set(club.code, [...(byCode.get(club.code) ?? []), club]);
+  }
   await store.transaction(async () => {
     await store.run(
       "UPDATE partnerships SET data = JSON_MODIFY(data,'$.since',coalesce(JSON_VALUE(data,'$.established'),?)) WHERE JSON_VALUE(data,'$.origin') = 'initial' AND JSON_VALUE(data,'$.since') IS NULL",
@@ -93,7 +95,7 @@ export async function ensureClubSupport(store: Store) {
         );
         assistantRows.push([
           club.id,
-          personName(random, club.language),
+          personName(random, club.code),
           ASSISTANT_ROLE,
           ability,
           55,
@@ -116,20 +118,13 @@ export async function ensureClubSupport(store: Store) {
       }
       supportRows.push([club.id, JSON.stringify(DEFAULT_ASSISTANT_DUTIES)]);
       if (linked.has(club.id)) continue;
-      const candidates = (
-        countries.get(club.country_id) ??
-        clubs.filter((entry) => entry.type === "club")
-      ).filter((entry) => entry.id !== club.id);
-      const partner =
-        candidates.find((entry) => entry.id === club.parent_id) ??
-        candidates.sort(
-          (left, right) =>
-            Number(left.league_id === club.league_id) -
-              Number(right.league_id === club.league_id) ||
-            Math.abs(left.reputation - club.reputation + 10) -
-              Math.abs(right.reputation - club.reputation + 10) ||
-            left.id - right.id,
-        )[0];
+      const partner = starterPartner(
+        club,
+        countries.get(club.country_id) ?? [],
+        byCode,
+        linked,
+        seedrandom(`${state.seed}:affiliate:${club.id}`),
+      );
       if (partner) {
         partnershipRows.push([
           club.id,
@@ -171,6 +166,46 @@ export async function ensureClubSupport(store: Store) {
         unexpectedEvents: "medium",
       });
   });
+}
+
+interface SupportClub extends Club {
+  code: string;
+  nation_reputation: number;
+  tier: number;
+}
+
+/**
+ * Starter affiliate: usually a domestic club about a level below; about a third of leading top-flight clubs
+ * instead partner a club in a heritage-linked nation (France–Senegal, Portugal–Brazil, Spain–Argentina...).
+ */
+function starterPartner(
+  club: SupportClub,
+  domestic: readonly SupportClub[],
+  byCode: ReadonlyMap<string, readonly SupportClub[]>,
+  linked: ReadonlySet<number>,
+  random: () => number,
+) {
+  const closest = (list: readonly SupportClub[], target: number) =>
+    [...list].sort(
+      (left, right) =>
+        Number(linked.has(left.id)) - Number(linked.has(right.id)) ||
+        Number(left.league_id === club.league_id) - Number(right.league_id === club.league_id) ||
+        Math.abs(left.reputation - target) - Math.abs(right.reputation - target) ||
+        left.id - right.id,
+    )[0];
+  if (club.tier === 1 && club.reputation >= 60 && random() < 0.3) {
+    const links = (nationByCode(club.code)?.nationality.links ?? []).filter(
+      (link) => link.code !== club.code && byCode.has(link.code),
+    );
+    if (links.length) {
+      const code = links[weightedIndex(links.map((link) => link.weight), random())].code;
+      const abroad = byCode.get(code)!.filter((entry) => entry.tier <= 2 && !linked.has(entry.id));
+      const stronger = (abroad[0]?.nation_reputation ?? 0) > club.nation_reputation;
+      const partner = abroad.length ? closest(abroad, club.reputation + (stronger ? 5 : -15)) : undefined;
+      if (partner) return partner;
+    }
+  }
+  return closest(domestic.filter((entry) => entry.id !== club.id), club.reputation - 12);
 }
 
 export async function clubAffiliates(
@@ -493,7 +528,8 @@ export async function processAssistant(store: Store, requested = false) {
   const targets =
     desk.duties.shortlist || desk.duties.scouting
       ? await store.all<Player>(
-          "SELECT TOP (3) * FROM players WHERE (club_id IS NULL OR club_id != ?) AND parent_club_id IS NULL AND role != 'Retired' AND age BETWEEN 18 AND 25 AND value <= ? AND ability BETWEEN ? AND ? ORDER BY shortlisted DESC,(potential - ability) DESC,ability DESC,id",
+          "SELECT TOP (3) * FROM players WHERE (club_id IS NULL OR club_id NOT IN (SELECT id FROM clubs WHERE id = ? OR parent_id = ?)) AND parent_club_id IS NULL AND role != 'Retired' AND age BETWEEN 18 AND 25 AND value <= ? AND ability BETWEEN ? AND ? ORDER BY shortlisted DESC,(potential - ability) DESC,ability DESC,id",
+          club.id,
           club.id,
           Math.max(0, club.transfer_budget),
           Math.max(1, average - 8),

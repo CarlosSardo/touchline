@@ -1,7 +1,5 @@
 import { useDeferredValue, useState } from "react";
 import {
-  ArrowDownWideNarrow,
-  ArrowUpNarrowWide,
   Bookmark,
   ChevronLeft,
   ChevronRight,
@@ -23,6 +21,8 @@ import {
   PageHeading,
   Panel,
   PlayerTable,
+  SortDirectionButton,
+  type PlayerTableColumn,
 } from "../ui.tsx";
 import {
   ATTRIBUTE_GROUPS,
@@ -32,6 +32,46 @@ import {
   POSITIONS,
 } from "../../shared/rules.ts";
 import type { PlayerPage } from "../../shared/api.ts";
+import {
+  PLAYER_COLUMNS,
+  type PlayerSortKey,
+  type SortDirection,
+  type SortState,
+} from "../sort.ts";
+
+type DatabaseSortKey = PlayerSortKey | "minutes";
+const SORT_OPTIONS: [DatabaseSortKey, string][] = [
+  ["ability", "Ability"],
+  ["potential", "Potential"],
+  ["value", "Value"],
+  ["age", "Age"],
+  ["name", "Name"],
+  ["position", "Position"],
+  ["nationality", "Nationality"],
+  ["club", "Club"],
+  ["wage", "Wage"],
+  ["contract", "Contract expiry"],
+  ["height", "Height"],
+  ["weight", "Weight"],
+  ["form", "Form"],
+  ["goals", "Goals"],
+  ["minutes", "Minutes"],
+];
+const DATABASE_COLUMNS: PlayerTableColumn[] = [
+  "position",
+  "age",
+  "nationality",
+  "ability",
+  "potential",
+  "club",
+  "value",
+  "wage",
+  "contract",
+  "height",
+  "form",
+];
+const sortDirection = (key: DatabaseSortKey): SortDirection =>
+  key === "minutes" ? "desc" : (PLAYER_COLUMNS[key].defaultDirection ?? "asc");
 
 type Filters = Record<string, string>;
 const defaultFilters: Filters = {
@@ -91,7 +131,7 @@ const filterLabels: Record<string, string> = {
   goalsMin: "Minimum goals",
   minutesMin: "Minimum minutes",
   injured: "Fitness",
-  freeAgent: "Free agents",
+  freeAgent: "Free agents & home-based",
 };
 
 function MoneyFilter({
@@ -148,8 +188,11 @@ export default function Database() {
   const [filters, setFilters] = useState<Filters>(defaultFilters);
   const [advanced, setAdvanced] = useState(false);
   const [shortlisted, setShortlisted] = useState(false);
-  const [sort, setSort] = useState("ability");
-  const [direction, setDirection] = useState("desc");
+  const [sorting, setSorting] = useState<SortState<DatabaseSortKey>>({
+    key: "ability",
+    direction: "desc",
+  });
+  const { key: sort, direction } = sorting;
   const [pagination, setPagination] = useState({ key: "", page: 1 });
   const [pageSize, setPageSize] = useState(30);
   const deferredSearch = useDeferredValue(search);
@@ -263,22 +306,23 @@ export default function Database() {
             <select
               aria-label="Sort players"
               value={sort}
-              onChange={(event) => setSort(event.target.value)}
+              onChange={(event) => {
+                const key = event.target.value as DatabaseSortKey;
+                setSorting({ key, direction: sortDirection(key) });
+              }}
             >
-              {[
-                "ability", "potential", "value", "age", "name", "wage",
-                "form", "goals", "minutes", "contract_end",
-              ].map((key) => (
+              {SORT_OPTIONS.map(([key, text]) => (
                 <option key={key} value={key}>
-                  {key === "contract_end" ? "Contract expiry" : label(key)}
+                  {text}
                 </option>
               ))}
             </select>
-            <IconButton
-              icon={direction === "desc" ? ArrowDownWideNarrow : ArrowUpNarrowWide}
-              label={direction === "desc" ? "Sort ascending" : "Sort descending"}
-              className="bordered"
-              onClick={() => setDirection(direction === "desc" ? "asc" : "desc")}
+            <SortDirectionButton
+              subject="players"
+              direction={direction}
+              onToggle={() =>
+                setSorting({ key: sort, direction: direction === "desc" ? "asc" : "desc" })
+              }
             />
           </div>
           <Button
@@ -458,7 +502,7 @@ export default function Database() {
                 <option value="">Any availability</option>
                 <option value="listed">Transfer listed</option>
                 <option value="availableLoan">Loan listed</option>
-                <option value="freeAgent">Free agents</option>
+                <option value="freeAgent">Free agents & home-based</option>
               </select>
             </Field>
             </div>
@@ -636,7 +680,13 @@ export default function Database() {
         ) : !data ? (
           <Loading label="Searching the player database" />
         ) : data.players.length ? (
-          <PlayerTable players={data.players} label="Player database results" />
+          <PlayerTable
+            players={data.players}
+            label="Player database results"
+            columns={DATABASE_COLUMNS}
+            sort={sort === "minutes" ? null : { key: sort, direction }}
+            onSortChange={setSorting}
+          />
         ) : (
           <Empty
             icon={Search}

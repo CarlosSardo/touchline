@@ -1049,6 +1049,35 @@ describe("SQL Store transactions (fake driver, no database)", () => {
     await harness.store.close();
   });
 
+  it("batched() commits each statement on its own while one idle transaction holds the world lock", async () => {
+    const harness = fakeStore();
+    await harness.store.batched(() =>
+      harness.store.transaction(async () => {
+        await harness.store.exec("UPDATE players SET morale = 1");
+        await harness.store.exec("UPDATE players SET morale = 2");
+      }),
+    );
+    const [holder, ...statements] = harness.transactions;
+    expect(statements).toHaveLength(2);
+    const locks = harness.calls.filter((call) => call.sql.includes("sp_getapplock"));
+    expect(locks.map((call) => call.owner)).toEqual([holder]);
+    expect(locks[0].parameters.worldLock).toBe("touchline:world:touchline_test_mock");
+    expect(harness.calls.filter((call) => call.sql.includes("UPDATE")).map((call) => call.owner)).toEqual(statements);
+    expect(harness.events.filter((event) => event === "commit")).toHaveLength(2);
+    expect(harness.events.at(-1)).toBe("rollback");
+    await harness.store.close();
+  });
+
+  it("batched() inside a transaction stays one atomic transaction", async () => {
+    const harness = fakeStore();
+    await harness.store.transaction(() =>
+      harness.store.batched(() => harness.store.exec("UPDATE players SET morale = 3")),
+    );
+    expect(harness.transactions).toHaveLength(1);
+    expect(harness.events.filter((event) => event === "commit")).toHaveLength(1);
+    await harness.store.close();
+  });
+
   it("rolls back even when an inner transaction exception is caught by the caller", async () => {
     const harness = fakeStore();
     await expect(
@@ -1141,35 +1170,43 @@ describe("SQL Store transactions (fake driver, no database)", () => {
     await harness.store.close();
   });
 
-  it("requires the writer transaction for clearWorld and excludes saves/migrations from deletion", async () => {
+  it("requires the writer transaction for clearWorld, truncates unreferenced tables and keeps saves/migrations", async () => {
     const harness = fakeStore((call) =>
-      call.sql.includes("FROM sys.tables")
+      call.sql.includes("HAS_PERMS_BY_NAME")
         ? [
-            "countries",
-            "meta",
-            "players",
-            "save_slots",
-            "save_chunks",
-            "schema_migrations",
-            "unrelated",
-          ].map((name) => ({ name }))
-        : [],
+            { name: "countries", referenced: 1, self_referenced: 0, can_alter: 1 },
+            { name: "players", referenced: 0, self_referenced: 0, can_alter: 1 },
+            { name: "meta", referenced: 0, self_referenced: 0, can_alter: 0 },
+          ]
+        : call.sql.includes("FROM sys.tables")
+          ? [
+              "countries",
+              "meta",
+              "players",
+              "save_slots",
+              "save_chunks",
+              "schema_migrations",
+              "unrelated",
+            ].map((name) => ({ name }))
+          : call.sql.includes("MIN([id])")
+            ? [{ low: 1, high: 1 }]
+            : [],
     );
     await expect(harness.store.clearWorld()).rejects.toThrow(
       /requires an active/,
     );
     expect(harness.calls).toEqual([]);
     await harness.store.transaction(async () => harness.store.clearWorld());
-    const deletes = harness.calls.filter((call) =>
-      call.sql.startsWith("DELETE FROM"),
+    const writes = harness.calls.filter((call) =>
+      /^(DELETE FROM|TRUNCATE TABLE)/.test(call.sql),
     );
-    expect(deletes.map((call) => call.sql)).toEqual([
-      "DELETE FROM [touchline_test_mock].[players];",
-      "DELETE FROM [touchline_test_mock].[countries];",
-      "DELETE FROM [touchline_test_mock].[meta];",
+    expect(writes.map((call) => call.sql.split(" WHERE ")[0].replace(/;$/, ""))).toEqual([
+      "TRUNCATE TABLE [touchline_test_mock].[players]",
+      "DELETE FROM [touchline_test_mock].[countries]",
+      "DELETE FROM [touchline_test_mock].[meta]",
     ]);
     expect(
-      deletes.every((call) => call.owner === harness.transactions[0]),
+      writes.every((call) => call.owner === harness.transactions[0]),
     ).toBe(true);
     expect(harness.calls[0].sql).toContain("sp_getapplock");
     expect(

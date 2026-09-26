@@ -35,12 +35,125 @@ import {
   PageHeading,
   Panel,
   SectionHeading,
+  SortHeader,
   Tabs,
 } from "../ui.tsx";
 import PitchMap from "../PitchMap.tsx";
 import { dateLabel, label, MAP_MODES } from "../../shared/rules.ts";
 import type { MatchDetail } from "../../shared/api.ts";
-import type { Fixture } from "../../shared/types.ts";
+import type {
+  Fixture,
+  MatchPlayer,
+  MatchResult,
+  MatchTeam,
+} from "../../shared/types.ts";
+import { positionRank, type SortColumn } from "../sort.ts";
+import { useSortableRows } from "../useSortableRows.ts";
+
+const MATCH_STATS: [string, string][] = [
+  ["goals", "Goals"],
+  ["assists", "Assists"],
+  ["passes", "Passes"],
+  ["keyPasses", "Key passes"],
+  ["xG", "xG"],
+  ["xA", "xA"],
+  ["duelsWon", "Duels won"],
+  ["tackles", "Tackles"],
+  ["saves", "Saves"],
+];
+type MatchStatRow = MatchPlayer & { performance: Record<string, number> };
+const MATCH_STAT_COLUMNS: SortColumn<MatchStatRow>[] = [
+  { key: "name", value: (row) => row.name, defaultDirection: "asc" },
+  { key: "position", value: (row) => positionRank(row.position), defaultDirection: "asc" },
+  { key: "rating", value: (row) => row.performance.rating, defaultDirection: "desc" },
+  { key: "minutes", value: (row) => row.performance.minutes, defaultDirection: "desc" },
+  ...MATCH_STATS.map(([key]): SortColumn<MatchStatRow> => ({
+    key,
+    value: (row) => row.performance[key],
+    defaultDirection: "desc",
+  })),
+];
+
+/** Players who took part, in lineup order until a column is sorted. */
+function MatchPlayerStats({
+  team,
+  result,
+  onReport,
+}: {
+  team: MatchTeam;
+  result: MatchResult;
+  onReport: (playerId: number) => void;
+}) {
+  const { setPlayer } = useGame();
+  const sorting = useSortableRows(
+    [...team.lineup, ...(team.bench ?? [])]
+      .filter((player) => (result.players[player.id]?.minutes ?? 0) > 0)
+      .map((player) => ({ ...player, performance: result.players[player.id] })),
+    MATCH_STAT_COLUMNS,
+    { tieBreakers: [{ value: (row) => row.name }, { value: (row) => row.id }] },
+  );
+  return (
+    <div className="table-scroll" role="region" aria-label={`${team.name} player statistics`} tabIndex={0}>
+      <table className="data-table">
+        <thead>
+          <tr>
+            <SortHeader {...sorting.header("name")} label="Player" />
+            <SortHeader {...sorting.header("position")} label="Pos" title="Position" />
+            <SortHeader {...sorting.header("rating")} label="Rating" />
+            <SortHeader {...sorting.header("minutes")} label="Minutes" />
+            {MATCH_STATS.map(([key, text]) => (
+              <SortHeader key={key} {...sorting.header(key)} label={text} />
+            ))}
+            <th>Report</th>
+          </tr>
+        </thead>
+        <tbody>
+          {sorting.rows.map((player) => (
+            <tr key={player.id}>
+              <td>
+                <button className="text-link" onClick={() => setPlayer(player.id)}>
+                  {player.name}
+                  <ArrowUpRight size={12} />
+                </button>
+              </td>
+              <td>
+                <span className="position-tag">{player.position}</span>
+              </td>
+              <td>
+                <Badge
+                  tone={
+                    player.performance.rating >= 7
+                      ? "green"
+                      : player.performance.rating < 6
+                        ? "red"
+                        : "amber"
+                  }
+                >
+                  {player.performance.rating.toFixed(1)}
+                </Badge>
+              </td>
+              <td>{player.performance.minutes}'</td>
+              {MATCH_STATS.map(([key]) => (
+                <td key={key}>
+                  {player.performance[key].toFixed(["xG", "xA"].includes(key) ? 2 : 0)}
+                </td>
+              ))}
+              <td>
+                <Button
+                  variant="secondary"
+                  icon={ArrowUpRight}
+                  onClick={() => onReport(player.id)}
+                >
+                  Player report
+                </Button>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
 
 const stats: [string, string][] = [
   ["possession", "Possession %"],
@@ -73,7 +186,6 @@ export default function Analytics() {
     fixtureId,
     matchPlayerId,
     openMatch,
-    setPlayer,
     navigate,
   } = useGame();
   const [age, setAge] = useState("Senior");
@@ -165,6 +277,15 @@ export default function Analytics() {
     : [];
   const result = data?.result;
   const snapshot = data?.snapshot;
+  // Compacted fixtures (outside the user's club family) keep only the result and scorers.
+  const scorers =
+    data && !snapshot && data.fixture.status === "played"
+      ? data.fixture.data
+        ? ((JSON.parse(data.fixture.data) as {
+            scorers?: { minute: number; addedTime?: number; teamId: number; playerId: number; name?: string }[];
+          }).scorers ?? [])
+        : []
+      : null;
   const allPlayers = snapshot
     ? [
         ...snapshot.home.lineup,
@@ -328,6 +449,14 @@ export default function Analytics() {
               </div>
             </div>
             <div className="scoreboard-footer">
+              {!result && data.fixture.home_xg !== null && data.fixture.away_xg !== null && data.fixture.status === "played" && (
+                <span>
+                  xG{" "}
+                  <strong>
+                    {data.fixture.home_xg.toFixed(2)} - {data.fixture.away_xg.toFixed(2)}
+                  </strong>
+                </span>
+              )}
               {result && (
                 <>
                   <span>
@@ -345,7 +474,7 @@ export default function Analytics() {
                   </span>
                 </>
               )}
-              <span>{snapshot?.weather ?? "Pre-match"}</span>
+              <span>{snapshot?.weather ?? (data.fixture.status === "played" ? "Result only" : "Pre-match")}</span>
             </div>
           </Panel>
           {result && snapshot ? (
@@ -494,101 +623,15 @@ export default function Analytics() {
                           title={team.name}
                           subtitle={`${team.formation} / ${team.style}`}
                         />
-                        <div className="table-scroll">
-                          <table className="data-table">
-                            <thead>
-                              <tr>
-                                <th>Player</th>
-                                <th>Pos</th>
-                                <th>Rating</th>
-                                <th>Minutes</th>
-                                <th>Goals</th>
-                                <th>Assists</th>
-                                <th>Passes</th>
-                                <th>Key passes</th>
-                                <th>xG</th>
-                                <th>xA</th>
-                                <th>Duels won</th>
-                                <th>Tackles</th>
-                                <th>Saves</th>
-                                <th>Report</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {[...team.lineup, ...(team.bench ?? [])]
-                                .filter(
-                                  (player) =>
-                                    (result.players[player.id]?.minutes ?? 0) >
-                                    0,
-                                )
-                                .map((player) => {
-                                  const performance = result.players[player.id];
-                                  return (
-                                    <tr key={player.id}>
-                                      <td>
-                                        <button
-                                          className="text-link"
-                                          onClick={() => setPlayer(player.id)}
-                                        >
-                                          {player.name}
-                                          <ArrowUpRight size={12} />
-                                        </button>
-                                      </td>
-                                      <td>
-                                        <span className="position-tag">
-                                          {player.position}
-                                        </span>
-                                      </td>
-                                      <td>
-                                        <Badge
-                                          tone={
-                                            performance.rating >= 7
-                                              ? "green"
-                                              : performance.rating < 6
-                                                ? "red"
-                                                : "amber"
-                                          }
-                                        >
-                                          {performance.rating.toFixed(1)}
-                                        </Badge>
-                                      </td>
-                                      <td>{performance.minutes}'</td>
-                                      {[
-                                        "goals",
-                                        "assists",
-                                        "passes",
-                                        "keyPasses",
-                                        "xG",
-                                        "xA",
-                                        "duelsWon",
-                                        "tackles",
-                                        "saves",
-                                      ].map((key) => (
-                                        <td key={key}>
-                                          {performance[key].toFixed(
-                                            ["xG", "xA"].includes(key) ? 2 : 0,
-                                          )}
-                                        </td>
-                                      ))}
-                                      <td>
-                                        <Button
-                                          variant="secondary"
-                                          icon={ArrowUpRight}
-                                          onClick={() => {
-                                            setTeamId(team.id);
-                                            setPlayerId(player.id);
-                                            setTab("individual");
-                                          }}
-                                        >
-                                          Player report
-                                        </Button>
-                                      </td>
-                                    </tr>
-                                  );
-                                })}
-                            </tbody>
-                          </table>
-                        </div>
+                        <MatchPlayerStats
+                          team={team}
+                          result={result}
+                          onReport={(playerId) => {
+                            setTeamId(team.id);
+                            setPlayerId(playerId);
+                            setTab("individual");
+                          }}
+                        />
                       </section>
                     ))}
                   </>
@@ -952,6 +995,34 @@ export default function Analytics() {
                     </BarChart>
                   </ResponsiveContainer>
                 </div>
+              </Panel>
+            </div>
+          ) : scorers ? (
+            <div className="section-space">
+              <Panel>
+                <Empty
+                  icon={Trophy}
+                  title="Result only"
+                  detail="Full match detail is kept only for your club's teams."
+                />
+                {scorers.length > 0 && (
+                  <ul className="compact-list" aria-label="Goalscorers">
+                    {scorers.map((goal, index) => (
+                      <li key={index}>
+                        <span>
+                          {goal.minute}
+                          {goal.addedTime ? `+${goal.addedTime}` : ""}'
+                        </span>
+                        <strong>
+                          <PlayerLink id={goal.playerId} name={goal.name ?? `Player ${goal.playerId}`} />
+                        </strong>
+                        <small>
+                          {goal.teamId === data.fixture.home_id ? data.fixture.home_name : data.fixture.away_name}
+                        </small>
+                      </li>
+                    ))}
+                  </ul>
+                )}
               </Panel>
             </div>
           ) : (

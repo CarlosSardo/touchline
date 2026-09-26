@@ -85,10 +85,11 @@ export const MAP_MODES = [
   "Pressing zones",
   "Fatigue map",
 ];
+/** World v4 targets: seniors = first teams, B-teams and home-based pools; youth = U19 and U17 academies. */
 export const WORLD_COUNTS = {
-  seniors: 120_000,
-  youth: 40_000,
-  annualRegens: 15_000,
+  seniors: 75_000,
+  youth: 100_000,
+  annualRegens: 18_000,
 };
 export const POSITIONS = [
   "GK",
@@ -465,12 +466,12 @@ export const ageOn = (birth: string, date: string) =>
   (date.slice(5) < birth.slice(5) ? 1 : 0);
 export const internationalBreak = (date: string) => {
   const monthDay = date.slice(5);
+  // FIFA 2026/27 windows: one merged September–October window (Nations League 24 Sep – 6 Oct), then Nov, Mar, June.
   return [
-    ["09-01", "09-15"],
-    ["10-05", "10-13"],
+    ["09-21", "10-06"],
     ["11-09", "11-17"],
     ["03-22", "03-30"],
-    ["06-01", "06-15"],
+    ["06-07", "06-15"],
   ].some(([start, end]) => monthDay >= start && monthDay <= end);
 };
 export const transferWindow = (date: string) => {
@@ -877,18 +878,33 @@ export const DEFAULT_SETTINGS: Settings = {
   ),
 };
 
+// 2025/26 market levels in GBP at a top-flight league factor of about 1: mid-table Premier League squad players
+// (ability ≈ 73–77) £10–25M, elite players (88–95) £75–160M; lower leagues and small nations far less.
 const PLAYER_QUALITY_VALUES: readonly (readonly [number, number])[] = [
   [1, 100],
-  [25, 1000],
-  [35, 5000],
-  [45, 25_000],
-  [55, 125_000],
-  [65, 750_000],
-  [75, 5_000_000],
-  [85, 30_000_000],
-  [95, 110_000_000],
-  [99, 160_000_000],
+  [15, 1_000],
+  [25, 5_000],
+  [35, 30_000],
+  [45, 120_000],
+  [55, 330_000],
+  [65, 1_800_000],
+  [75, 14_000_000],
+  [85, 55_000_000],
+  [95, 160_000_000],
+  [99, 220_000_000],
 ];
+/** Player values stay within these bounds (world invariant 5). */
+export const VALUE_RANGE = { min: 100, max: 250_000_000 } as const;
+
+function qualityValue(ability: number) {
+  for (let index = 1; index < PLAYER_QUALITY_VALUES.length; index++) {
+    const [lowerAbility, lowerValue] = PLAYER_QUALITY_VALUES[index - 1];
+    const [upperAbility, upperValue] = PLAYER_QUALITY_VALUES[index];
+    if (ability <= upperAbility)
+      return lowerValue * (upperValue / lowerValue) ** ((ability - lowerAbility) / (upperAbility - lowerAbility));
+  }
+  return PLAYER_QUALITY_VALUES[PLAYER_QUALITY_VALUES.length - 1][1];
+}
 
 export function valuation(
   player: Pick<
@@ -904,6 +920,8 @@ export function valuation(
   context: {
     date: string;
     leagueReputation: number;
+    /** Market price level of the league nation (world-catalog MARKET_VALUE_FACTOR, server-side); default 1. */
+    marketFactor?: number;
     balance: number;
     philosophy: string;
     inflation: number;
@@ -912,25 +930,17 @@ export function valuation(
   },
 ) {
   const ability = clamp(player.ability);
-  let quality = PLAYER_QUALITY_VALUES[0][1];
-  for (let index = 1; index < PLAYER_QUALITY_VALUES.length; index++) {
-    const [lowerAbility, lowerValue] = PLAYER_QUALITY_VALUES[index - 1];
-    const [upperAbility, upperValue] = PLAYER_QUALITY_VALUES[index];
-    if (ability <= upperAbility) {
-      const progress = (ability - lowerAbility) / (upperAbility - lowerAbility);
-      quality = lowerValue * (upperValue / lowerValue) ** progress;
-      break;
-    }
-  }
-  const potential =
-    1 +
-    clamp((clamp(player.potential) - ability) / 30, 0, 1) *
-      0.65 *
-      clamp((25 - player.age) / 9, 0, 1);
+  const quality = qualityValue(ability);
+  // Young players are priced on half of their projected upside (at most 15 points), fading out by 24.
+  const upside =
+    clamp(clamp(player.potential) - ability, 0, 30) *
+    clamp((24 - player.age) / 8, 0, 1) *
+    0.5;
+  const potential = qualityValue(clamp(ability + upside)) / quality;
   const resalePeakAge = player.position === "GK" ? 31 : 28;
   const age =
-    clamp((player.age - 12) / 10, 0.1, 1) *
-    clamp(Math.exp(-Math.max(0, player.age - resalePeakAge) / 4), 0.025, 1);
+    clamp((player.age - 12) / 7, 0.15, 1) *
+    clamp(Math.exp(-Math.max(0, player.age - resalePeakAge) / 4.5), 0.025, 1);
   const position = {
     GK: 0.78,
     CB: 0.9,
@@ -943,8 +953,10 @@ export function valuation(
     RW: 1.1,
     ST: 1.12,
   }[player.position];
+  // Ability already separates the leagues; this is the market premium of richer leagues for equal quality.
   const league =
-    0.08 + 1.12 * (clamp(context.leagueReputation, 0, 100) / 100) ** 2;
+    (0.3 + 0.8 * (clamp(context.leagueReputation, 0, 100) / 100) ** 2) *
+    clamp(context.marketFactor ?? 1, 0.1, 1.5);
   const months = clamp(
     daysBetween(context.date, player.contract_end) / 30.44,
     0,
@@ -978,7 +990,7 @@ export function valuation(
         ? 1.05
         : 1;
   const standings = 1 - clamp(context.crisis, 0, 100) / 500;
-  const value =
+  const value = clamp(
     Math.round(
       (quality *
         potential *
@@ -991,7 +1003,10 @@ export function valuation(
         philosophy *
         standings) /
         100,
-      ) * 100;
+    ) * 100,
+    VALUE_RANGE.min,
+    VALUE_RANGE.max,
+  );
   return {
     value,
     layers: {

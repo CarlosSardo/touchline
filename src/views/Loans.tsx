@@ -38,6 +38,7 @@ import {
   Panel,
   PlayerTable,
   SectionHeading,
+  SortHeader,
   Stat,
   Tabs,
   TextLink,
@@ -52,6 +53,21 @@ import {
 import { AffiliateInterest } from "./ClubSupport.tsx";
 import type { LoanDesk } from "../../shared/api.ts";
 import type { Club, Loan, LoanTerms, Player } from "../../shared/types.ts";
+import { dateValue, type SortColumn } from "../sort.ts";
+import { useSortableRows } from "../useSortableRows.ts";
+
+const LOAN_COLUMNS: SortColumn<
+  Loan,
+  "player" | "club" | "type" | "score" | "fit" | "pressure" | "ends"
+>[] = [
+  { key: "player", value: (loan) => loan.player_name, defaultDirection: "asc" },
+  { key: "club", value: (loan) => loan.destination_name, defaultDirection: "asc" },
+  { key: "type", value: (loan) => loan.type, defaultDirection: "asc" },
+  { key: "score", value: (loan) => loan.score, defaultDirection: "desc" },
+  { key: "fit", value: (loan) => loan.fit, defaultDirection: "desc" },
+  { key: "pressure", value: (loan) => loan.pressure, defaultDirection: "desc" },
+  { key: "ends", value: (loan) => dateValue(loan.end_date), defaultDirection: "asc" },
+];
 
 function ClubChooser({
   onChoose,
@@ -450,6 +466,13 @@ export default function Loans() {
   const [network, setNetwork] = useState(false);
   const [offer, setOffer] = useState<Player | null>(null);
   const [selected, setSelected] = useState<number | null>(null);
+  const shown = (data?.loans ?? []).filter((loan) =>
+    tab === "history" ? loan.status !== "active" : loan.status === "active",
+  );
+  const tracker = useSortableRows(shown, LOAN_COLUMNS, {
+    initial: { key: "ends", direction: "asc" },
+    tieBreakers: [{ value: (loan) => loan.id }],
+  });
   if (error) return <ErrorState message={error} />;
   if (!data || !bootstrap) return <Loading />;
   const active = data.loans.filter((loan) => loan.status === "active");
@@ -520,29 +543,23 @@ export default function Loans() {
           onChange={setTab}
         />
         {(tab === "active" || tab === "history") &&
-          ((tab === "active"
-            ? active
-            : data.loans.filter((loan) => loan.status !== "active")
-          ).length ? (
-            <div className="table-scroll">
+          (shown.length ? (
+            <div className="table-scroll" role="region" aria-label={tab === "active" ? "Loan tracker" : "Loan history"} tabIndex={0}>
               <table className="data-table">
                 <thead>
                   <tr>
-                    <th>Player</th>
-                    <th>Loan club</th>
-                    <th>Agreement</th>
-                    <th>LSS</th>
-                    <th>Fit</th>
-                    <th>Pressure</th>
-                    <th>Ends</th>
+                    <SortHeader {...tracker.header("player")} label="Player" />
+                    <SortHeader {...tracker.header("club")} label="Loan club" />
+                    <SortHeader {...tracker.header("type")} label="Agreement" />
+                    <SortHeader {...tracker.header("score")} label="LSS" title="Loan Success Score" />
+                    <SortHeader {...tracker.header("fit")} label="Fit" />
+                    <SortHeader {...tracker.header("pressure")} label="Pressure" />
+                    <SortHeader {...tracker.header("ends")} label="Ends" />
                     <th>Review</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {(tab === "active"
-                    ? active
-                    : data.loans.filter((loan) => loan.status !== "active")
-                  ).map((loan) => (
+                  {tracker.rows.map((loan) => (
                     <tr key={loan.id}>
                       <td>
                         <div className="report-player">

@@ -300,3 +300,135 @@ export function drawLeaguePhase(
     "A legal league-phase draw could not be found. The entrant field must be reviewed; constraints were not relaxed.",
   );
 }
+
+export interface GroupDraw {
+  pots: number[][];
+  groups: number[][];
+  /** Most clubs of one association allowed in a group (1 unless an association has more clubs than groups). */
+  maxSameAssociation: number;
+}
+
+/**
+ * Group-stage draw (Libertadores, Sudamericana, CAF, ACL Two per zone): one pot per group position seeded by
+ * coefficient, one club per pot in every group and association protection within each group.
+ */
+export function drawGroups(entrants: DrawEntrant[], groupCount: number, seed: string): GroupDraw {
+  if (groupCount < 1 || entrants.length % groupCount)
+    throw new Error("A group draw needs the same number of clubs in every group.");
+  const random = seedrandom(seed);
+  const sorted = [...entrants].sort((left, right) => right.coefficient - left.coefficient || left.id - right.id);
+  const pots = Array.from({ length: entrants.length / groupCount }, (_, index) =>
+    sorted.slice(index * groupCount, (index + 1) * groupCount),
+  );
+  const perCountry = new Map<number, number>();
+  for (const entrant of entrants) perCountry.set(entrant.countryId, (perCountry.get(entrant.countryId) ?? 0) + 1);
+  const limit = Math.max(1, ...[...perCountry.values()].map((count) => Math.ceil(count / groupCount)));
+  const groups: DrawEntrant[][] = Array.from({ length: groupCount }, () => []);
+  const place = (pot: number, order: DrawEntrant[], index: number): boolean => {
+    if (pot === pots.length) return true;
+    if (index === order.length) {
+      const next = pot + 1;
+      return place(next, next < pots.length ? shuffle(pots[next], random) : [], 0);
+    }
+    const club = order[index];
+    for (const group of groups) {
+      if (group.length !== pot) continue;
+      if (group.filter((member) => member.countryId === club.countryId).length >= limit) continue;
+      group.push(club);
+      if (place(pot, order, index + 1)) return true;
+      group.pop();
+    }
+    return false;
+  };
+  if (!place(0, shuffle(pots[0], random), 0))
+    throw new Error("A legal group draw could not be found for this entrant field.");
+  return {
+    pots: pots.map((pot) => pot.map((entrant) => entrant.id)),
+    groups: groups.map((group) => group.map((entrant) => entrant.id)),
+    maxSameAssociation: limit,
+  };
+}
+
+/** Splits matches into rounds where every club plays once (a 1-factorisation found by seeded backtracking). */
+function scheduleRounds(matches: [number, number][], rounds: number, random: seedrandom.PRNG) {
+  const clubs = [...new Set(matches.flat())];
+  for (let attempt = 0; attempt < 50; attempt++) {
+    const result: [number, number][][] = [];
+    const used = new Set<number>();
+    let steps = 0;
+    const fill = (round: [number, number][], busy: Set<number>): boolean => {
+      if (++steps > 20_000) return false;
+      if (round.length === clubs.length / 2) {
+        result.push(round);
+        if (result.length === rounds || fill([], new Set())) return true;
+        result.pop();
+        return false;
+      }
+      const club = clubs.find((id) => !busy.has(id))!;
+      for (const index of shuffle([...matches.keys()], random)) {
+        const [home, away] = matches[index];
+        if (used.has(index) || (home !== club && away !== club) || busy.has(home) || busy.has(away)) continue;
+        used.add(index);
+        if (fill([...round, matches[index]], new Set([...busy, home, away]))) return true;
+        used.delete(index);
+      }
+      return false;
+    };
+    if (fill([], new Set())) return result;
+  }
+  throw new Error("The league-stage matches could not be split into rounds.");
+}
+
+/**
+ * ACL Elite league stage for one zone: 16 clubs (2026/27; 12 before) in four pots by coefficient; every club meets two
+ * clubs of each pot (one at home, one away), eight different opponents, avoiding same-association pairings where possible.
+ */
+export function drawZoneLeaguePhase(entrants: DrawEntrant[], seed: string): LeaguePhaseDraw {
+  const size = entrants.length / 4;
+  if (![3, 4].includes(size) || new Set(entrants.map((entrant) => entrant.id)).size !== entrants.length)
+    throw new Error("An ACL Elite zone draw requires 12 or 16 distinct clubs.");
+  const random = seedrandom(seed);
+  const sorted = [...entrants].sort((left, right) => right.coefficient - left.coefficient || left.id - right.id);
+  const pots = [0, 1, 2, 3].map((index) => sorted.slice(index * size, index * size + size).map((entrant) => entrant.id));
+  const country = new Map(entrants.map((entrant) => [entrant.id, entrant.countryId]));
+  const clashes = (edges: [number, number][]) =>
+    edges.filter(([home, away]) => country.get(home) === country.get(away)).length;
+  const matches: [number, number][] = [];
+  for (const pot of pots) {
+    const cycle = shuffle(pot, random);
+    matches.push(...cycle.map((club, index): [number, number] => [club, cycle[(index + 1) % size]]));
+  }
+  const permutations = (items: number[]): number[][] =>
+    items.length <= 1 ? [items] : items.flatMap((item) => permutations(items.filter((other) => other !== item)).map((rest) => [item, ...rest]));
+  const orders = permutations(Array.from({ length: size }, (_, index) => index));
+  for (let upper = 0; upper < 4; upper++)
+    for (let lower = upper + 1; lower < 4; lower++) {
+      // A cycle through both pots: each club is home to one and away to one club of the other pot.
+      const cycle = (order: number[]) =>
+        order.flatMap((target, index): [number, number][] => [
+          [pots[upper][index], pots[lower][target]],
+          [pots[lower][target], pots[upper][(index + 1) % size]],
+        ]);
+      matches.push(...shuffle(orders, random).map(cycle).sort((left, right) => clashes(left) - clashes(right))[0]);
+    }
+  const fixtures = scheduleRounds(matches, 8, random).flatMap((round, index) =>
+    round.map(([homeId, awayId]) => ({ homeId, awayId, round: index + 1 })),
+  );
+  const perAssociation = new Map<string, number>();
+  for (const [home, away] of matches) {
+    for (const [club, opponent] of [[home, away], [away, home]]) {
+      const key = `${club}:${country.get(opponent)}`;
+      perAssociation.set(key, (perAssociation.get(key) ?? 0) + 1);
+    }
+  }
+  return {
+    pots,
+    fixtures,
+    constraints: {
+      associationProtection: clashes(matches) === 0,
+      maxSameAssociation: Math.max(...perAssociation.values()),
+      homeMatches: 4,
+      awayMatches: 4,
+    },
+  };
+}

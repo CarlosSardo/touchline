@@ -8,7 +8,36 @@ import {
   type KnockoutTie,
 } from "../shared/competition-rules.ts";
 import { minimumReserveTier } from "../shared/world-rules.ts";
-import { drawLeaguePhase } from "./draw.ts";
+import {
+  advancePlayoff,
+  assignConferences,
+  baseSchedule,
+  boundaryKey,
+  createPlayoff,
+  halvedPoints,
+  knockoutStage,
+  lastStageTies,
+  miniLeagueRounds,
+  pairQualifyingRound,
+  planBoundaries,
+  planSplit,
+  postseasonDates,
+  QUALIFYING_STAGES,
+  qualifyingPlan,
+  rankTable,
+  readLeagueData,
+  regularSeasonDates,
+  resolvePlayoffBySeed,
+  splitMatchdays,
+  type PlayoffInput,
+  type PlayoffState,
+  type PyramidClub,
+  type PyramidTier,
+  type QualifyingStage,
+} from "../shared/league-rules.ts";
+import { drawGroups, drawLeaguePhase, drawZoneLeaguePhase } from "./draw.ts";
+import { CONTINENTAL, nationByCode } from "../shared/world-catalog/index.ts";
+import type { ContinentalCompetitionSpec, ContinentalStage, CupSpec } from "../shared/world-catalog/types.ts";
 import { continentalEntries } from "./qualification.ts";
 import type {
   AgeGroup,
@@ -34,129 +63,116 @@ export interface CompetitionSpec {
   national?: boolean;
   country?: string;
   qualifier?: boolean;
+  /** Catalog domestic cup legs (final separately) and neutral final. */
+  cupFormat?: Pick<CupSpec, "legs" | "finalLegs" | "neutralFinal">;
+  /** Continental club competition from the catalog (formats, access, drops, feeds). */
+  catalog?: ContinentalCompetitionSpec;
 }
 
-export const COMPETITIONS: CompetitionSpec[] = [
+type BracketSize = "playoff" | "16" | "8" | "4" | "2";
+
+/**
+ * Real phase dates inside the July–June season. CONMEBOL's calendar-year editions (February–November) keep their
+ * cadence six months later: Recopa and qualifying from late July, groups September–November, knockouts January–May.
+ */
+export const CADENCE: Record<
+  string,
   {
-    name: "UEFA Champions League",
-    confederation: "UEFA",
-    age: "Senior",
-    kind: "continental",
-    teams: 36,
-    format: "Swiss",
-    rounds: 8,
-    qualifies: 16,
-    start: "09-16",
-    qualifier: true,
+    start?: string;
+    qualifying?: Partial<Record<QualifyingStage, string>>;
+    matchdays?: string[];
+    knockout?: Partial<Record<BracketSize, string>>;
+    /** Days between rounds of a single-venue tournament. */
+    gap?: number;
+  }
+> = {
+  // 2026/27 league phases and finals; knockout rounds before the finals follow UEFA's usual weeks (inferred).
+  "uefa-champions-league": {
+    start: "09-08",
+    matchdays: ["09-08", "10-13", "10-20", "11-03", "11-24", "12-08", "01-19", "01-27"],
+    knockout: { playoff: "02-16", "16": "03-09", "8": "04-06", "4": "04-27", "2": "06-05" },
   },
-  {
-    name: "UEFA Europa League",
-    confederation: "UEFA",
-    age: "Senior",
-    kind: "continental",
-    teams: 36,
-    format: "Swiss",
-    rounds: 8,
-    qualifies: 16,
+  "uefa-europa-league": {
     start: "09-17",
-    qualifier: true,
+    matchdays: ["09-17", "10-15", "10-22", "11-05", "11-26", "12-10", "01-21", "01-28"],
+    knockout: { playoff: "02-18", "16": "03-11", "8": "04-08", "4": "04-29", "2": "05-26" },
   },
-  {
-    name: "UEFA Conference League",
-    confederation: "UEFA",
-    age: "Senior",
-    kind: "continental",
-    teams: 36,
-    format: "Swiss",
-    rounds: 6,
-    qualifies: 16,
-    start: "10-01",
-    qualifier: true,
+  "uefa-conference-league": {
+    start: "10-15",
+    matchdays: ["10-15", "10-22", "11-05", "11-26", "12-10", "12-17"],
+    knockout: { playoff: "02-18", "16": "03-11", "8": "04-08", "4": "04-29", "2": "06-02" },
   },
-  {
-    name: "UEFA Youth League",
-    confederation: "UEFA",
-    age: "U19",
-    kind: "youth",
-    teams: 36,
-    format: "Swiss",
-    rounds: 6,
-    qualifies: 16,
+  // UCL Path on UCL matchdays 1–6; Domestic Champions Path rounds 1–3 (the third repeats round 2); final 19 April.
+  "uefa-youth-league": {
+    start: "09-08",
+    matchdays: ["09-08", "10-13", "10-20", "11-03", "11-24", "12-08"],
+    qualifying: { q1: "09-16", q2: "10-28", q3: "11-25" },
+    knockout: { playoff: "02-09", "16": "02-23", "8": "03-09", "4": "04-16", "2": "04-19" },
+  },
+  "uefa-super-cup": { start: "08-12" },
+  // Groups avoid the September–October FIFA window (MD2 after it).
+  "copa-libertadores": {
     start: "09-16",
-    qualifier: true,
+    qualifying: { q1: "07-22", q2: "08-05", q3: "08-19" },
+    matchdays: ["09-16", "10-07", "10-14", "10-28", "11-04", "11-25"],
+    knockout: { "16": "02-10", "8": "03-10", "4": "04-14", "2": "05-29" },
   },
-  {
-    name: "Copa Libertadores",
-    confederation: "CONMEBOL",
-    age: "Senior",
-    kind: "continental",
-    teams: 32,
-    format: "Groups",
-    rounds: 6,
-    qualifies: 16,
-    start: "02-17",
-    qualifier: true,
+  "copa-sudamericana": {
+    start: "09-17",
+    qualifying: { q1: "08-20" },
+    matchdays: ["09-17", "10-08", "10-15", "10-29", "11-05", "11-26"],
+    knockout: { playoff: "01-20", "16": "02-11", "8": "03-11", "4": "04-15", "2": "05-22" },
   },
-  {
-    name: "Copa Sudamericana",
-    confederation: "CONMEBOL",
-    age: "Senior",
-    kind: "continental",
-    teams: 32,
-    format: "Groups",
-    rounds: 6,
-    qualifies: 16,
-    start: "02-18",
-    qualifier: true,
+  "recopa-sudamericana": { start: "08-19" },
+  "libertadores-sub-20": { start: "08-12", gap: 3 },
+  // Single-match preliminaries in August (ACL Two East really plays 31 August); finals 1 May (centralised) and 15 May.
+  "afc-champions-league-elite": {
+    qualifying: { playoff: "08-11" },
+    knockout: { "16": "03-03", "8": "04-23", "4": "04-27", "2": "05-01" },
   },
-  {
-    name: "AFC Champions League",
-    confederation: "AFC",
-    age: "Senior",
-    kind: "continental",
-    teams: 24,
-    format: "Swiss",
-    rounds: 8,
-    qualifies: 16,
-    start: "09-16",
-    qualifier: true,
+  "afc-champions-league-two": {
+    start: "09-15",
+    qualifying: { playoff: "08-12" },
+    knockout: { "16": "02-11", "8": "03-04", "4": "04-08", "2": "05-15" },
   },
-  {
-    name: "CAF Champions League",
-    confederation: "CAF",
-    age: "Senior",
-    kind: "continental",
-    teams: 16,
-    format: "Groups",
-    rounds: 6,
-    qualifies: 8,
-    start: "11-20",
-    qualifier: true,
+  // Qualifying 4 Sep – 25 Oct (both competitions, no play-off round); CL groups from 27 Nov, final 24/31 May.
+  "caf-champions-league": {
+    start: "11-27",
+    qualifying: { q1: "09-05", q2: "10-17" },
+    knockout: { "8": "03-13", "4": "04-10", "2": "05-24" },
   },
-  {
-    name: "CONCACAF Champions League",
-    confederation: "CONCACAF",
-    age: "Senior",
-    kind: "continental",
-    teams: 32,
-    format: "Knockout",
-    rounds: 5,
-    qualifies: 1,
-    start: "02-16",
-    qualifier: true,
+  "caf-confederation-cup": {
+    qualifying: { q1: "09-05", q2: "10-17" },
+    knockout: { "8": "03-14", "4": "04-11", "2": "05-16" },
   },
-  {
-    name: "OFC Champions League",
-    confederation: "OFC",
-    age: "Senior",
-    kind: "continental",
-    teams: 8,
-    format: "Groups",
-    rounds: 3,
-    qualifies: 4,
-    start: "03-10",
-    qualifier: true,
-  },
+  // 2026 feeders: Leagues Cup 4 Aug – 6 Sep, Central American Cup to 2/6 Dec, Caribbean Cup 4 Aug – 1/5 Dec.
+  "leagues-cup": { start: "08-04", knockout: { "8": "08-25", "4": "09-02", "2": "09-06" } },
+  "concacaf-central-american-cup": { knockout: { "8": "09-08", "4": "10-20", "2": "12-02" } },
+  "concacaf-caribbean-cup": { start: "08-04", knockout: { "4": "10-13", "2": "12-01" } },
+  "concacaf-champions-cup": { start: "03-10", knockout: { "8": "04-07", "4": "04-28", "2": "05-30" } },
+  // Played on 23 September until 2025; the week before is the closest date outside the merged FIFA window.
+  "campeones-cup": { start: "09-16" },
+};
+
+/** Senior national-team matchdays inside the 2026/27 FIFA windows (Nations League league-phase weeks). */
+export const NATIONS_SERIES_DATES = ["09-24", "09-27", "10-01", "10-04", "11-12", "11-15"];
+
+const continentalSpec = (catalog: ContinentalCompetitionSpec): CompetitionSpec => ({
+  name: catalog.name,
+  confederation: catalog.confederation,
+  age: catalog.age,
+  kind: catalog.age === "Senior" ? "continental" : "youth",
+  teams: catalog.teams,
+  format: catalog.format === "league-phase" ? "Swiss" : catalog.format === "groups" ? "Groups" : "Knockout",
+  rounds: catalog.matchdays ?? (catalog.groupSize ?? 2) * 2 - ((catalog.groupSize ?? 2) % 2 ? 0 : 2),
+  qualifies: catalog.advance,
+  start: CADENCE[catalog.id]?.start ?? catalog.start,
+  qualifier: true,
+  catalog,
+});
+
+export const COMPETITIONS: CompetitionSpec[] = [
+  ...CONTINENTAL.competitions.map(continentalSpec),
   {
     name: "FIFA U17 World Cup",
     confederation: "FIFA",
@@ -282,7 +298,7 @@ export const COMPETITIONS: CompetitionSpec[] = [
       format: "Groups" as const,
       rounds: 6,
       qualifies: 8,
-      start: "09-03",
+      start: NATIONS_SERIES_DATES[0],
       national: true,
     }),
   ),
@@ -309,24 +325,41 @@ export interface CompetitionData {
 const seasonDate = (season: number, monthDay: string) =>
   `${Number(monthDay.slice(0, 2)) >= 7 ? season : season + 1}-${monthDay}`;
 
-function matchDates(season: number, count: number) {
-  const available: string[] = [];
-  let date = `${season}-08-08`;
-  while (new Date(`${date}T12:00:00Z`).getUTCDay() !== 6)
-    date = addDays(date, 1);
-  while (date <= `${season + 1}-05-31`) {
-    if (!internationalBreak(date) && date.slice(5) !== "12-26")
-      available.push(date);
-    date = addDays(date, 7);
+/** Planned matchdays moved by `delay`, clear of the FIFA windows and at least three days apart. */
+function plannedMatchdays(monthDays: readonly string[], season: number, delay: number) {
+  const dates: string[] = [];
+  for (const monthDay of monthDays) {
+    const previous = dates.at(-1);
+    let date = addDays(seasonDate(season, monthDay), delay);
+    if (previous && daysBetween(previous, date) < 3) date = addDays(previous, 7);
+    while (internationalBreak(date)) date = addDays(date, 7);
+    dates.push(date);
   }
-  for (const extra of ["12-29", "01-20", "02-03", "04-21", "05-12"]) {
-    if (available.length >= count) break;
-    available.push(seasonDate(season, extra));
-  }
-  available.sort();
-  return Array.from(
-    { length: count },
-    (_, index) => available[Math.floor((index * available.length) / count)],
+  return dates;
+}
+
+/** Clubs per conference in catalog order; clubs without a valid conference fill the smallest ones (persisted). */
+async function conferenceGroups(
+  store: Store,
+  leagueId: number,
+  rows: readonly { id: number; group_name: string }[],
+  conferences: readonly string[] | undefined,
+) {
+  if (!conferences?.length) return [rows.map((row) => row.id)];
+  const current = new Map(
+    rows.filter((row) => conferences.includes(row.group_name)).map((row) => [row.id, row.group_name]),
+  );
+  const missing = rows.filter((row) => !current.has(row.id)).map((row) => row.id);
+  const assigned = assignConferences(conferences, current, [], missing);
+  for (const clubId of missing)
+    await store.run(
+      "UPDATE standings SET group_name = ? WHERE league_id = ? AND club_id = ?",
+      assigned.get(clubId)!,
+      leagueId,
+      clubId,
+    );
+  return conferences.map((name) =>
+    rows.filter((row) => assigned.get(row.id) === name).map((row) => row.id),
   );
 }
 
@@ -435,7 +468,9 @@ async function addFixture(
     if (ageGroup === "Senior" && !batch.national.has(home))
       while (internationalBreak(scheduled)) scheduled = addDays(scheduled, 1);
     if (++attempts > 150)
-      throw new Error("The competition calendar has no safe fixture slot.");
+      throw new Error(
+        `The competition calendar has no safe fixture slot (league ${leagueId}, ${stage} ${round}, clubs ${home} v ${away}, from ${date}).`,
+      );
   }
   batch.rows.push({
     id: ++batch.nextId,
@@ -467,8 +502,12 @@ async function createLeague(
   countryId: number | null = null,
 ) {
   const existing = await store.get<{ id: number }>(
-    "SELECT id FROM leagues WHERE name = ?",
+    // Real cup names repeat across nations (Coupe du Congo, Trophée des Champions).
+    countryId === null
+      ? "SELECT id FROM leagues WHERE name = ?"
+      : "SELECT id FROM leagues WHERE name = ? AND country_id = ?",
     spec.name,
+    ...(countryId === null ? [] : [countryId]),
   );
   if (existing) {
     await store.run("DELETE FROM standings WHERE league_id = ?", existing.id);
@@ -513,12 +552,14 @@ async function setData(store: Store, leagueId: number, data: CompetitionData) {
 export async function scheduleKnockout(
   store: Store,
   leagueId: number,
-  clubs: number[],
+  entrants: number[],
   season: number,
   date: string,
   round = 1,
   extra: CompetitionData = {},
 ) {
+  // A club paired with itself gets no fixture, so it must appear once per round.
+  const clubs = [...new Set(entrants)];
   return withFixtureBatch(store, season, async () => {
     const data: CompetitionData = {
       ...JSON.parse(
@@ -545,7 +586,21 @@ export async function scheduleKnockout(
       "SELECT * FROM leagues WHERE id = ?",
       leagueId,
     ))!;
-    const rules = knockoutRules(data.spec?.name ?? league.name, stage);
+    const base = knockoutRules(data.spec?.name ?? league.name, stage);
+    const cup = data.spec?.cupFormat;
+    const rules = cup
+      ? {
+          ...base,
+          legs: stage === "Final" ? (cup.finalLegs ?? 1) : (cup.legs ?? 1),
+          neutral: stage === "Final" && Boolean(cup.neutralFinal),
+        }
+      : base;
+    // Senior club rounds keep out of the FIFA windows; national-team rounds are played inside them.
+    const clear = (day: string, step: number) => {
+      if (data.spec?.age === "Senior" && !data.spec.national)
+        while (internationalBreak(day)) day = addDays(day, step);
+      return day;
+    };
     for (let index = 0; index < playing.length / 2; index++) {
       const seeded = playing[index];
       const opponent = playing[playing.length - 1 - index];
@@ -558,7 +613,7 @@ export async function scheduleKnockout(
         store,
         leagueId,
         season,
-        date,
+        clear(date, 1),
         rules.legs === 2 ? opponent : seeded,
         rules.legs === 2 ? seeded : opponent,
         stage,
@@ -566,12 +621,12 @@ export async function scheduleKnockout(
         "",
         { tie },
       );
-      if (rules.legs === 2) {
+      if (rules.legs === 2 && firstDate) {
         await addFixture(
           store,
           leagueId,
           season,
-          addDays(firstDate!, 7),
+          clear(addDays(firstDate, 7), 7),
           seeded,
           opponent,
           stage,
@@ -591,6 +646,114 @@ export async function scheduleKnockout(
   });
 }
 
+/** Catalog group stages (pots by coefficient), ACL Elite zone league stages and the Leagues Cup cross-league phase. */
+async function catalogMainPhase(
+  store: Store,
+  leagueId: number,
+  clubs: number[],
+  spec: CompetitionSpec,
+  season: number,
+  start: string,
+): Promise<boolean> {
+  const catalog = spec.catalog!;
+  const cross = catalog.id === "leagues-cup";
+  if (catalog.format === "knockout" || (catalog.format === "league-phase" && !catalog.zones && !cross)) return false;
+  const entrants = await store.all<Club & { code: string }>(
+    `SELECT clubs.*,countries.code FROM clubs JOIN countries ON countries.id = clubs.country_id WHERE clubs.id IN (${clubs.map(() => "?").join(",")}) ORDER BY clubs.reputation DESC, clubs.id`,
+    ...clubs,
+  );
+  const drawn = (list: typeof entrants) =>
+    list.map((club) => ({ id: club.id, countryId: club.country_id, coefficient: club.reputation }));
+  const zones = catalog.zones?.length
+    ? catalog.zones.map((zone) => ({ name: zone.name, clubs: entrants.filter((club) => zone.nations.includes(club.code)) }))
+    : [{ name: "", clubs: entrants }];
+  const rows: { club_id: number; group_name: string }[] = [];
+  const matches: { home: number; away: number; round: number; group: string }[] = [];
+  let letter = 0;
+  for (const zone of zones) {
+    if (zone.clubs.length < 2) continue;
+    if (cross) {
+      // MLS v Liga MX: every club meets three different clubs of the other league.
+      const sides = [...new Set(zone.clubs.map((club) => club.country_id))].map((countryId) =>
+        zone.clubs.filter((club) => club.country_id === countryId),
+      );
+      if (sides.length !== 2 || sides[0].length !== sides[1].length) return false;
+      const [left, right] = sides;
+      const matchdays = catalog.matchdays ?? 3;
+      const step = Math.max(1, Math.floor(left.length / matchdays));
+      for (let round = 0; round < matchdays; round++)
+        left.forEach((club, index) => {
+          const opponent = right[(index + round * step) % right.length];
+          const [home, away] = round % 2 ? [opponent.id, club.id] : [club.id, opponent.id];
+          matches.push({ home, away, round: round + 1, group: "League phase" });
+        });
+      rows.push(...zone.clubs.map((club) => ({ club_id: club.id, group_name: "League phase" })));
+      continue;
+    }
+    if (catalog.format === "league-phase") {
+      if (zone.clubs.length !== catalog.teams / zones.length) return false;
+      let draw: ReturnType<typeof drawZoneLeaguePhase>;
+      try {
+        draw = drawZoneLeaguePhase(drawn(zone.clubs), `${season}:${spec.name}:${zone.name}`);
+      } catch {
+        return false;
+      }
+      rows.push(...zone.clubs.map((club) => ({ club_id: club.id, group_name: zone.name })));
+      matches.push(
+        ...draw.fixtures.map((fixture) => ({
+          home: fixture.homeId,
+          away: fixture.awayId,
+          round: fixture.round,
+          group: zone.name,
+        })),
+      );
+      continue;
+    }
+    const count = Math.max(1, Math.round(zone.clubs.length / (catalog.groupSize ?? 4)));
+    let groups: number[][] = [];
+    try {
+      if (zone.clubs.length % count === 0)
+        groups = drawGroups(drawn(zone.clubs), count, `${season}:${spec.name}:${zone.name}`).groups;
+    } catch {
+      groups = [];
+    }
+    if (!groups.length) {
+      groups = Array.from({ length: count }, () => [] as number[]);
+      zone.clubs.forEach((club, index) => groups[index % count].push(club.id));
+    }
+    for (const group of groups) {
+      const name = `Group ${String.fromCharCode(65 + letter++)}`;
+      rows.push(...group.map((clubId) => ({ club_id: clubId, group_name: name })));
+      const firstLeg = roundrobin(group.length, group);
+      // Single-venue groups (Libertadores Sub-20) are one round robin.
+      [...firstLeg, ...(catalog.legs === 1 ? [] : firstLeg.map((pairs) => pairs.map(([home, away]) => [away, home] as [number, number])))].forEach(
+        (pairs, round) => pairs.forEach(([home, away]) => matches.push({ home, away, round: round + 1, group: name })),
+      );
+    }
+  }
+  if (!rows.length) return false;
+  await store.bulkInsert("standings", rows.map((row) => ({ league_id: leagueId, ...row })));
+  const cadence = CADENCE[catalog.id];
+  const gap = cadence?.gap ?? (["CONMEBOL", "CONCACAF"].includes(catalog.confederation) ? 7 : 14);
+  const planned = cadence?.matchdays?.map((monthDay) => seasonDate(season, monthDay));
+  const delay = planned ? Math.max(0, daysBetween(planned[0], start)) : 0;
+  const dates: string[] = [];
+  for (let round = 0; round < Math.max(0, ...matches.map((match) => match.round)); round++) {
+    let date = planned?.[round]
+      ? addDays(planned[round], delay)
+      : round
+        ? addDays(dates[round - 1], gap)
+        : start;
+    if (round && daysBetween(dates[round - 1], date) < 3) date = addDays(dates[round - 1], 7);
+    while (internationalBreak(date)) date = addDays(date, 7);
+    dates.push(date);
+  }
+  const stage = catalog.format === "groups" ? "Group stage" : "League phase";
+  for (const match of matches)
+    await addFixture(store, leagueId, season, dates[match.round - 1], match.home, match.away, stage, match.round, match.group);
+  return true;
+}
+
 export async function setupMainCompetition(
   store: Store,
   leagueId: number,
@@ -606,7 +769,11 @@ export async function setupMainCompetition(
     );
     await store.run("DELETE FROM standings WHERE league_id = ?", leagueId);
     const uniqueClubs = [...new Set(clubs)];
-    if (uniqueClubs.length < 2) return;
+    if (uniqueClubs.length < 2) {
+      // A lone entrant keeps no "Qualified" row: nobody is listed in a competition that is not held.
+      await setData(store, leagueId, { ...oldData, spec, season, phase: "not held", qualified: [] });
+      return;
+    }
     const plannedStart = seasonDate(season, spec.start);
     const start =
       earliestDate && earliestDate > plannedStart ? earliestDate : plannedStart;
@@ -633,7 +800,13 @@ export async function setupMainCompetition(
       await scheduleKnockout(store, leagueId, uniqueClubs, season, start);
       return;
     }
+    const planned = spec.catalog && CADENCE[spec.catalog.id]?.matchdays;
+    // Planned matchdays move together when the main phase starts late (qualifying finished after the first one).
+    const plannedDates = planned
+      ? plannedMatchdays(planned, season, Math.max(0, daysBetween(seasonDate(season, planned[0]), start)))
+      : [];
     if (
+      plannedDates.length &&
       [
         "UEFA Champions League",
         "UEFA Europa League",
@@ -666,37 +839,12 @@ export async function setupMainCompetition(
           group_name: "League phase",
         })),
       );
-      const dates =
-        spec.name === "UEFA Conference League"
-          ? ["10-01", "10-22", "11-05", "11-26", "12-10", "12-17"]
-          : [
-              "09-16",
-              "09-30",
-              "10-21",
-              "11-04",
-              "11-25",
-              "12-09",
-              "01-20",
-              "01-27",
-            ];
-      const weekdayOffset = spec.name === "UEFA Europa League" ? 1 : 0;
-      const firstRoundDate = addDays(
-        seasonDate(season, dates[0]),
-        weekdayOffset,
-      );
-      const scheduleDelay = earliestDate
-        ? Math.max(0, daysBetween(firstRoundDate, earliestDate))
-        : 0;
       for (const fixture of draw.fixtures) {
-        const date = addDays(
-          seasonDate(season, dates[fixture.round - 1]),
-          weekdayOffset + scheduleDelay,
-        );
         await addFixture(
           store,
           leagueId,
           season,
-          date,
+          plannedDates[fixture.round - 1],
           fixture.homeId,
           fixture.awayId,
           "League phase",
@@ -715,6 +863,7 @@ export async function setupMainCompetition(
       });
       return;
     }
+    if (spec.catalog && (await catalogMainPhase(store, leagueId, uniqueClubs, spec, season, start))) return;
     const groups =
       spec.format === "Swiss"
         ? [uniqueClubs]
@@ -745,46 +894,11 @@ export async function setupMainCompetition(
         ),
       ].slice(0, spec.rounds);
       for (const [round, pairs] of schedule.entries()) {
-        let date = addDays(start, round * gap);
-        if (spec.confederation === "UEFA" && spec.format === "Swiss") {
-          const roundDates = [
-            "09-16",
-            "09-30",
-            "10-21",
-            "11-04",
-            "11-25",
-            "12-09",
-            "01-20",
-            "01-27",
-          ];
-          date = seasonDate(season, roundDates[round] ?? "01-27");
-          if (
-            spec.name === "UEFA Europa League" ||
-            spec.name === "UEFA Conference League"
-          )
-            date = addDays(date, 1);
-          const firstRoundDate = addDays(
-            seasonDate(season, roundDates[0]),
-            spec.name === "UEFA Champions League" ? 0 : 1,
-          );
-          if (earliestDate)
-            date = addDays(
-              date,
-              Math.max(0, daysBetween(firstRoundDate, earliestDate)),
-            );
-        }
+        let date = plannedDates[round] ?? addDays(start, round * gap);
         if (spec.kind === "continental" || spec.name === "UEFA Youth League")
           while (internationalBreak(date)) date = addDays(date, 7);
-        if (spec.national && spec.age === "Senior")
-          date =
-            [
-              `${season}-09-03`,
-              `${season}-09-08`,
-              `${season}-10-07`,
-              `${season}-10-12`,
-              `${season}-11-11`,
-              `${season}-11-16`,
-            ][round] ?? date;
+        if (spec.national && spec.age === "Senior" && NATIONS_SERIES_DATES[round])
+          date = seasonDate(season, NATIONS_SERIES_DATES[round]);
         for (const [home, away] of pairs)
           await addFixture(
             store,
@@ -966,22 +1080,23 @@ export async function scheduleDomesticLeague(
     if (Number(JSON.parse(league.data).activeFromSeason ?? season) > season)
       return;
     if (fixtureBatches.get(store)!.scheduledLeagues.has(league.id)) return;
-    const entries = (
-      await store.all<Club>(
-        "SELECT clubs.* FROM standings JOIN clubs ON clubs.id = standings.club_id WHERE standings.league_id = ? ORDER BY clubs.id",
+    const rows = (
+      await store.all<Club & { group_name: string }>(
+        "SELECT clubs.*, standings.group_name FROM standings JOIN clubs ON clubs.id = standings.club_id WHERE standings.league_id = ? ORDER BY clubs.id",
         league.id,
       )
-    ).filter((club) => clubCompetitionEligible(club, "league", season))
-      .map((club) => club.id);
-    if (entries.length < 2) return;
-    const firstLeg = roundrobin(entries.length, entries);
-    const schedule = [
-      ...firstLeg,
-      ...firstLeg.map((pairs) =>
-        pairs.map(([home, away]) => [away, home] as [number, number]),
-      ),
-    ];
-    const dates = matchDates(season, schedule.length);
+    ).filter((club) => clubCompetitionEligible(club, "league", season));
+    if (rows.length < 2) return;
+    const format = readLeagueData(league.data, league.tier);
+    const groups = await conferenceGroups(store, league.id, rows, format.conferences);
+    const schedule = baseSchedule(groups, format.roundRobins, format.interConference ?? 0);
+    const title = miniLeagueRounds(format.championship, groups.length);
+    const reserved = regularSeasonDates(
+      season,
+      schedule.length,
+      splitMatchdays(format.split) + title,
+    );
+    const dates = reserved.base;
     if (fromDate && dates[0] < fromDate) return;
     for (const [round, pairs] of schedule.entries()) {
       for (const [home, away] of pairs)
@@ -996,8 +1111,23 @@ export async function scheduleDomesticLeague(
           round + 1,
         );
     }
+    if (reserved.split.length) {
+      const raw = JSON.parse(league.data);
+      const plan: SeasonPlan = {
+        season,
+        baseRounds: schedule.length,
+        splitDates: reserved.split.slice(0, reserved.split.length - title),
+        titleDates: reserved.split.slice(reserved.split.length - title),
+        ...(format.split ? {} : { splitDone: true }),
+      };
+      await store.run(
+        "UPDATE leagues SET data = ? WHERE id = ?",
+        JSON.stringify({ ...raw, seasonPlan: plan }),
+        league.id,
+      );
+    }
     if (league.age_group === "Senior") {
-      for (const [round, pairs] of firstLeg.slice(0, 2).entries()) {
+      for (const [round, pairs] of schedule.slice(0, 2).entries()) {
         const date = `${season}-07-${round === 0 ? "11" : "25"}`;
         if (fromDate && date < fromDate) continue;
         for (const [home, away] of pairs)
@@ -1014,6 +1144,577 @@ export async function scheduleDomesticLeague(
       }
     }
   });
+}
+
+type CupClub = Club & { tier: number | null };
+
+/** Section 4 entrants: own first teams (hosted abroad only with cups "home") plus clubs hosted here with cups "host". */
+function cupEntrants(clubs: readonly CupClub[], country: Country, cup: CupSpec) {
+  const inTiers = (club: CupClub) => !cup.tiers || cup.tiers.includes(club.tier ?? 0);
+  return clubs
+    .filter((club) => {
+      const hosted = JSON.parse(club.data).hosted as { host: string; cups: string } | undefined;
+      if (club.country_id === country.id) return hosted ? hosted.cups === "home" : inTiers(club);
+      return hosted?.host === country.code && hosted.cups === "host" && inTiers(club);
+    })
+    .sort(
+      (left, right) =>
+        (left.tier ?? 99) - (right.tier ?? 99) || right.reputation - left.reputation || left.id - right.id,
+    )
+    .slice(0, cup.maxEntrants ?? 64);
+}
+
+/** A lone entrant wins by walkover (Liechtenstein Cup with one club) and is recorded as champion. */
+async function recordWalkover(store: Store, leagueId: number, spec: CompetitionSpec, club: Club, season: number) {
+  await setData(store, leagueId, { spec, season, phase: "complete", champion: club.id, championName: club.name });
+  await store.run(
+    "INSERT INTO history(season, entity_type, entity_id, date, data) VALUES (?, ?, ?, ?, ?)",
+    season,
+    "champion",
+    leagueId,
+    `${season}-07-01`,
+    JSON.stringify({ clubId: club.id, name: club.name, competition: spec.name, walkover: true }),
+  );
+}
+
+/** Super cup participants from last season; a duplicate or unknown participant is replaced by the next league club. */
+async function superCupEntrants(store: Store, country: Country, cup: CupSpec, cups: readonly CupSpec[], season: number) {
+  const top = await store.get<League>(
+    "SELECT * FROM leagues WHERE country_id = ? AND kind = 'league' AND age_group = 'Senior' AND tier = 1 AND coalesce(JSON_VALUE(data,'$.reserveOnly'),'false') NOT IN ('true','1')",
+    country.id,
+  );
+  const archived = top
+    ? await store.get<{ data: string }>(
+        "SELECT TOP 1 data FROM history WHERE entity_type = 'league' AND entity_id = ? AND season = ? ORDER BY id DESC",
+        top.id,
+        season - 1,
+      )
+    : undefined;
+  const last = archived ? JSON.parse(archived.data) : {};
+  // First season: no history yet, so the strongest top-tier clubs stand in.
+  const ranked = last.table
+    ? rankTable(last.table as Standing[], top ? readLeagueData(top.data, 1).split : undefined).map((row) => row.club_id)
+    : (
+        await store.all<{ id: number }>(
+          "SELECT clubs.id FROM standings JOIN clubs ON clubs.id = standings.club_id WHERE standings.league_id = ? ORDER BY clubs.reputation DESC, clubs.id",
+          top?.id ?? 0,
+        )
+      ).map((row) => row.id);
+  const champion: number | undefined = last.champion ?? ranked[0];
+  const winnerOf = async (kind: CupSpec["kind"]) => {
+    const name = cups.find((entry) => entry.kind === kind)?.name;
+    const row = name
+      ? await store.get<{ data: string }>(
+          "SELECT TOP 1 history.data FROM history JOIN leagues ON leagues.id = history.entity_id WHERE history.entity_type = 'champion' AND history.season = ? AND leagues.name = ? AND leagues.country_id = ? ORDER BY history.id DESC",
+          season - 1,
+          name,
+          country.id,
+        )
+      : undefined;
+    return row ? Number(JSON.parse(row.data).clubId) : undefined;
+  };
+  const picks: number[] = [];
+  for (const participant of cup.participants ?? ["champion", "cup-winner"]) {
+    let clubId =
+      participant === "champion"
+        ? champion
+        : participant === "runner-up"
+          ? ranked.find((id) => id !== champion)
+          : participant === "cup-winner"
+            ? await winnerOf("national")
+            : participant === "league-cup-winner"
+              ? await winnerOf("league")
+              : undefined;
+    if (clubId === undefined || picks.includes(clubId)) clubId = ranked.find((id) => !picks.includes(id));
+    if (clubId !== undefined) picks.push(clubId);
+  }
+  return picks;
+}
+
+/** Catalog cups of one nation: national, league and super cups (zero allowed) and the U19/U17 cups. */
+async function scheduleNationalCups(store: Store, country: Country, season: number) {
+  const football = nationByCode(country.code)?.football;
+  if (!football) return;
+  const seniors = (
+    await store.all<CupClub>(
+      "SELECT clubs.*, (SELECT min(leagues.tier) FROM standings JOIN leagues ON leagues.id = standings.league_id WHERE standings.club_id = clubs.id AND leagues.kind = 'league' AND leagues.age_group = 'Senior' AND leagues.tier > 0) AS tier FROM clubs WHERE clubs.type = 'club' AND clubs.parent_id IS NULL AND (clubs.country_id = ? OR JSON_VALUE(clubs.data,'$.hosted.host') = ?) ORDER BY clubs.id",
+      country.id,
+      country.code,
+    )
+  ).filter((club) => clubCompetitionEligible(club, "cup", season));
+  const byId = new Map(seniors.map((club) => [club.id, club]));
+  for (const cup of football.cups) {
+    const entries =
+      cup.kind === "super"
+        ? await superCupEntrants(store, country, cup, football.cups, season)
+        : cupEntrants(seniors, country, cup).map((club) => club.id);
+    const spec: CompetitionSpec = {
+      name: cup.name,
+      confederation: country.confederation,
+      age: "Senior",
+      kind: "cup",
+      teams: entries.length,
+      format: "Knockout",
+      rounds: cup.rounds ?? Math.max(1, Math.ceil(Math.log2(Math.max(2, entries.length)))),
+      qualifies: 1,
+      start: cup.start ?? (cup.kind === "super" ? "08-01" : cup.kind === "league" ? "08-26" : "10-21"),
+      cupFormat: { legs: cup.legs, finalLegs: cup.finalLegs, neutralFinal: cup.neutralFinal },
+    };
+    const leagueId = await createLeague(store, spec, country.id);
+    if (entries.length === 1 && byId.has(entries[0]))
+      await recordWalkover(store, leagueId, spec, byId.get(entries[0])!, season);
+    else await setupMainCompetition(store, leagueId, entries, spec, season);
+  }
+  for (const age of ["U19", "U17"] as const) {
+    const name = football.youth[age].cup?.name;
+    if (!name) continue;
+    const entries = (
+      await store.all<Club>(
+        "SELECT DISTINCT clubs.* FROM standings JOIN clubs ON clubs.id = standings.club_id JOIN leagues ON leagues.id = standings.league_id WHERE leagues.country_id = ? AND leagues.age_group = ? AND leagues.kind = 'league' AND (JSON_VALUE(leagues.data,'$.activeFromSeason') IS NULL OR TRY_CONVERT(int,JSON_VALUE(leagues.data,'$.activeFromSeason')) <= ?) ORDER BY clubs.id",
+        country.id,
+        age,
+        season,
+      )
+    ).filter((club) => clubCompetitionEligible(club, "cup", season)).map((club) => club.id);
+    if (entries.length < 2) continue;
+    const spec: CompetitionSpec = {
+      name,
+      confederation: country.confederation,
+      age: age as AgeGroup,
+      kind: "cup",
+      teams: entries.length,
+      format: "Knockout",
+      rounds: Math.ceil(Math.log2(entries.length)),
+      qualifies: 1,
+      start: "12-02",
+    };
+    await setupMainCompetition(store, await createLeague(store, spec, country.id), entries, spec, season);
+  }
+}
+
+// ----------------------------------------------------------- continental
+
+/** UEFA qualifying first legs (2025/26 calendar); other confederations count back from the main start. */
+const UEFA_STAGE_DATES: Partial<Record<QualifyingStage, string>> = {
+  q1: "07-08",
+  q2: "07-22",
+  q3: "08-05",
+  q4: "08-12",
+  playoff: "08-19",
+};
+
+/** Next continental knockout round: two weeks apart, compressed (at least 3 days) so the final is played by June. */
+function continentalRoundDate(date: string, season: number, clubs: number) {
+  const rounds = Math.max(1, Math.ceil(Math.log2(Math.max(2, clubs))));
+  // Leaves room for the June FIFA window (9 days) and a margin: no club matches in it.
+  const days = daysBetween(date, `${season + 1}-06-27`) - 15;
+  let next = addDays(date, Math.max(3, Math.min(14, Math.floor(days / rounds) - 7)));
+  while (internationalBreak(next)) next = addDays(next, 7);
+  return next;
+}
+
+/** A knockout round on its real date (at least three days after the last round), or the next single-venue round. */
+function cadenceRoundDate(catalogId: string, date: string, season: number, alive: number, playoff = false) {
+  const cadence = CADENCE[catalogId];
+  if (cadence?.gap) return addDays(date, cadence.gap);
+  const bracket = playoff || alive > 16 ? "playoff" : (String(2 ** Math.ceil(Math.log2(Math.max(2, alive)))) as BracketSize);
+  const planned = cadence?.knockout?.[bracket];
+  if (!planned) return undefined;
+  let next = seasonDate(season, planned);
+  if (next < addDays(date, 3)) next = addDays(date, 3);
+  while (internationalBreak(next)) next = addDays(next, 1);
+  return next;
+}
+
+interface QualifyingData extends CompetitionData {
+  catalogQualifying: true;
+  qualificationFor: number;
+  /** Winners wanted when the main phase has no other entrants (main teams, or UYL knockout places). */
+  target: number;
+  stageEntrants: Partial<Record<QualifyingStage, number[]>>;
+  paths: Record<string, string>;
+  seeds: Record<string, number>;
+  lastStage: QualifyingStage;
+  stage?: QualifyingStage;
+  carried: number[];
+  completedStages: QualifyingStage[];
+  resolvedRound?: number;
+  /** Winners wanted per zone at the last stage (ACL Elite: 16 per zone minus its direct entrants). */
+  pathTargets?: Record<string, number>;
+}
+
+const catalogById = (id: string) => CONTINENTAL.competitions.find((item) => item.id === id);
+const leagueNamed = (store: Store, name: string) =>
+  store.get<League>("SELECT TOP (1) * FROM leagues WHERE name = ? AND country_id IS NULL ORDER BY id", name);
+const dropsInto = (id: string) =>
+  CONTINENTAL.competitions.flatMap((source) =>
+    (source.drops ?? []).filter((drop) => drop.to === id).map((drop) => ({ source, drop })),
+  );
+
+async function qualifyingOf(store: Store, name: string, season: number) {
+  const league = await leagueNamed(store, `${name} Qualifying`);
+  const data = league ? (JSON.parse(league.data) as Partial<QualifyingData>) : undefined;
+  return league && data?.catalogQualifying && data.season === season ? { league, data } : undefined;
+}
+
+/** A source stage is done once resolved, skipped (the bracket moved past it) or the bracket is absent/complete. */
+async function stageDone(store: Store, name: string, stage: ContinentalStage, season: number, started = false) {
+  const source = await qualifyingOf(store, name, season);
+  if (!source || source.data.phase === "complete" || stage === "main") return true;
+  if (source.data.completedStages?.includes(stage as QualifyingStage)) return true;
+  const current = source.data.stage ? QUALIFYING_STAGES.indexOf(source.data.stage) : -1;
+  const wanted = QUALIFYING_STAGES.indexOf(stage as QualifyingStage);
+  return current > wanted || (started && current === wanted);
+}
+
+/** Clubs still to drop into this main phase from source rounds in progress; null = a source round is not drawn yet. */
+async function pendingMainDrops(store: Store, catalog: ContinentalCompetitionSpec, season: number) {
+  let pending = 0;
+  for (const { source, drop } of dropsInto(catalog.id).filter(({ drop }) => drop.stage === "main")) {
+    if (await stageDone(store, source.name, drop.from, season)) continue;
+    if (!(await stageDone(store, source.name, drop.from, season, true))) return null;
+    const { league, data } = (await qualifyingOf(store, source.name, season))!;
+    const fixtures = await store.all<Fixture>(
+      "SELECT * FROM fixtures WHERE league_id = ? AND season = ? AND round = ?",
+      league.id,
+      season,
+      data.nextRound ?? 0,
+    );
+    const ties = new Map(fixtures.map((fixture) => [JSON.parse(fixture.data).tie?.id ?? fixture.id, fixture]));
+    pending += [...ties.values()].filter((fixture) => !drop.path || data.paths?.[fixture.home_id] === drop.path).length;
+  }
+  return pending;
+}
+
+async function deliverDrop(
+  store: Store,
+  drop: NonNullable<ContinentalCompetitionSpec["drops"]>[number],
+  clubId: number,
+  from: QualifyingData,
+  season: number,
+) {
+  const target = catalogById(drop.to);
+  if (!target) return;
+  const qualifying = drop.stage === "main" ? undefined : await qualifyingOf(store, target.name, season);
+  if (qualifying) {
+    const data = qualifying.data as QualifyingData;
+    const stage = drop.stage as QualifyingStage;
+    data.stageEntrants[stage] = [...(data.stageEntrants[stage] ?? []), clubId];
+    // The League Path exists only in the Champions League: its losers join the target's main path.
+    const path = drop.path ?? from.paths[clubId] ?? "";
+    data.paths[clubId] = path === "league" ? "" : path;
+    data.seeds[clubId] = from.seeds[clubId] ?? 0;
+    await setData(store, qualifying.league.id, data);
+    await store.bulkInsert("standings", [{ league_id: qualifying.league.id, club_id: clubId, group_name: stage }]);
+    return;
+  }
+  const main = await leagueNamed(store, target.name);
+  if (!main) return;
+  const data: CompetitionData = JSON.parse(main.data);
+  if (data.season !== season || data.phase !== "awaiting qualifiers") return;
+  await setData(store, main.id, { ...data, direct: [...(data.direct ?? []), clubId] });
+  await store.bulkInsert("standings", [{ league_id: main.id, club_id: clubId, group_name: "Qualified" }]);
+}
+
+/** Starts a continental main phase once its own qualifying, main-phase drop-ins and mirrored field are known. */
+async function tryStartMain(store: Store, mainId: number, season: number, date: string) {
+  const main = (await store.get<League>("SELECT * FROM leagues WHERE id = ?", mainId))!;
+  const data: CompetitionData = JSON.parse(main.data);
+  const spec = data.spec!;
+  const catalog = spec.catalog!;
+  if (data.phase !== "awaiting qualifiers" || data.season !== season) return;
+  if (!catalog.mirrors)
+    for (const id of data.qualifiers ?? []) {
+      const qualifying = await store.get<League>("SELECT * FROM leagues WHERE id = ?", id);
+      if (qualifying && JSON.parse(qualifying.data).phase !== "complete") return;
+    }
+  for (const { source, drop } of dropsInto(catalog.id).filter(({ drop }) => drop.stage === "main"))
+    if (!(await stageDone(store, source.name, drop.from, season))) return;
+  let clubs = [...new Set(data.direct ?? [])];
+  if (catalog.mirrors) {
+    const mirrored = await leagueNamed(store, catalogById(catalog.mirrors)?.name ?? "");
+    const mirroredData: CompetitionData | undefined = mirrored && JSON.parse(mirrored.data);
+    if (mirroredData?.season !== season || !["groups", "knockout", "complete"].includes(mirroredData.phase ?? ""))
+      return;
+    const sides = new Set(
+      (
+        await store.all<{ club_id: number }>(
+          "SELECT DISTINCT standings.club_id FROM standings JOIN leagues ON leagues.id = standings.league_id WHERE leagues.kind = 'league' AND leagues.age_group = ?",
+          spec.age,
+        )
+      ).map((row) => row.club_id),
+    );
+    clubs = (mirroredData.qualified ?? []).filter((id) => sides.has(id));
+  }
+  // Fewer than two clubs: "not held" (AFC Challenge League when no ACL Two preliminary loser drops).
+  await setupMainCompetition(store, mainId, clubs.slice(0, spec.teams), spec, season, addDays(date, 3));
+}
+
+/** Schedules the next qualifying round; waits while drop-ins for that stage are still being decided elsewhere. */
+async function advanceQualifying(store: Store, leagueId: number, season: number, date: string) {
+  const league = (await store.get<League>("SELECT * FROM leagues WHERE id = ?", leagueId))!;
+  const data = JSON.parse(league.data) as QualifyingData;
+  const main = (await store.get<League>("SELECT * FROM leagues WHERE id = ?", data.qualificationFor))!;
+  const mainData: CompetitionData = JSON.parse(main.data);
+  const catalog = mainData.spec!.catalog!;
+  const lastIndex = QUALIFYING_STAGES.indexOf(data.lastStage);
+  let index = data.stage ? QUALIFYING_STAGES.indexOf(data.stage) : -1;
+  let carried = [...data.carried];
+  for (;;) {
+    const nextIndex = Math.min(index + 1, QUALIFYING_STAGES.length - 1);
+    const stage = QUALIFYING_STAGES[nextIndex];
+    for (const { source, drop } of dropsInto(catalog.id).filter(({ drop }) => drop.stage === stage))
+      if (!(await stageDone(store, source.name, drop.from, season))) return;
+    const playing = [...new Set([...carried, ...(nextIndex > index ? (data.stageEntrants[stage] ?? []) : [])])];
+    const last = nextIndex >= lastIndex;
+    const entering =
+      (data.stageEntrants[stage]?.length ?? 0) > 0 || dropsInto(catalog.id).some(({ drop }) => drop.stage === stage);
+    if (!last && !entering) {
+      carried = playing;
+      index = nextIndex;
+      continue;
+    }
+    let slots = data.target;
+    if (last && !catalog.mirrors) {
+      const pending = await pendingMainDrops(store, catalog, season);
+      if (pending === null) return;
+      slots -= new Set(mainData.direct ?? []).size + pending;
+    }
+    const pathOf = (clubId: number) => data.paths[clubId] ?? "";
+    // Zoned competitions fill each zone on its own (ACL Elite preliminary round: two ties per zone).
+    const zoneTies =
+      last && data.pathTargets
+        ? Object.fromEntries(
+            Object.entries(data.pathTargets).map(([zone, target]) => [
+              zone,
+              lastStageTies(playing.filter((clubId) => pathOf(clubId) === zone).length, target),
+            ]),
+          )
+        : undefined;
+    const laterEntrants = QUALIFYING_STAGES.slice(nextIndex + 1).some(
+      (later) => (data.stageEntrants[later]?.length ?? 0) > 0,
+    );
+    const ties = !last
+      ? laterEntrants || playing.length < 2
+        ? Math.floor(playing.length / 2)
+        : // Only drop-ins follow (CAF Confederation Cup): byes bring the next round to a power of two (60 → 32).
+          playing.length - 2 ** (Math.ceil(Math.log2(playing.length)) - 1)
+      : zoneTies
+        ? Object.values(zoneTies).reduce((sum, count) => sum + count, 0)
+        : lastStageTies(playing.length, slots);
+    if (!ties) {
+      if (!last) {
+        carried = playing;
+        index = nextIndex;
+        continue;
+      }
+      const winners = zoneTies
+        ? playing.filter((clubId) => (data.pathTargets![pathOf(clubId)] ?? 0) > 0)
+        : slots <= 0
+          ? []
+          : playing;
+      const current: CompetitionData = JSON.parse(
+        (await store.get<League>("SELECT * FROM leagues WHERE id = ?", main.id))!.data,
+      );
+      await setData(
+        store,
+        main.id,
+        catalog.mirrors
+          ? { ...current, knockoutEntrants: [...((current.knockoutEntrants as number[]) ?? []), ...winners] }
+          : { ...current, direct: [...(current.direct ?? []), ...winners] },
+      );
+      await setData(store, leagueId, { ...data, stage, carried: [], phase: "complete", qualified: winners });
+      await tryStartMain(store, main.id, season, date);
+      return;
+    }
+    const sorted = playing.sort((left, right) => (data.seeds[right] ?? 0) - (data.seeds[left] ?? 0) || left - right);
+    const pairs = (
+      zoneTies
+        ? Object.entries(zoneTies).map(([zone, count]) =>
+            pairQualifyingRound(sorted.filter((clubId) => pathOf(clubId) === zone), count),
+          )
+        : [pairQualifyingRound(sorted, ties, pathOf)]
+    ).flatMap((part) => part.pairs);
+    const paired = new Set(pairs.flat());
+    const byes = sorted.filter((clubId) => !paired.has(clubId));
+    const round = (data.nextRound ?? 0) + 1;
+    const stageDates = CADENCE[catalog.id]?.qualifying ?? (catalog.confederation === "UEFA" ? UEFA_STAGE_DATES : undefined);
+    const planned = stageDates?.[stage];
+    let first = date;
+    if (planned && nextIndex > index) {
+      const fixed = addDays(seasonDate(season, planned), catalog.confederation === "UEFA" && catalog.level !== 1 ? 1 : 0);
+      if (fixed > first) first = fixed;
+    }
+    while (internationalBreak(first)) first = addDays(first, 7);
+    const rules = knockoutRules(league.name, "Qualifying");
+    await withFixtureBatch(store, season, async () => {
+      for (const [tieIndex, [seeded, opponent]] of pairs.entries()) {
+        const tie: KnockoutTie = { ...rules, id: `${season}:${leagueId}:${round}:${tieIndex}`, leg: 1 };
+        const details = { tie, qualifyingStage: stage };
+        const firstDate = await addFixture(
+          store,
+          leagueId,
+          season,
+          first,
+          rules.legs === 2 ? opponent : seeded,
+          rules.legs === 2 ? seeded : opponent,
+          "Qualifying",
+          round,
+          "",
+          details,
+        );
+        if (rules.legs === 2) {
+          // A tie may straddle a FIFA window (UYL Domestic Champions Path round 1: 16 September, then October).
+          let second = addDays(firstDate!, 7);
+          while (internationalBreak(second)) second = addDays(second, 7);
+          await addFixture(store, leagueId, season, second, seeded, opponent, "Qualifying", round, "", {
+            ...details,
+            tie: { ...tie, leg: 2 },
+          });
+        }
+      }
+    });
+    await setData(store, leagueId, { ...data, stage, carried: byes, nextRound: round, phase: "knockout" });
+    return;
+  }
+}
+
+/** Resolves a finished qualifying round once (winners carried, losers dropped), then tries the next round. */
+async function progressQualifying(store: Store, league: League, season: number, date: string) {
+  const data = JSON.parse(league.data) as QualifyingData;
+  if (data.season !== season || data.phase === "complete") return;
+  const round = data.nextRound ?? 0;
+  if (round && data.resolvedRound !== round) {
+    const fixtures = await store.all<Fixture>(
+      "SELECT * FROM fixtures WHERE league_id = ? AND season = ? AND round = ?",
+      league.id,
+      season,
+      round,
+    );
+    if (fixtures.some((fixture) => fixture.status === "scheduled")) return;
+    const ties = new Map<string, Fixture[]>();
+    for (const fixture of fixtures) {
+      const id = JSON.parse(fixture.data).tie?.id ?? String(fixture.id);
+      ties.set(id, [...(ties.get(id) ?? []), fixture]);
+    }
+    const winners: number[] = [];
+    const main = (await store.get<League>("SELECT * FROM leagues WHERE id = ?", data.qualificationFor))!;
+    const catalog = (JSON.parse(main.data) as CompetitionData).spec!.catalog!;
+    for (const legs of ties.values()) {
+      const winner = knockoutWinner(legs);
+      if (!winner) throw new Error(`Qualifying tie in ${league.name} has no winner.`);
+      winners.push(winner);
+      const loser = legs[0].home_id === winner ? legs[0].away_id : legs[0].home_id;
+      const drop = (catalog.drops ?? []).find(
+        (item) => item.from === data.stage && (!item.path || item.path === data.paths[loser]),
+      );
+      if (drop) await deliverDrop(store, drop, loser, data, season);
+    }
+    const fresh = JSON.parse((await store.get<League>("SELECT * FROM leagues WHERE id = ?", league.id))!.data);
+    Object.assign(data, fresh, {
+      carried: [...data.carried, ...winners],
+      completedStages: [...new Set([...(data.completedStages ?? []), data.stage!])],
+      resolvedRound: round,
+    });
+    await setData(store, league.id, data);
+  }
+  await advanceQualifying(store, league.id, season, addDays(date, 7));
+}
+
+async function setupContinental(store: Store, spec: CompetitionSpec, season: number, usedSenior: Set<number>) {
+  const catalog = spec.catalog!;
+  // Feeders, super cups and youth events are separate pools: their clubs may also hold a senior place.
+  const separate = Boolean(catalog.feeder) || catalog.kind === "super" || spec.age !== "Senior";
+  const entries = (await continentalEntries(store, catalog.id, season, separate ? new Set() : usedSenior)).filter(
+    (entry) => clubCompetitionEligible(entry.club, spec.kind, season),
+  );
+  if (!separate) for (const entry of entries) usedSenior.add(entry.club.id);
+  const mainId = await createLeague(store, spec);
+  const direct = new Set(entries.filter((entry) => entry.stage === "main").map((entry) => entry.club.id));
+  // A club listed twice keeps one place: the main phase, else its first qualifying stage.
+  const listed = new Set(direct);
+  const qualifying = entries.filter(
+    (entry) => entry.stage !== "main" && !listed.has(entry.club.id) && Boolean(listed.add(entry.club.id)),
+  );
+  const codes = new Map(
+    (await store.all<Country>("SELECT * FROM countries")).map((country) => [country.id, country.code]),
+  );
+  // AFC play-offs stay inside their zone; UEFA qualifying keeps the Champions and League paths apart.
+  const pathOf = (entry: (typeof entries)[number]) =>
+    entry.path ??
+    catalog.zones?.find((zone) => zone.nations.includes(codes.get(entry.club.country_id) ?? ""))?.name ??
+    "";
+  const sources = dropsInto(catalog.id).filter(({ drop }) => drop.stage !== "main");
+  const data: CompetitionData = {
+    spec,
+    season,
+    phase: "awaiting qualifiers",
+    direct: [...direct],
+    qualifiers: [],
+    qualification: entries.map(({ club, ...entry }) => ({ clubId: club.id, ...entry })),
+    regulationsVersion: 2,
+  };
+  // Before qualifying: a qualifying round with no ties can start the main phase at once (its own standings).
+  if (direct.size)
+    await store.bulkInsert(
+      "standings",
+      [...direct].map((clubId) => ({ league_id: mainId, club_id: clubId, group_name: "Qualified" })),
+    );
+  if (qualifying.length || sources.length) {
+    const qualifyingSpec: CompetitionSpec = {
+      ...spec,
+      name: `${spec.name} Qualifying`,
+      format: "Knockout",
+      teams: qualifying.length,
+      qualifies: 0,
+    };
+    const qualifyingId = await createLeague(store, qualifyingSpec);
+    const stageEntrants: QualifyingData["stageEntrants"] = {};
+    for (const entry of qualifying) {
+      const stage = entry.stage as QualifyingStage;
+      stageEntrants[stage] = [...(stageEntrants[stage] ?? []), entry.club.id];
+    }
+    const stages = [...qualifying.map((entry) => entry.stage), ...sources.map(({ drop }) => drop.stage)];
+    const lastIndex = Math.max(...stages.map((stage) => QUALIFYING_STAGES.indexOf(stage as QualifyingStage)));
+    const knockoutSize = 2 ** Math.ceil(Math.log2(Math.max(2, catalog.advance)));
+    const zoneSize = catalog.zones?.length ? catalog.teams / catalog.zones.length : 0;
+    const directIn = (zone: string) =>
+      new Set(entries.filter((entry) => entry.stage === "main" && pathOf(entry) === zone).map((entry) => entry.club.id))
+        .size;
+    await setData(store, qualifyingId, {
+      spec: qualifyingSpec,
+      season,
+      phase: "knockout",
+      catalogQualifying: true,
+      qualificationFor: mainId,
+      target: catalog.mirrors ? knockoutSize - catalog.advance : spec.teams,
+      stageEntrants,
+      paths: Object.fromEntries(qualifying.map((entry) => [entry.club.id, pathOf(entry)])),
+      seeds: Object.fromEntries(qualifying.map((entry) => [entry.club.id, entry.coefficient])),
+      lastStage: QUALIFYING_STAGES[lastIndex],
+      carried: [],
+      completedStages: [],
+      nextRound: 0,
+      ...(zoneSize
+        ? { pathTargets: Object.fromEntries(catalog.zones!.map((zone) => [zone.name, zoneSize - directIn(zone.name)])) }
+        : {}),
+    } satisfies QualifyingData);
+    await store.bulkInsert(
+      "standings",
+      qualifying.map((entry) => ({ league_id: qualifyingId, club_id: entry.club.id, group_name: entry.stage })),
+    );
+    data.qualifiers = [qualifyingId];
+    await setData(store, mainId, data);
+    // Non-UEFA qualifying counts back from the main start: two weeks per round, the first legs a week earlier.
+    const counts: Partial<Record<QualifyingStage, number>> = {};
+    for (const [stage, clubs] of Object.entries(stageEntrants)) counts[stage as QualifyingStage] = clubs.length;
+    const rounds = Math.max(1, qualifyingPlan(counts, spec.teams - (data.direct?.length ?? 0)).length);
+    const counted = CADENCE[catalog.id]?.qualifying
+      ? `${season}-07-02`
+      : addDays(seasonDate(season, spec.start), -(rounds * 14 + 7));
+    await advanceQualifying(store, qualifyingId, season, counted < `${season}-07-02` ? `${season}-07-02` : counted);
+  } else await setData(store, mainId, data);
+  await tryStartMain(store, mainId, season, addDays(seasonDate(season, spec.start), -3));
 }
 
 export async function createCalendar(store: Store) {
@@ -1040,72 +1741,8 @@ export async function createCalendar(store: Store) {
       const countries = await store.all<Country>(
         "SELECT * FROM countries ORDER BY id",
       );
-      for (const country of countries) {
-        for (const age of ["U17", "U19"] as AgeGroup[]) {
-          const entries = (
-            await store.all<Club>(
-              "SELECT DISTINCT clubs.* FROM standings JOIN clubs ON clubs.id = standings.club_id JOIN leagues ON leagues.id = standings.league_id WHERE leagues.country_id = ? AND leagues.age_group = ? AND leagues.kind = 'league' AND (JSON_VALUE(leagues.data,'$.activeFromSeason') IS NULL OR TRY_CONVERT(int,JSON_VALUE(leagues.data,'$.activeFromSeason')) <= ?) ORDER BY clubs.id",
-              country.id,
-              age,
-              season,
-            )
-          ).filter((club) => clubCompetitionEligible(club, "cup", season))
-            .map((club) => club.id);
-          const spec: CompetitionSpec = {
-            name: `${country.name} ${age} Cup`,
-            confederation: country.confederation,
-            age,
-            kind: "cup",
-            teams: entries.length,
-            format: "Knockout",
-            rounds: 3,
-            qualifies: 1,
-            start: "12-02",
-          };
-          const leagueId = await createLeague(store, spec, country.id);
-          await setupMainCompetition(store, leagueId, entries, spec, season);
-          const superSpec: CompetitionSpec = {
-            ...spec,
-            name: `${country.name} ${age} Super Cup`,
-            teams: 2,
-            rounds: 1,
-            start: "07-18",
-          };
-          const superId = await createLeague(store, superSpec, country.id);
-          await setupMainCompetition(
-            store,
-            superId,
-            entries.slice(0, 2),
-            superSpec,
-            season,
-          );
-        }
-        const seniorEntries = (
-          await store.all<Club>(
-            "SELECT * FROM clubs WHERE country_id = ? AND type = 'club' ORDER BY reputation DESC,id",
-            country.id,
-          )
-        ).filter((club) => clubCompetitionEligible(club, "cup", season))
-          .slice(0, 32).map((club) => club.id);
-        const cupSpec: CompetitionSpec = {
-          name: `${country.name} National Cup`,
-          confederation: country.confederation,
-          age: "Senior",
-          kind: "cup",
-          teams: seniorEntries.length,
-          format: "Knockout",
-          rounds: 5,
-          qualifies: 1,
-          start: "10-21",
-        };
-        await setupMainCompetition(
-          store,
-          await createLeague(store, cupSpec, country.id),
-          seniorEntries,
-          cupSpec,
-          season,
-        );
-      }
+      for (const country of countries)
+        await scheduleNationalCups(store, country, season);
       const previousTables = new Map<number, Standing[]>();
       for (const archived of await store.all<{
         entity_id: number;
@@ -1120,10 +1757,13 @@ export async function createCalendar(store: Store) {
         );
       const usedSenior = new Set<number>();
       for (const spec of COMPETITIONS) {
+        if (spec.catalog) {
+          await setupContinental(store, spec, season, usedSenior);
+          continue;
+        }
         if (
           settings.youthTournamentFrequency === "low" &&
           spec.kind === "youth" &&
-          spec.name !== "UEFA Youth League" &&
           season % 2 === 1
         ) {
           const restingId = await createLeague(store, spec);
@@ -1167,7 +1807,7 @@ export async function createCalendar(store: Store) {
           })
           .sort((left, right) => right.score - left.score);
         const perCountry = new Map<number, number>();
-        let candidates = ranked
+        const candidates = ranked
           .filter(({ club }) => {
             const count = perCountry.get(club.country_id) ?? 0;
             perCountry.set(club.country_id, count + 1);
@@ -1178,50 +1818,22 @@ export async function createCalendar(store: Store) {
             );
           })
           .map(({ club }) => club);
-        let qualification: Awaited<ReturnType<typeof continentalEntries>> = [];
-        if (
-          spec.confederation === "UEFA" &&
-          spec.age === "Senior" &&
-          spec.kind === "continental"
-        ) {
-          qualification = (await continentalEntries(
-            store,
-            spec.name,
-            season,
-            usedSenior,
-          )).filter((entry) =>
-            clubCompetitionEligible(entry.club, spec.kind, season),
-          );
-          candidates = qualification.map((entry) => entry.club);
-        }
         if (candidates.length < 2) continue;
         const teamCount = Math.min(
           spec.teams,
           candidates.length - (candidates.length % 2),
         );
         const mainId = await createLeague(store, spec);
-        if (qualification.length)
-          await setData(store, mainId, {
-            spec,
-            qualification: qualification.map(({ club, ...entry }) => ({
-              clubId: club.id,
-              ...entry,
-            })),
-            regulationsVersion: 1,
-          });
         const allIds = candidates.map((club) => club.id);
         if (spec.kind === "continental")
-          (qualification.length
-            ? allIds
-            : allIds.slice(0, teamCount + 12)
-          ).forEach((id) => usedSenior.add(id));
+          allIds.slice(0, teamCount + 12).forEach((id) => usedSenior.add(id));
         const canQualify = spec.qualifier && allIds.length >= teamCount + 4;
         if (canQualify) {
           const slots = Math.min(4, Math.floor(teamCount / 4));
           const direct = allIds.slice(0, teamCount - slots);
           const qualifying = allIds.slice(
             teamCount - slots,
-            qualification.length ? undefined : teamCount - slots + slots * 4,
+            teamCount - slots + slots * 4,
           );
           const qualifyingSpec: CompetitionSpec = {
             ...spec,
@@ -1260,26 +1872,12 @@ export async function createCalendar(store: Store) {
             qualifiers: [qualifyingId],
           });
           const mainStart = seasonDate(season, spec.start);
-          const qualifyingRounds = Math.ceil(
-            Math.log2(qualifying.length / slots),
-          );
-          const completeQualifyingStart = addDays(
-            mainStart,
-            -(qualifyingRounds * 14 + 14),
-          );
-          const qualifierDate = qualification.length
-            ? completeQualifyingStart < `${season}-07-02`
-              ? `${season}-07-02`
-              : completeQualifyingStart
-            : spec.kind === "continental" && Number(spec.start.slice(0, 2)) >= 7
-              ? `${season}-07-21`
-              : addDays(mainStart, -28);
           await scheduleKnockout(
             store,
             qualifyingId,
             qualifying,
             season,
-            qualifierDate,
+            addDays(mainStart, -28),
             1,
             { qualificationFor: mainId, slots },
           );
@@ -1315,10 +1913,429 @@ export async function createCalendar(store: Store) {
   });
 }
 
+export interface CountryPyramid {
+  leagues: League[];
+  tiers: PyramidTier[];
+  clubs: Map<number, PyramidClub>;
+}
+
+/** Senior own tiers of one country: split-aware final tables, conference tables and B-team ceilings. */
+export async function countryPyramid(store: Store, countryId: number, season?: number): Promise<CountryPyramid> {
+  const leagues = await store.all<League>(
+    "SELECT * FROM leagues WHERE country_id = ? AND kind = 'league' AND age_group = 'Senior' AND tier > 0 AND coalesce(JSON_VALUE(data,'$.reserveOnly'),'false') NOT IN ('true','1') ORDER BY tier",
+    countryId,
+  );
+  const ids = new Set(leagues.map((league) => league.id));
+  const rows = (
+    await store.all<Standing & { parent_id: number | null; club_data: string }>(
+      "SELECT standings.*, clubs.parent_id, clubs.data AS club_data FROM standings JOIN clubs ON clubs.id = standings.club_id JOIN leagues ON leagues.id = standings.league_id WHERE leagues.country_id = ? AND leagues.kind = 'league'",
+      countryId,
+    )
+  ).filter((row) => ids.has(row.league_id));
+  const clubs = new Map<number, PyramidClub>();
+  for (const row of rows) {
+    const pyramid = row.parent_id ? JSON.parse(row.club_data).reservePolicy?.pyramid : undefined;
+    clubs.set(row.club_id, {
+      clubId: row.club_id,
+      ...(pyramid
+        ? {
+            reserve: {
+              parentId: row.parent_id!,
+              highestTier: Number(pyramid.highestTier),
+              minGapBelowParent: Number(pyramid.minGapBelowParent),
+              ...(pyramid.maxPerTier ? { maxPerTier: Number(pyramid.maxPerTier) } : {}),
+            },
+          }
+        : {}),
+    });
+  }
+  const raw = new Map(leagues.map((league) => [league.tier, JSON.parse(league.data)]));
+  const tiers = leagues.map((league): PyramidTier => {
+    const format = readLeagueData(raw.get(league.tier), league.tier, {
+      above: raw.get(league.tier - 1),
+      below: raw.get(league.tier + 1),
+    });
+    const table = rows.filter((row) => row.league_id === league.id);
+    return {
+      leagueId: league.id,
+      tier: league.tier,
+      closed: format.closed,
+      movementDown: format.movementDown,
+      table: rankTable(table, format.split).map((row) => row.club_id),
+      ...(format.conferences && !format.split
+        ? {
+            conferenceTables: format.conferences.map((name) =>
+              rankTable(table.filter((row) => row.group_name === name)).map((row) => row.club_id),
+            ),
+          }
+        : {}),
+    };
+  });
+  if (season !== undefined)
+    for (const row of await store.all<{ data: string }>(
+      "SELECT data FROM leagues WHERE kind = 'cup' AND country_id = ? AND JSON_VALUE(data,'$.key') = 'title' AND TRY_CONVERT(int, JSON_VALUE(data,'$.season')) = ?",
+      countryId,
+      season,
+    )) {
+      const playoff = JSON.parse(row.data) as PlayoffData;
+      const champion =
+        playoff.champion ?? (playoff.state ? resolvePlayoffBySeed(playoff.state).winners[0] : undefined);
+      const tier = tiers.find((entry) => entry.leagueId === playoff.leagueId);
+      if (tier && champion !== undefined) tier.champion = champion;
+    }
+  return { leagues, tiers, clubs };
+}
+
+interface SeasonPlan {
+  season: number;
+  baseRounds: number;
+  splitDates: string[];
+  /** Reserved dates of a round-robin title play-off. */
+  titleDates: string[];
+  splitDone?: boolean;
+}
+
+/** Title and movement play-offs (kind "cup", phase "playoff"); `key` is `title` or a league-rules boundary key. */
+export interface PlayoffData {
+  /** Always true: tells play-offs apart from domestic cups (both are kind "cup"). */
+  playoff: true;
+  phase: "playoff" | "complete";
+  season: number;
+  key: string;
+  leagueId: number;
+  state?: PlayoffState;
+  miniLeague?: number[];
+  champion?: number;
+  spec: CompetitionSpec;
+}
+
+const nextPostseasonDate = (season: number, date: string) =>
+  postseasonDates(season, date)[0] ?? addDays(date, 3);
+
+async function openPlayoff(
+  store: Store,
+  name: string,
+  country: Country,
+  season: number,
+  playoff: Pick<PlayoffData, "key" | "leagueId" | "state" | "miniLeague">,
+  teams: number,
+) {
+  const existing = await store.get<League>(
+    "SELECT * FROM leagues WHERE name = ? AND country_id = ? AND kind = 'cup'",
+    name,
+    country.id,
+  );
+  if (existing && Number(JSON.parse(existing.data).season) === season) return null;
+  const data: PlayoffData = {
+    ...playoff,
+    playoff: true,
+    phase: "playoff",
+    season,
+    spec: {
+      name,
+      confederation: country.confederation,
+      age: "Senior",
+      kind: "cup",
+      teams,
+      format: playoff.miniLeague ? "Groups" : "Knockout",
+      rounds: playoff.miniLeague ? 1 : Math.ceil(Math.log2(Math.max(2, teams))),
+      qualifies: 1,
+      start: "05-20",
+    },
+  };
+  let id = existing?.id;
+  if (id) {
+    await store.run("DELETE FROM standings WHERE league_id = ?", id);
+    await store.run("UPDATE leagues SET data = ? WHERE id = ?", JSON.stringify(data), id);
+  } else {
+    id = Number(
+      (
+        await store.run(
+          "INSERT INTO leagues(name, country_id, confederation, tier, age_group, kind, reputation, format, data) VALUES (?, ?, ?, 0, 'Senior', 'cup', ?, ?, ?)",
+          name,
+          country.id,
+          country.confederation,
+          country.reputation,
+          playoff.miniLeague ? "Round-robin play-off" : "Play-off",
+          JSON.stringify(data),
+        )
+      ).lastInsertRowid,
+    );
+  }
+  fixtureBatches.get(store)?.ages.set(id, "Senior");
+  return id;
+}
+
+async function schedulePlayoffRound(
+  store: Store,
+  competitionId: number,
+  season: number,
+  date: string,
+  state: PlayoffState,
+) {
+  const round = state.pending!;
+  const stage = knockoutStage(round.pairs.length * 2, round.final);
+  for (const [index, [better, worse]] of round.pairs.entries()) {
+    const tie: KnockoutTie = {
+      version: 1,
+      legs: round.legs,
+      extraTime: true,
+      awayGoals: false,
+      neutral: round.neutral,
+      id: `${season}:${competitionId}:${state.round}:${index}`,
+      leg: 1,
+    };
+    const first = await addFixture(
+      store,
+      competitionId,
+      season,
+      date,
+      round.legs === 2 ? worse : better,
+      round.legs === 2 ? better : worse,
+      stage,
+      state.round + 1,
+      "",
+      { tie },
+    );
+    if (round.legs === 2)
+      await addFixture(store, competitionId, season, addDays(first!, 3), better, worse, stage, state.round + 1, "", {
+        tie: { ...tie, leg: 2 },
+      });
+  }
+}
+
+/** Advances domestic play-offs round by round; mini-leagues finish when every match is played. */
+async function progressPlayoffs(store: Store, season: number, date: string) {
+  for (const competition of await store.all<League>(
+    "SELECT * FROM leagues WHERE kind = 'cup' AND JSON_VALUE(data,'$.phase') = 'playoff' AND TRY_CONVERT(int, JSON_VALUE(data,'$.season')) = ? ORDER BY id",
+    season,
+  )) {
+    const data = JSON.parse(competition.data) as PlayoffData;
+    const fixtures = await store.all<Fixture>(
+      "SELECT * FROM fixtures WHERE league_id = ? AND season = ? ORDER BY round, id",
+      competition.id,
+      season,
+    );
+    if (fixtures.some((fixture) => fixture.status === "scheduled")) continue;
+    let next: PlayoffData;
+    if (data.miniLeague) {
+      const table = await store.all<Standing>("SELECT * FROM standings WHERE league_id = ?", competition.id);
+      next = { ...data, phase: "complete", champion: rankTable(table)[0]?.club_id };
+    } else {
+      const state = data.state!;
+      const ties = new Map<string, Fixture[]>();
+      for (const fixture of fixtures.filter((row) => row.round === state.round + 1)) {
+        const id = String(JSON.parse(fixture.data).tie?.id);
+        ties.set(id, [...(ties.get(id) ?? []), fixture]);
+      }
+      const winners = [...ties.values()].flatMap((legs) => knockoutWinner(legs) ?? []);
+      const advanced = advancePlayoff(state, winners);
+      if (advanced.pending)
+        await withFixtureBatch(store, season, () =>
+          schedulePlayoffRound(store, competition.id, season, nextPostseasonDate(season, date), advanced),
+        );
+      next = advanced.pending
+        ? { ...data, state: advanced }
+        : {
+            ...data,
+            state: advanced,
+            phase: "complete",
+            ...(advanced.kind === "championship" ? { champion: advanced.result?.winners[0] } : {}),
+          };
+    }
+    await store.run("UPDATE leagues SET data = ? WHERE id = ?", JSON.stringify(next), competition.id);
+  }
+}
+
+/** Split groups start once every base round is played: fixed group order, points kept or halved (rounded up). */
+async function progressSplits(store: Store, season: number) {
+  for (const league of await store.all<League>(
+    "SELECT * FROM leagues WHERE kind = 'league' AND TRY_CONVERT(int, JSON_VALUE(data,'$.seasonPlan.season')) = ? AND JSON_VALUE(data,'$.seasonPlan.splitDone') IS NULL ORDER BY id",
+    season,
+  )) {
+    const raw = JSON.parse(league.data);
+    const plan = raw.seasonPlan as SeasonPlan;
+    const format = readLeagueData(raw, league.tier);
+    const unplayed = (await store.get<{ count: number }>(
+      "SELECT count(*) AS count FROM fixtures WHERE league_id = ? AND season = ? AND status = 'scheduled' AND round <= ?",
+      league.id,
+      season,
+      plan.baseRounds,
+    ))!.count;
+    if (unplayed || !format.split) continue;
+    const table = await store.all<Standing>(
+      "SELECT * FROM standings WHERE league_id = ?",
+      league.id,
+    );
+    const points = new Map(table.map((row) => [row.club_id, row.points]));
+    await withFixtureBatch(store, season, async () => {
+      for (const group of planSplit(rankTable(table), format.split!)) {
+        for (const clubId of group.clubs)
+          await store.run(
+            "UPDATE standings SET group_name = ?, points = ? WHERE league_id = ? AND club_id = ?",
+            group.name,
+            group.points === "halved" ? halvedPoints(points.get(clubId)!) : points.get(clubId)!,
+            league.id,
+            clubId,
+          );
+        for (const [round, pairs] of baseSchedule([group.clubs], group.roundRobins).entries())
+          for (const [home, away] of pairs)
+            await addFixture(
+              store,
+              league.id,
+              season,
+              plan.splitDates[round],
+              home,
+              away,
+              "League",
+              plan.baseRounds + round + 1,
+              group.name,
+            );
+      }
+    });
+    await store.run(
+      "UPDATE leagues SET data = ? WHERE id = ?",
+      JSON.stringify({ ...raw, seasonPlan: { ...plan, splitDone: true } }),
+      league.id,
+    );
+  }
+}
+
+const SENIOR_TIERS =
+  "kind = 'league' AND age_group = 'Senior' AND tier > 0 AND coalesce(JSON_VALUE(data,'$.reserveOnly'),'false') NOT IN ('true','1')";
+const UNPLAYED =
+  "(SELECT count(*) FROM fixtures WHERE fixtures.league_id = leagues.id AND fixtures.season = ? AND fixtures.status = 'scheduled')";
+const regularSeasonOver = (league: League & { unplayed: number }, season: number) => {
+  const plan = JSON.parse(league.data).seasonPlan as SeasonPlan | undefined;
+  return !league.unplayed && (!JSON.parse(league.data).split || (plan?.season === season && plan.splitDone));
+};
+
+/** Title play-off of one league: seeded by the final table (per conference when set); mini-leagues use reserved dates. */
+async function openTitlePlayoff(store: Store, league: League, season: number, date: string) {
+  const raw = JSON.parse(league.data);
+  const championship = readLeagueData(raw, league.tier).championship!;
+  const country = (await store.get<Country>("SELECT * FROM countries WHERE id = ?", league.country_id))!;
+  const tier = (await countryPyramid(store, country.id)).tiers.find((entry) => entry.leagueId === league.id);
+  if (!tier) return;
+  const [from, to] = championship.positions;
+  const groups = championship.perConference && tier.conferenceTables
+    ? tier.conferenceTables.map((table) => table.slice(from - 1, to))
+    : [tier.table.slice(from - 1, to)];
+  const seeds = tier.table.filter((clubId) => groups.some((group) => group.includes(clubId)));
+  const name = `${league.name} Play-offs`;
+  if (championship.format === "round-robin") {
+    const id = await openPlayoff(store, name, country, season, { key: "title", leagueId: league.id, miniLeague: seeds }, seeds.length);
+    if (!id) return;
+    for (const clubId of seeds)
+      await store.run("INSERT INTO standings(league_id, club_id, group_name) VALUES (?, ?, 'Play-offs')", id, clubId);
+    const reserved = (raw.seasonPlan as SeasonPlan | undefined)?.titleDates ?? [];
+    const fallback = postseasonDates(season, date);
+    for (const [round, pairs] of baseSchedule([seeds], championship.roundRobins ?? 2).entries())
+      for (const [home, away] of pairs)
+        await addFixture(store, id, season, reserved[round] ?? fallback[round] ?? addDays(date, 3 * (round + 1)), home, away, "League", round + 1, "Play-offs");
+    return;
+  }
+  const state = createPlayoff({
+    kind: "championship",
+    legs: championship.legs,
+    finalLegs: championship.finalLegs,
+    neutralFinal: championship.neutralFinal,
+    seeds,
+    ...(groups.length > 1 ? { groups } : {}),
+  });
+  const id = await openPlayoff(store, name, country, season, { key: "title", leagueId: league.id, state }, seeds.length);
+  if (id && state.pending) await schedulePlayoffRound(store, id, season, nextPostseasonDate(season, date), state);
+}
+
+/** Movement play-off names: promotion play-offs belong to the lower league, play-outs and cross-tier ties to the upper. */
+const movementPlayoffName = (spec: PlayoffInput["kind"], upper: League, lower: League, suffix: string) =>
+  spec === "promotion"
+    ? `${lower.name} Promotion Play-offs${suffix}`
+    : spec === "relegation"
+      ? `${upper.name} Relegation Play-out${suffix}`
+      : `${upper.name} Relegation Play-offs${suffix}`;
+
+/** Title play-offs as soon as a league's regular season ends; movement play-offs once every senior tier of the country has. */
+async function startPostseason(store: Store, season: number, date: string) {
+  for (const league of await store.all<League & { unplayed: number }>(
+    `SELECT leagues.*, ${UNPLAYED} AS unplayed FROM leagues WHERE ${SENIOR_TIERS} AND JSON_VALUE(data,'$.championship.legs') IS NOT NULL AND coalesce(TRY_CONVERT(int, JSON_VALUE(data,'$.titleSeason')), 0) < ? AND EXISTS (SELECT 1 FROM fixtures WHERE fixtures.league_id = leagues.id AND fixtures.season = ?) ORDER BY id`,
+    season,
+    season,
+    season,
+  )) {
+    if (!regularSeasonOver(league, season)) continue;
+    await withFixtureBatch(store, season, () => openTitlePlayoff(store, league, season, date));
+    await store.run(
+      "UPDATE leagues SET data = ? WHERE id = ?",
+      JSON.stringify({ ...JSON.parse(league.data), titleSeason: season }),
+      league.id,
+    );
+  }
+  if (date < `${season + 1}-04-01`) return;
+  const pending = await store.all<League & { unplayed: number }>(
+    `SELECT leagues.*, ${UNPLAYED} AS unplayed FROM leagues WHERE ${SENIOR_TIERS} AND coalesce(TRY_CONVERT(int, JSON_VALUE(data,'$.postseason')), 0) < ? ORDER BY country_id, tier`,
+    season,
+    season,
+  );
+  const countries = new Map<number, (League & { unplayed: number })[]>();
+  for (const league of pending)
+    countries.set(league.country_id!, [...(countries.get(league.country_id!) ?? []), league]);
+  for (const [countryId, leagues] of countries) {
+    if (!leagues.every((league) => regularSeasonOver(league, season))) continue;
+    const awaitingFinal = await store.get<{ id: number }>(
+      "SELECT TOP 1 leagues.id FROM leagues WHERE country_id = ? AND kind = 'league' AND JSON_VALUE(data,'$.movementUp.championPromoted') = 'true' AND NOT EXISTS (SELECT 1 FROM leagues AS playoff WHERE playoff.kind = 'cup' AND playoff.country_id = leagues.country_id AND JSON_VALUE(playoff.data,'$.key') = 'title' AND TRY_CONVERT(int, JSON_VALUE(playoff.data,'$.leagueId')) = leagues.id AND TRY_CONVERT(int, JSON_VALUE(playoff.data,'$.season')) = ? AND JSON_VALUE(playoff.data,'$.phase') = 'complete')",
+      countryId,
+      season,
+    );
+    if (awaitingFinal) continue;
+    const country = (await store.get<Country>("SELECT * FROM countries WHERE id = ?", countryId))!;
+    const pyramid = await countryPyramid(store, countryId, season);
+    const byId = new Map(pyramid.leagues.map((league) => [league.id, league]));
+    await withFixtureBatch(store, season, async () => {
+      for (const boundary of planBoundaries(pyramid))
+        for (const plan of boundary.playoffs) {
+          const upper = byId.get(plan.upperLeagueId)!;
+          const lower = byId.get(plan.lowerLeagueId)!;
+          const side = readLeagueData(lower.data, lower.tier).conferences ?? readLeagueData(upper.data, upper.tier).conferences;
+          const suffix = plan.conference !== undefined && side?.[plan.conference]
+            ? ` (${side[plan.conference]})`
+            : plan.index > 0 ? ` ${plan.index + 1}` : "";
+          const state = createPlayoff(plan.input);
+          const id = await openPlayoff(
+            store,
+            movementPlayoffName(plan.input.kind, upper, lower, suffix),
+            country,
+            season,
+            { key: boundaryKey(plan.upper, plan.index, plan.conference), leagueId: upper.id, state },
+            state.seeds.length,
+          );
+          if (id && state.pending) await schedulePlayoffRound(store, id, season, nextPostseasonDate(season, date), state);
+        }
+    });
+    for (const league of leagues)
+      await store.run(
+        "UPDATE leagues SET data = ? WHERE id = ?",
+        JSON.stringify({ ...JSON.parse(league.data), postseason: season }),
+        league.id,
+      );
+  }
+}
+
 export async function progressCompetitions(store: Store, date: string) {
   const state = await store.meta<GameState>("state");
+  await progressSplits(store, state.season);
+  await progressPlayoffs(store, state.season, date);
+  await startPostseason(store, state.season, date);
   for (const league of await store.all<League>(
-    "SELECT * FROM leagues WHERE kind != 'league' AND JSON_VALUE(data, '$.phase') IN ('groups', 'knockout') ORDER BY id",
+    "SELECT * FROM leagues WHERE country_id IS NULL AND JSON_VALUE(data, '$.catalogQualifying') = 'true' AND JSON_VALUE(data, '$.phase') = 'knockout' ORDER BY id",
+  ))
+    await progressQualifying(store, league, state.season, date);
+  for (const league of await store.all<League>(
+    "SELECT * FROM leagues WHERE country_id IS NULL AND JSON_VALUE(data, '$.phase') = 'awaiting qualifiers' AND JSON_VALUE(data, '$.spec.catalog.id') IS NOT NULL ORDER BY id",
+  ))
+    await tryStartMain(store, league.id, state.season, date);
+  for (const league of await store.all<League>(
+    "SELECT * FROM leagues WHERE kind != 'league' AND JSON_VALUE(data, '$.phase') IN ('groups', 'knockout') AND JSON_VALUE(data, '$.catalogQualifying') IS NULL ORDER BY id",
   )) {
     const data: CompetitionData = JSON.parse(league.data);
     const unplayed = (await store.get<{ count: number }>(
@@ -1347,7 +2364,18 @@ export async function progressCompetitions(store: Store, date: string) {
           ? 14
           : 3,
     );
-    if (league.kind === "continental")
+    if (spec.catalog) {
+      const round = matches.filter((fixture) => fixture.round === matches[0].round);
+      const alive =
+        data.phase === "groups"
+          ? spec.qualifies + ((data.knockoutEntrants as number[] | undefined)?.length ?? 0)
+          : new Set(round.flatMap((fixture) => [fixture.home_id, fixture.away_id])).size / 2 +
+            (data.pendingByes?.length ?? 0) +
+            (data.playoffByes?.length ?? 0);
+      nextDate =
+        cadenceRoundDate(spec.catalog.id, date, state.season, alive, data.phase === "groups" && Boolean(spec.catalog.byes)) ??
+        continentalRoundDate(date, state.season, alive);
+    } else if (league.kind === "continental")
       while (internationalBreak(nextDate)) nextDate = addDays(nextDate, 7);
     if (spec.national && spec.age === "Senior")
       while (!internationalBreak(nextDate)) nextDate = addDays(nextDate, 1);
@@ -1356,46 +2384,103 @@ export async function progressCompetitions(store: Store, date: string) {
         "SELECT * FROM standings WHERE league_id = ? ORDER BY points DESC, (gf-ga) DESC, gf DESC, club_id",
         league.id,
       );
+      const catalog = spec.catalog;
+      if (catalog) {
+        // Wait for clubs still to arrive: Libertadores 3rd places (Sudamericana) and UYL Domestic Champions Path winners.
+        const feeders = CONTINENTAL.competitions.filter(
+          (item) => !item.feeder && item.feeds?.some((feed) => feed.to === catalog.id),
+        );
+        let waiting = false;
+        for (const item of feeders) {
+          const source = await leagueNamed(store, item.name);
+          const sourceData = source && (JSON.parse(source.data) as CompetitionData);
+          if (
+            sourceData?.season === state.season &&
+            ["awaiting qualifiers", "groups"].includes(sourceData.phase ?? "") &&
+            !sourceData.fed
+          )
+            waiting = true;
+        }
+        for (const id of catalog.mirrors ? (data.qualifiers ?? []) : []) {
+          const qualifying = await store.get<League>("SELECT * FROM leagues WHERE id = ?", id);
+          if (qualifying && JSON.parse(qualifying.data).phase !== "complete") waiting = true;
+        }
+        if (waiting) continue;
+      }
+      const groups = [...new Set(table.map((entry) => entry.group_name))];
+      const byGroup = (group: string) => table.filter((entry) => entry.group_name === group).map((entry) => entry.club_id);
+      if (catalog && !catalog.feeder)
+        for (const feed of catalog.feeds ?? []) {
+          const target = catalogById(feed.to);
+          const main = target && (await leagueNamed(store, target.name));
+          if (!main) continue;
+          const mainData: CompetitionData = JSON.parse(main.data);
+          const fed = groups.flatMap((group) => byGroup(group).slice(feed.positions[0] - 1, feed.positions[1]));
+          await setData(store, main.id, { ...mainData, feedIns: [...((mainData.feedIns as number[]) ?? []), ...fed] });
+        }
+      if (catalog) await setData(store, league.id, { ...data, fed: true });
       let qualified: number[] = [];
-      if (spec.format === "Swiss") {
+      const byes = catalog
+        ? (catalog.byes ?? 0)
+        : table.length >= 24 && spec.confederation === "UEFA" && spec.age === "Senior"
+          ? 8
+          : 0;
+      // Small worlds: a play-off round needs two clubs; otherwise every qualifier goes straight into the knockout.
+      if (spec.format === "Swiss" && !catalog?.zones && byes && table.slice(byes, catalog?.advance ?? 24).length >= 2) {
+        // League phase: 1st–8th skip the knockout play-offs, 9th–24th play them.
+        await scheduleKnockout(
+          store,
+          league.id,
+          table.slice(byes, catalog?.advance ?? 24).map((entry) => entry.club_id),
+          state.season,
+          nextDate,
+          spec.rounds + 1,
+          { playoffByes: table.slice(0, byes).map((entry) => entry.club_id) },
+        );
+        continue;
+      }
+      if (spec.format === "Groups" && byes) {
+        // Group winners skip the knockout play-offs; runners-up meet the clubs fed in from another competition.
+        const winners = groups.map((group) => byGroup(group)[0]).filter((id) => id !== undefined);
+        const playoff = [...groups.map((group) => byGroup(group)[1]), ...((data.feedIns as number[]) ?? [])].filter(
+          (id) => id !== undefined,
+        );
+        if (playoff.length >= 2)
+          await scheduleKnockout(store, league.id, playoff, state.season, nextDate, spec.rounds + 1, {
+            playoffByes: winners,
+          });
+        else if (winners.length + playoff.length >= 2)
+          await scheduleKnockout(store, league.id, [...winners, ...playoff], state.season, nextDate, spec.rounds + 1);
+        continue;
+      }
+      if (spec.format === "Swiss" && !catalog?.zones) {
         const target = Math.min(
           spec.qualifies,
           2 ** Math.floor(Math.log2(table.length)),
         );
-        if (
-          table.length >= 24 &&
-          spec.confederation === "UEFA" &&
-          spec.age === "Senior"
-        ) {
-          const byes = table.slice(0, 8).map((entry) => entry.club_id);
-          const playoff = table.slice(8, 24).map((entry) => entry.club_id);
-          await scheduleKnockout(
-            store,
-            league.id,
-            playoff,
-            state.season,
-            nextDate,
-            spec.rounds + 1,
-            { playoffByes: byes },
-          );
-          continue;
-        }
-        qualified = table.slice(0, target).map((entry) => entry.club_id);
+        qualified = table.slice(0, catalog?.advance ?? target).map((entry) => entry.club_id);
       } else {
-        const groups = [...new Set(table.map((entry) => entry.group_name))];
         const perGroup = Math.floor(spec.qualifies / groups.length);
-        for (const group of groups)
-          qualified.push(
-            ...table
-              .filter((entry) => entry.group_name === group)
-              .slice(0, perGroup)
-              .map((entry) => entry.club_id),
-          );
+        for (const group of groups) qualified.push(...byGroup(group).slice(0, perGroup));
         const extras = table
           .filter((entry) => !qualified.includes(entry.club_id))
           .slice(0, Math.max(0, spec.qualifies - qualified.length));
         qualified.push(...extras.map((entry) => entry.club_id));
+        if (
+          catalog?.zones &&
+          groups.length === 2 &&
+          perGroup % 2 === 0 &&
+          groups.every((group) => byGroup(group).length >= perGroup)
+        ) {
+          // Seed order so that the first knockout round pairs 1st v 8th, 2nd v 7th… inside each zone.
+          const [first, second] = groups.map((group) => byGroup(group).slice(0, perGroup));
+          qualified = [
+            ...first.slice(0, perGroup / 2).flatMap((clubId, index) => [clubId, second[index]]),
+            ...first.slice(perGroup / 2).flatMap((clubId, index) => [second[perGroup / 2 + index], clubId]),
+          ];
+        }
       }
+      qualified.push(...((data.knockoutEntrants as number[]) ?? []));
       if (qualified.length >= 2)
         await scheduleKnockout(
           store,
@@ -1486,6 +2571,39 @@ export async function progressCompetitions(store: Store, date: string) {
           competition: league.name,
         }),
       );
+      if (spec.catalog?.feeder) {
+        // Final order (champion, finalist, then by round reached and phase table) feeds next season's Champions Cup.
+        const reached = new Map<number, number>();
+        for (const fixture of matches)
+          for (const clubId of [fixture.home_id, fixture.away_id])
+            reached.set(clubId, Math.max(reached.get(clubId) ?? 0, fixture.round));
+        const phaseRank = new Map(
+          (
+            await store.all<Standing>(
+              "SELECT * FROM standings WHERE league_id = ? ORDER BY points DESC, (gf-ga) DESC, gf DESC, club_id",
+              league.id,
+            )
+          ).map((row, index) => [row.club_id, index]),
+        );
+        const order = [...reached.keys()].sort(
+          (left, right) =>
+            Number(right === champion.id) - Number(left === champion.id) ||
+            reached.get(right)! - reached.get(left)! ||
+            (phaseRank.get(left) ?? 999) - (phaseRank.get(right) ?? 999),
+        );
+        await store.run(
+          "INSERT INTO history(season, entity_type, entity_id, date, data) VALUES (?, ?, ?, ?, ?)",
+          state.season,
+          "league",
+          league.id,
+          date,
+          JSON.stringify({
+            table: order.map((club_id, index) => ({ club_id, position: index + 1 })),
+            champion: champion.id,
+            competition: league.name,
+          }),
+        );
+      }
       if (champion.id === state.clubId)
         await store.run(
           "INSERT INTO news(date, category, title, body, severity) VALUES (?, ?, ?, ?, ?)",

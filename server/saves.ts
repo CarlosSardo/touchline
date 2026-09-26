@@ -16,10 +16,8 @@ import {
   stateOf,
 } from "./systems.ts";
 import { generateWorld } from "./world.ts";
-import { expandWorld } from "./world-expansion.ts";
 import { createCalendar } from "./calendar.ts";
 import { SETTING_DEFINITIONS } from "../shared/rules.ts";
-import { WORLD_VERSION } from "../shared/world-rules.ts";
 import type { DeleteActiveCareerRequest, DeleteActiveCareerResult, SaveSlot } from "../shared/api.ts";
 import type { GameState, Settings } from "../shared/types.ts";
 import {
@@ -47,6 +45,38 @@ import {
 const UUID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
 const PAGE_ROWS = 1000;
 const CHUNK_DELETE_BATCH = 64;
+
+/** Per-career checkpoint counts; older ones rotate away oldest first, imported checkpoints never do. */
+export const SAVE_SLOT_LIMITS = Object.freeze({ automatic: 3, manual: 10 });
+/** Worlds before the rebuilt catalog world cannot be loaded (decision 1). */
+export const MIN_WORLD_VERSION = 4;
+
+interface WorldMeta {
+  version?: number;
+  nations?: unknown;
+  options?: { nations?: unknown; squads?: unknown };
+}
+
+/** A regenerated world keeps the nation subset and squad mode of the world it replaces. */
+function regenerationOptions(world: WorldMeta) {
+  const nations = world.options?.nations ?? world.nations;
+  const squads = world.options?.squads;
+  return {
+    ...(Array.isArray(nations) && nations.length && nations.every((code) => typeof code === "string")
+      ? { nations: nations as string[] }
+      : {}),
+    ...(squads === "full" || squads === "minimum" ? { squads: squads as "full" | "minimum" } : {}),
+  };
+}
+
+function worldVersionError(world: unknown) {
+  const version = (world as WorldMeta | null)?.version ?? 1;
+  if (Number.isSafeInteger(version) && version >= MIN_WORLD_VERSION) return undefined;
+  return new SaveFormatError(
+    `This save comes from an older Touchline world (version ${Number.isSafeInteger(version) ? version : "unknown"}). ` +
+      "The football world has been rebuilt, so saves made before it can't be loaded any more. Start a new career instead.",
+  );
+}
 
 type CheckpointProgress = (table: string, rows: number, total: number) => void;
 
@@ -111,7 +141,10 @@ function temporaryFile() {
   return join(tmpdir(), `touchline-${randomUUID()}.touchline.gz`);
 }
 
-function slotFromRow(row: CatalogRow): SaveSlot {
+/** Imported uploads never rotate away, so the client needs the flag to warn before a manual save replaces one. */
+export type ListedSaveSlot = SaveSlot & { imported: boolean };
+
+function slotFromRow(row: CatalogRow): ListedSaveSlot {
   if (!UUID.test(row.id))
     throw new SaveFormatError("Invalid save catalog identifier.");
   return {
@@ -121,6 +154,7 @@ function slotFromRow(row: CatalogRow): SaveSlot {
     modified: new Date(row.created_at).toISOString(),
     compressed: true,
     automatic: Boolean(row.automatic),
+    imported: Boolean(row.imported),
     career: row.career_metadata
       ? (JSON.parse(row.career_metadata) as SaveSlot["career"])
       : undefined,
@@ -434,6 +468,17 @@ export async function validateWorldCheckpoint(
           if (typeof value !== "string" || metadata.has(key))
             throw new SaveFormatError("Invalid game metadata.");
           metadata.set(key, value);
+          // meta is the first table, so an old world is refused before the rest of the file is read.
+          if (key === "world") {
+            let world: unknown;
+            try {
+              world = JSON.parse(value);
+            } catch {
+              throw new SaveFormatError("Invalid game metadata.");
+            }
+            const outdated = worldVersionError(world);
+            if (outdated) throw outdated;
+          }
         }
       },
     },
@@ -589,7 +634,7 @@ export async function restoreCheckpointFile(
   });
 }
 
-async function* storedChunks(store: Store, slot: CatalogRow) {
+export async function* storedChunks(store: Store, slot: Pick<CatalogRow, "id" | "byte_length">) {
   let ordinal = 0;
   let bytes = 0;
   for (;;) {
@@ -628,8 +673,9 @@ export class Saves {
   constructor(readonly store: Store) {}
 
   async currentState(): Promise<GameState | null> {
+    // An unfinished (or interrupted) world build is not a career yet; prepareCareer discards and rebuilds it.
     const row = await this.store.get<{ value: string }>(
-      "SELECT value FROM meta WHERE [key] = 'state'",
+      "SELECT [value] FROM meta WHERE [key] = 'state' AND NOT EXISTS (SELECT 1 FROM meta WHERE [key] = 'worldBuild')",
     );
     return row ? JSON.parse(row.value) as GameState : null;
   }
@@ -641,9 +687,46 @@ export class Saves {
     return state;
   }
 
+  private async buildMarker() {
+    return this.store.get<{ value: string }>("SELECT [value] FROM meta WHERE [key] = 'worldBuild'");
+  }
+
+  /** Empties the world tables (committing in batches inside Store.batched) and keeps the migration marker. */
+  private async discardBuild() {
+    const marker = await this.store.get<{ value: string }>(
+      "SELECT [value] FROM meta WHERE [key] = 'appearanceIndexVersion'",
+    );
+    await this.store.discardWorld();
+    if (marker)
+      await this.store.run(
+        "INSERT INTO meta ([key], [value]) VALUES (?, ?)",
+        "appearanceIndexVersion",
+        marker.value,
+      );
+  }
+
+  /**
+   * Builds a world in committed batches (Azure SQL log limits). meta 'worldBuild' marks it unfinished until the
+   * end; an interrupted or failed build is discarded before the next one starts.
+   */
+  private async buildWorld(options: Parameters<typeof generateWorld>[1]) {
+    await this.store.setMeta("worldBuild", { seed: options?.seed, started: new Date().toISOString() });
+    const started = performance.now();
+    try {
+      await generateWorld(this.store, options);
+    } catch (error) {
+      await this.discardBuild().catch((cleanup: unknown) =>
+        console.error("Discarding the failed world build also failed:", cleanup instanceof Error ? cleanup.message : cleanup));
+      throw error;
+    }
+    console.info(`Career world built in ${Math.round((performance.now() - started) / 100) / 10}s.`);
+  }
+
   async prepareCareer(displayName: string) {
-    return this.store.transaction(async () => {
-      if (await this.currentState()) return { created: false };
+    if (!(await this.buildMarker()) && (await this.currentState())) return { created: false };
+    return this.store.batched(async () => {
+      if (await this.buildMarker()) await this.discardBuild();
+      else if (await this.currentState()) return { created: false };
       // Snapshots of other careers may remain after the active career is deleted; only world tables must be empty.
       for (const table of WORLD_TABLES) {
         const existing = await this.store.get(
@@ -652,16 +735,18 @@ export class Saves {
         if (existing)
           throw Object.assign(new GameError("This world contains existing data and cannot be prepared as a new career."), { status: 409 });
       }
-      await generateWorld(this.store, { seed: `touchline-${randomUUID()}`, expanded: false });
+      await this.buildWorld({ seed: `touchline-${randomUUID()}` });
       const state = await stateOf(this.store);
       state.director.name = displayName.trim().slice(0, 50) || "Sporting director";
       await this.store.setMeta("state", state);
+      await this.store.run("DELETE FROM meta WHERE [key] = 'worldBuild'");
+      // Written last: startCareer reuses a prepared world only when this matches its seed.
       await this.store.setMeta("careerPreparationSeed", state.seed);
       return { created: true };
     });
   }
 
-  async list(): Promise<SaveSlot[]> {
+  async list(): Promise<ListedSaveSlot[]> {
     return (
       await this.store.all<CatalogRow>(
         `SELECT * FROM ${tableName(this.store, "save_slots")} WHERE complete = 1 ORDER BY created_at DESC,id DESC`,
@@ -796,20 +881,19 @@ export class Saves {
         chunkWriter(this.store, slot.id),
       );
       await completeSlot(this.store, slot.id, summary);
-      if (automatic) {
-        const obsolete = await this.store.all<{ id: string }>(
-          `SELECT id FROM ${tableName(this.store, "save_slots")} WHERE automatic = 1 AND imported = 0 AND complete = 1 AND career_id COLLATE Latin1_General_100_BIN2 = ? AND DATALENGTH(career_id) = DATALENGTH(?)
-           ORDER BY CASE WHEN id = ? THEN 0 ELSE 1 END,created_at DESC,id DESC OFFSET 3 ROWS`,
-          state.careerId,
-          state.careerId,
-          slot.id,
+      const obsolete = await this.store.all<{ id: string }>(
+        `SELECT id FROM ${tableName(this.store, "save_slots")} WHERE automatic = ? AND imported = 0 AND complete = 1 AND career_id COLLATE Latin1_General_100_BIN2 = ? AND DATALENGTH(career_id) = DATALENGTH(?)
+         ORDER BY CASE WHEN id = ? THEN 0 ELSE 1 END,created_at DESC,id DESC OFFSET ${automatic ? SAVE_SLOT_LIMITS.automatic : SAVE_SLOT_LIMITS.manual} ROWS`,
+        automatic ? 1 : 0,
+        state.careerId,
+        state.careerId,
+        slot.id,
+      );
+      for (const old of obsolete)
+        await this.store.run(
+          `DELETE FROM ${tableName(this.store, "save_slots")} WHERE id = ? AND imported = 0`,
+          old.id,
         );
-        for (const old of obsolete)
-          await this.store.run(
-            `DELETE FROM ${tableName(this.store, "save_slots")} WHERE id = ? AND imported = 0`,
-            old.id,
-          );
-      }
       return { file: slot.file, name: slot.name };
     });
   }
@@ -847,49 +931,35 @@ export class Saves {
       throw new GameError("Choose a senior club for your appointment.");
     const reusePrepared = prepared && seed === oldState.seed;
     const oldSettings = await settingsOf(this.store);
-    const world = await this.store.meta<{
-      countries: number;
-      seniors: number;
-      youth: number;
-      expanded?: boolean;
-    }>("world");
-    const expanded = world.expanded ?? world.countries >= 200;
-    const country = await this.store.get<{ code: string }>(
-      "SELECT code FROM countries WHERE id = ?",
-      selected.country_id,
-    );
-    const ordinal = await this.store.get<{ total: number }>(
-      "SELECT COUNT(*) AS total FROM clubs WHERE country_id = ? AND type = 'club' AND id < ?",
-      selected.country_id,
-      selected.id,
-    );
-    const selectedKey =
-      JSON.parse(selected.data).worldKey ??
-      `${country!.code}:club:${ordinal!.total}`;
+    const world = await this.store.meta<WorldMeta>("world");
+    // Club ids differ between seeds; the catalog key of the chosen club is stable.
+    const selectedKey: unknown = JSON.parse(selected.data).worldKey;
+    if (!reusePrepared && typeof selectedKey !== "string")
+      throw new GameError(
+        "The selected club is unavailable in this world configuration.",
+      );
     const archived = oldState.started === false ? undefined : await this.create(
       oldState.careerName ??
         `${oldState.director.name} - ${(await clubOf(this.store)).name}`,
     );
+    // The old career is archived above; the replacement world is built in committed batches.
+    if (!reusePrepared)
+      await this.store.batched(async () => {
+        await this.store.setMeta("worldBuild", { seed, started: new Date().toISOString() });
+        await this.discardBuild();
+        await this.buildWorld({ seed, ...regenerationOptions(world) });
+      });
     return this.store.transaction(async () => {
-      if (!reusePrepared) {
-        await this.store.clearWorld();
-        await generateWorld(this.store, {
-          seed,
-          countryLimit: world.countries,
-          seniors: world.seniors,
-          youth: world.youth,
-          expanded,
-        });
-      }
+      await this.store.run("DELETE FROM meta WHERE [key] = 'worldBuild'");
       const state = await stateOf(this.store);
-      state.clubId = expanded && !reusePrepared
-        ? ((
+      state.clubId = reusePrepared
+        ? input.clubId
+        : ((
             await this.store.get<{ id: number }>(
               "SELECT id FROM clubs WHERE type = 'club' AND JSON_VALUE(data,'$.worldKey') = ?",
-              selectedKey,
+              selectedKey as string,
             )
-          )?.id ?? 0)
-        : input.clubId;
+          )?.id ?? 0);
       if (!state.clubId)
         throw new GameError(
           "The selected club is unavailable in this world configuration.",
@@ -937,27 +1007,6 @@ export class Saves {
         archived: archived?.file ?? null,
         saved: saved.file,
         careerId: state.careerId,
-      };
-    });
-  }
-
-  async expandWorld() {
-    await this.requireState();
-    if (
-      ((await this.store.meta<{ version?: number }>("world")).version ?? 1) >=
-      WORLD_VERSION
-    )
-      return {
-        changed: false,
-        message: "This career already uses the expanded world.",
-      };
-    const archived = await this.create("Before world expansion");
-    return this.store.transaction(async () => {
-      const result = await expandWorld(this.store);
-      return {
-        ...result,
-        archived: archived.file,
-        message: `World expanded: ${result.clubsAdded} clubs, ${result.leaguesAdded} leagues and ${result.playersAdded} players added.`,
       };
     });
   }

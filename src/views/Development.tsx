@@ -18,6 +18,7 @@ import {
 import { useCurrency, useGame, useResource } from "../game-context.tsx";
 import {
   Badge,
+  BodyCell,
   Button,
   DetailList,
   Empty,
@@ -33,6 +34,8 @@ import {
   PlayerName,
   Rating,
   SectionHeading,
+  SortDirectionButton,
+  SortHeader,
   Stat,
   Tabs,
   TextLink,
@@ -41,6 +44,73 @@ import { dateLabel, POSITIONS, TRAINING_TYPES } from "../../shared/rules.ts";
 import type { AcademyData, StaffDesk, TrainingData } from "../../shared/api.ts";
 import type { Player, Staff } from "../../shared/types.ts";
 import { AssistantPanel } from "./ClubSupport.tsx";
+import {
+  dateValue,
+  PLAYER_COLUMNS,
+  PLAYER_TIE_BREAKERS,
+  positionRank,
+  rankOf,
+  type SortColumn,
+} from "../sort.ts";
+import { useSortableRows } from "../useSortableRows.ts";
+
+type AcademySortKey =
+  | "name"
+  | "position"
+  | "age"
+  | "ability"
+  | "potential"
+  | "height"
+  | "development"
+  | "burnout";
+const ACADEMY_COLUMNS: SortColumn<Player, AcademySortKey>[] = [
+  PLAYER_COLUMNS.name,
+  PLAYER_COLUMNS.position,
+  PLAYER_COLUMNS.age,
+  PLAYER_COLUMNS.ability,
+  PLAYER_COLUMNS.potential,
+  PLAYER_COLUMNS.height,
+  { key: "development", value: (player) => player.training, defaultDirection: "asc" },
+  { key: "burnout", value: (player) => player.details?.mentalHealth.burnout, defaultDirection: "desc" },
+];
+const ACADEMY_SORT_OPTIONS: [AcademySortKey, string][] = [
+  ["potential", "Potential"],
+  ["ability", "Ability"],
+  ["age", "Age"],
+  ["name", "Name"],
+  ["position", "Position"],
+  ["height", "Height"],
+  ["burnout", "Burnout"],
+];
+const MENTORSHIP_COLUMNS: SortColumn<Player, "name" | "position" | "mentor" | "focus">[] = [
+  PLAYER_COLUMNS.name,
+  PLAYER_COLUMNS.position,
+  {
+    key: "mentor",
+    value: (player) =>
+      player.details ? (player.details.development.mentorId ? 1 : 0) : null,
+    defaultDirection: "asc",
+  },
+  { key: "focus", value: (player) => player.training, defaultDirection: "asc" },
+];
+const AGE_GROUPS = ["Senior", "U19", "U17"];
+const TRAINING_COLUMNS: SortColumn<
+  Player,
+  "name" | "group" | "focus" | "intensity" | "position" | "fitness"
+>[] = [
+  PLAYER_COLUMNS.name,
+  { key: "group", value: (player) => rankOf(AGE_GROUPS, player.age_group), defaultDirection: "asc" },
+  { key: "focus", value: (player) => player.training, defaultDirection: "asc" },
+  { key: "intensity", value: (player) => player.intensity, defaultDirection: "desc" },
+  { key: "position", value: (player) => positionRank(player.position), defaultDirection: "asc" },
+  PLAYER_COLUMNS.fitness,
+];
+const MEDICAL_COLUMNS: SortColumn<Player, "name" | "return" | "condition" | "plan">[] = [
+  PLAYER_COLUMNS.name,
+  { key: "return", value: (player) => dateValue(player.injury_until), defaultDirection: "asc" },
+  { key: "condition", value: (player) => player.fitness, defaultDirection: "desc" },
+  { key: "plan", value: (player) => player.training, defaultDirection: "asc" },
+];
 
 function MentorSheet({ player, close }: { player: Player; close: () => void }) {
   const { act } = useGame();
@@ -118,18 +188,17 @@ export function Academy() {
   const [query, setQuery] = useState("");
   const [position, setPosition] = useState("");
   const [focus, setFocus] = useState("");
-  const [sort, setSort] = useState("potential");
   const [mentee, setMentee] = useState<Player | null>(null);
-  if (error) return <ErrorState message={error} />;
-  if (!data || !bootstrap) return <Loading />;
-  const cohort = data.players.filter(
+  const season = bootstrap?.state.season ?? 0;
+  const today = bootstrap?.state.date ?? "";
+  const cohort = (data?.players ?? []).filter(
     (player) => group === "all" || player.age_group === group,
   );
   const agesOut = (player: Player) =>
     (player.age_group === "U17" || player.age_group === "U19") &&
-    player.birth_date < `${bootstrap.state.season + 1 - (player.age_group === "U17" ? 16 : 18)}-01-01`;
+    player.birth_date < `${season + 1 - (player.age_group === "U17" ? 16 : 18)}-01-01`;
   const isInjured = (player: Player) =>
-    !!player.injury_until && player.injury_until > bootstrap.state.date;
+    !!player.injury_until && player.injury_until > today;
   const needsCare = (player: Player) =>
     isInjured(player) || player.fitness < 60 || (player.details?.mentalHealth.burnout ?? 0) >= 60;
   const isUnpaired = (player: Player) => player.details?.development.mentorId === null;
@@ -140,16 +209,22 @@ export function Academy() {
     ...((player.details?.mentalHealth.burnout ?? 0) >= 60 ? ["Burnout 60+"] : []),
     ...(isUnpaired(player) ? ["No mentor"] : []),
   ];
-  const selected = cohort.filter((player) =>
+  const filtered = cohort.filter((player) =>
     (!position || player.position === position) &&
     (!query || `${player.name} ${player.nationality}`.toLowerCase().includes(query.trim().toLowerCase())) &&
     (!focus || (focus === "age-out" ? agesOut(player) : focus === "care" ? needsCare(player) : isUnpaired(player))),
-  ).sort((first, second) =>
-    sort === "name" ? first.name.localeCompare(second.name)
-      : sort === "age" ? second.age - first.age
-        : sort === "ability" ? second.ability - first.ability
-          : second.potential - first.potential,
   );
+  const sorting = useSortableRows(filtered, ACADEMY_COLUMNS, {
+    initial: { key: "potential", direction: "desc" },
+    tieBreakers: PLAYER_TIE_BREAKERS,
+  });
+  const mentorship = useSortableRows(filtered, MENTORSHIP_COLUMNS, {
+    initial: { key: "mentor", direction: "asc" },
+    tieBreakers: PLAYER_TIE_BREAKERS,
+  });
+  if (error) return <ErrorState message={error} />;
+  if (!data || !bootstrap) return <Loading />;
+  const selected = sorting.rows;
   const priorityPlayers = selected.filter((player) => priorities(player).length);
   const cohortLeagues = data.leagues.filter((league) => group === "all" || league.age_group === group);
   const leagueIds = new Set(cohortLeagues.map((league) => league.id));
@@ -264,13 +339,24 @@ export function Academy() {
                 </select>
               </Field>
               <Field label="Sort by">
-                <select aria-label="Sort academy players" value={sort} onChange={(event) => setSort(event.target.value)}>
-                  <option value="potential">Potential</option>
-                  <option value="ability">Ability</option>
-                  <option value="age">Age: oldest first</option>
-                  <option value="name">Name</option>
+                <select
+                  aria-label="Sort academy players"
+                  value={sorting.sort?.key ?? ""}
+                  onChange={(event) => {
+                    const key = event.target.value as AcademySortKey;
+                    sorting.setSort({ key, direction: sorting.defaultDirection(key) });
+                  }}
+                >
+                  {ACADEMY_SORT_OPTIONS.map(([key, text]) => (
+                    <option key={key} value={key}>{text}</option>
+                  ))}
                 </select>
               </Field>
+              <SortDirectionButton
+                subject="academy players"
+                direction={sorting.sort?.direction}
+                onToggle={() => sorting.sort && sorting.toggle(sorting.sort.key)}
+              />
               {(query || position || focus) && <IconButton icon={X} label="Clear academy filters" onClick={() => { setQuery(""); setPosition(""); setFocus(""); }} />}
             </div>
             <div className="position-coverage" role="group" aria-label="Academy position coverage">
@@ -292,13 +378,14 @@ export function Academy() {
                 <caption className="sr-only">{group === "all" ? "Academy" : group} prospects and pathways</caption>
                 <thead>
                   <tr>
-                    <th>Player</th>
-                    <th>Pos</th>
-                    <th>Group / age</th>
-                    <th>Ability</th>
-                    <th>Potential</th>
-                    <th>Development</th>
-                    <th>Burnout</th>
+                    <SortHeader {...sorting.header("name")} label="Player" />
+                    <SortHeader {...sorting.header("position")} label="Pos" title="Position" />
+                    <SortHeader {...sorting.header("age")} label="Group / age" title="Age" />
+                    <SortHeader {...sorting.header("ability")} label="Ability" title="Current ability" />
+                    <SortHeader {...sorting.header("potential")} label="Potential" title="Current dynamic potential" />
+                    <SortHeader {...sorting.header("height")} label="Height" title="Current height and weight" />
+                    <SortHeader {...sorting.header("development")} label="Development" title="Training focus" />
+                    <SortHeader {...sorting.header("burnout")} label="Burnout" />
                     <th>Pathway</th>
                   </tr>
                 </thead>
@@ -330,6 +417,9 @@ export function Academy() {
                             )}
                           </small>
                         </span>
+                      </td>
+                      <td>
+                        <BodyCell player={player} />
                       </td>
                       <td>
                         <div className="roster-status">
@@ -431,9 +521,17 @@ export function Academy() {
           <div className="table-scroll roster-table-scroll" role="region" aria-label="Academy mentorship" tabIndex={0} aria-busy={loading}>
             <table className="data-table mentorship-table">
               <caption className="sr-only">{group === "all" ? "Academy" : group} mentorship</caption>
-              <thead><tr><th>Player</th><th>Pos</th><th>Mentor</th><th>Development focus</th><th>Actions</th></tr></thead>
+              <thead>
+                <tr>
+                  <SortHeader {...mentorship.header("name")} label="Player" />
+                  <SortHeader {...mentorship.header("position")} label="Pos" title="Position" />
+                  <SortHeader {...mentorship.header("mentor")} label="Mentor" title="Unpaired players first" />
+                  <SortHeader {...mentorship.header("focus")} label="Development focus" />
+                  <th>Actions</th>
+                </tr>
+              </thead>
               <tbody>
-                {selected.map((player) => (
+                {mentorship.rows.map((player) => (
                   <tr key={player.id}>
                     <td><PlayerName player={player} compact /></td>
                     <td><span className="position-tag">{player.position}</span></td>
@@ -691,13 +789,21 @@ export function Training() {
   const [group, setGroup] = useState("");
   const [position, setPosition] = useState("");
   const [query, setQuery] = useState("");
-  if (error) return <ErrorState message={error} />;
-  if (!data || !bootstrap) return <Loading />;
-  const players = data.players.filter((player) =>
+  const filtered = (data?.players ?? []).filter((player) =>
     (!group || player.age_group === group) &&
     (!position || player.position === position) &&
     (!query || player.name.toLowerCase().includes(query.trim().toLowerCase())),
   );
+  const plans = useSortableRows(filtered, TRAINING_COLUMNS, {
+    tieBreakers: PLAYER_TIE_BREAKERS,
+  });
+  const medical = useSortableRows(data?.injuries ?? [], MEDICAL_COLUMNS, {
+    initial: { key: "return", direction: "asc" },
+    tieBreakers: PLAYER_TIE_BREAKERS,
+  });
+  if (error) return <ErrorState message={error} />;
+  if (!data || !bootstrap) return <Loading />;
+  const players = plans.rows;
   return (
     <div className="page">
       <PageHeading
@@ -786,12 +892,12 @@ export function Training() {
             <table className="data-table">
               <thead>
                 <tr>
-                  <th>Player</th>
-                  <th>Group</th>
-                  <th>Development focus</th>
-                  <th>Intensity</th>
-                  <th>Position training</th>
-                  <th>Fitness</th>
+                  <SortHeader {...plans.header("name")} label="Player" />
+                  <SortHeader {...plans.header("group")} label="Group" title="Age group" />
+                  <SortHeader {...plans.header("focus")} label="Development focus" />
+                  <SortHeader {...plans.header("intensity")} label="Intensity" />
+                  <SortHeader {...plans.header("position")} label="Position training" title="Position" />
+                  <SortHeader {...plans.header("fitness")} label="Fitness" />
                 </tr>
               </thead>
               <tbody>
@@ -882,19 +988,19 @@ export function Training() {
         )}
         {tab === "medical" &&
           (data.injuries.length ? (
-            <div className="table-scroll">
+            <div className="table-scroll" role="region" aria-label="Medical room" tabIndex={0}>
               <table className="data-table">
                 <thead>
                   <tr>
-                    <th>Player</th>
-                    <th>Expected return</th>
-                    <th>Condition</th>
-                    <th>Current plan</th>
+                    <SortHeader {...medical.header("name")} label="Player" />
+                    <SortHeader {...medical.header("return")} label="Expected return" />
+                    <SortHeader {...medical.header("condition")} label="Condition" title="Fitness" />
+                    <SortHeader {...medical.header("plan")} label="Current plan" />
                     <th>Action</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {data.injuries.map((player) => (
+                  {medical.rows.map((player) => (
                     <tr key={player.id}>
                       <td>
                         <PlayerName player={player} compact />

@@ -1,4 +1,4 @@
-import { useDeferredValue, useRef, useState } from "react";
+import { useDeferredValue, useId, useRef, useState } from "react";
 import {
   ArrowLeft,
   Award,
@@ -44,9 +44,15 @@ import {
   label,
   SETTING_DEFINITIONS,
 } from "../../shared/rules.ts";
-import { PORTABLE_SAVE_EXTENSION, type SaveSlot } from "../../shared/api.ts";
+import { PORTABLE_SAVE_EXTENSION } from "../../shared/api.ts";
 import type { Club, SettingValue } from "../../shared/types.ts";
 import SavedCareers from "../SavedCareers.tsx";
+import { SaveReplacementWarning } from "../SaveReplacement.tsx";
+import {
+  oldestPhrase,
+  savesReplacedByManualSave,
+  type ListedSave,
+} from "../save-rotation.ts";
 
 function AccountIdentity() {
   const { session } = useGame();
@@ -184,14 +190,50 @@ export function CareerSheet({ close }: { close: () => void }) {
 
 function SaveSettings() {
   const { bootstrap, notify, refresh, confirm, revision } = useGame();
-  const { data: slots, error } = useResource<SaveSlot[]>("saves");
+  const { data: slots, error } = useResource<ListedSave[]>("saves");
   const [name, setName] = useState("My career");
   const [pending, setPending] = useState(false);
+  const [checking, setChecking] = useState(false);
+  const [replacing, setReplacing] = useState<{
+    name: string;
+    saves: ListedSave[];
+  } | null>(null);
+  const replacementId = useId();
   const upload = useRef<HTMLInputElement>(null);
-  async function save() {
+  async function requestSave() {
+    if (checking) return;
+    const saveName = name;
+    // Not `pending`: a disabled button drops focus, which the dialog must return to on Cancel.
+    setChecking(true);
+    let replaced: ListedSave[];
+    try {
+      // Read the catalog now: another tab or device may have saved since this list loaded.
+      replaced = savesReplacedByManualSave(
+        await api<ListedSave[]>("saves"),
+        bootstrap?.state.careerId,
+      );
+    } catch (failure) {
+      notify(
+        failure instanceof Error ? failure.message : "Save failed.",
+        "error",
+      );
+      return;
+    } finally {
+      setChecking(false);
+    }
+    if (replaced.length) {
+      setReplacing({ name: saveName, saves: replaced });
+      return;
+    }
+    await save(saveName);
+  }
+  async function save(saveName: string) {
     setPending(true);
     try {
-      await api("saves", { method: "POST", body: JSON.stringify({ name }) });
+      await api("saves", {
+        method: "POST",
+        body: JSON.stringify({ name: saveName }),
+      });
       await refresh();
       notify("Career snapshot created.");
     } catch (failure) {
@@ -257,10 +299,11 @@ function SaveSettings() {
           />
           <Button
             icon={Save}
-            onClick={() => void save()}
+            onClick={() => void requestSave()}
             disabled={pending || !name.trim()}
+            aria-busy={checking || undefined}
           >
-            {pending ? "Working..." : "Save career"}
+            {pending || checking ? "Working..." : "Save career"}
           </Button>
           <a
             href="/api/saves/export"
@@ -334,6 +377,36 @@ function SaveSettings() {
         <LockKeyhole size={16} />
         <span>Portable career snapshots / .touchline.gz</span>
       </div>
+      {replacing && (
+        <Modal
+          title="Replace your oldest save?"
+          describedBy={replacementId}
+          onClose={() => setReplacing(null)}
+        >
+          <div className="sheet-body">
+            <SaveReplacementWarning id={replacementId} saves={replacing.saves}>
+              Saving &ldquo;{replacing.name.trim()}&rdquo; now permanently
+              deletes {oldestPhrase(replacing.saves.length)}:
+            </SaveReplacementWarning>
+          </div>
+          <footer className="sheet-footer">
+            <Button variant="secondary" onClick={() => setReplacing(null)}>
+              Cancel
+            </Button>
+            <Button
+              variant="danger"
+              icon={Save}
+              onClick={() => {
+                const saveName = replacing.name;
+                setReplacing(null);
+                void save(saveName);
+              }}
+            >
+              Replace and save
+            </Button>
+          </footer>
+        </Modal>
+      )}
     </>
   );
 }

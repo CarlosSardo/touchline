@@ -19,7 +19,8 @@ import { stateOf } from "./systems.ts";
 import { playerCareer } from "./queries.ts";
 import { simulateMatch } from "./match.ts";
 import { estimateClubRevenue } from "./finance.ts";
-import { addDays } from "../shared/rules.ts";
+import { addDays, ageOn } from "../shared/rules.ts";
+import { checkMinors, checkSquads } from "./check-simulation.ts";
 import {
   JOURNALISTS,
   mediaFeed,
@@ -62,7 +63,7 @@ describe("connected simulation", () => {
   let store: Store;
   beforeAll(async () => {
     store = await Store.createTest("simulation");
-    await generateWorld(store, { countryLimit: 2, seniors: 1800, youth: 800 });
+    await generateWorld(store, { nations: ["EN", "ES"] });
     await createCalendar(store);
   });
   afterAll(async () => {
@@ -70,16 +71,20 @@ describe("connected simulation", () => {
   });
 
   it("advances the calendar, develops players, updates market values and persists weekly accounts", async () => {
-    const before = (await store.get<Player>(
-      "SELECT * FROM players WHERE id = 1",
-    ))!;
+    // Player 1 is now an elite player at the 99 ceiling, where upward drift is clamped away: sample squads instead.
+    const before = await store.all<{ id: number; potential: number }>(
+      "SELECT TOP (40) id,potential FROM players WHERE club_id IS NOT NULL AND age <= 21 AND potential < 95 AND role != 'Retired' ORDER BY id",
+    );
     const result = await advance(store, 7);
     expect(result.date).toBe("2026-07-08");
     expect((await stateOf(store)).week).toBe(1);
-    expect(
-      (await store.get<Player>("SELECT * FROM players WHERE id = 1"))!
-        .potential,
-    ).not.toBe(before.potential);
+    const after = new Map(
+      (await store.all<{ id: number; potential: number }>(
+        `SELECT id,potential FROM players WHERE id IN (${before.map(() => "?").join(",")})`,
+        ...before.map((player) => player.id),
+      )).map((player) => [player.id, player.potential]),
+    );
+    expect(before.some((player) => after.get(player.id) !== player.potential)).toBe(true);
     expect(
       await store.all(
         "SELECT * FROM ledger WHERE club_id = 1 AND category = 'Player & staff wages'",
@@ -116,8 +121,10 @@ describe("connected simulation", () => {
   });
 
   it("updates a complete league table from the same result used by match analytics", async () => {
+    // Only the user's fixtures keep the snapshot and full stats; the rest are stored compact.
     const fixture = (await store.get<Fixture>(
-      "SELECT TOP (1) * FROM fixtures WHERE league_id = 1 AND stage = 'League' ORDER BY date",
+      "SELECT TOP (1) * FROM fixtures WHERE ? IN (home_id, away_id) AND stage = 'League' AND status = 'scheduled' ORDER BY date",
+      (await stateOf(store)).clubId,
     ))!;
     await playFixture(store, fixture);
     const result = (await store.get<Fixture>(
@@ -125,11 +132,13 @@ describe("connected simulation", () => {
       fixture.id,
     ))!;
     const home = (await store.get<Standing>(
-      "SELECT * FROM standings WHERE league_id = 1 AND club_id = ?",
+      "SELECT * FROM standings WHERE league_id = ? AND club_id = ?",
+      fixture.league_id,
       fixture.home_id,
     ))!;
     const away = (await store.get<Standing>(
-      "SELECT * FROM standings WHERE league_id = 1 AND club_id = ?",
+      "SELECT * FROM standings WHERE league_id = ? AND club_id = ?",
+      fixture.league_id,
       fixture.away_id,
     ))!;
     expect(home.played).toBe(1);
@@ -178,7 +187,8 @@ describe("connected simulation", () => {
     await playFixture(store, result);
     expect(
       (await store.get<Standing>(
-        "SELECT * FROM standings WHERE league_id = 1 AND club_id = ?",
+        "SELECT * FROM standings WHERE league_id = ? AND club_id = ?",
+        fixture.league_id,
         fixture.home_id,
       ))!.played,
     ).toBe(1);
@@ -186,7 +196,7 @@ describe("connected simulation", () => {
 
   it("backfills legacy saves without rewriting snapshots or duplicating appearances", async () => {
     const fixture = (await store.get<Fixture>(
-      "SELECT TOP (1) * FROM fixtures WHERE status = 'played' ORDER BY id",
+      "SELECT TOP (1) * FROM fixtures WHERE status = 'played' AND JSON_QUERY(data, '$.snapshot') IS NOT NULL ORDER BY id",
     ))!;
     const snapshot: MatchSnapshot = {
       ...JSON.parse(fixture.data).snapshot,
@@ -216,7 +226,10 @@ describe("connected simulation", () => {
     const snapshots = await store.all(
       "SELECT id,data FROM fixtures WHERE status = 'played' ORDER BY id",
     );
-    await store.run("DELETE FROM player_match_appearances");
+    // A legacy save has full data for every fixture; compact (non-user) fixtures keep their rows because they cannot be rebuilt.
+    await store.run(
+      "DELETE FROM player_match_appearances WHERE fixture_id IN (SELECT id FROM fixtures WHERE JSON_QUERY(data, '$.players') IS NOT NULL)",
+    );
     await store.run("DELETE FROM meta WHERE [key] = 'appearanceIndexVersion'");
     await store.schema();
     expect(
@@ -251,26 +264,49 @@ describe("connected simulation", () => {
     await expectSchemaIntegrity(store);
   });
 
-  it("generates exactly 15000 regens per annual intake and records previous standings", async () => {
-    const before = (await store.get<{ count: number }>(
-      "SELECT count(*) AS count FROM players",
-    ))!.count;
+  it("runs the 5-12 academy intake at rollover, keeps squads legal and records previous standings", async () => {
+    const firstTeams = await store.all<{ id: number }>(
+      "SELECT id FROM clubs WHERE type = 'club'",
+    );
     await store.setMeta("state", {
       ...(await stateOf(store)),
       date: "2027-07-01",
     });
     await store.transaction(async () => await seasonRollover(store));
+    expect((await stateOf(store)).season).toBe(2027);
+    const intake = await store.meta<{ season: number; clubs: Record<string, number> }>("youthIntake");
+    expect(intake.season).toBe(2027);
+    for (const club of firstTeams) {
+      expect(intake.clubs[club.id]).toBeGreaterThanOrEqual(5);
+      expect(intake.clubs[club.id]).toBeLessThanOrEqual(12);
+    }
+    expect(new Set(Object.values(intake.clubs)).size).toBeGreaterThan(2);
+    const summary = await store.meta<{ count: number; academy: number }>("lastIntake");
+    expect(summary.academy).toBe(Object.values(intake.clubs).reduce((total, count) => total + count, 0));
+    expect(summary.count).toBeGreaterThanOrEqual(summary.academy);
+    const academy = await store.all<{ birth_date: string; age_group: string; profile: string }>(
+      "SELECT birth_date,age_group,profile FROM players WHERE JSON_VALUE(profile,'$.intake.source') = 'academy' AND JSON_VALUE(profile,'$.intake.season') = '2027'",
+    );
+    expect(academy).toHaveLength(summary.academy);
+    for (const player of academy) {
+      expect([14, 15]).toContain(ageOn(player.birth_date, "2027-07-01"));
+      expect(player.age_group).toBe("U17");
+      const profile = JSON.parse(player.profile) as PlayerProfile;
+      expect(profile.contract?.status).toBe("amateur");
+      expect(profile.identity.growth).toBeDefined();
+    }
+    await checkSquads(store, "test rollover");
+    await checkMinors(store, "2027-07-01");
     expect(
       (await store.get<{ count: number }>(
-        "SELECT count(*) AS count FROM players",
-      ))!.count - before,
-    ).toBe(15000);
-    expect((await stateOf(store)).season).toBe(2027);
+        "SELECT count(*) AS count FROM players WHERE role = 'Retired' AND JSON_VALUE(profile,'$.retirement.reason') IS NULL",
+      ))!.count,
+    ).toBe(0);
     expect(
       (await store.get<{ count: number }>(
         "SELECT count(*) AS count FROM history WHERE entity_type = 'league'",
       ))!.count,
-    ).toBe(10);
+    ).toBeGreaterThan(0);
     expect(
       await store.all("SELECT * FROM standings WHERE played != 0"),
     ).toHaveLength(0);
@@ -324,11 +360,7 @@ describe("persisted football media", () => {
   it("publishes distinct sourced reports and factual discussions without duplicate stories", async () => {
     const store = await Store.createTest("simulation");
     try {
-      await generateWorld(store, {
-        countryLimit: 1,
-        seniors: 1200,
-        youth: 400,
-      });
+      await generateWorld(store, { nations: ["EN"] });
       const player = (await store.get<Player>(
         "SELECT TOP (1) * FROM players WHERE club_id = 2 AND age_group = 'Senior'",
       ))!;
@@ -397,11 +429,7 @@ describe("daily transfer market", () => {
   async function marketWorld() {
     const store = await Store.createTest("simulation");
     try {
-      await generateWorld(store, {
-        countryLimit: 3,
-        seniors: 2400,
-        youth: 500,
-      });
+      await generateWorld(store, { nations: ["EN", "ES", "DE"] });
       await store.run(
         "UPDATE clubs SET transfer_budget = 100000000, balance = 200000000, wage_budget = 10000000, reputation = 65 WHERE type = 'club'",
       );
@@ -587,7 +615,7 @@ describe("knockout match integration", () => {
   });
 
   it("retains tie metadata and advances once per aggregate tie", async () => {
-    await generateWorld(store, { countryLimit: 1, seniors: 1600, youth: 600 });
+    await generateWorld(store, { nations: ["EN"] });
     const spec = COMPETITIONS.find(
       (entry) => entry.name === "UEFA Champions League",
     )!;

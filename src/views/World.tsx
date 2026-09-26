@@ -5,12 +5,10 @@ import {
   Globe2,
   RotateCcw,
   Search,
-  Plus,
 } from "lucide-react";
-import { api, useGame, useResource } from "../game-context.tsx";
+import { useGame, useResource } from "../game-context.tsx";
 import {
   Badge,
-  Button,
   ClubLink,
   Empty,
   ErrorState,
@@ -23,11 +21,21 @@ import {
 } from "../ui.tsx";
 import type { WorldAudit, WorldClubPage } from "../../shared/api.ts";
 import { compactNumber, label } from "../../shared/rules.ts";
-import { WORLD_VERSION } from "../../shared/world-rules.ts";
+
+// Keyed by string so catalog-backed policy modes and evidence levels degrade to a neutral label.
+const RESERVE_MODES: Record<string, string> = {
+  pyramid: "Senior pyramid",
+  separate: "Separate development league",
+  "reserve-league": "Separate reserve league",
+  none: "No reserve teams",
+};
+
+function reserveModeLabel(mode: string) {
+  return RESERVE_MODES[mode] ?? "Permission unverified";
+}
 
 export default function World() {
-  const { bootstrap, openLeague, confirm, notify, refresh } = useGame();
-  const [expanding, setExpanding] = useState(false);
+  const { bootstrap, openLeague } = useGame();
   const { data: audit } = useResource<WorldAudit>("world/audit");
   const [search, setSearch] = useState("");
   const [country, setCountry] = useState("");
@@ -73,34 +81,7 @@ export default function World() {
         eyebrow="THE GLOBAL GAME"
         title="World browser"
         subtitle="Clubs, reserve teams and national sides."
-      >
-        {bootstrap && bootstrap.world.version < WORLD_VERSION ? (
-          <Button
-            icon={Plus}
-            disabled={expanding}
-            onClick={() =>
-              confirm(
-                "Expand this career?",
-                "A backup will be saved first. Existing players, contracts, results and fixtures stay intact. Incompatible generated club names will be localized; new divisions and academy squads will be added. Mid-season competitions begin next season.",
-                () => {
-                  setExpanding(true);
-                  void api<{ message: string }>("world/expand", {
-                    method: "POST",
-                  })
-                    .then(async (result) => {
-                      await refresh();
-                      notify(result.message);
-                    })
-                    .catch((failure: Error) => notify(failure.message, "error"))
-                    .finally(() => setExpanding(false));
-                },
-              )
-            }
-          >
-            {expanding ? "Expanding world..." : "Expand career world"}
-          </Button>
-        ) : null}
-      </PageHeading>
+      />
       <Panel>
         <div className="filter-bar">
           <div className="search-field">
@@ -333,11 +314,7 @@ export default function World() {
                   <td>{entry.reserves}</td>
                   <td>
                     <strong>
-                      {entry.reservePolicy.mode === "pyramid"
-                        ? "Senior pyramid"
-                        : entry.reservePolicy.mode === "separate"
-                          ? "Separate development league"
-                          : "Permission unverified"}
+                      {reserveModeLabel(entry.reservePolicy.mode)}
                     </strong>
                     <p>{entry.reservePolicy.summary}</p>
                     <details>
@@ -352,12 +329,12 @@ export default function World() {
                   <td>
                     <Badge
                       tone={
-                        entry.reservePolicy.evidence === "documented"
+                        String(entry.reservePolicy.evidence) === "documented"
                           ? "green"
                           : "amber"
                       }
                     >
-                      {label(entry.reservePolicy.evidence)}
+                      {label(String(entry.reservePolicy.evidence))}
                     </Badge>
                     {entry.reservePolicy.source && (
                       <a

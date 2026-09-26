@@ -29,3 +29,8 @@ Lead owns simulation, football rules, balancing, architecture, and code review. 
 - Learning: before gating on an existing test, trace its preconditions at HEAD, and git-log the asserted UI.
 
 📌 Team update (2026-09-23T13:56:00+0200): New-career busy fix + Delete career shipped via PR #3 (e80e867) — 409 world_busy contract, ungated /api/me, classic world for new private careers, delete-active refuses dbo (409 career_protected); deploy/Rai review in progress — decided by Lead, Carlos Sardo
+
+### 2026-09-24T09:22:15+0200 — PR #6 independent review
+
+- Approved exact commit `6f8efc8ffdb3fc12595938c6821c35a8c8ebb961` with no findings after independently confirming 304 Vitest tests in 13 files, 65 Playwright tests in 2 files, and clean configuration.
+- GitHub correctly refused formal self-approval because `CarlosSardo` authored the PR; the independent Squad reviewer verdict remained the merge gate.

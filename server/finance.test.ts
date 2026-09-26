@@ -11,21 +11,30 @@ import {
   money,
   transferPaymentPlan,
   valuation,
+  VALUE_RANGE,
 } from "../shared/rules.ts";
+import { MARKET_VALUE_FACTOR, marketValueFactor } from "../shared/world-catalog/market.ts";
 import {
   acquirePlayerAsset,
   annualAmortization,
   assessFinances,
   assetAmortization,
+  baseWage,
   clubValuation,
   closeFinancialYear,
   estimateClubRevenue,
   initialClubFinances,
+  marketWage,
+  payrollScale,
   postWeeklyAccounts,
+  professionalWageFloor,
   recordFinancialItem,
   sellPlayerAsset,
+  spendRatio,
+  weeklyOperatingCosts,
   type ClubEconomyInput,
 } from "./finance.ts";
+import type { AgeGroup } from "../shared/types.ts";
 
 describe("currency presentation", () => {
   it("uses compact values without changing accounting amounts", () => {
@@ -100,64 +109,71 @@ describe("heuristic player valuation", () => {
       label: "amateur-level players",
       player: { ability: 25, potential: 30 },
       reputation: 10,
-      minimum: 0,
-      maximum: 500,
+      minimum: 500,
+      maximum: 5000,
     },
     {
       label: "lower-division regulars",
       player: { ability: 45, potential: 50 },
       reputation: 25,
-      minimum: 1000,
-      maximum: 15_000,
+      minimum: 20_000,
+      maximum: 90_000,
     },
     {
       label: "useful modest-league professionals",
       player: { ability: 55, potential: 60 },
       reputation: 45,
-      minimum: 25_000,
-      maximum: 90_000,
+      minimum: 80_000,
+      maximum: 300_000,
     },
     {
       label: "established professionals",
       player: { ability: 65, potential: 70 },
       reputation: 65,
-      minimum: 250_000,
-      maximum: 900_000,
+      minimum: 600_000,
+      maximum: 2_500_000,
     },
     {
       label: "strong top-division players",
       player: { ability: 75, potential: 78 },
       reputation: 80,
-      minimum: 2_000_000,
-      maximum: 8_000_000,
+      minimum: 7_000_000,
+      maximum: 20_000_000,
+    },
+    {
+      label: "mid-table Premier League squad players",
+      player: { ability: 74, potential: 76 },
+      reputation: 92,
+      minimum: 10_000_000,
+      maximum: 25_000_000,
     },
     {
       label: "proven elite young forwards",
       player: { ability: 90, potential: 97, age: 22, position: "ST" },
       reputation: 95,
-      minimum: 50_000_000,
-      maximum: 110_000_000,
+      minimum: 80_000_000,
+      maximum: 180_000_000,
     },
     {
       label: "world-class prime forwards",
       player: { ability: 95, potential: 97, position: "ST" },
       reputation: 99,
-      minimum: 100_000_000,
-      maximum: 200_000_000,
+      minimum: 130_000_000,
+      maximum: 250_000_000,
     },
     {
       label: "unproven academy prospects",
       player: { ability: 45, potential: 99, age: 16 },
       reputation: 85,
-      minimum: 2000,
-      maximum: 50_000,
+      minimum: 150_000,
+      maximum: 800_000,
     },
     {
       label: "older useful professionals",
       player: { ability: 65, potential: 70, age: 35 },
       reputation: 65,
-      minimum: 20_000,
-      maximum: 140_000,
+      minimum: 100_000,
+      maximum: 450_000,
     },
   ] as const)("calibrates $label in GBP", (scenario) => {
     const { value } = estimate(scenario.player, {
@@ -165,6 +181,19 @@ describe("heuristic player valuation", () => {
     });
     expect(value).toBeGreaterThanOrEqual(scenario.minimum);
     expect(value).toBeLessThanOrEqual(scenario.maximum);
+  });
+
+  it("prices equal quality lower in cheaper league markets, the big European leagues at 1", () => {
+    const star = { ability: 80, potential: 82, age: 26, position: "ST" as const };
+    const europe = estimate(star, { leagueReputation: 70 }).value;
+    expect(estimate(star, { leagueReputation: 70, marketFactor: 1 }).value).toBe(europe);
+    expect(estimate(star, { leagueReputation: 70, marketFactor: marketValueFactor("JP") }).value).toBeCloseTo(europe * 0.27, -5);
+    expect(estimate(star, { leagueReputation: 70, marketFactor: 0 }).value).toBeGreaterThanOrEqual(europe * 0.1 - 100);
+    for (const code of ["EN", "ES", "DE", "IT", "FR", "PT", undefined, null]) expect(marketValueFactor(code), String(code)).toBe(1);
+    for (const factor of Object.values(MARKET_VALUE_FACTOR)) {
+      expect(factor).toBeGreaterThan(0.2);
+      expect(factor).toBeLessThan(1);
+    }
   });
 
   it("is monotonic in quality and league reputation, including band boundaries", () => {
@@ -188,13 +217,16 @@ describe("heuristic player valuation", () => {
     );
   });
 
-  it("prices prospects on demonstrated quality with bounded potential upside", () => {
+  it("prices prospects on half their projected upside, fading out by 24", () => {
     const ordinary = estimate({ ability: 45, potential: 45, age: 16 });
     const prospect = estimate({ ability: 45, potential: 99, age: 16 });
-    expect(prospect.value).toBeGreaterThan(ordinary.value);
-    expect(prospect.value).toBeLessThan(ordinary.value * 1.7);
-    expect(prospect.layers["Potential value"]).toBeCloseTo(1.65);
-    expect(prospect.value).toBeLessThan(estimate().value / 10);
+    expect(prospect.value).toBeGreaterThan(ordinary.value * 3);
+    expect(prospect.value).toBeLessThan(ordinary.value * 8);
+    expect(prospect.layers["Potential value"]).toBeGreaterThan(3);
+    expect(prospect.value).toBeLessThan(estimate().value / 2);
+    expect(estimate({ potential: 99, age: 24 }).value).toBe(
+      estimate({ potential: 65, age: 24 }).value,
+    );
     expect(estimate({ potential: 99, age: 30 }).value).toBe(
       estimate({ potential: 65, age: 30 }).value,
     );
@@ -206,7 +238,7 @@ describe("heuristic player valuation", () => {
     expect(estimate({ age: 30 }).value).toBeLessThan(prime);
     expect(veteran).toBeLessThan(prime * 0.25);
     expect(estimate({ age: 40 }).value).toBeLessThan(veteran);
-    expect(estimate({ age: 18 }).value).toBeLessThan(prime);
+    expect(estimate({ age: 18, potential: 65 }).value).toBeLessThan(prime);
     const keeperRetention =
       estimate({ position: "GK", age: 35 }).value /
       estimate({ position: "GK", age: 26 }).value;
@@ -220,7 +252,7 @@ describe("heuristic player valuation", () => {
     expect(striker).toBeLessThan(goalkeeper * 1.5);
   });
 
-  it("declines to zero at contract expiry without a large minimum fee", () => {
+  it("declines to the minimum value at contract expiry without a large minimum fee", () => {
     const contracted = estimate().value;
     let previous = -1;
     for (const months of [0, 1, 6, 12, 24, 36, 60]) {
@@ -230,8 +262,8 @@ describe("heuristic player valuation", () => {
       expect(value).toBeGreaterThan(previous);
       previous = value;
     }
-    expect(estimate({ contract_end: context.date }).value).toBe(0);
-    expect(estimate({ contract_end: "2026-01-01" }).value).toBe(0);
+    expect(estimate({ contract_end: context.date }).value).toBe(VALUE_RANGE.min);
+    expect(estimate({ contract_end: "2026-01-01" }).value).toBe(VALUE_RANGE.min);
     expect(
       estimate(
         {
@@ -243,7 +275,7 @@ describe("heuristic player valuation", () => {
         },
         { leagueReputation: 100, hype: 10000, balance: 1_000_000_000 },
       ).value,
-    ).toBe(0);
+    ).toBe(VALUE_RANGE.min);
     expect(
       estimate({ contract_end: addMonths(context.date, 1) }).value,
     ).toBeLessThan(contracted * 0.05);
@@ -253,7 +285,24 @@ describe("heuristic player valuation", () => {
     expect(
       estimate({ contract_end: addMonths(context.date, 61) }).value,
     ).toBe(estimate({ contract_end: addMonths(context.date, 120) }).value);
-    expect(estimate({ ability: 1, potential: 1, age: 40 }).value).toBe(0);
+    expect(estimate({ ability: 1, potential: 1, age: 40 }).value).toBe(VALUE_RANGE.min);
+  });
+
+  it("keeps every value between 100 and 250M", () => {
+    expect(
+      estimate(
+        { ability: 99, potential: 99, age: 23, position: "ST", form: 10, contract_end: "2035-07-01" },
+        { date: "2030-07-01", leagueReputation: 100, hype: 1000, inflation: 10, balance: 1e9, philosophy: "Win now" },
+      ).value,
+    ).toBe(VALUE_RANGE.max);
+    for (const ability of [1, 20, 40, 60, 80, 99])
+      for (const age of [14, 18, 24, 30, 38])
+        for (const leagueReputation of [0, 50, 100]) {
+          const { value } = estimate({ ability, potential: 99, age }, { leagueReputation });
+          expect(Number.isFinite(value)).toBe(true);
+          expect(value).toBeGreaterThanOrEqual(VALUE_RANGE.min);
+          expect(value).toBeLessThanOrEqual(VALUE_RANGE.max);
+        }
   });
 
   it("bounds hype, form, injuries and selling-club pressure", () => {
@@ -321,6 +370,38 @@ describe("heuristic player valuation", () => {
     expect(valuation(persisted, context)).toEqual(valuation(alternate, context));
     expect(persisted.wage).toBe(1500);
     expect(persisted.value).toBe(8_000_000);
+  });
+});
+
+describe("wage levels", () => {
+  it("scales payroll to 88% of the wage budget less amateur allowances, within 0.02-4", () => {
+    expect(payrollScale(100_000, 100_000)).toBeCloseTo(0.88);
+    expect(payrollScale(100_000, 100_000, 8_000)).toBeCloseTo(0.8);
+    expect(payrollScale(1_000, 100, 900)).toBe(0.02);
+    expect(payrollScale(10, 1_000_000)).toBe(0.02);
+    expect(payrollScale(100_000_000, 1)).toBe(4);
+    expect(payrollScale(-5, 100)).toBe(0.02);
+  });
+
+  it("lowers the professional wage floor to 10-50 on thin budgets, as generated", () => {
+    expect(professionalWageFloor(100_000, 500, 30)).toBe(50);
+    expect(professionalWageFloor(1_500, 900, 20)).toBe(20);
+    expect(professionalWageFloor(200, 300, 20)).toBe(10);
+    expect(professionalWageFloor(0, 0, 0)).toBe(50);
+  });
+
+  it("prices weekly wages by ability, club budget and age group, never below 50 or the current wage", () => {
+    const player = { ability: 74, age: 26, age_group: "Senior" as AgeGroup, wage: 0 };
+    // Mid-table Premier League payroll factor ≈ 1.75 (player wage budget = 62% of the catalog wage bill): about £40k a week.
+    expect(marketWage(player, 1.75)).toBeGreaterThan(30_000);
+    expect(marketWage(player, 1.75)).toBeLessThan(55_000);
+    expect(marketWage({ ...player, ability: 92 }, 4)).toBeGreaterThan(250_000);
+    expect(marketWage({ ...player, ability: 99 }, 4)).toBeLessThanOrEqual(1_200_000);
+    expect(marketWage({ ...player, ability: 55 }, 0.3)).toBeLessThan(1500);
+    expect(marketWage({ ...player, ability: 20 }, 0.02)).toBe(50);
+    expect(marketWage({ ...player, age_group: "U19" as AgeGroup }, 2.5)).toBeLessThan(marketWage(player, 2.5) / 3);
+    expect(marketWage({ ...player, wage: 90_000 }, 2.5)).toBe(90_000);
+    expect(baseWage(90)).toBeGreaterThan(baseWage(80) * 2);
   });
 });
 
@@ -520,11 +601,7 @@ describe("financial regulatory accounting", () => {
     store.transaction(async () => {
       await store.clearWorld();
       await store.schema();
-      await generateWorld(store, {
-        countryLimit: 1,
-        seniors: 1200,
-        youth: 500,
-      });
+      await generateWorld(store, { nations: ["EN"] });
     }),
   );
   afterAll(async () => await store?.close());
@@ -605,5 +682,111 @@ describe("financial regulatory accounting", () => {
     await recordFinancialItem(store, 1, "revenue", 100_000_000);
     await closeFinancialYear(store, 2026);
     expect((await assessFinances(store, 1)).footballRevenue).toBe(109_000_000);
+  });
+});
+
+describe("weekly operating costs", () => {
+  /** One synthetic 20-club season: 52 weeks, 21 home matches, payroll on or above budget. */
+  const season = (options: {
+    tier: number;
+    league: number;
+    payrollShare: number;
+    staffShare: number;
+    overspend?: number;
+    upkeepOnly?: boolean;
+  }) =>
+    Array.from({ length: 20 }, (_, index) => {
+      const facilities = 80 - index * 2;
+      const academy = 70 - index * 2;
+      const expected = estimateClubRevenue({
+        reputation: 90 - index * 2,
+        leagueReputation: options.league,
+        tier: options.tier,
+        capacity: 60_000 - index * 2_500,
+        fanMood: 72,
+        homeMatches: 21,
+      });
+      const revenue = expected.annualOperatingRevenue;
+      const budgeted = (options.payrollShare * revenue) / 52;
+      const weeklyWages = budgeted * (1 + (options.overspend ?? 0)) + (options.staffShare * revenue) / 52;
+      let balance = revenue * 0.2;
+      let lowest = balance;
+      let income = 0;
+      let costs = 0;
+      for (let week = 0; week < 52; week++) {
+        const weekIncome =
+          expected.annualCommercial / 52 + (week < 42 && week % 2 === 0 ? expected.matchdayPerHomeMatch : 0);
+        const operating = options.upkeepOnly
+          ? Math.round(facilities ** 2 * 2.2) + Math.round(academy ** 2 * 1.6)
+          : weeklyOperatingCosts({
+              annualRevenue: revenue,
+              wageShare: (budgeted * 52) / revenue,
+              spendRatio: spendRatio(options.tier * 100 + index, options.tier),
+              facilities,
+              academy,
+              balance,
+            }).total;
+        income += weekIncome;
+        costs += weeklyWages + operating;
+        balance += weekIncome - weeklyWages - operating;
+        lowest = Math.min(lowest, balance);
+      }
+      return { margin: (income - costs) / income, lowest };
+    });
+  const median = (values: number[]) => [...values].sort((left, right) => left - right)[values.length >> 1];
+
+  it("keeps top-flight margins between break-even and a modest profit", () => {
+    // Revenue far above the catalog wage bill (Portugal, Netherlands, Morocco top flights) used to leave 60–90% margins.
+    const rich = { tier: 1, league: 85, payrollShare: 0.12, staffShare: 0.005 };
+    expect(median(season({ ...rich, upkeepOnly: true }).map((club) => club.margin))).toBeGreaterThan(0.6);
+    const clubs = season(rich);
+    for (const club of clubs) {
+      expect(club.margin).toBeGreaterThan(0);
+      expect(club.margin).toBeLessThan(0.1);
+      expect(club.lowest).toBeGreaterThan(0);
+    }
+    // Premier League-like wage share: still modest profits before transfers.
+    const english = season({ tier: 1, league: 92, payrollShare: 0.34, staffShare: 0.01 }).map((club) => club.margin);
+    expect(median(english)).toBeGreaterThan(0.01);
+    expect(median(english)).toBeLessThan(0.08);
+    expect(Math.max(...english)).toBeLessThan(0.1);
+  });
+
+  it("gives lower tiers thin margins with some losses", () => {
+    const margins = season({ tier: 3, league: 70, payrollShare: 0.45, staffShare: 0.08 }).map((club) => club.margin);
+    expect(median(margins)).toBeGreaterThan(-0.04);
+    expect(median(margins)).toBeLessThan(0.05);
+    expect(margins.some((margin) => margin < 0)).toBe(true);
+    expect(margins.some((margin) => margin > 0)).toBe(true);
+  });
+
+  it("charges only upkeep where wages already exceed revenue", () => {
+    const poor = { tier: 4, league: 60, payrollShare: 1.1, staffShare: 0.1 };
+    const before = season({ ...poor, upkeepOnly: true }).map((club) => club.margin);
+    expect(season(poor).map((club) => club.margin)).toEqual(before);
+    expect(Math.max(...before)).toBeLessThan(0);
+  });
+
+  it("makes wages above the budget cost money, and cuts spending when cash runs low", () => {
+    const base = { tier: 1, league: 88, payrollShare: 0.3, staffShare: 0.01 };
+    const onBudget = season(base);
+    const over = season({ ...base, overspend: 0.2 });
+    for (const [index, club] of over.entries())
+      expect(club.margin).toBeLessThan(onBudget[index].margin - 0.05);
+    const input = { annualRevenue: 52_000_000, wageShare: 0.3, spendRatio: 0.94, facilities: 70, academy: 60 };
+    const funded = weeklyOperatingCosts({ ...input, balance: 5_200_000 }).total;
+    const broke = weeklyOperatingCosts({ ...input, balance: 0 }).total;
+    expect(funded - broke).toBeCloseTo(60_000, -1);
+    expect(weeklyOperatingCosts({ ...input, balance: -1_000_000 }).total).toBe(broke);
+  });
+
+  it("draws a stable spend ratio per club within its tier band", () => {
+    for (let id = 1; id <= 500; id++) {
+      expect(spendRatio(id, 1)).toBeGreaterThanOrEqual(0.9);
+      expect(spendRatio(id, 1)).toBeLessThan(0.98);
+      expect(spendRatio(id, 6)).toBeGreaterThanOrEqual(0.855);
+      expect(spendRatio(id, 6)).toBeLessThan(0.935);
+      expect(spendRatio(id, 1)).toBe(spendRatio(id, 1));
+    }
   });
 });

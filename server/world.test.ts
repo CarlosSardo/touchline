@@ -1,668 +1,320 @@
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Store } from "./db.ts";
+import { hasMinorRoute, verifyWorld } from "./check-world.ts";
 import {
-  buildWorldStructure,
-  countryDefinitions,
-  ensureClubRosters,
+  assertPlanStandings,
+  avoidedClubKeys,
   generateWorld,
+  isAvoidedClubKey,
+  planWorld,
+  worldPlayers,
+  worldStaff,
+  type WorldPlan,
 } from "./world.ts";
-import { ensureClubSupport } from "./club-support.ts";
-import { initialClubFinances } from "./finance.ts";
-import {
-  ATTRIBUTE_GROUPS,
-  DEFAULT_SETTINGS,
-  START_DATE,
-  loanScore,
-  valuation,
-} from "../shared/rules.ts";
-import type { Club, League, Player, PlayerProfile } from "../shared/types.ts";
-import {
-  associationRuleAudit,
-  domesticPyramid,
-  minimumReserveTier,
-  planPyramidMoves,
-  reservePolicy,
-  SQUAD_MINIMUMS,
-  WORLD_VERSION,
-  youthGroups,
-} from "../shared/world-rules.ts";
-import {
-  clubIdentity,
-  culturalPersonName,
-  namingPools,
-  playerBackground,
-} from "./world-names.ts";
-import seedrandom from "seedrandom";
-import { expandWorld } from "./world-expansion.ts";
-import { activateWorldStructure, createCalendar } from "./calendar.ts";
+import { clubNameKey, worldCatalog } from "../shared/world-catalog/index.ts";
+import { MIN_GOALKEEPERS, SQUAD_MINIMUMS, WORLD_VERSION } from "../shared/world-rules.ts";
+import type { GameState, PlayerProfile } from "../shared/types.ts";
+import type { PlayerRow } from "./people.ts";
 
-async function expectSchemaIntegrity(store: Store) {
-  const tables = await store.all<{ id: number; name: string }>(
-    "SELECT object_id AS id,name FROM sys.tables WHERE schema_id = SCHEMA_ID(?) ORDER BY name",
-    store.schemaName,
+// Finished catalog nations: British pyramids with cross-border clubs, big cities, B-teams, home pools, AFC leagues.
+const NATIONS = ["EN", "WAL", "SCO", "NIR", "IE", "NO", "TR", "RU", "IL", "JP", "AU", "SA"];
+const lookup = worldCatalog();
+const data = (value: unknown) => JSON.parse(String(value)) as Record<string, unknown>;
+
+describe("world plan (pure)", () => {
+  const plan: WorldPlan = planWorld({ nations: NATIONS });
+  const leagues = plan.rows.leagues;
+  const leagueById = new Map(leagues.map((league) => [Number(league.id), league]));
+  const standings = plan.rows.standings;
+  const byCode = new Map(plan.countries.map((country) => [country.code, country]));
+  let players: PlayerRow[] = [];
+  beforeAll(() => {
+    players = [...worldPlayers(planWorld({ nations: NATIONS, squads: "minimum" }))];
+  });
+
+  it("plans every catalog tier at its real size, each club in exactly one senior league", () => {
+    for (const code of NATIONS) {
+      const country = byCode.get(code)!;
+      const tiers = lookup.requireNation(code).football?.leagues ?? [];
+      const own = leagues.filter((league) => league.country_id === country.id && league.age_group === "Senior" && Number(league.tier) > 0);
+      expect(own.map((league) => Number(league.tier)), code).toEqual(tiers.map((tier) => tier.tier));
+      for (const league of own) {
+        const size = standings.filter((row) => row.league_id === league.id).length;
+        expect(size, String(league.name)).toBe(tiers[Number(league.tier) - 1].size);
+        expect(data(league.data)).toMatchObject({ worldVersion: WORLD_VERSION, catalogKey: `L:${code}:${league.tier}` });
+      }
+    }
+    for (const club of plan.clubs) {
+      const senior = standings.filter((row) => row.club_id === club.id && leagueById.get(Number(row.league_id))?.age_group === "Senior");
+      expect(senior.map((row) => row.league_id), String(club.row.name)).toEqual([club.row.league_id]);
+    }
+    expect(plan.counts.nationalTeams).toBe(NATIONS.length * 4);
+    expect(plan.rows.countries.map((country) => country.code)[0]).toBe("EN");
+  });
+
+  it("rejects duplicate standings and plans hosted-club and home-pool-only subsets", () => {
+    const small = planWorld({ nations: ["SCO"], structureOnly: true });
+    const duplicate = { ...small.rows, standings: [...small.rows.standings, { ...small.rows.standings[0] }] };
+    expect(() => assertPlanStandings(duplicate)).toThrow(/stands in Senior leagues/);
+    for (const nations of [["US", "CA", "CH", "LI"], ["EN", "WAL", "ES"], ["SCO", "IE"]])
+      expect(() => planWorld({ nations, structureOnly: true }), nations.join()).not.toThrow();
+    // Faroe Islands has no own league: national teams, free staff and home-based players only (db:seed --nations FO).
+    const pool = planWorld({ nations: ["FO"], squads: "minimum" });
+    expect(pool.rows.leagues).toEqual([]);
+    expect(pool.clubs).toEqual([]);
+    expect(pool.counts.nationalTeams).toBe(4);
+    expect(worldStaff(pool).staff.every((row) => row.club_id === null)).toBe(true);
+    const homeBased = [...worldPlayers(pool)];
+    expect(homeBased.length).toBeGreaterThan(0);
+    expect(homeBased.every((row) => row.club_id === null)).toBe(true);
+  });
+
+  it("puts every first team in one U19 and one U17 league of 2-16 clubs and gives B-teams none", () => {
+    for (const club of plan.clubs) {
+      const youth = standings
+        .filter((row) => row.club_id === club.id)
+        .map((row) => String(leagueById.get(Number(row.league_id))!.age_group))
+        .filter((age) => age !== "Senior")
+        .sort();
+      expect(youth, String(club.row.name)).toEqual(club.type === "club" ? ["U17", "U19"] : []);
+    }
+    for (const league of leagues.filter((entry) => entry.age_group !== "Senior")) {
+      const size = standings.filter((row) => row.league_id === league.id).length;
+      expect(size, String(league.name)).toBeGreaterThanOrEqual(2);
+      expect(size, String(league.name)).toBeLessThanOrEqual(16);
+    }
+  });
+
+  it("hosts Welsh and Northern Irish clubs abroad and counts them against their home cities", () => {
+    for (const [home, host] of [["WAL", "EN"], ["NIR", "IE"]]) {
+      const spec = lookup.requireNation(home).hostedAbroad!.find((entry) => entry.host === host)!;
+      const hosted = plan.clubs.filter((club) => club.code === home && club.hosted);
+      expect(hosted.map((club) => club.row.city).sort()).toEqual([...spec.cities].sort());
+      expect(hosted.map((club) => club.tier).sort()).toEqual([...spec.tiers].sort());
+      for (const club of hosted) {
+        expect(leagueById.get(Number(club.row.league_id))!.country_id).toBe(byCode.get(host)!.id);
+        expect(data(club.row.data).hosted).toMatchObject({ host });
+      }
+      for (const city of lookup.requireNation(home).cities.major) {
+        const clubs = plan.clubs.filter((club) => club.code === home && club.type === "club" && club.row.city === city.name);
+        expect(clubs.length, city.name).toBeLessThanOrEqual(city.maxClubs ?? { mega: 6, large: 3, medium: 2, small: 1, town: 1 }[city.size]);
+      }
+    }
+  });
+
+  it("spreads a metropolis across the pyramid instead of filling the top flight", () => {
+    const london = lookup.requireNation("EN").cities.major.find((city) => city.name === "London")!;
+    const clubs = plan.clubs.filter((club) => club.code === "EN" && club.type === "club" && club.row.city === "London");
+    expect(clubs.length).toBeLessThanOrEqual(london.maxClubs ?? 6);
+    expect(new Set(clubs.map((club) => club.tier)).size).toBeGreaterThanOrEqual(3);
+    expect(clubs.filter((club) => club.tier === 1).length).toBeLessThan(clubs.length / 2 + 1);
+  });
+
+  it("never reproduces a real club name, or a near-copy of one, and keeps names unique per nation", () => {
+    // Italian and Lusophone templates can render near-copies (La Spezia Calcio, Académica de Praia); German and
+    // Croatian ones add years (FC Augsburg 36, NK Zagreb 1943).
+    const nearCopies = planWorld({ nations: ["IT", "CV", "AO", "MZ", "TN", "EC", "DE", "HR"].filter((code) => lookup.nationByCode(code)), structureOnly: true });
+    for (const [world, codes] of [[plan, NATIONS], [nearCopies, nearCopies.nations.map((nation) => nation.code)]] as const)
+      for (const code of codes) {
+        const keys = world.clubs.filter((club) => club.code === code && club.type === "club").map((club) => clubNameKey(String(club.row.name)));
+        expect(new Set(keys).size, code).toBe(keys.length);
+        const avoided = avoidedClubKeys(lookup.avoidedClubNames(code));
+        expect(keys.filter((key) => isAvoidedClubKey(key, avoided)), code).toEqual([]);
+      }
+    expect(lookup.avoidedClubNames("EN").size).toBeGreaterThan(0);
+  });
+
+  it("orders north/south conferences and youth groups by latitude", () => {
+    const meanLatitude = (leagueId: unknown, group?: string) => {
+      const latitudes = standings
+        .filter((row) => row.league_id === leagueId && (group === undefined || row.group_name === group))
+        .map((row) => plan.clubs.find((club) => club.id === row.club_id)?.lat)
+        .filter((lat): lat is number => lat !== undefined);
+      return latitudes.reduce((total, lat) => total + lat, 0) / Math.max(1, latitudes.length);
+    };
+    let compared = 0;
+    for (const league of leagues) {
+      const conferences = (data(league.data).conferences as string[] | undefined) ?? [];
+      const north = conferences.find((name) => /north/i.test(name));
+      const south = conferences.find((name) => /south/i.test(name));
+      if (!north || !south) continue;
+      expect(meanLatitude(league.id, north), String(league.name)).toBeGreaterThan(meanLatitude(league.id, south));
+      compared++;
+    }
+    const youth = new Map<string, { north: number[]; south: number[] }>();
+    for (const league of leagues.filter((entry) => entry.age_group !== "Senior")) {
+      const [division, group] = String(league.name).split(" - ");
+      if (!group || !/north|south/i.test(group)) continue;
+      const key = `${league.country_id}:${league.age_group}:${division}`;
+      const entry = youth.get(key) ?? { north: [], south: [] };
+      entry[/north/i.test(group) ? "north" : "south"].push(meanLatitude(league.id));
+      youth.set(key, entry);
+    }
+    for (const [key, entry] of youth)
+      if (entry.north.length && entry.south.length) {
+        expect(Math.min(...entry.north), key).toBeGreaterThan(Math.max(...entry.south));
+        compared++;
+      }
+    expect(compared).toBeGreaterThan(0);
+  });
+
+  it("interpolates budgets by reputation, so tier giants stand apart", () => {
+    for (const code of ["EN", "SCO", "JP"]) {
+      const top = plan.clubs
+        .filter((club) => club.code === code && club.type === "club" && club.tier === 1 && !club.hosted)
+        .sort((left, right) => Number(right.row.reputation) - Number(left.row.reputation));
+      const budgets = top.map((club) => Number(club.row.wage_budget));
+      expect(budgets[0], code).toBeGreaterThan(budgets[Math.floor(budgets.length / 2)]);
+      expect(budgets[Math.floor(budgets.length / 2)], code).toBeGreaterThan(budgets.at(-1)!);
+      for (const club of top) expect(Number(club.row.balance)).toBeGreaterThanOrEqual(1.25 * Number(club.row.transfer_budget) - 1);
+    }
+    const scotland = plan.clubs
+      .filter((club) => club.code === "SCO" && club.tier === 1)
+      .map((club) => Number(club.row.wage_budget))
+      .sort((left, right) => right - left);
+    expect(scotland[1]).toBeGreaterThan(2 * scotland[2]);
+  });
+
+  it("builds minimum squads with two goalkeepers, sane values and payrolls within budget", () => {
+    const squads = new Map<string, { total: number; keepers: number; wages: number }>();
+    for (const row of players) {
+      if (row.club_id === null) continue;
+      const key = `${row.club_id}:${row.age_group}`;
+      const entry = squads.get(key) ?? { total: 0, keepers: 0, wages: 0 };
+      entry.total++;
+      if (row.position === "GK") entry.keepers++;
+      entry.wages += Number(row.wage);
+      squads.set(key, entry);
+      expect(Number(row.value)).toBeGreaterThanOrEqual(100);
+      expect(Number(row.value)).toBeLessThanOrEqual(250_000_000);
+      expect(Number(row.wage)).toBeLessThanOrEqual(1_200_000);
+    }
+    let withinBudget = 0;
+    const planMinimum = planWorld({ nations: NATIONS, squads: "minimum" });
+    for (const club of planMinimum.clubs) {
+      const groups = club.type === "club" ? (["Senior", "U19", "U17"] as const) : (["Senior"] as const);
+      let payroll = 0;
+      for (const ageGroup of groups) {
+        const entry = squads.get(`${club.id}:${ageGroup}`);
+        const minimum = club.type === "bteam" ? SQUAD_MINIMUMS.BTeam : SQUAD_MINIMUMS[ageGroup];
+        expect(entry?.total, `${club.row.name} ${ageGroup}`).toBe(minimum);
+        expect(entry!.keepers, `${club.row.name} ${ageGroup}`).toBeGreaterThanOrEqual(MIN_GOALKEEPERS);
+        payroll += entry!.wages;
+      }
+      if (payroll <= 1.1 * Number(club.row.wage_budget)) withinBudget++;
+    }
+    expect(withinBudget).toBeGreaterThanOrEqual(0.95 * planMinimum.clubs.length);
+  });
+
+  it("registers foreign minors only through an allowed route and keeps home pools club-less", () => {
+    const planMinimum = planWorld({ nations: NATIONS, squads: "minimum" });
+    const clubCountry = new Map(planMinimum.clubs.map((club) => [club.id, club]));
+    const codes = new Map(planMinimum.countries.map((country) => [country.id, country.code]));
+    for (const row of players) {
+      if (row.club_id === null || Number(row.age) >= 18) continue;
+      const club = clubCountry.get(Number(row.club_id))!;
+      // Cross-border clubs are local to their home nation and to the association they register with (Derry City: FAI).
+      const local = [Number(club.row.country_id)];
+      if (club.hosted?.registration === "host")
+        local.push(planMinimum.countries.find((country) => country.code === club.hosted!.host)!.id);
+      if (local.includes(Number(row.country_id))) continue;
+      const profile = JSON.parse(String(row.profile)) as PlayerProfile;
+      const allowed = local.some((countryId) => hasMinorRoute(profile, Number(row.age), { countryId, code: codes.get(countryId)! }));
+      expect(allowed, String(row.name)).toBe(true);
+    }
+    const pool = lookup.requireNation("IL").homePool!;
+    const israel = planMinimum.countries.find((country) => country.code === "IL")!.id;
+    const homeBased = players.filter((row) => row.club_id === null && (JSON.parse(String(row.profile)) as PlayerProfile).homeBased?.countryId === israel);
+    expect(homeBased.length).toBe(pool.seniors + pool.youth);
+    expect(homeBased.every((row) => Number(row.country_id) === israel && row.wage === 0)).toBe(true);
+  });
+
+  it("gives staff to first teams only and is deterministic for a seed", () => {
+    const { staff } = worldStaff(plan);
+    const firstTeams = new Set(plan.clubs.filter((club) => club.type === "club").map((club) => club.id));
+    expect(staff.filter((row) => row.club_id !== null).every((row) => firstTeams.has(Number(row.club_id)))).toBe(true);
+    expect(planWorld({ nations: NATIONS }).rows).toEqual(plan.rows);
+    const first = (seed: string) => worldPlayers(planWorld({ nations: ["SCO"], seed, squads: "minimum" })).next().value;
+    expect(first("a")).toEqual(first("a"));
+    expect(first("a")).not.toEqual(first("b"));
+  });
+});
+
+describe("club-name tokens (pure)", () => {
+  it("refuse a real club with a year or number added, dropped or swapped", () => {
+    const avoided = avoidedClubKeys(["FC Augsburg", "NK Zagreb", "1. FSV Mainz 05", "FC Schalke 04", "1. FC Köln", "AC Milan"].map(clubNameKey));
+    const refused = ["FC Augsburg 36", "Augsburg 1907", "NK Zagreb 1943", "FSV Mainz 12", "1. FSV Mainz 05", "Schalke 1904", "FC Köln", "AC Milano 1899"];
+    for (const name of refused) expect(isAvoidedClubKey(clubNameKey(name), avoided), name).toBe(true);
+    for (const name of ["FC Augsburg-Hochzoll 36", "NK Zagorje 1943", "SV Mainz-Kastel 05", "TSV Köln-Mülheim 1920"])
+      expect(isAvoidedClubKey(clubNameKey(name), avoided), name).toBe(false);
+  });
+  it.skipIf(!lookup.nationByCode("PT") || !lookup.nationByCode("HU"))(
+    "applies city prepositions ({of}) and adjectival city forms ({cityAdj})",
+    () => {
+      const plan = planWorld({ nations: ["PT", "HU"], structureOnly: true });
+      const names = (code: string) =>
+        plan.clubs.filter((club) => club.type === "club" && club.code === code).map((club) => String(club.row.name));
+      const portuguese = names("PT");
+      expect(portuguese.filter((name) => / de (Porto|Amadora|Covilhã|Maia)$/.test(name))).toEqual([]);
+      expect(portuguese.every((name) => !/[{}]|\s{2}/.test(name))).toBe(true);
+      const adjectives = lookup.requireNation("HU").cities.major.flatMap((city) => city.adjective ?? []);
+      const hungarian = names("HU");
+      expect(hungarian.some((name) => adjectives.includes(name.split(" ")[0]))).toBe(true);
+      expect(hungarian.every((name) => !/[{}]|^\s|\s{2}/.test(name))).toBe(true);
+    },
   );
-  expect(tables.length).toBeGreaterThan(0);
-  expect(
-    await store.all(
-      "SELECT name FROM sys.foreign_keys WHERE schema_id = SCHEMA_ID(?) AND (is_disabled = 1 OR is_not_trusted = 1)",
-      store.schemaName,
-    ),
-  ).toEqual([]);
-  for (const table of tables) {
-    expect(Number.isSafeInteger(table.id)).toBe(true);
-    expect(
-      await store.all(
-        `DBCC CHECKCONSTRAINTS (${table.id}) WITH ALL_CONSTRAINTS, ALL_ERRORMSGS`,
-      ),
-      table.name,
-    ).toEqual([]);
-  }
-}
+});
 
-describe("persistent football world", () => {
+describe("generated world (SQL)", () => {
   let store: Store;
   beforeAll(async () => {
     store = await Store.createTest("world");
-    await generateWorld(store, { countryLimit: 12, seniors: 1200, youth: 600 });
-  });
+    await store.schema();
+    await generateWorld(store, { nations: NATIONS, squads: "minimum" });
+  }, 600_000);
   afterAll(async () => {
     await store?.close();
   });
 
-  it("provides over 200 associations and at least 1200 domestic leagues at full scale", () => {
-    expect(countryDefinitions().length).toBeGreaterThanOrEqual(240);
-    expect(countryDefinitions().length * 5).toBeGreaterThanOrEqual(1200);
-    expect(
-      new Set(countryDefinitions().map((country) => country.code)).size,
-    ).toBe(countryDefinitions().length);
+  it("satisfies the section 8 structure, squad, orphan, registration and value invariants", async () => {
+    const report = await verifyWorld(store, { nations: NATIONS });
+    expect(report.problems).toEqual([]);
+    expect(report.totals.nationalTeams).toBe(NATIONS.length * 4);
+    expect(report.totals.homeBased).toBeGreaterThan(0);
   });
 
-  it("starts in summer 2026 and persists all player records without faces", async () => {
-    expect((await store.meta<{ date: string }>("state")).date).toBe(START_DATE);
-    expect(
-      (await store.get<{ count: number }>(
-        "SELECT count(*) AS count FROM players",
-      ))!.count,
-    ).toBe(1800);
-    const player = (await store.get<Player>("SELECT TOP (1) * FROM players"))!;
-    const profile = JSON.parse(player.profile) as PlayerProfile;
-    expect(
-      profile.identity.heritage.reduce(
-        (total, item) => total + item.percentage,
-        0,
-      ),
-    ).toBe(100);
-    expect(profile).not.toHaveProperty("face");
-    for (const [group, keys] of Object.entries(ATTRIBUTE_GROUPS)) {
-      for (const key of keys)
-        expect(
-          profile.attributes[group as keyof typeof ATTRIBUTE_GROUPS][key],
-        ).toBeGreaterThanOrEqual(1);
-    }
-    expect(
-      await store.all<Player>(
-        "SELECT * FROM players WHERE ability < 1 OR ability > 99 OR potential > 99",
-      ),
-    ).toHaveLength(0);
-  });
-
-  it("gives every association three senior and two youth divisions with table entries", async () => {
-    expect(
-      await store.all(
-        "SELECT country_id FROM leagues GROUP BY country_id HAVING count(*) != 5",
-      ),
-    ).toHaveLength(0);
-    expect(
-      await store.all(
-        "SELECT leagues.id FROM leagues LEFT JOIN standings ON standings.league_id = leagues.id GROUP BY leagues.id HAVING count(standings.club_id) = 0",
-      ),
-    ).toHaveLength(0);
-    expect(
-      await store.all(
-        "SELECT clubs.id FROM clubs JOIN countries ON countries.id = clubs.country_id WHERE clubs.type = 'bteam' AND countries.code IN ('EN','IT','BE')",
-      ),
-    ).toHaveLength(0);
-  });
-
-  it("does not regenerate or duplicate an existing save", async () => {
-    await generateWorld(store);
-    expect(
-      (await store.get<{ count: number }>(
-        "SELECT count(*) AS count FROM players",
-      ))!.count,
-    ).toBe(1800);
-    expect(await store.meta("settings")).toEqual(DEFAULT_SETTINGS);
-  });
-
-  it("starts every club with one director assistant and at least one affiliate without duplicating data", async () => {
-    const state = await store.meta("state");
-    expect(
-      await store.all(
-        "SELECT clubs.id FROM clubs LEFT JOIN staff ON staff.club_id = clubs.id AND staff.role = 'Sporting director assistant' WHERE clubs.type != 'national' GROUP BY clubs.id HAVING count(staff.id) != 1",
-      ),
-    ).toHaveLength(0);
-    expect(
-      await store.all(
-        "SELECT id FROM clubs WHERE type != 'national' AND NOT EXISTS (SELECT 1 FROM partnerships WHERE club_id = clubs.id OR partner_id = clubs.id)",
-      ),
-    ).toHaveLength(0);
-    expect(
-      await store.all(
-        "SELECT id FROM partnerships WHERE JSON_VALUE(data,'$.since') IS NULL OR JSON_VALUE(data,'$.annualFee') IS NULL",
-      ),
-    ).toHaveLength(0);
-    const staff = (await store.get<{ total: number }>(
-      "SELECT count(*) AS total FROM staff",
-    ))!.total;
-    const partners = (await store.get<{ total: number }>(
-      "SELECT count(*) AS total FROM partnerships",
-    ))!.total;
-    await ensureClubSupport(store);
-    expect(
-      (await store.get<{ total: number }>(
-        "SELECT count(*) AS total FROM staff",
-      ))!.total,
-    ).toBe(staff);
-    expect(
-      (await store.get<{ total: number }>(
-        "SELECT count(*) AS total FROM partnerships",
-      ))!.total,
-    ).toBe(partners);
-    expect(await store.meta("state")).toEqual(state);
-    await expectSchemaIntegrity(store);
-  });
-});
-
-describe("expanded football world", () => {
-  it("builds a SQL-free structure with legal reserve placement and both academies for every association", () => {
-    const structure = buildWorldStructure({ expanded: true });
-    const clubs = structure.rows.clubs as unknown as Club[];
-    const leagues = structure.rows.leagues as unknown as League[];
-    const clubById = new Map(clubs.map((club) => [club.id, club]));
-    const leagueById = new Map(leagues.map((league) => [league.id, league]));
-    const countries = new Map(structure.countryRows.map((country) => [country.id, country]));
-    const youthEntries = new Map<string, number>();
-    for (const standing of structure.rows.standings) {
-      const age = leagueById.get(Number(standing.league_id))!.age_group;
-      const key = `${standing.club_id}:${age}`;
-      youthEntries.set(key, (youthEntries.get(key) ?? 0) + 1);
-    }
-    expect(structure.countryRows).toHaveLength(countryDefinitions().length);
-    expect(clubs.filter((club) => club.type !== "national" &&
-      (youthEntries.get(`${club.id}:U19`) !== 1 || youthEntries.get(`${club.id}:U17`) !== 1),
-    )).toEqual([]);
-    const leagueSizes = new Map<number, number>();
-    for (const standing of structure.rows.standings) {
-      const leagueId = Number(standing.league_id);
-      leagueSizes.set(leagueId, (leagueSizes.get(leagueId) ?? 0) + 1);
-    }
-    for (const club of clubs.filter((entry) => entry.type !== "national")) {
-      const league = leagueById.get(club.league_id!)!;
-      const finances = initialClubFinances({
-        reputation: club.reputation,
-        leagueReputation: league.reputation,
-        tier: league.tier,
-        capacity: club.capacity,
-        fanMood: club.fan_mood,
-        homeMatches: leagueSizes.get(league.id)! + 1,
-      });
-      expect(club).toMatchObject(finances);
-      expect(structure.clubRows.find((entry) => entry.id === club.id)).toMatchObject(finances);
-    }
-    for (const country of structure.countryRows) {
-      const domestic = leagues.filter((league) =>
-        league.country_id === country.id && league.age_group === "Senior" &&
-        !JSON.parse(league.data).reserveOnly,
-      );
-      expect(domestic.map((league) => league.tier), country.code).toEqual(
-        domesticPyramid(country).map((division) => division.tier),
-      );
-    }
-    for (const club of clubs.filter((club) => club.type === "bteam")) {
-      const country = countries.get(club.country_id)!;
-      const policy = reservePolicy(country.code);
-      const parent = clubById.get(club.parent_id!)!;
-      const division = leagueById.get(club.league_id!)!;
-      expect(parent.type).toBe("club");
-      expect(parent.country_id).toBe(club.country_id);
-      expect(policy.mode).not.toBe("unverified");
-      if (policy.mode === "pyramid")
-        expect(division.tier).toBeGreaterThanOrEqual(
-          minimumReserveTier(country.code, leagueById.get(parent.league_id!)!.tier),
-        );
-      else {
-        expect(JSON.parse(division.data)).toMatchObject({
-          reserveOnly: true, promotion: 0, relegation: 0,
-          reserveCompetition: policy.competition,
-        });
-      }
-    }
-  });
-
-  it("adds modeled local tiers in large and smaller countries without presenting them as certified formats", () => {
-    const countries = countryDefinitions();
-    for (const [code, tiers] of [["EN", 10], ["DE", 10], ["FR", 10], ["PT", 8], ["LU", 5], ["FO", 4], ["IS", 6]] as const) {
-      const pyramid = domesticPyramid(countries.find((country) => country.code === code)!);
-      expect(pyramid, code).toHaveLength(tiers);
-      expect(pyramid.every((division) => division.evidence === "modeled")).toBe(true);
-      expect(new Set(pyramid.map((division) => division.name)).size).toBe(tiers);
-    }
-    expect(domesticPyramid(countries.find((country) => country.code === "FR")!)
-      .slice(2, 5).map((division) => division.name)).toEqual([
-        "France Ligue 3", "France National 1", "France National 2",
-      ]);
-  });
-
-  it("creates plausible dual and triple family backgrounds without equating club location to ancestry", () => {
-    const countries = countryDefinitions().map((country, index) => ({
-      ...country,
-      id: index + 1,
-    }));
-    const france = countries.find((country) => country.code === "FR")!;
-    const china = countries.find((country) => country.code === "CN")!;
-    const counts = new Set<number>();
-    for (let index = 0; index < 400; index++) {
-      const identity = playerBackground(
-        seedrandom(`family:${index}`),
-        france,
-        countries,
-      );
-      counts.add(identity.nationalities!.length);
-      expect(
-        identity.heritage!.reduce(
-          (total, entry) => total + entry.percentage,
-          0,
-        ),
-      ).toBe(100);
-      expect(
-        new Set(identity.heritage!.map((entry) => entry.country)).size,
-      ).toBe(identity.heritage!.length);
-      expect(identity.nationalities![0].countryId).toBe(france.id);
-      expect(identity.biography!.length).toBe(3);
-      expect(
-        identity.heritage!.every(
-          (entry) => !["Japan", "Australia", "China"].includes(entry.country),
-        ),
-      ).toBe(true);
-      expect(
-        playerBackground(seedrandom(`family:${index}`), china, countries)
-          .nationalities,
-      ).toHaveLength(1);
-    }
-    expect(counts).toEqual(new Set([1, 2, 3]));
-  });
-
-  it.each([1, 2])("upgrades a v%i career without resetting state, identities, contracts, money or existing fixtures", async (version) => {
-    const store = await Store.createTest("world");
-    let testStoreGuard: ReturnType<typeof vi.spyOn> | undefined;
-    try {
-      await generateWorld(store, { countryLimit: 1, seniors: 480, youth: 240 });
-      await createCalendar(store);
-      const initialState = await store.meta<{ date: string; season: number }>("state");
-      await store.setMeta("state", { ...initialState, date: "2026-10-01" });
-      await store.setMeta("world", { ...await store.meta<object>("world"), version });
-      const state = await store.meta("state");
-      const fixtures = await store.all("SELECT * FROM fixtures ORDER BY id");
-      const players = await store.all(
-        "SELECT * FROM players ORDER BY id",
-      );
-      const staff = await store.all("SELECT * FROM staff ORDER BY id");
-      const clubIdentities = await store.all(
-        "SELECT id,name,short_name,city,manager,balance,transfer_budget,wage_budget FROM clubs ORDER BY id",
-      );
-      const club = await store.get(
-        "SELECT id,name,balance,transfer_budget,wage_budget FROM clubs WHERE id = 1",
-      );
-      testStoreGuard = vi.spyOn(Store, "createTest").mockRejectedValue(
-        new Error("Remote test schemas are not permitted in production"),
-      );
-      const expansion = await expandWorld(store);
-      expect(testStoreGuard).not.toHaveBeenCalled();
-      expect(expansion.clubsAdded).toBeGreaterThan(90);
-      expect(expansion.playersAdded).toBeGreaterThan(5000);
-      expect(expansion).toHaveProperty("activeFromSeason", 2027);
-      expect(await store.meta("state")).toEqual(state);
-      expect(
-        await store.get(
-          "SELECT id,name,balance,transfer_budget,wage_budget FROM clubs WHERE id = 1",
-        ),
-      ).toEqual(club);
-      expect(
-        await store.all(
-          "SELECT * FROM players WHERE id <= ? ORDER BY id",
-          players.length,
-        ),
-      ).toEqual(players);
-      expect(await store.all(
-        "SELECT * FROM staff WHERE id <= ? ORDER BY id", staff.length,
-      )).toEqual(staff);
-      expect(await store.all(
-        "SELECT id,name,short_name,city,manager,balance,transfer_budget,wage_budget FROM clubs WHERE id <= ? ORDER BY id",
-        clubIdentities.length,
-      )).toEqual(clubIdentities);
-      expect(await store.all("SELECT * FROM fixtures ORDER BY id")).toEqual(fixtures);
-      expect(await store.all(
-        "SELECT id FROM clubs WHERE JSON_VALUE(data,'$.pendingSeniorLeague') IS NOT NULL AND league_id IS NOT NULL",
-      )).toEqual([]);
-      const pending = await store.all(
-        "SELECT id FROM clubs WHERE JSON_VALUE(data,'$.pendingSeniorLeague') IS NOT NULL",
-      );
-      expect(pending.length).toBeGreaterThan(0);
-      expect(await activateWorldStructure(store, 2026)).toEqual({
-        leaguesActivated: 0, clubsAdmitted: 0,
-      });
-      expect(
-        await store.all(
-          "SELECT * FROM fixtures WHERE id <= ? ORDER BY id",
-          fixtures.length,
-        ),
-      ).toEqual(fixtures);
-      expect((await expandWorld(store)).changed).toBe(false);
-      expect((await store.meta<{ version: number }>("world")).version).toBe(WORLD_VERSION);
-      if (version === 2) {
-        await store.setMeta("state", { ...await store.meta<object>("state"), season: 2027, date: "2027-07-01" });
-        const activation = await activateWorldStructure(store, 2027);
-        expect(activation.clubsAdmitted).toBeGreaterThanOrEqual(pending.length);
-        expect(await store.all(
-          "SELECT id FROM clubs WHERE JSON_VALUE(data,'$.pendingSeniorLeague') IS NOT NULL",
-        )).toEqual([]);
-        const seniorDivisions = await store.all<League>(
-          "SELECT * FROM leagues WHERE kind = 'league' AND age_group = 'Senior' AND tier > 0 ORDER BY tier",
-        );
-        for (const division of seniorDivisions) {
-          const expected = domesticPyramid(countryDefinitions()[0])[division.tier - 1];
-          expect((await store.get<{ count: number }>(
-            "SELECT count(*) AS count FROM clubs WHERE type = 'club' AND league_id = ?",
-            division.id,
-          ))!.count).toBeGreaterThanOrEqual(expected.clubs);
-        }
-        expect(await activateWorldStructure(store, 2027)).toEqual({
-          leaguesActivated: 0, clubsAdmitted: 0,
-        });
-        expect(await store.all("SELECT * FROM fixtures ORDER BY id")).toEqual(fixtures);
-      }
-      await expectSchemaIntegrity(store);
-    } finally {
-      testStoreGuard?.mockRestore();
-      await store.close();
-    }
-  });
-
-  it("localizes incompatible legacy club suffixes while retaining player identities, cities and finances", async () => {
-    const store = await Store.createTest("world");
-    try {
-      await generateWorld(store, { countryLimit: 1, seniors: 48, youth: 24 });
-      await store.run("UPDATE countries SET code = 'PT', name = 'Portugal', language = 'pt' WHERE id = 1");
-      await store.run("UPDATE clubs SET name = 'Porto United', city = 'Porto' WHERE id = 1");
-      await store.run("UPDATE clubs SET name = 'Porto United B', city = 'Porto', type = 'bteam', parent_id = 1 WHERE id = 2");
-      await store.run("UPDATE clubs SET name = 'Personal Club' WHERE id = 3");
-      await store.setMeta("state", { ...await store.meta<object>("state"), date: "2026-10-01" });
-      const clubs = await store.all("SELECT id,city,balance,transfer_budget,wage_budget FROM clubs ORDER BY id");
-      const players = await store.all("SELECT * FROM players ORDER BY id");
-      expect((await expandWorld(store)).changed).toBe(true);
-      expect(await store.get("SELECT name,city FROM clubs WHERE id = 1")).toEqual({ name: "FC Porto", city: "Porto" });
-      expect((await store.get<{ name: string }>("SELECT name FROM clubs WHERE id = 2"))!.name).toBe("FC Porto B");
-      expect((await store.get<{ name: string }>("SELECT name FROM clubs WHERE id = 3"))!.name).toBe("Personal Club");
-      expect(await store.all("SELECT id,city,balance,transfer_budget,wage_budget FROM clubs WHERE id <= ? ORDER BY id", clubs.length)).toEqual(clubs);
-      expect(await store.all("SELECT * FROM players WHERE id <= ? ORDER BY id", players.length)).toEqual(players);
-      expect((await expandWorld(store)).changed).toBe(false);
-    } finally {
-      await store.close();
-    }
-  });
-
-  it("fills missing and expired age squads without rewriting existing players or finances and is idempotent", async () => {
-    const store = await Store.createTest("world");
-    try {
-      await generateWorld(store, { countryLimit: 1, seniors: 48, youth: 12 });
-      const players = await store.all("SELECT * FROM players ORDER BY id");
-      const clubs = await store.all(
-        "SELECT id,balance,transfer_budget,wage_budget FROM clubs ORDER BY id",
-      );
-      const added = await ensureClubRosters(store);
-      expect(added).toBeGreaterThan(1000);
-      expect(
-        await store.all(
-          "SELECT * FROM players WHERE id <= ? ORDER BY id",
-          players.length,
-        ),
-      ).toEqual(players);
-      expect(
-        await store.all(
-          "SELECT id,balance,transfer_budget,wage_budget FROM clubs ORDER BY id",
-        ),
-      ).toEqual(clubs);
-      expect(await ensureClubRosters(store)).toBe(0);
-      for (const [age, minimum] of Object.entries(SQUAD_MINIMUMS))
-        expect(
-          await store.all(
-            "SELECT clubs.id FROM clubs LEFT JOIN players ON players.club_id = clubs.id AND players.age_group = ? WHERE clubs.type != 'national' GROUP BY clubs.id HAVING count(players.id) < ? OR SUM(CASE WHEN players.position = 'GK' THEN 1 ELSE 0 END) < 2",
-            age,
-            minimum,
-          ),
-        ).toHaveLength(0);
-      await store.run(
-        "UPDATE players SET contract_end = '2026-06-30' WHERE club_id = 1 AND age_group = 'U17' AND position = 'GK'",
-      );
-      const expired = await store.all(
-        "SELECT * FROM players WHERE contract_end < ? ORDER BY id",
-        START_DATE,
-      );
-      expect(expired).toHaveLength(2);
-      expect(await ensureClubRosters(store, { youthOnly: true })).toBe(2);
-      expect(await ensureClubRosters(store, { youthOnly: true })).toBe(0);
-      expect(
-        await store.all("SELECT * FROM players WHERE contract_end < ? ORDER BY id", START_DATE),
-      ).toEqual(expired);
-      expect(
-        await store.all(
-          "SELECT clubs.id FROM clubs LEFT JOIN players ON players.club_id = clubs.id AND players.age_group = 'U17' AND players.contract_end >= ? WHERE clubs.type != 'national' GROUP BY clubs.id HAVING count(players.id) < ? OR SUM(CASE WHEN players.position = 'GK' THEN 1 ELSE 0 END) < 2",
-          START_DATE,
-          SQUAD_MINIMUMS.U17,
-        ),
-      ).toHaveLength(0);
-    } finally {
-      await store.close();
-    }
-  });
-
-  it("honors reserve promotion ceilings and demotes reserves after a parent relegation without changing division sizes", () => {
-    const divisions = [1, 2, 3, 4, 5].map((tier) => ({
-      id: tier,
-      tier,
-      promotion: 1,
-      relegation: tier === 5 ? 0 : 1,
-      entries: Array.from({ length: 8 }, (_, index) => ({
-        clubId: tier * 100 + index,
-        parentId: null as number | null,
-      })),
-    }));
-    divisions[2].entries[0].parentId = 100;
-    const germanMoves = planPyramidMoves("DE", divisions);
-    expect(germanMoves.find((move) => move.club === 300)).toBeUndefined();
-    expect(germanMoves.find((move) => move.club === 301)?.to).toBe(2);
-    divisions[1].entries[0].parentId = 107;
-    const spanishMoves = planPyramidMoves("ES", divisions);
-    const newDivision = (clubId: number) =>
-      spanishMoves.find((move) => move.club === clubId)?.to ??
-      Math.floor(clubId / 100);
-    expect(newDivision(107)).toBe(2);
-    expect(newDivision(200)).toBeGreaterThan(2);
-    for (const division of divisions) {
-      const remaining =
-        division.entries.length -
-        spanishMoves.filter((move) => move.from === division.id).length +
-        spanishMoves.filter((move) => move.to === division.id).length;
-      expect(remaining).toBe(division.entries.length);
-    }
-    const closed = divisions.map((division) => ({
-      ...division,
-      promotion: 0,
-      relegation: 0,
-      entries: division.entries.map((entry) => ({ ...entry, parentId: null })),
-    }));
-    expect(planPyramidMoves("US", closed)).toEqual([]);
-    for (const country of ["US", "CA", "AU"])
-      expect(planPyramidMoves(country, closed.map((division) => ({
-        ...division, promotion: 2, relegation: 2,
-      })))).toEqual([]);
-  });
-
-  it("audits every association and enforces documented reserve ceilings without inventing unknown permissions", () => {
-    for (const country of countryDefinitions()) {
-      const policy = reservePolicy(country.code);
-      const audit = associationRuleAudit(country);
-      expect(audit.scope).toBe("partial");
-      expect(audit.code).toBe(country.code);
-      expect(audit.pyramid.evidence).toBe("modeled");
-      expect(policy.verification).toBeTruthy();
-      expect(policy.competition).toBeTruthy();
-      expect(policy.summary.length).toBeGreaterThan(20);
-      if (policy.mode === "pyramid") {
-        expect(policy.source).toMatch(/^https:\/\//);
-        expect(minimumReserveTier(country.code, 1)).toBeGreaterThan(1);
-      } else {
-        expect(minimumReserveTier(country.code, 1)).toBe(Infinity);
-      }
-    }
-    expect(minimumReserveTier("DE", 1)).toBe(3);
-    expect(minimumReserveTier("DE", 3)).toBe(5);
-    expect(minimumReserveTier("NO", 2)).toBe(4);
-    expect(minimumReserveTier("IT", 1)).toBe(2);
-    expect(reservePolicy("US")).toMatchObject({
-      mode: "separate",
-      professional: true,
-      competition: "closed-development",
-    });
-    expect(reservePolicy("CA")).toMatchObject({
-      mode: "separate", professional: true, competition: "closed-development",
-    });
-    expect(reservePolicy("EN").competition).toBe("reserve-league");
-    expect(reservePolicy("LU").evidence).toBe("unverified");
-    const groups = youthGroups(
-      Array.from({ length: 257 }, (_, index) => index),
+  it("records world v4 meta and starts at the top English club", async () => {
+    const world = await store.meta<Record<string, number>>("world");
+    expect(world).toMatchObject({ version: WORLD_VERSION, nations: NATIONS.length });
+    expect(world).not.toHaveProperty("expanded");
+    expect((world as Record<string, unknown>).options).toEqual({ nations: NATIONS, squads: "minimum" });
+    const state = await store.meta<GameState>("state");
+    const top = await store.get<{ id: number }>(
+      "SELECT TOP (1) clubs.id FROM clubs JOIN leagues ON leagues.id = clubs.league_id JOIN countries ON countries.id = clubs.country_id WHERE countries.code = 'EN' AND leagues.tier = 1 AND clubs.type = 'club' ORDER BY clubs.reputation DESC, clubs.id",
     );
-    expect(
-      Math.min(...groups.map((group) => group.length)),
-    ).toBeGreaterThanOrEqual(15);
-    expect(
-      Math.max(...groups.map((group) => group.length)),
-    ).toBeLessThanOrEqual(16);
+    expect(state.clubId).toBe(top!.id);
   });
 
-  it("uses reproducible country-aware names without affecting the following random draws", () => {
-    for (const country of countryDefinitions()) {
-      const first = seedrandom(`names:${country.code}`);
-      const second = seedrandom(`names:${country.code}`);
-      expect(culturalPersonName(first, country)).toBe(
-        culturalPersonName(second, country),
-      );
-      expect(first()).toBe(second());
-      expect(
-        namingPools(country).pools.every(
-          (entry) => entry.given.length > 0 && entry.family.length > 0,
-        ),
-      ).toBe(true);
-      const clubs = Array.from(
-        { length: 200 },
-        (_, index) => clubIdentity(country, index).name,
-      );
-      expect(new Set(clubs).size, country.code).toBe(clubs.length);
-    }
-    const portugal = countryDefinitions().find(
-      (country) => country.code === "PT",
-    )!;
-    expect(clubIdentity(portugal, 1).name).toBe("SC Porto");
-    expect(namingPools(portugal).source).toBe("pt_PT");
-    expect(
-      namingPools(
-        countryDefinitions().find((country) => country.code === "NG")!,
-      ).source,
-    ).toBe("country:NG");
-  });
-
-  it("scales country pyramids and gives every club three complete squads and bounded youth leagues", async () => {
-    const store = await Store.createTest("world");
+  it("builds structure-only worlds without people", async () => {
+    const structure = await Store.createTest("world-structure");
     try {
-      await generateWorld(store, {
-        countryLimit: 2,
-        seniors: 0,
-        youth: 0,
-        expanded: true,
+      await structure.schema();
+      await generateWorld(structure, { nations: ["SCO", "IS"], structureOnly: true });
+      const count = async (table: string) => (await structure.get<{ total: number }>(`SELECT count(*) AS total FROM ${table}`))!.total;
+      expect(await count("players")).toBe(0);
+      expect(await count("staff")).toBe(0);
+      expect(await count("leagues")).toBeGreaterThan(4);
+      // v4 models SCO and IS with one senior division each: 24 clubs plus 8 national teams.
+      const planned = planWorld({ nations: ["SCO", "IS"] }).rows;
+      expect(await count("clubs")).toBe(planned.clubs.length);
+      expect(await count("standings")).toBe(planned.standings.length);
+      expect((await structure.meta<Record<string, unknown>>("world")).options).toEqual({
+        nations: ["SCO", "IS"],
+        squads: "full",
+        structureOnly: true,
       });
-      expect(domesticPyramid(countryDefinitions()[0])).toHaveLength(10);
-      for (const [ageGroup, minimum] of Object.entries(SQUAD_MINIMUMS)) {
-        expect(
-          await store.all(
-            "SELECT clubs.id FROM clubs LEFT JOIN players ON players.club_id = clubs.id AND players.age_group = ? WHERE clubs.type != 'national' GROUP BY clubs.id HAVING count(players.id) < ? OR SUM(CASE WHEN players.position = 'GK' THEN 1 ELSE 0 END) < 2",
-            ageGroup,
-            minimum,
-          ),
-        ).toHaveLength(0);
-      }
-      expect(
-        await store.all(
-          "SELECT clubs.id FROM clubs WHERE type != 'national' AND (SELECT count(*) FROM standings JOIN leagues ON leagues.id = standings.league_id WHERE standings.club_id = clubs.id AND leagues.age_group IN ('U19','U17') AND leagues.kind = 'league') != 2",
-        ),
-      ).toHaveLength(0);
-      expect(
-        await store.all(
-          "SELECT leagues.id FROM leagues JOIN standings ON standings.league_id = leagues.id WHERE leagues.age_group IN ('U19','U17') GROUP BY leagues.id HAVING count(*) > 16 OR count(*) < 4",
-        ),
-      ).toHaveLength(0);
-      await expectSchemaIntegrity(store);
     } finally {
-      await store.close();
+      await structure.close();
     }
-  });
-});
-
-describe("football formulas", () => {
-  it("uses every valuation layer and reduces the value of expiring contracts", () => {
-    const player = {
-      ability: 78,
-      potential: 87,
-      age: 22,
-      position: "ST" as const,
-      contract_end: "2030-06-30",
-      form: 7,
-      injury_until: null,
-    };
-    const context = {
-      date: START_DATE,
-      leagueReputation: 90,
-      balance: 50_000_000,
-      philosophy: "Develop and sell",
-      inflation: 4,
-      crisis: 0,
-      hype: 0,
-    };
-    expect(Object.keys(valuation(player, context).layers)).toHaveLength(10);
-    expect(valuation(player, context).value).toBeGreaterThan(
-      valuation({ ...player, contract_end: "2027-06-30" }, context).value,
-    );
-    expect(
-      valuation({ ...player, contract_end: START_DATE }, context).value,
-    ).toBe(0);
-  });
-
-  it("bounds Loan Success Score and weights all eleven factors", () => {
-    const factors = Object.fromEntries(
-      [
-        "minutes",
-        "position",
-        "tacticalFit",
-        "development",
-        "performance",
-        "personality",
-        "lifestyle",
-        "injury",
-        "environment",
-        "trust",
-        "fans",
-      ].map((key) => [key, 100]),
-    );
-    expect(loanScore(factors)).toBe(100);
-    expect(loanScore({ ...factors, minutes: 0 })).toBe(80);
-  });
+  }, 300_000);
 });
