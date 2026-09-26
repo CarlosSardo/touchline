@@ -396,7 +396,7 @@ export async function checkWorld(options: WorldOptions = {}): Promise<boolean> {
         ["first teams", report.totals.firstTeams, catalog.firstTeamClubs],
         ["hosted clubs", report.totals.hostedClubs, catalog.hostedClubs],
         ["B-teams", report.totals.bTeams, catalog.bTeams],
-        ["national teams", report.totals.nationalTeams, catalog.nations * 4],
+        ["national teams", report.totals.nationalTeams, catalog.nations * NATIONAL_TEAM_AGES.length],
       ];
       for (const [label, actual, target] of exact)
         if (actual !== target) add(`${actual} ${label}, catalog ${target}`);

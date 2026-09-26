@@ -1510,7 +1510,7 @@ async function writeBatchDiscipline(
 ) {
   await writeChunks(teams, 2000, (json) =>
     store.run(
-      "UPDATE target SET suspension = target.suspension - 1 FROM discipline AS target JOIN players ON players.id = target.player_id JOIN OPENJSON(?) WITH (club_id int, scope nvarchar(100), country_id int, national int, age_group nvarchar(10)) AS team ON team.scope = target.scope AND ((team.national = 0 AND team.club_id = players.playing_club_id AND team.age_group = players.age_group) OR (team.national = 1 AND team.country_id = players.country_id)) WHERE target.suspension > 0",
+      "UPDATE target SET suspension = target.suspension - 1 FROM discipline AS target JOIN players ON players.id = target.player_id JOIN OPENJSON(?) WITH (club_id int, scope nvarchar(100), country_id int, [national] int, age_group nvarchar(10)) AS team ON team.scope = target.scope AND ((team.[national] = 0 AND team.club_id = players.playing_club_id AND team.age_group = players.age_group) OR (team.[national] = 1 AND team.country_id = players.country_id)) WHERE target.suspension > 0",
       json,
     ),
   );
