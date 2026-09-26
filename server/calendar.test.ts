@@ -383,14 +383,21 @@ describe("football calendar", () => {
     const russian = await byCode("RU");
     const liechtenstein = await byCode("LI");
     expect(russian.size).toBeGreaterThan(0);
+    // A competition without an access rule only takes drops (AFC Challenge League: ACL Two preliminary losers).
+    const listed = new Set(CONTINENTAL.access.map((rule) => rule.competition));
     const entered = new Map<number, string>();
     for (const competition of CONTINENTAL.competitions) {
       const main = await store.get<League>(
         "SELECT * FROM leagues WHERE name = ? AND country_id IS NULL",
         competition.name,
       );
-      const entries = (JSON.parse(main?.data ?? "{}").qualification ?? []) as { clubId: number; stage: string }[];
-      if (competition.kind === "club" && competition.age === "Senior") expect(entries.length).toBeGreaterThan(1);
+      const data = JSON.parse(main?.data ?? "{}");
+      const entries = (data.qualification ?? []) as { clubId: number; stage: string }[];
+      if (competition.kind === "club" && competition.age === "Senior") {
+        if (listed.has(competition.id)) expect(entries.length, competition.name).toBeGreaterThan(1);
+        // At most one ACL Two preliminary entrant per zone here: no tie, no loser drops, so it is not held.
+        else expect([entries.length, data.phase], competition.name).toEqual([0, "not held"]);
+      }
       expect(new Set(entries.map((entry) => entry.clubId)).size).toBe(entries.length);
       expect(entries.filter((entry) => russian.has(entry.clubId))).toEqual([]);
       expect(entries.filter((entry) => entry.stage === "main").length).toBeLessThanOrEqual(competition.teams);
