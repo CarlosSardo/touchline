@@ -1,10 +1,11 @@
+import { once } from "node:events";
 import { createReadStream, createWriteStream } from "node:fs";
 import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { Readable, Writable } from "node:stream";
-import { pipeline } from "node:stream/promises";
+import { finished, pipeline } from "node:stream/promises";
 import type { Store } from "./db.ts";
 import { WORLD_TABLES, schemaMigrations } from "./sql-schema.ts";
 import { ensureClubSupport } from "./club-support.ts";
@@ -32,6 +33,7 @@ import {
   readCheckpoint,
   validateManifest,
   withCheckpointDestination,
+  worldDigest,
   writeCheckpoint,
   type CheckpointColumn,
   type CheckpointManifest,
@@ -43,7 +45,12 @@ import {
 } from "./save-format.ts";
 
 const UUID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
-const PAGE_ROWS = 1000;
+// Paging and batch sizes only bound memory and round trips; checkpoint bytes do not depend on them.
+const CHECKPOINT_PAGE_ROWS = 4000;
+const CHECKPOINT_PAGE_BYTES = 4 * SQL_CHUNK_BYTES;
+const RESTORE_BATCH_ROWS = 5000;
+const RESTORE_BATCH_BYTES = 4 * SQL_CHUNK_BYTES;
+const CHUNKS_PER_READ = 4;
 const CHUNK_DELETE_BATCH = 64;
 
 /** Per-career checkpoint counts; older ones rotate away oldest first, imported checkpoints never do. */
@@ -144,6 +151,24 @@ function temporaryFile() {
 /** Imported uploads never rotate away, so the client needs the flag to warn before a manual save replaces one. */
 export type ListedSaveSlot = SaveSlot & { imported: boolean };
 
+/** The world digest kept in the catalog's career metadata; undefined for older saves or unreadable metadata. */
+function storedWorldDigest(metadata: string | null) {
+  if (!metadata) return undefined;
+  try {
+    const digest: unknown = (JSON.parse(metadata) as { worldDigest?: unknown }).worldDigest;
+    return typeof digest === "string" && /^[a-f0-9]{64}$/.test(digest) ? digest : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function careerFromMetadata(metadata: string | null) {
+  if (!metadata) return undefined;
+  const career = JSON.parse(metadata) as SaveSlot["career"] & { worldDigest?: string };
+  delete career.worldDigest;
+  return career;
+}
+
 function slotFromRow(row: CatalogRow): ListedSaveSlot {
   if (!UUID.test(row.id))
     throw new SaveFormatError("Invalid save catalog identifier.");
@@ -155,9 +180,7 @@ function slotFromRow(row: CatalogRow): ListedSaveSlot {
     compressed: true,
     automatic: Boolean(row.automatic),
     imported: Boolean(row.imported),
-    career: row.career_metadata
-      ? (JSON.parse(row.career_metadata) as SaveSlot["career"])
-      : undefined,
+    career: careerFromMetadata(row.career_metadata),
   };
 }
 
@@ -314,14 +337,14 @@ async function* worldRows(store: Store, table: CheckpointTable, progress?: Check
       : "";
     const batch = await store.all<Record<string, RestoredValue>>(
       `WITH checkpoint_page AS (
-         SELECT TOP (${PAGE_ROWS}) ${columns.join(",")},${rowBytes} AS checkpoint_bytes
+         SELECT TOP (${CHECKPOINT_PAGE_ROWS}) ${columns.join(",")},${rowBytes} AS checkpoint_bytes
          FROM ${tableName(store, table.name)} ${after ? `WHERE ${after}` : ""} ORDER BY ${order}
        ), checkpoint_sized AS (
          SELECT *,SUM(checkpoint_bytes) OVER (ORDER BY ${order} ROWS UNBOUNDED PRECEDING) AS checkpoint_total,
            ROW_NUMBER() OVER (ORDER BY ${order}) AS checkpoint_ordinal FROM checkpoint_page
        )
        SELECT ${columns.map((column) => `CASE WHEN checkpoint_bytes <= ${SAVE_LIMITS.lineBytes} THEN ${column} ELSE NULL END AS ${column}`).join(",")},checkpoint_bytes
-       FROM checkpoint_sized WHERE checkpoint_total <= ${SQL_CHUNK_BYTES} OR checkpoint_ordinal = 1 ORDER BY ${order}`,
+       FROM checkpoint_sized WHERE checkpoint_total <= ${CHECKPOINT_PAGE_BYTES} OR checkpoint_ordinal = 1 ORDER BY ${order}`,
       ...parameters,
     );
     if (!batch.length) {
@@ -430,19 +453,21 @@ async function createSlot(store: Store, options: CheckpointSlotOptions) {
     options.imported ? 1 : 0,
     SAVE_FORMAT_VERSION,
   );
-  return { id, name, file: `${id}.touchline.gz` };
+  return { id, name, file: `${id}.touchline.gz`, career: options.career };
 }
 
+/** Also records the world digest, so a later pre-load archive can tell whether this exact world is already saved. */
 async function completeSlot(
   store: Store,
-  id: string,
+  slot: Awaited<ReturnType<typeof createSlot>>,
   summary: CheckpointSummary,
 ) {
   await store.run(
-    `UPDATE ${tableName(store, "save_slots")} SET byte_length = ?, sha256 = ?, complete = 1 WHERE id = ?`,
+    `UPDATE ${tableName(store, "save_slots")} SET byte_length = ?, sha256 = ?, career_metadata = ?, complete = 1 WHERE id = ?`,
     summary.byteLength,
     summary.sha256,
-    id,
+    slot.career ? JSON.stringify({ ...slot.career, worldDigest: worldDigest(summary) }) : null,
+    slot.id,
   );
 }
 
@@ -450,9 +475,16 @@ export async function validateWorldCheckpoint(
   store: Store,
   file: string,
 ): Promise<ValidatedWorldCheckpoint> {
+  return validateWorldSource(store, createReadStream(file, { highWaterMark: SQL_CHUNK_BYTES }));
+}
+
+async function validateWorldSource(
+  store: Store,
+  source: Readable,
+): Promise<ValidatedWorldCheckpoint> {
   const metadata = new Map<string, string>();
   const summary = await readCheckpoint(
-    createReadStream(file, { highWaterMark: SQL_CHUNK_BYTES }),
+    source,
     {
       expected: await checkpointSchema(store),
       onRow(table, values) {
@@ -540,7 +572,7 @@ export async function persistCheckpointFile(
       throw new SaveFormatError(
         "The staged checkpoint changed while storing it.",
       );
-    await completeSlot(store, slot.id, summary);
+    await completeSlot(store, slot, summary);
     return { file: slot.file, name: slot.name };
   });
 }
@@ -604,7 +636,7 @@ export async function restoreCheckpointFile(
           );
           if (
             batch.length &&
-            (bytes + size > SQL_CHUNK_BYTES || batch.length >= PAGE_ROWS)
+            (bytes + size > RESTORE_BATCH_BYTES || batch.length >= RESTORE_BATCH_ROWS)
           )
             await flush(table);
           batch.push(values);
@@ -635,38 +667,66 @@ export async function restoreCheckpointFile(
 }
 
 export async function* storedChunks(store: Store, slot: Pick<CatalogRow, "id" | "byte_length">) {
-  let ordinal = 0;
-  let bytes = 0;
-  for (;;) {
-    const chunk = await store.get<{
-      ordinal: number;
-      data: Buffer | null;
-      byte_length: number;
-    }>(
-      `SELECT TOP (1) ordinal,CASE WHEN DATALENGTH(data) <= ${SQL_CHUNK_BYTES} THEN data ELSE NULL END AS data,
+  type StoredChunk = { ordinal: number; data: Buffer | null; byte_length: number };
+  const read = (from: number): Promise<StoredChunk[]> => {
+    const next = store.all<StoredChunk>(
+      `SELECT TOP (${CHUNKS_PER_READ}) ordinal,CASE WHEN DATALENGTH(data) <= ${SQL_CHUNK_BYTES} THEN data ELSE NULL END AS data,
         CONVERT(INT,DATALENGTH(data)) AS byte_length FROM ${tableName(store, "save_chunks")}
        WHERE save_id = ? AND ordinal >= ? ORDER BY ordinal`,
       slot.id,
-      ordinal,
+      from,
     );
-    if (!chunk) break;
-    if (
-      chunk.ordinal !== ordinal ||
-      !Buffer.isBuffer(chunk.data) ||
-      chunk.byte_length < 1 ||
-      chunk.data.length !== chunk.byte_length
-    )
-      throw new SaveFormatError(
-        "A save chunk is missing, oversized, or damaged.",
-      );
-    bytes += chunk.byte_length;
-    if (bytes > SAVE_LIMITS.compressedBytes || bytes > Number(slot.byte_length))
-      throw new SaveFormatError("Save chunks exceed the catalog length.");
-    ordinal++;
-    yield chunk.data;
+    // Awaited below, or abandoned when the consumer stops early; never an unhandled rejection.
+    next.catch(() => {});
+    return next;
+  };
+  let ordinal = 0;
+  let bytes = 0;
+  let pending: Promise<StoredChunk[]> | undefined = read(0);
+  try {
+    while (pending) {
+      const chunks: StoredChunk[] = await pending;
+      // Prefetch the next chunks so the SQL round trip overlaps with consuming these.
+      pending = chunks.length === CHUNKS_PER_READ ? read(ordinal + chunks.length) : undefined;
+      for (const chunk of chunks) {
+        if (
+          chunk.ordinal !== ordinal ||
+          !Buffer.isBuffer(chunk.data) ||
+          chunk.byte_length < 1 ||
+          chunk.data.length !== chunk.byte_length
+        )
+          throw new SaveFormatError(
+            "A save chunk is missing, oversized, or damaged.",
+          );
+        bytes += chunk.byte_length;
+        if (bytes > SAVE_LIMITS.compressedBytes || bytes > Number(slot.byte_length))
+          throw new SaveFormatError("Save chunks exceed the catalog length.");
+        ordinal++;
+        yield chunk.data;
+      }
+    }
+  } finally {
+    await pending?.catch(() => {});
   }
   if (!ordinal || bytes !== Number(slot.byte_length))
     throw new SaveFormatError("The saved checkpoint is incomplete.");
+}
+
+/** Passes chunks through while writing them to a new private file; the file is closed before the stream ends. */
+export async function* writeThrough(file: string, chunks: AsyncIterable<Buffer>) {
+  const output = createWriteStream(file, { flags: "wx", mode: 0o600, highWaterMark: SQL_CHUNK_BYTES });
+  const done = finished(output);
+  done.catch(() => {});
+  try {
+    for await (const chunk of chunks) {
+      if (!output.write(chunk)) await Promise.race([once(output, "drain"), done]);
+      yield chunk;
+    }
+    output.end();
+    await done;
+  } finally {
+    if (!output.writableFinished) output.destroy();
+  }
 }
 
 export class Saves {
@@ -853,51 +913,153 @@ export class Saves {
     saveName(name);
     const kept = keep === undefined ? undefined : slotId(keep);
     return this.store.transaction(async () => {
-      const state = await this.requireState();
-      const club = await clubOf(this.store);
-      let changed = false;
-      if (!state.careerId) {
-        state.careerId = randomUUID();
-        state.careerName ??= `${state.director.name} at ${club.name}`;
-        changed = true;
-      }
-      if (automatic) {
-        state.lastAutosave = state.date;
-        changed = true;
-      }
-      if (changed) await this.store.setMeta("state", state);
-      const slot = await createSlot(this.store, {
-        name,
-        automatic,
-        career: {
-          id: state.careerId,
-          name: state.careerName ?? `${state.director.name} at ${club.name}`,
-          director: state.director.name,
-          club: club.name,
-          date: state.date,
-          season: state.season,
-        },
-      });
+      const { careerId, career } = await this.slotCareer(automatic);
+      const slot = await createSlot(this.store, { name, automatic, career });
       const summary = await writeWorldCheckpoint(
         this.store,
         chunkWriter(this.store, slot.id),
       );
-      await completeSlot(this.store, slot.id, summary);
-      const obsolete = await this.store.all<{ id: string }>(
-        `SELECT id FROM ${tableName(this.store, "save_slots")} WHERE automatic = ? AND imported = 0 AND complete = 1 AND career_id COLLATE Latin1_General_100_BIN2 = ? AND DATALENGTH(career_id) = DATALENGTH(?)
-         ORDER BY CASE WHEN id IN (?, ?) THEN 0 ELSE 1 END,created_at DESC,id DESC OFFSET ${automatic ? SAVE_SLOT_LIMITS.automatic : SAVE_SLOT_LIMITS.manual} ROWS`,
-        automatic ? 1 : 0,
-        state.careerId,
-        state.careerId,
-        slot.id,
-        kept ?? slot.id,
-      );
-      for (const old of obsolete)
-        await this.store.run(
-          `DELETE FROM ${tableName(this.store, "save_slots")} WHERE id = ? AND imported = 0`,
-          old.id,
-        );
+      await completeSlot(this.store, slot, summary);
+      await this.rotate(careerId, automatic, slot.id, kept);
       return { file: slot.file, name: slot.name };
+    });
+  }
+
+  /** Gives the active career an id (and autosave date) before a save; returns its catalog metadata. */
+  private async slotCareer(automatic: boolean) {
+    const state = await this.requireState();
+    const club = await clubOf(this.store);
+    let changed = false;
+    if (!state.careerId) {
+      state.careerId = randomUUID();
+      state.careerName ??= `${state.director.name} at ${club.name}`;
+      changed = true;
+    }
+    if (automatic) {
+      state.lastAutosave = state.date;
+      changed = true;
+    }
+    if (changed) await this.store.setMeta("state", state);
+    return {
+      careerId: state.careerId,
+      career: {
+        id: state.careerId,
+        name: state.careerName ?? `${state.director.name} at ${club.name}`,
+        director: state.director.name,
+        club: club.name,
+        date: state.date,
+        season: state.season,
+      },
+    };
+  }
+
+  private async rotate(careerId: string, automatic: boolean, id: string, kept?: string) {
+    const obsolete = await this.store.all<{ id: string }>(
+      `SELECT id FROM ${tableName(this.store, "save_slots")} WHERE automatic = ? AND imported = 0 AND complete = 1 AND career_id COLLATE Latin1_General_100_BIN2 = ? AND DATALENGTH(career_id) = DATALENGTH(?)
+       ORDER BY CASE WHEN id IN (?, ?) THEN 0 ELSE 1 END,created_at DESC,id DESC OFFSET ${automatic ? SAVE_SLOT_LIMITS.automatic : SAVE_SLOT_LIMITS.manual} ROWS`,
+      automatic ? 1 : 0,
+      careerId,
+      careerId,
+      id,
+      kept ?? id,
+    );
+    for (const old of obsolete)
+      await this.store.run(
+        `DELETE FROM ${tableName(this.store, "save_slots")} WHERE id = ? AND imported = 0`,
+        old.id,
+      );
+  }
+
+  /**
+   * The save that already holds exactly this world, so a pre-load archive would only duplicate it. Only a save that
+   * outlives a fresh archive qualifies: the career's newest manual save (same position in manual rotation) or an
+   * imported one (never rotated). Autosaves rotate after three, so they never stand in for the archive.
+   */
+  private async unchangedSlot(careerId: string, digest: string) {
+    const slots = await this.store.all<Pick<CatalogRow, "id" | "name" | "automatic" | "imported" | "format_version" | "byte_length" | "sha256" | "career_metadata">>(
+      `SELECT id,name,automatic,imported,format_version,byte_length,sha256,career_metadata FROM ${tableName(this.store, "save_slots")} WITH (UPDLOCK,HOLDLOCK)
+       WHERE complete = 1 AND career_id COLLATE Latin1_General_100_BIN2 = ? AND DATALENGTH(career_id) = DATALENGTH(?)
+       ORDER BY created_at DESC,id DESC`,
+      careerId,
+      careerId,
+    );
+    const newestManual = slots.find((slot) => !slot.automatic && !slot.imported);
+    for (const slot of slots) {
+      if (
+        (slot !== newestManual && !slot.imported) ||
+        !UUID.test(slot.id) ||
+        slot.format_version !== SAVE_FORMAT_VERSION ||
+        !slot.sha256 ||
+        storedWorldDigest(slot.career_metadata) !== digest
+      )
+        continue;
+      // Cheap structural check that the chunks are all there; storedChunks re-verifies them on restore.
+      const stored = await this.store.get<{ chunks: number; first: number | null; last: number | null; bytes: number | string | null; largest: number | null }>(
+        `SELECT COUNT(*) AS chunks,MIN(ordinal) AS first,MAX(ordinal) AS last,SUM(CONVERT(BIGINT,DATALENGTH(data))) AS bytes,
+          MAX(CONVERT(BIGINT,DATALENGTH(data))) AS largest FROM ${tableName(this.store, "save_chunks")} WHERE save_id = ?`,
+        slot.id,
+      );
+      if (
+        stored &&
+        stored.chunks > 0 &&
+        stored.first === 0 &&
+        stored.last === stored.chunks - 1 &&
+        Number(stored.bytes) === Number(slot.byte_length) &&
+        Number(stored.largest) <= SQL_CHUNK_BYTES
+      )
+        return { file: `${slot.id.toLowerCase()}.touchline.gz`, name: slot.name };
+    }
+    return undefined;
+  }
+
+  /**
+   * The safety save made before loading another career. The world is checkpointed to a local file first; when its
+   * digest equals a qualifying save of this career (nothing changed since), that save is returned and no bytes are
+   * stored. Otherwise the file is stored as a new manual save, exactly like `create`.
+   */
+  private async archiveBeforeLoad(name: string, keep: string) {
+    saveName(name);
+    const kept = slotId(keep);
+    const file = temporaryFile();
+    try {
+      return await this.store.transaction(async () => {
+        const { careerId, career } = await this.slotCareer(false);
+        const summary = await writeWorldCheckpoint(
+          this.store,
+          createWriteStream(file, { flags: "wx", mode: 0o600, highWaterMark: SQL_CHUNK_BYTES }),
+        );
+        const existing = await this.unchangedSlot(careerId, worldDigest(summary));
+        if (existing) return existing;
+        const slot = await createSlot(this.store, { name, career });
+        const measured = measuredStream(SAVE_LIMITS.compressedBytes, "Checkpoint");
+        await pipeline(
+          createReadStream(file, { highWaterMark: SQL_CHUNK_BYTES }),
+          measured.stream,
+          chunkWriter(this.store, slot.id),
+        );
+        const stored = measured.result();
+        if (stored.sha256 !== summary.sha256 || stored.byteLength !== summary.byteLength)
+          throw new SaveFormatError("The staged checkpoint changed while storing it.");
+        await completeSlot(this.store, slot, summary);
+        await this.rotate(careerId, false, slot.id, kept);
+        return { file: slot.file, name: slot.name };
+      });
+    } finally {
+      await rm(file, { force: true });
+    }
+  }
+
+  /** Loads a saved career in one transaction, first keeping the active started career in a save. */
+  async loadCareer(file: string): Promise<{ archived: string | null }> {
+    return this.store.transaction(async () => {
+      if (!(await this.list()).some((slot) => slot.file === file))
+        throw Object.assign(new GameError("Save slot not found."), { status: 404 });
+      const state = await this.currentState();
+      const archived = state && state.started !== false
+        ? await this.archiveBeforeLoad(`${state.careerName ?? state.director.name} before load`, file)
+        : undefined;
+      await this.restore(file);
+      return { archived: archived?.file ?? null };
     });
   }
 
@@ -1057,7 +1219,7 @@ export class Saves {
     const id = slotId(file);
     const temporary = temporaryFile();
     try {
-      const slot = await this.store.transaction(async () => {
+      const validated = await this.store.transaction(async () => {
         const slot = await this.store.get<CatalogRow>(
           `SELECT * FROM ${tableName(this.store, "save_slots")} WITH (HOLDLOCK) WHERE id = ? AND complete = 1`,
           id,
@@ -1071,21 +1233,37 @@ export class Saves {
           throw new SaveFormatError(
             "Unsupported or incomplete save catalog entry.",
           );
-        await pipeline(
-          Readable.from(storedChunks(this.store, slot), { objectMode: false }),
-          createWriteStream(temporary, { flags: "wx", mode: 0o600 }),
-        );
-        return slot;
+        // Validated while it downloads: the staged file is written from exactly the bytes being checked.
+        let downloadError: unknown;
+        const store = this.store;
+        const chunks = async function* () {
+          try {
+            yield* storedChunks(store, slot);
+          } catch (error) {
+            downloadError = error;
+            throw error;
+          }
+        };
+        let validated: ValidatedWorldCheckpoint;
+        try {
+          validated = await validateWorldSource(
+            this.store,
+            Readable.from(writeThrough(temporary, chunks()), { objectMode: false }),
+          );
+        } catch (error) {
+          // A damaged or incomplete chunk set reports as such, as when the download finished before validation.
+          throw downloadError ?? error;
+        }
+        const { summary } = validated;
+        if (
+          summary.sha256 !== slot.sha256 ||
+          summary.byteLength !== Number(slot.byte_length)
+        )
+          throw new SaveFormatError(
+            "Saved checkpoint digest does not match the catalog.",
+          );
+        return validated;
       });
-      const validated = await validateWorldCheckpoint(this.store, temporary);
-      const { summary } = validated;
-      if (
-        summary.sha256 !== slot.sha256 ||
-        summary.byteLength !== Number(slot.byte_length)
-      )
-        throw new SaveFormatError(
-          "Saved checkpoint digest does not match the catalog.",
-        );
       await restoreCheckpointFile(this.store, temporary, true, validated);
     } catch (error) {
       if (error instanceof SaveFormatError) throw new GameError(error.message);
