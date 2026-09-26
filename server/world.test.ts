@@ -50,7 +50,7 @@ describe("world plan (pure)", () => {
       const senior = standings.filter((row) => row.club_id === club.id && leagueById.get(Number(row.league_id))?.age_group === "Senior");
       expect(senior.map((row) => row.league_id), String(club.row.name)).toEqual([club.row.league_id]);
     }
-    expect(plan.counts.nationalTeams).toBe(NATIONS.length * 4);
+    expect(plan.counts.nationalTeams).toBe(NATIONS.length * 5);
     expect(plan.rows.countries.map((country) => country.code)[0]).toBe("EN");
   });
 
@@ -64,7 +64,7 @@ describe("world plan (pure)", () => {
     const pool = planWorld({ nations: ["FO"], squads: "minimum" });
     expect(pool.rows.leagues).toEqual([]);
     expect(pool.clubs).toEqual([]);
-    expect(pool.counts.nationalTeams).toBe(4);
+    expect(pool.counts.nationalTeams).toBe(5);
     expect(worldStaff(pool).staff.every((row) => row.club_id === null)).toBe(true);
     const homeBased = [...worldPlayers(pool)];
     expect(homeBased.length).toBeGreaterThan(0);
@@ -289,7 +289,7 @@ describe("generated world (SQL)", () => {
   it("satisfies the section 8 structure, squad, orphan, registration and value invariants", async () => {
     const report = await verifyWorld(store, { nations: NATIONS });
     expect(report.problems).toEqual([]);
-    expect(report.totals.nationalTeams).toBe(NATIONS.length * 4);
+    expect(report.totals.nationalTeams).toBe(NATIONS.length * 5);
     expect(report.totals.homeBased).toBeGreaterThan(0);
   });
 
@@ -314,7 +314,7 @@ describe("generated world (SQL)", () => {
       expect(await count("players")).toBe(0);
       expect(await count("staff")).toBe(0);
       expect(await count("leagues")).toBeGreaterThan(4);
-      // v4 models SCO and IS with one senior division each: 24 clubs plus 8 national teams.
+      // v4 models SCO and IS with one senior division each: 24 clubs plus 10 national teams.
       const planned = planWorld({ nations: ["SCO", "IS"] }).rows;
       expect(await count("clubs")).toBe(planned.clubs.length);
       expect(await count("standings")).toBe(planned.standings.length);

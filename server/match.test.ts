@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { expectedPoints, simulateMatch } from "./match.ts";
+import { expectedPoints, MATCH_RULES_VERSION, simulateMatch } from "./match.ts";
 import { calibrationSample } from "./check-simulation.ts";
 import type { MatchSnapshot, Position } from "../shared/types.ts";
 
@@ -264,6 +264,60 @@ describe("version-three match laws", () => {
     }
     expect(dismissals).toBeGreaterThan(0);
   });
+});
+
+describe("version-four match laws", () => {
+  const bench = (id: number) =>
+    positions.slice(0, 9).map((position, index) => ({
+      id: id * 100 + 20 + index,
+      name: `Substitute ${id}-${index}`,
+      position,
+      ability: 74,
+      fitness: 99,
+      confidence: 70,
+    }));
+  const current: MatchSnapshot = {
+    ...snapshot,
+    rulesVersion: MATCH_RULES_VERSION,
+    home: { ...team(1), bench: bench(1) },
+    away: { ...team(2), bench: bench(2) },
+  };
+
+  it("is the version for new snapshots and leaves version-three replays untouched by its laws", () => {
+    expect(MATCH_RULES_VERSION).toBe(4);
+    const v3 = simulateMatch({ ...current, rulesVersion: 3 }, "replay");
+    expect(v3.substitutions!.map((sub) => sub.minute).every((minute) => [45, 60, 72, 82].includes(minute) || v3.injuries!.length)).toBe(true);
+    expect(simulateMatch({ ...current, rulesVersion: 3 }, "replay")).toEqual(v3);
+  });
+
+  it("awards penalties about every fourth match, counts regulation minutes and varies substitutions", () => {
+    let penalties = 0;
+    let halfTime = 0;
+    let unused = 0;
+    let stoppage = 0;
+    const matches = 60;
+    for (let index = 0; index < matches; index++) {
+      const result = simulateMatch(current, `laws-4-${index}`);
+      penalties += result.actions.filter((action) => action.type === "shot" && action.xg === 0.76).length;
+      stoppage += result.stoppageTime![0] + result.stoppageTime![1];
+      for (const side of [current.home, current.away]) {
+        const changes = result.substitutions!.filter((sub) => sub.teamId === side.id);
+        if (changes.some((sub) => sub.minute === 45)) halfTime++;
+        if (changes.length < 5) unused++;
+        const minutes = [...side.lineup, ...(side.bench ?? [])].reduce(
+          (sum, player) => sum + result.players[player.id].minutes,
+          0,
+        );
+        expect(minutes).toBeLessThanOrEqual(11 * 90);
+      }
+    }
+    expect(penalties / matches).toBeGreaterThan(0.1);
+    expect(penalties / matches).toBeLessThan(0.6);
+    expect(halfTime).toBeGreaterThan(0);
+    expect(unused).toBeGreaterThan(0);
+    expect(stoppage / matches).toBeGreaterThan(8);
+    expect(stoppage / matches).toBeLessThan(15);
+  }, 30000);
 });
 
 it("keeps goals, results and discipline inside reproducible statistical envelopes", () => {

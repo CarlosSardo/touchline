@@ -65,6 +65,110 @@ async function bootstrapOf(request: APIRequestContext) {
   return (await retryBusyResponse(() => request.get("/api/bootstrap"))).json();
 }
 
+/**
+ * Compares the database table with the API. Revisited and prefetched pages come from the client cache without a
+ * request, so no network response can be awaited; `changes` updates the tracked query (null removes a parameter).
+ */
+function databaseQuery(page: Page) {
+  const query: Record<string, string> = {
+    q: "",
+    sort: "ability",
+    direction: "desc",
+    page: "1",
+    pageSize: "30",
+  };
+  return async (
+    action: () => Promise<unknown>,
+    changes: Record<string, string | null> = {},
+  ) => {
+    for (const [key, value] of Object.entries(changes))
+      if (value === null) delete query[key];
+      else query[key] = value;
+    await action();
+    const result: PlayerPage = await (
+      await retryBusyResponse(() =>
+        page.request.get(`/api/players?${new URLSearchParams(query)}`),
+      )
+    ).json();
+    await expect(page.locator(".database-results")).not.toHaveClass(/is-stale/);
+    await expect(
+      page.locator(".database-workspace .player-table tbody tr .player-name strong"),
+    ).toHaveText(result.players.map((player) => player.name));
+    return result;
+  };
+}
+
+interface InterestView {
+  score: number;
+  moveScore?: number;
+  refuses?: boolean;
+  expectedWage: number;
+  wageToAgree?: number | null;
+  rivals?: { status: string }[];
+}
+
+async function interestOf(
+  request: APIRequestContext,
+  playerId: number,
+  parameters: Record<string, string> = {},
+) {
+  return (await (
+    await retryBusyResponse(() =>
+      request.get(`/api/players/${playerId}/interest?${new URLSearchParams(parameters)}`),
+    )
+  ).json()) as InterestView;
+}
+
+/** Talks survive club talks (overall and move interest >= 50), a wage reaches 85, and no rival can hijack them. */
+const willingToTalk = (interest: InterestView) =>
+  !interest.refuses &&
+  interest.score >= 50 &&
+  (interest.moveScore ?? interest.score) >= 50 &&
+  !!interest.wageToAgree &&
+  !(interest.rivals ?? []).some((rival) =>
+    ["monitoring", "bid", "fee-agreed"].includes(rival.status),
+  );
+
+/** Candidates willing to join the director's club, cheapest wage to agree first; skips players already in talks. */
+async function willingTargets<T extends { id: number }>(
+  request: APIRequestContext,
+  candidates: T[],
+) {
+  const desk = await (await retryBusyResponse(() => request.get("/api/transfers"))).json();
+  const busy = new Set(desk.negotiations.map((entry: { player_id: number }) => entry.player_id));
+  const willing: { player: T; wage: number }[] = [];
+  for (const player of candidates) {
+    if (busy.has(player.id)) continue;
+    const interest = await interestOf(request, player.id);
+    if (willingToTalk(interest))
+      willing.push({ player, wage: Math.max(interest.wageToAgree!, interest.expectedWage) });
+  }
+  return willing.sort((left, right) => left.wage - right.wage).map((entry) => entry.player);
+}
+
+/** A weekly wage, in the display currency, that brings the player to 85 with the terms stored on the deal. */
+async function agreeableWage(
+  request: APIRequestContext,
+  negotiationId: number,
+  playerId: number,
+  currency: ReturnType<typeof currencyCode>,
+) {
+  const desk = await (await retryBusyResponse(() => request.get("/api/transfers"))).json();
+  const deal = desk.negotiations.find((entry: { id: number }) => entry.id === negotiationId);
+  const data = JSON.parse(deal.data);
+  const interest = await interestOf(request, playerId, {
+    negotiationId: String(negotiationId),
+    role: data.role || "Regular starter",
+    years: String(data.years || 4),
+    promises: JSON.stringify(data.promises ?? []),
+  });
+  expect(interest.refuses, "the player must still be willing to talk").toBeFalsy();
+  expect(interest.wageToAgree, "a wage within the cap must reach agreement").toBeTruthy();
+  const wage = Math.max(interest.wageToAgree!, interest.expectedWage, data.requiredWage ?? 0);
+  // A small margin keeps the display-currency round trip above the threshold.
+  return String(Math.ceil(displayAmount(wage * 1.02, currency)) + 1);
+}
+
 test("association rules expose the catalog coverage of every seeded association", async ({
   page,
   request,
@@ -434,7 +538,7 @@ test("future transfer agreements keep young players at their clubs and reserve m
         `/api/players?ageMin=14&ageMax=15&country=${country.id}&sort=value&direction=asc&pageSize=100`,
       )
     ).json();
-    let chosenPlayer: PlayerPage["players"][number] | undefined;
+    const eligible: PlayerPage["players"] = [];
     for (const candidate of players.players) {
       if (
         !candidate.club_id ||
@@ -448,11 +552,10 @@ test("future transfer agreements keep young players at their clubs and reserve m
       if (
         details.youthTransfer.international &&
         !details.youthTransfer.eligibleToApply
-      ) {
-        chosenPlayer = candidate;
-        break;
-      }
+      )
+        eligible.push(candidate);
     }
+    const chosenPlayer = (await willingTargets(request, eligible))[0];
     expect(chosenPlayer).toBeTruthy();
     const target = chosenPlayer!;
     await page.goto(`/#offer/${target.id}`);
@@ -498,8 +601,11 @@ test("future transfer agreements keep young players at their clubs and reserve m
     await page
       .getByLabel("Proposed weekly wage")
       .fill(
-        String(
-          displayAmount(deal.wage * 2, currencyCode(before.settings.currency)),
+        await agreeableWage(
+          request,
+          deal.id,
+          target.id,
+          currencyCode(before.settings.currency),
         ),
       );
     await page
@@ -1400,25 +1506,14 @@ test("player filters and complete faceless dossier work", async ({ page }) => {
 test("database filter groups reset dependent fields, clear chips and restart pagination", async ({
   page,
 }) => {
+  const results = databaseQuery(page);
   async function resultsAfter(
     action: () => Promise<unknown>,
-    parameters: Record<string, string | null>,
+    changes: Record<string, string | null>,
   ) {
-    const pending = page.waitForResponse((response) => {
-      const url = new URL(response.url());
-      return url.pathname === "/api/players" && Object.entries(parameters).every(
-        ([key, value]) => url.searchParams.get(key) === value,
-      );
-    });
-    await action();
-    const response = await pending;
-    expect(response.ok()).toBe(true);
-    const result: PlayerPage = await response.json();
+    const result = await results(action, changes);
     const rows = page.locator(".database-workspace .player-table tbody tr");
     await expect(rows).toHaveCount(result.players.length);
-    await expect(rows.locator(".player-name strong")).toHaveText(
-      result.players.map((player) => player.name),
-    );
     await expect(rows.locator(".position-tag")).toHaveText(
       result.players.map((player) => player.position),
     );
@@ -1439,7 +1534,7 @@ test("database filter groups reset dependent fields, clear chips and restart pag
     return result;
   }
 
-  const initial = await resultsAfter(() => page.goto("/#database"), { page: "1" });
+  const initial = await resultsAfter(() => page.goto("/#database"), {});
   expect(initial.pages).toBeGreaterThan(1);
   for (const name of [
     "Identity & location",
@@ -1479,7 +1574,7 @@ test("database filter groups reset dependent fields, clear chips and restart pag
   const personalityKey = await personality.locator("option").nth(1).getAttribute("value");
   expect(attributeKey).toBeTruthy();
   expect(personalityKey).toBeTruthy();
-  await resultsAfter(() => attribute.selectOption(attributeKey!), { attribute: attributeKey, attributeMin: null });
+  await resultsAfter(() => attribute.selectOption(attributeKey!), { attribute: attributeKey, attributeMin: null, page: "1" });
   await expect(attributeMin).toBeEnabled();
   await resultsAfter(() => attributeMin.fill("60"), { attribute: attributeKey, attributeMin: "60" });
   await resultsAfter(() => personality.selectOption(personalityKey!), { personality: personalityKey, personalityMin: null });
@@ -2254,18 +2349,43 @@ test("offer page separates transfer and loan types before opening resumable talk
       "/api/players?country=1&ageMin=20&ageMax=25&pageSize=100&valueMax=12000000",
     )
   ).json();
-  const target = search.players.find(
-    (player: {
-      club_id: number;
-      parent_club_id: number | null;
-      contract_end: string;
-    }) =>
-      player.club_id !== bootstrap.club.id &&
-      player.club_id &&
-      !player.parent_club_id &&
-      player.contract_end >= "2028-06-30",
+  const candidates = await willingTargets(
+    request,
+    search.players.filter(
+      (player: {
+        club_id: number;
+        parent_club_id: number | null;
+        contract_end: string;
+      }) =>
+        player.club_id !== bootstrap.club.id &&
+        player.club_id &&
+        !player.parent_club_id &&
+        player.contract_end >= "2028-06-30",
+    ) as { id: number; name: string; club_name: string }[],
   );
-  expect(target).toBeTruthy();
+  // Loan interest is assessed with loan terms, so probe the loan the test opens and close the probe again.
+  let found: (typeof candidates)[number] | undefined;
+  for (const candidate of candidates) {
+    const probe = await request.post("/api/action", {
+      data: { type: "enquiry", playerId: candidate.id, dealType: "Loan with option" },
+    });
+    if (probe.status() !== 200) continue;
+    const opened = await probe.json();
+    if (opened.stage === "Rejected") continue;
+    expect(
+      (
+        await request.post("/api/action", {
+          data: { type: "negotiation", id: opened.id, action: "withdraw" },
+        })
+      ).status(),
+    ).toBe(200);
+    if (opened.interest >= 50) {
+      found = candidate;
+      break;
+    }
+  }
+  expect(found).toBeTruthy();
+  const target = found!;
   const before = await (await request.get("/api/transfers")).json();
   await page.goto("/#database");
   await page.getByLabel("Search players", { exact: true }).fill(target.name);
@@ -2374,10 +2494,15 @@ test("a real transfer registers instalments, buy-back and sell-on clauses throug
       "/api/players?ageMin=20&ageMax=25&abilityMin=62&abilityMax=68&country=1&valueMax=12000000&pageSize=100",
     )
   ).json();
-  const target = search.players.find(
-    (player: { club_id: number; parent_club_id: number | null }) =>
-      player.club_id !== bootstrap.club.id && !player.parent_club_id,
-  );
+  const target = (
+    await willingTargets(
+      request,
+      search.players.filter(
+        (player: { club_id: number; parent_club_id: number | null }) =>
+          player.club_id !== bootstrap.club.id && !player.parent_club_id,
+      ) as { id: number; name: string; club_id: number }[],
+    )
+  )[0];
   expect(target).toBeTruthy();
   const enquiry = await request.post("/api/action", {
     data: {
@@ -2388,6 +2513,7 @@ test("a real transfer registers instalments, buy-back and sell-on clauses throug
   });
   expect(enquiry.status()).toBe(200);
   const negotiation = await enquiry.json();
+  expect(negotiation.stage).toBe("Enquiry");
   await page.goto("/#transfers");
   const card = page.locator(".entity-card").filter({
     has: page.getByRole("heading", { name: target.name, exact: true }),
@@ -2442,7 +2568,14 @@ test("a real transfer registers instalments, buy-back and sell-on clauses throug
   ).toBeVisible();
   await dialog
     .getByLabel("Proposed weekly wage")
-    .fill(String(Math.round(target.wage * 2)));
+    .fill(
+      await agreeableWage(
+        request,
+        negotiation.id,
+        target.id,
+        currencyCode(bootstrap.settings.currency),
+      ),
+    );
   await expect(
     dialog.getByRole("button", { name: "Submit personal terms" }),
   ).toBeVisible();
@@ -2616,21 +2749,41 @@ test("an outgoing loan honors its terms and can be recalled", async ({
       `/api/players?club=${bootstrap.club.id}&ageMin=19&ageMax=25&ageGroup=Senior&pageSize=100&sort=value&direction=asc`,
     )
   ).json();
-  const target = roster.players.find(
+  const candidates = roster.players.filter(
     (player: { contract_end: string; parent_club_id: number | null }) =>
       !player.parent_club_id && player.contract_end >= "2028-06-30",
-  );
-  expect(target).toBeTruthy();
-  const enquiry = await request.post("/api/action", {
-    data: {
-      type: "enquiry",
-      playerId: target.id,
-      dealType: "Development loan",
-      destinationId: 2,
-    },
-  });
-  expect(enquiry.status()).toBe(200);
-  const negotiation = await enquiry.json();
+  ) as { id: number; name: string }[];
+  // Interest in the borrowing club is only known once talks exist: open them, keep the first willing player.
+  let found: { target: (typeof candidates)[number]; negotiation: { id: number; asking_price: number } } | undefined;
+  for (const candidate of candidates) {
+    const enquiry = await request.post("/api/action", {
+      data: {
+        type: "enquiry",
+        playerId: candidate.id,
+        dealType: "Development loan",
+        destinationId: 2,
+      },
+    });
+    if (enquiry.status() !== 200) continue;
+    const opened = await enquiry.json();
+    if (opened.stage === "Rejected") continue;
+    const interest = await interestOf(request, candidate.id, {
+      negotiationId: String(opened.id),
+    });
+    if (opened.interest >= 50 && willingToTalk(interest)) {
+      found = { target: candidate, negotiation: opened };
+      break;
+    }
+    expect(
+      (
+        await request.post("/api/action", {
+          data: { type: "negotiation", id: opened.id, action: "withdraw" },
+        })
+      ).status(),
+    ).toBe(200);
+  }
+  expect(found).toBeTruthy();
+  const { target, negotiation } = found!;
   await page.goto("/#transfers");
   const card = page.locator(".entity-card").filter({
     has: page.getByRole("heading", { name: target.name, exact: true }),
@@ -2652,6 +2805,16 @@ test("an outgoing loan honors its terms and can be recalled", async ({
   await expect(
     dialog.getByRole("slider", { name: /Borrowing club salary share/ }),
   ).toHaveCount(0);
+  await dialog
+    .getByLabel("Proposed weekly wage")
+    .fill(
+      await agreeableWage(
+        request,
+        negotiation.id,
+        target.id,
+        currencyCode(bootstrap.settings.currency),
+      ),
+    );
   await dialog.getByRole("button", { name: "Submit personal terms" }).click();
   await dialog
     .getByRole("button", { name: "Sign conditional agreement" })
@@ -3249,29 +3412,14 @@ const positionIndex = (text: string) => (POSITIONS as readonly string[]).indexOf
 test("paginated database sorts on the server from its column headers", async ({ page }) => {
   const table = page.locator(".database-workspace .player-table");
   const header = table.getByRole("columnheader", { name: "Age", exact: true });
-  async function search(action: () => Promise<unknown>, parameters: Record<string, string>) {
-    const pending = page.waitForResponse((response) => {
-      const url = new URL(response.url());
-      return (
-        url.pathname === "/api/players" &&
-        Object.entries(parameters).every(([key, value]) => url.searchParams.get(key) === value)
-      );
-    });
-    await action();
-    const response = await pending;
-    expect(response.ok()).toBe(true);
-    const result: PlayerPage = await response.json();
-    await expect(table.locator("tbody tr .player-name strong")).toHaveText(
-      result.players.map((player) => player.name),
-    );
-    return result;
-  }
-  await search(() => page.goto("/#database"), { page: "1" });
+  const search = databaseQuery(page);
+  await search(() => page.goto("/#database"));
   await expect(header).not.toHaveAttribute("aria-sort", /./);
   for (const direction of ["asc", "desc"] as const) {
     const first = await search(() => header.getByRole("button").click(), {
       sort: "age",
       direction,
+      page: "1",
     });
     await expect(header).toHaveAttribute("aria-sort", ariaSortOf(direction));
     expect(first.pages).toBeGreaterThan(1);
@@ -3293,6 +3441,7 @@ test("paginated database sorts on the server from its column headers", async ({ 
   const byPosition = await search(() => position.getByRole("button").click(), {
     sort: "position",
     direction: "asc",
+    page: "1",
   });
   await expect(position).toHaveAttribute("aria-sort", "ascending");
   await expect(header).not.toHaveAttribute("aria-sort", /./);

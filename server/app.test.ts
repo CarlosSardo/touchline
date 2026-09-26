@@ -7,11 +7,14 @@ import { AccountNotProvisionedError, type AuthenticatedIdentity } from "./accoun
 import { processCompetitionNotifications } from "./notifications.ts";
 import { generateWorld } from "./world.ts";
 import { createCalendar } from "./calendar.ts";
-import { createApp, readApiConfiguration } from "./app.ts";
+import { createApp, isCalendarDate, loanDurationError, MAX_LOAN_DAYS, readApiConfiguration } from "./app.ts";
+import { playerSearchChanged } from "./queries.ts";
 import { initialInbox, stateOf } from "./systems.ts";
 import { Saves } from "./saves.ts";
 import { tableName, WORLD_TABLES } from "./sql-schema.ts";
-import { DEFAULT_ASSISTANT_DUTIES, groupCareerSaves } from "../shared/rules.ts";
+import { ageOn, addDays, DEFAULT_ASSISTANT_DUTIES, groupCareerSaves } from "../shared/rules.ts";
+import { CALL_UP_RULES } from "../shared/features/callups.ts";
+import { clubTransfersChanged } from "./club-transfers.ts";
 import type { AccountUser, SaveSlot } from "../shared/api.ts";
 import { createUnexpectedEvent } from "./events.ts";
 
@@ -32,6 +35,24 @@ const principal = (objectId: string, tenantId = tenant, additional: { typ: strin
   Buffer.from(JSON.stringify({ auth_typ: "aad", claims: [
     { typ: "oid", val: objectId }, { typ: "tid", val: tenantId }, ...additional,
   ] })).toString("base64");
+
+describe("action input validation (no database)", () => {
+  it("accepts only real calendar dates for a call-up end", () => {
+    for (const value of ["2026-10-15", "2028-02-29", "2026-12-31"]) expect(isCalendarDate(value), value).toBe(true);
+    for (const value of ["2026-13-45", "2027-02-29", "2026-04-31", "2026-00-10", "2026-1-05", "20261015", ""])
+      expect(isCalendarDate(value), value).toBe(false);
+  });
+
+  it("limits loans between clubs of different countries to one season", () => {
+    expect(MAX_LOAN_DAYS).toEqual({ domestic: 730, international: 380 });
+    expect(loanDurationError({ type: "Two-year loan", crossBorder: false })).toBeNull();
+    expect(loanDurationError({ type: "Cross-border loan", duration: 730, crossBorder: false })).toBeNull();
+    expect(loanDurationError({ type: "Cross-border loan", duration: 380, crossBorder: true })).toBeNull();
+    expect(loanDurationError({ type: "Standard loan", crossBorder: true })).toBeNull();
+    expect(loanDurationError({ type: "Two-year loan", crossBorder: true })).toMatch(/at most one season \(380 days\)/);
+    expect(loanDurationError({ type: "Loan with option", duration: 381, crossBorder: true })).toMatch(/at most one season/);
+  });
+});
 
 describe("hosted invitation access (no database)", () => {
   const app = (
@@ -808,6 +829,35 @@ describe("game HTTP API and SQL saves", () => {
     expect(attributes.body.total).toBeGreaterThan(0);
   });
 
+  it("pages and sorts player searches consistently with exact totals below the cap", async () => {
+    const active = (await store.get<{ count: number }>(
+      "SELECT count(*) AS count FROM players WHERE role <> 'Retired'",
+    ))!.count;
+    const all = await request(app).get("/api/players").query({ pageSize: 100 });
+    expect(all.status).toBe(200);
+    expect(all.body.total).toBe(active);
+    // The unfiltered search always reports the exact number of active players.
+    expect(all.body.totalCapped).toBe(false);
+    expect(all.body.pages).toBe(Math.max(1, Math.ceil(active / 100)));
+    const ordered = all.body.players.map((player: { ability: number }) => player.ability);
+    expect(ordered).toEqual([...ordered].sort((left, right) => right - left));
+    // Same filter, other sort and page: the cached match set must give the same total and disjoint pages.
+    const expected = await store.all<{ id: number }>(
+      "SELECT TOP (20) id FROM players WHERE role <> 'Retired' AND position = 'ST' ORDER BY value ASC, name COLLATE Latin1_General_100_CI_AI ASC, id ASC",
+    );
+    const first = await request(app).get("/api/players").query({ position: "ST", sort: "value", direction: "asc", pageSize: 10 });
+    const second = await request(app).get("/api/players").query({ position: "ST", sort: "value", direction: "asc", pageSize: 10, page: 2 });
+    expect(second.body.total).toBe(first.body.total);
+    expect([...first.body.players, ...second.body.players].map((player: { id: number }) => player.id)).toEqual(
+      expected.map((row) => row.id),
+    );
+    // JSON-filtered searches rank their known match set; sorting by a JSON value keeps missing values last.
+    const tall = await request(app).get("/api/players").query({ heightMin: 150, sort: "height", direction: "desc", pageSize: 100 });
+    expect(tall.status).toBe(200);
+    const heights = tall.body.players.map((player: { height: number | null }) => player.height ?? -1);
+    expect(heights).toEqual([...heights].sort((left, right) => right - left));
+  });
+
   it("filters explicit youth contract status without treating legacy contracts as free", async () => {
     const amateur = await request(app)
       .get("/api/players")
@@ -884,6 +934,8 @@ describe("game HTTP API and SQL saves", () => {
         JSON.stringify(profile),
         player.id,
       );
+      // Nationalities are fixed at creation in the game; this direct edit bypasses every mutation route.
+      playerSearchChanged(store, true);
       const response = await request(app)
         .get("/api/players")
         .query({
@@ -910,6 +962,7 @@ describe("game HTTP API and SQL saves", () => {
         player.profile,
         player.id,
       );
+      playerSearchChanged(store, true);
     }
   });
 
@@ -1217,6 +1270,61 @@ describe("game HTTP API and SQL saves", () => {
       await store.all("SELECT id,club_id,wage,morale FROM players ORDER BY id"),
     ).toEqual(before);
     expect(await stateOf(store)).toEqual(state);
+  });
+
+  it("shows rival pursuits on the transfer desk and interest preview only as fogged views", async () => {
+    const state = await stateOf(store);
+    const target = (await store.get<{ id: number; club_id: number; wage: number; profile: string }>(
+      "SELECT TOP (1) id,club_id,wage,profile FROM players WHERE club_id IS NOT NULL AND club_id <> ? AND role <> 'Retired' AND age_group = 'Senior' ORDER BY ability DESC,id",
+      state.clubId,
+    ))!;
+    const rival = (await store.get<{ id: number }>(
+      "SELECT TOP (1) id FROM clubs WHERE type = 'club' AND id NOT IN (?,?) ORDER BY id",
+      state.clubId,
+      target.club_id,
+    ))!;
+    const fee = 7_654_321;
+    const id = Number(
+      (
+        await store.run(
+          "INSERT INTO negotiations(player_id,buying_club_id,selling_club_id,type,stage,asking_price,offer,wage,interest,created,deadline,data) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+          target.id,
+          state.clubId,
+          target.club_id,
+          "Permanent transfer",
+          "Club talks",
+          10_000_000,
+          0,
+          target.wage,
+          70,
+          state.date,
+          state.date,
+          JSON.stringify({
+            workflowVersion: 2,
+            log: [],
+            agent: JSON.parse(target.profile).agent,
+            years: 4,
+            role: "Regular starter",
+            promises: [],
+            rivals: [{ clubId: rival.id, since: state.date, status: "bid", fee, wage: 54_321, interest: 90, raises: 0, nextAction: state.date, source: "market" }],
+          }),
+        )
+      ).lastInsertRowid,
+    );
+    try {
+      const desk = await request(app).get("/api/transfers");
+      expect(desk.status).toBe(200);
+      const talks = desk.body.negotiations.find((negotiation: { id: number }) => negotiation.id === id);
+      expect(JSON.parse(talks.data)).not.toHaveProperty("rivals");
+      expect(talks.rivals).toHaveLength(1);
+      expect(JSON.stringify(desk.body)).not.toContain(String(fee));
+      const interest = await request(app).get(`/api/players/${target.id}/interest`);
+      expect(interest.status).toBe(200);
+      expect(interest.body.rivals).toHaveLength(1);
+      expect(JSON.stringify(interest.body)).not.toContain(String(fee));
+    } finally {
+      await store.run("DELETE FROM negotiations WHERE id = ?", id);
+    }
   });
 
   it("validates assistant delegation, event preferences and board affiliate actions", async () => {
@@ -1767,6 +1875,8 @@ describe("game HTTP API and SQL saves", () => {
     try {
       const manual = [];
       for (let index = 0; index < 10; index++) manual.push(await saves.create(`Cap ${index}`));
+      // A change since the last save forces a real pre-load archive, which is what rotates the manual saves.
+      await store.run("UPDATE clubs SET balance = balance + 1 WHERE id = ?", original.clubId);
       const response = await request(app).post("/api/careers/load").send({ file: manual[0].file });
       expect(response.status).toBe(200);
       const career = (await saves.list())
@@ -1778,6 +1888,162 @@ describe("game HTTP API and SQL saves", () => {
     } finally {
       await store.setMeta("state", original);
     }
+  });
+
+  it("lists a club's recorded transfers in and out by season with fees, terms and totals", async () => {
+    const state = await stateOf(store);
+    const [home, away] = await store.all<{ id: number; name: string }>(
+      "SELECT TOP (2) id,name FROM clubs WHERE type = 'club' AND id != ? ORDER BY id",
+      state.clubId,
+    );
+    const player = (await store.get<{ id: number; name: string; birth_date: string; position: string }>(
+      "SELECT TOP (1) id,name,birth_date,position FROM players WHERE club_id = ? ORDER BY id",
+      home.id,
+    ))!;
+    const season = state.season - 3;
+    const history: number[] = [];
+    const record = async (entityType: string, date: string, data: object, rowSeason = season) =>
+      history.push(
+        Number(
+          (
+            await store.run(
+              "INSERT INTO history(season,entity_type,entity_id,date,data) VALUES (?,?,?,?,?)",
+              rowSeason,
+              entityType,
+              player.id,
+              date,
+              JSON.stringify({ name: player.name, ...data }),
+            )
+          ).lastInsertRowid,
+        ),
+      );
+    const negotiation = Number(
+      (
+        await store.run(
+          "INSERT INTO negotiations(player_id,buying_club_id,selling_club_id,type,stage,asking_price,offer,wage,interest,created,deadline,data) VALUES (?,?,?,?,'Completed',?,?,?,?,?,?,?)",
+          player.id,
+          away.id,
+          home.id,
+          "Permanent transfer",
+          5_000_000,
+          4_500_000,
+          20_000,
+          70,
+          `${season}-08-01`,
+          `${season}-08-08`,
+          JSON.stringify({
+            transferTerms: { upfrontPercent: 40, installments: 3, intervalMonths: 12, buyBackFee: 0, buyBackYears: 1, sellOnPercent: 15 },
+          }),
+        )
+      ).lastInsertRowid,
+    );
+    try {
+      await record("transfer", `${season}-07-10`, { from: null, to: home.id, club: home.name, fee: 0, type: "Free transfer" });
+      await record("transfer", `${season}-08-20`, { from: home.id, to: away.id, club: away.name, fee: 4_500_000, type: "Permanent transfer" });
+      await record("loan", `${season + 1}-01-15`, { from: away.id, to: home.id, club: home.name, fee: 250_000, type: "Standard loan" }, season);
+      // A move between two other clubs mentioning the club only by name is not the club's.
+      await record("transfer", `${season}-09-01`, { from: away.id, to: state.clubId, club: home.name, fee: 1 });
+      // A call-up and its return are listed (marked) but never counted.
+      await record("squad", `${season}-10-01`, { fromClubId: away.id, toClubId: home.id, label: "First team", callUp: true, until: `${season}-10-05` });
+      await record("squad", `${season}-10-06`, { fromClubId: home.id, toClubId: away.id, label: "B team", callUpReturn: true });
+
+      const response = await request(app).get(`/api/clubs/${home.id}/transfers?season=${season}`);
+      expect(response.status).toBe(200);
+      expect(response.body.club).toMatchObject({ id: home.id, name: home.name });
+      expect(typeof response.body.club.country.code).toBe("string");
+      expect(response.body.seasons.map((entry: { season: number }) => entry.season)).toEqual(
+        expect.arrayContaining([state.season, season]),
+      );
+      expect(response.body.groups).toHaveLength(1);
+      const [group] = response.body.groups;
+      expect(group.season).toBe(season);
+      expect(group.totals).toEqual({
+        spent: 250_000,
+        received: 4_500_000,
+        net: 4_250_000,
+        countIn: 2,
+        countOut: 1,
+        countInternal: 0,
+        countLoanEnds: 0,
+        unknownFees: 0,
+      });
+      expect(group.transfers.map((entry: { kind: string; direction: string; club: { id: number } | null; fee: number }) => [entry.kind, entry.direction, entry.club?.id ?? null, entry.fee])).toEqual([
+        ["loan", "in", away.id, 250_000],
+        ["squad", "out", away.id, null],
+        ["squad", "in", away.id, null],
+        ["transfer", "out", away.id, 4_500_000],
+        ["free", "in", null, 0],
+      ]);
+      expect(group.transfers[0]).not.toHaveProperty("callUp");
+      expect(group.transfers[1]).toMatchObject({ callUpReturn: true });
+      expect(group.transfers[2]).toMatchObject({ callUp: true, until: `${season}-10-05` });
+      const sale = group.transfers[3];
+      expect(sale.player).toEqual({
+        id: player.id,
+        name: player.name,
+        position: player.position,
+        ageAtMove: ageOn(player.birth_date, `${season}-08-20`),
+      });
+      expect(sale.terms).toMatchObject({ installments: 3, sellOnPercent: 15 });
+      expect(group.transfers[4].terms).toBeNull();
+
+      const outgoing = await request(app).get(`/api/clubs/${away.id}/transfers?season=${season}&direction=out&type=loan,transfer`);
+      expect(outgoing.status).toBe(200);
+      expect(outgoing.body.filter).toEqual({ season, direction: "out", types: ["loan", "transfer"] });
+      expect(outgoing.body.groups[0].transfers.map((entry: { kind: string; club: { id: number } }) => [entry.kind, entry.club.id])).toEqual([
+        ["loan", home.id],
+        ["transfer", state.clubId],
+      ]);
+
+      const paged = await request(app).get(`/api/clubs/${home.id}/transfers?season=${season}&pageSize=2&page=2`);
+      expect(paged.body).toMatchObject({ total: 5, pages: 3, page: 2, pageSize: 2 });
+      expect(paged.body.groups[0].transfers).toHaveLength(2);
+
+      // A newly recorded move is seen at once: only history ids above the cached scan are read.
+      await record("transfer", `${season}-08-25`, { from: away.id, to: home.id, club: home.name, fee: 1_000_000, type: "Permanent transfer" });
+      const again = await request(app).get(`/api/clubs/${home.id}/transfers?season=${season}&direction=in&type=transfer`);
+      expect(again.body.total).toBe(1);
+      expect(again.body.groups[0].totals.spent).toBe(1_250_000);
+
+      expect((await request(app).get("/api/clubs/99999999/transfers")).status).toBe(404);
+      for (const query of ["page=0", "pageSize=501", "direction=sideways", "type=gift", "season=abc"])
+        expect((await request(app).get(`/api/clubs/${home.id}/transfers?${query}`)).status, query).toBe(400);
+      expect((await request(app).get("/api/clubs/abc/transfers")).status).toBe(400);
+    } finally {
+      await store.run("DELETE FROM history WHERE id IN (SELECT [id] FROM OPENJSON(?) WITH ([id] INT '$'))", JSON.stringify(history));
+      await store.run("DELETE FROM negotiations WHERE id = ?", negotiation);
+      // The scan cache assumes append-only move rows.
+      clubTransfersChanged(store);
+    }
+  });
+
+  it("rejects impossible call-up end dates and loans longer than a year between countries", async () => {
+    const state = await stateOf(store);
+    const own = (await store.get<{ id: number }>(
+      "SELECT TOP (1) id FROM players WHERE club_id = ? AND role != 'Retired' ORDER BY id",
+      state.clubId,
+    ))!;
+    const callUp = (date: string) =>
+      request(app)
+        .post("/api/action")
+        .send({ type: "call-up", playerId: own.id, clubId: state.clubId, ageGroup: "Senior", duration: { kind: "until", date } });
+    for (const date of ["2026-13-45", "2027-02-29"]) {
+      const response = await callUp(date);
+      expect(response.status, date).toBe(400);
+      expect(response.body.error, date).toMatch(/valid date/);
+    }
+    const tooLong = await callUp(addDays(state.date, CALL_UP_RULES.maxDays + 1));
+    expect(tooLong.status).toBe(400);
+    expect(tooLong.body.error).toMatch(new RegExp(`at most ${CALL_UP_RULES.maxDays} days`));
+    const foreign = await store.get<{ id: number }>(
+      "SELECT TOP (1) players.id FROM players JOIN clubs ON clubs.id = players.club_id WHERE clubs.type = 'club' AND clubs.country_id <> (SELECT country_id FROM clubs WHERE id = ?) AND players.role != 'Retired' AND players.parent_club_id IS NULL ORDER BY players.id",
+      state.clubId,
+    );
+    expect(foreign).toBeTruthy();
+    const loan = await request(app).post("/api/action").send({ type: "enquiry", playerId: foreign!.id, dealType: "Two-year loan" });
+    expect(loan.status).toBe(400);
+    expect(loan.body.error).toMatch(/at most one season \(380 days\)/);
+    expect(await store.get("SELECT id FROM negotiations WHERE player_id = ? AND type = 'Two-year loan'", foreign!.id)).toBeFalsy();
   });
 
   it("starts a fresh named career and can load the previous career without losing it", async () => {

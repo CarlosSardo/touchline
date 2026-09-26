@@ -1,9 +1,11 @@
 import seedrandom from "seedrandom";
 import { describe, expect, it } from "vitest";
 import { simulateMatchV3 } from "./match-v3.ts";
+import { MATCH_RULES_VERSION } from "./match.ts";
 import {
   fastExpectedGoals,
   followsFixture,
+  RED_CARD_ATTACK,
   simulateFastMatch,
   simulateFixture,
 } from "./fast-match.ts";
@@ -54,7 +56,7 @@ function syntheticTeam(id: number, ability: number, seed: string): MatchTeam {
 
 function snapshot(home: number, away: number, index: number, decisive = false): MatchSnapshot {
   return {
-    rulesVersion: 3,
+    rulesVersion: MATCH_RULES_VERSION,
     home: syntheticTeam(1, home, `h:${home}:${index % 40}`),
     away: syntheticTeam(2, away, `a:${away}:${index % 40}`),
     weather: "Clear",
@@ -136,9 +138,56 @@ describe("fast match model", () => {
         for (const player of team.bench ?? [])
           if (result.players[player.id].minutes)
             expect(result.substitutions!.some((change) => change.onId === player.id)).toBe(true);
+        expect(lines.reduce((sum, line) => sum + line.minutes, 0)).toBeLessThanOrEqual(11 * 90);
       }
+      const dismissed = new Map(
+        result.events.filter((event) => event.type === "red card").map((event) => [event.playerId, event.elapsed ?? 0]),
+      );
+      for (const change of result.substitutions!)
+        expect(dismissed.has(change.offId) && dismissed.get(change.offId)! < change.elapsed!, `${index}`).toBe(false);
       expect(result.events.filter((event) => event.type === "goal")).toHaveLength(result.homeGoals + result.awayGoals);
     }
+  });
+
+  it("varies substitutions: some at half-time, not always all five, never more than the limit", () => {
+    let halfTime = 0;
+    let allFive = 0;
+    let changes = 0;
+    const minutes = new Set<number>();
+    for (let index = 0; index < 300; index++) {
+      const result = simulateFastMatch(snapshot(65, 65, index), `subs:${index}`);
+      for (const teamId of [1, 2]) {
+        const own = result.substitutions!.filter((change) => change.teamId === teamId);
+        changes += own.length;
+        if (own.length === 5) allFive++;
+        if (own.some((change) => change.minute <= 46)) halfTime++;
+        for (const change of own) minutes.add(change.minute);
+      }
+    }
+    expect(changes / 600).toBeGreaterThan(3.8);
+    expect(changes / 600).toBeLessThan(4.7);
+    expect(allFive / 600).toBeGreaterThan(0.35);
+    expect(allFive / 600).toBeLessThan(0.75);
+    expect(halfTime / 600).toBeGreaterThan(0.1);
+    expect(minutes.size).toBeGreaterThan(20);
+  });
+
+  it("lets a dismissal change the score: the ten men score less", () => {
+    let withRed = 0;
+    let redGoals = 0;
+    let otherGoals = 0;
+    for (let index = 0; index < 6000 && withRed < 250; index++) {
+      const result = simulateFastMatch(snapshot(65, 65, index), `red:${index}`);
+      const red = result.events.find((event) => event.type === "red card" && (event.elapsed ?? 99) < 45);
+      if (!red) continue;
+      withRed++;
+      const home = red.teamId === 1;
+      redGoals += home ? result.homeGoals : result.awayGoals;
+      otherGoals += home ? result.awayGoals : result.homeGoals;
+    }
+    expect(RED_CARD_ATTACK).toBeLessThan(1);
+    expect(withRed).toBeGreaterThan(50);
+    expect(redGoals).toBeLessThan(otherGoals);
   });
 
   it("always decides knockout fixtures", () => {

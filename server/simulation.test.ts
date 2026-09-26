@@ -17,7 +17,7 @@ import {
 } from "./simulation.ts";
 import { stateOf } from "./systems.ts";
 import { playerCareer } from "./queries.ts";
-import { simulateMatch } from "./match.ts";
+import { MATCH_RULES_VERSION, simulateMatch } from "./match.ts";
 import { estimateClubRevenue } from "./finance.ts";
 import { addDays, ageOn } from "../shared/rules.ts";
 import { checkMinors, checkSquads } from "./check-simulation.ts";
@@ -159,7 +159,7 @@ describe("connected simulation", () => {
     expect(home.xg).toBe(result.home_xg);
     expect(home.xpts).toBeGreaterThanOrEqual(0);
     expect(home.xpts).toBeLessThanOrEqual(3);
-    expect(JSON.parse(result.data).snapshot.rulesVersion).toBe(3);
+    expect(JSON.parse(result.data).snapshot.rulesVersion).toBe(MATCH_RULES_VERSION);
     expect(JSON.parse(result.data).substitutions.length).toBeGreaterThan(0);
     const snapshot = JSON.parse(result.data).snapshot;
     const awayPlayer = snapshot.away.lineup[0];

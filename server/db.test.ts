@@ -346,8 +346,8 @@ describe("SQL pool configuration (no database)", () => {
     });
     expect(configuration.pool).toMatchObject({
       min: 0,
-      max: 4,
-      idleTimeoutMillis: 10000,
+      max: 10,
+      idleTimeoutMillis: 60000,
     });
     expect(configuration.options).toMatchObject({
       encrypt: true,
@@ -1131,6 +1131,49 @@ describe("SQL Store transactions (fake driver, no database)", () => {
     await harness.store.close();
   });
 
+  it("readTransaction() shares the world lock between readers and refuses every write", async () => {
+    const harness = fakeStore();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let inside = 0;
+    let overlap = 0;
+    const reader = () =>
+      harness.store.readTransaction(async () => {
+        inside++;
+        overlap = Math.max(overlap, inside);
+        await harness.store.all("SELECT 1");
+        await gate;
+        inside--;
+        return harness.store.transaction(async () => 7);
+      });
+    const readers = Promise.all([reader(), reader()]);
+    await vi.waitFor(() => expect(overlap).toBe(2));
+    release();
+    expect(await readers).toEqual([7, 7]);
+    const locks = harness.calls.filter((call) => call.sql.includes("sp_getapplock"));
+    expect(locks).toHaveLength(2);
+    expect(locks.every((call) => call.sql.includes("@LockMode = N'Shared'") && !call.sql.includes("Exclusive"))).toBe(true);
+    expect(locks[0].parameters.worldLock).toBe("touchline:world:touchline_test_mock");
+    expect(new Set(locks.map((call) => call.owner)).size).toBe(2);
+    for (const write of [
+      () => harness.store.run("UPDATE players SET morale = 1"),
+      () => harness.store.exec("DELETE FROM news"),
+      () => harness.store.get("DELETE FROM news OUTPUT DELETED.id WHERE id = ?", 9),
+      () => harness.store.setMeta("state", {}),
+      () => harness.store.bulkInsert("news", [{ id: 1 }]),
+      () => harness.store.clearWorld(),
+    ])
+      await expect(harness.store.readTransaction(write)).rejects.toThrow(/read-only|writer lock/);
+    expect(harness.calls.some((call) => /UPDATE|DELETE|INSERT|TRUNCATE/.test(call.sql))).toBe(false);
+    await harness.store.transaction(() => harness.store.readTransaction(() => harness.store.exec("UPDATE players SET morale = 2")));
+    const writer = harness.calls.filter((call) => call.sql.includes("sp_getapplock")).at(-1)!;
+    expect(writer.sql).toContain("@LockMode = N'Exclusive'");
+    expect(harness.calls.at(-1)?.sql).toContain("UPDATE [touchline_test_mock].players");
+    await harness.store.close();
+  });
+
   it("batched() inside a transaction stays one atomic transaction", async () => {
     const harness = fakeStore();
     await harness.store.transaction(() =>
@@ -1587,5 +1630,84 @@ if (process.env.SQL_INTEGRATION_TESTS === "true") {
         await Promise.all([peer?.close(), other?.close(), store.close()]);
       }
     }, 180000);
+
+    it("runs world readers side by side, while plain and batched writers exclude them", async () => {
+      const store = await Store.createTest("read_lock");
+      const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+      const latch = () => {
+        let open!: () => void;
+        const opened = new Promise<void>((resolve) => {
+          open = resolve;
+        });
+        return { open, opened };
+      };
+      try {
+        await store.setMeta("probe", 1);
+        // Two readers inside the lock at once; serialized readers would hit the 5 s bound instead.
+        const both = latch();
+        let inside = 0;
+        const reader = () =>
+          store.readTransaction(async () => {
+            if (++inside === 2) both.open();
+            await Promise.race([
+              both.opened,
+              pause(5000).then(() => {
+                throw new Error("World readers were serialized.");
+              }),
+            ]);
+            return store.meta<number>("probe");
+          });
+        await expect(Promise.all([reader(), reader()])).resolves.toEqual([1, 1]);
+
+        let value = 1;
+        for (const writer of [
+          (callback: () => Promise<void>) => store.transaction(callback),
+          (callback: () => Promise<void>) => store.batched(callback),
+        ]) {
+          const entered = latch();
+          const finish = latch();
+          value++;
+          const writing = writer(async () => {
+            // Inside batched() this statement has already committed; a reader must still wait for the whole writer.
+            await store.setMeta("probe", value);
+            entered.open();
+            await finish.opened;
+          });
+          await entered.opened;
+          let started = false;
+          const reading = store.readTransaction(async () => {
+            started = true;
+            return store.meta<number>("probe");
+          });
+          await pause(500);
+          expect(started).toBe(false);
+          finish.open();
+          await writing;
+          await expect(reading).resolves.toBe(value);
+        }
+
+        // A writer waits for a reader that is still inside the shared lock.
+        const release = latch();
+        const held = latch();
+        const holding = store.readTransaction(async () => {
+          held.open();
+          await release.opened;
+        });
+        await held.opened;
+        let wrote = false;
+        const writing = store.transaction(async () => {
+          wrote = true;
+          await store.setMeta("probe", 9);
+        });
+        await pause(500);
+        expect(wrote).toBe(false);
+        release.open();
+        await holding;
+        await writing;
+        expect(await store.meta<number>("probe")).toBe(9);
+      } finally {
+        await store.close();
+      }
+    }, 120000);
   });
 }

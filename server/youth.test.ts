@@ -11,13 +11,13 @@ import {
   leavesFreeAgency,
   leaveThreshold,
   missingPositions,
-  retirementChance,
   selectSquad,
   SQUAD_CAPS,
   youthBirthCutoff,
   youthRatings,
 } from "./youth.ts";
-import { birthDateForAge } from "./people.ts";
+import { birthDateForAge, seniorRetirementChance } from "./people.ts";
+import { deadlineDay, disciplineScope, LEGACY_DISCIPLINE_SCOPE, transferWindow, winterWindowClose } from "../shared/rules.ts";
 import { SQUAD_MINIMUMS } from "../shared/world-rules.ts";
 import type { Position } from "../shared/types.ts";
 
@@ -158,16 +158,31 @@ describe("squad planning", () => {
     }
     expect(thin).toBeGreaterThan(0);
   });
+});
 
-  it("retires semi-professionals from 31, elite players from 34 and everyone by 40", () => {
-    expect(retirementChance(30, 45, false)).toBe(0);
-    expect(retirementChance(31, 45, false)).toBeGreaterThan(0);
-    expect(retirementChance(33, 85, false)).toBe(0);
-    expect(retirementChance(34, 85, false)).toBeGreaterThan(0);
-    expect(retirementChance(34, 50, false)).toBeGreaterThan(retirementChance(34, 85, false));
-    expect(retirementChance(40, 90, false)).toBe(1);
-    expect(retirementChance(36, 60, false)).toBeGreaterThan(retirementChance(34, 60, false));
-    expect(retirementChance(34, 60, true)).toBeGreaterThan(retirementChance(34, 60, false));
+describe("season calendar and discipline rules", () => {
+  it("closes the winter window on 1 February, or the Monday after when 31 January is a weekend", () => {
+    expect(winterWindowClose(2027)).toBe("2027-02-01");
+    expect(winterWindowClose(2026)).toBe("2026-02-02");
+    expect(winterWindowClose(2028)).toBe("2028-02-01");
+    expect(transferWindow("2027-01-31")).toBe(true);
+    expect(transferWindow("2027-02-01")).toBe(true);
+    expect(transferWindow("2027-02-02")).toBe(false);
+    expect(deadlineDay("2027-02-01")).toBe(true);
+    expect(deadlineDay("2027-01-31")).toBe(false);
+    expect(deadlineDay("2026-09-01")).toBe(true);
+  });
+
+  it("scopes cautions and bans per competition, play-offs with their league", () => {
+    const league = (id: number, kind: string, data = "{}") => ({ id, kind, confederation: "UEFA", data });
+    expect(disciplineScope(undefined)).toBe("friendly");
+    expect(disciplineScope(league(4, "league"))).toBe("league:4");
+    expect(disciplineScope(league(5, "league"))).not.toBe(disciplineScope(league(4, "league")));
+    expect(disciplineScope(league(9, "cup"))).toBe("cup:9");
+    expect(disciplineScope(league(10, "cup", JSON.stringify({ playoff: true, leagueId: 4 })))).toBe("league:4");
+    expect(disciplineScope(league(11, "continental"))).toBe("UEFA:senior");
+    expect(disciplineScope(league(12, "international"))).toBe("national:12");
+    expect(LEGACY_DISCIPLINE_SCOPE).toBe("%:%:%");
   });
 });
 
@@ -201,9 +216,11 @@ describe("population balance", () => {
       expect(Math.abs(change), `season ${season.season}: ${season.end} vs ${previous} (${JSON.stringify(season)})`).toBeLessThanOrEqual(0.03);
       expect(Math.abs(season.end - seasons[0].start) / seasons[0].start, `season ${season.season} vs start`).toBeLessThanOrEqual(0.05);
       expect(season.inflow).toBeGreaterThan(0);
-      expect(season.retired).toBeGreaterThan(0);
+      expect(season.outflow).toBeGreaterThan(0);
       previous = season.end;
     }
+    // Contracted retirements start at 32+ (people.ts); released veterans leave as free agents in this projection.
+    expect(seasons.reduce((total, season) => total + season.retired, 0)).toBeGreaterThan(0);
   });
 });
 
@@ -345,7 +362,7 @@ function projectPopulation(seed: string, seasonCount: number) {
       person.age++;
       person.ability = Math.min(person.potential, person.ability + (person.age <= 23 ? (person.potential - person.ability) * 0.3 : person.age >= 31 ? -2 : 0));
       if (person.club === null) leavers.add(person);
-      else if (person.group === "Senior" && random() < retirementChance(person.age, person.ability, false)) {
+      else if (person.group === "Senior" && random() < seniorRetirementChance({ age: person.age, ability: person.ability, position: person.position })) {
         leavers.add(person);
         retired++;
       } else if (rank[eligible(person)] > rank[person.group]) person.group = eligible(person);
