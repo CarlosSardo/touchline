@@ -94,8 +94,8 @@ const CORE_CONNECTORS = new Set([...CONNECTORS, "al", "las", "los", "les", "lo",
 // languages. Distinctive words (Town, United, Rovers, Real, Racing, Dinamo, Kickers…) are part of the identity.
 const CLUB_FORM_WORDS = new Set(
   [
-    "ac acd acf acs ad ae afc aif aik aj ak ao as asc asd asv bfc bk bsc bv ca cd cdf ce cf cfc cp cpd cr crb cs csd csm css",
-    "ea ec es ess esv fa fb fbc fc fcv fk ff fsv fv gd gf gfc gif gks hnk ib if ifk ik il is jk js kaa kf kfc kks kmsk krc ks",
+    "ac acd acf acs ad ae afc aif aik aj ak ao as asc asd asv bfc bk bois bsc bv ca cd cdf ce cf cfc cp cpd cr crb cs csd csm css",
+    "ea ec es ess esv fa fb fbc fc fcv fk ff fsv fv gd gf gfc gif gks goif hnk ib if ifk ik il is jk js kaa kf kfc kks kmsk krc ks",
     "ksc kse ksk ksv kv kvc kvk lks mc mfc mfk mks mte nk ofk ogc oks pfc ps rc rcd rfc rkc rks rsc sad sc scp sco sd se sfc",
     "sg sk sks sl sm sp spvgg ss ssc ssd ssv sv te tj ts tsg tsv tus ud ue umf us usd usm usv vfb vfl vfr vsc vse vv wks",
     "club clube clubul klub kulubu nadi sport sports sportif sportive sportiva sportivo sportiv sportowy sportski sportclub",
@@ -201,6 +201,8 @@ export function catalogLookup(catalog: WorldCatalog): CatalogLookup {
     /** Every part of a real identity, for bare places (Birmingham for Birmingham City). */
     parts: Set<string>;
     places: Set<string>;
+    /** Curated districts by their first identity word, with their city's words (Favoriten → Wien). */
+    districts: Map<string, { words: string[]; city: string[] }[]>;
   }
   const realClubs = new Map<string, RealClubs>();
   const citizenshipGroup = (code: string): string =>
@@ -219,14 +221,20 @@ export function catalogLookup(catalog: WorldCatalog): CatalogLookup {
     if (!real) {
       const nation = nationIndex.get(code);
       const aliases = clubNameAliases(nation);
-      real = { aliases, exact: new Set(), shorter: new Set(), parts: new Set(), places: new Set() };
+      real = { aliases, exact: new Set(), shorter: new Set(), parts: new Set(), places: new Set(), districts: new Map() };
       for (const name of realClubNames(code))
         for (const key of realClubKeys(name, aliases)) {
           real.exact.add(key);
           identitySubsets(key, real.parts, real.shorter);
         }
-      for (const city of nation?.cities.major ?? [])
+      for (const city of nation?.cities.major ?? []) {
+        const cityWords = clubCoreKey(city.name, aliases).split(" ");
         for (const place of [city.name, ...(city.districts ?? [])]) real.places.add(clubCoreKey(place, aliases));
+        for (const district of city.districts ?? []) {
+          const words = clubCoreKey(district, aliases).split(" ").filter(Boolean);
+          if (words.length) real.districts.set(words[0], [...(real.districts.get(words[0]) ?? []), { words, city: cityWords }]);
+        }
+      }
       realClubs.set(code, real);
     }
     return real;
@@ -268,10 +276,20 @@ export function catalogLookup(catalog: WorldCatalog): CatalogLookup {
     avoidedClubNames,
     copiesRealClub(code, name, place) {
       const real = realClubsOf(code);
+      const copies = (key: string) => real.exact.has(key) || real.shorter.has(key);
       const key = clubCoreKey(name, real.aliases);
-      if (real.exact.has(key) || real.shorter.has(key)) return true;
+      if (copies(key)) return true;
       const bare = real.places.has(key) || (place !== undefined && clubCoreKey(place, real.aliases) === key);
-      return bare && real.parts.has(key);
+      if (bare) return real.parts.has(key);
+      // A district with a word of its city's real club is that club: Austria Favoriten ~ Austria Wien.
+      const words = key.split(" ");
+      return words.some((word) =>
+        (real.districts.get(word) ?? []).some((district) => {
+          if (!district.words.every((part) => words.includes(part))) return false;
+          const rest = words.filter((part) => !district.words.includes(part) && !district.city.includes(part));
+          return rest.length > 0 && real.exact.has([...new Set([...rest, ...district.city])].sort().join(" "));
+        }),
+      );
     },
   };
 }

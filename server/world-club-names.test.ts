@@ -17,6 +17,7 @@ describe("real club names (pure)", () => {
       ["Athletic Madrid", "Atlético de Madrid"],
       ["Trabzon FK", "Trabzonspor"],
       ["Helsingborg FF", "Helsingborgs IF"],
+      ["Göteborg BoIS", "IFK Göteborg"],
       ["AC Milano 1899", "AC Milan"],
     ];
     for (const [generated, real] of variants) expect(clubCoreKey(generated), generated).toBe(clubCoreKey(real));
@@ -48,6 +49,20 @@ describe("real club names (pure)", () => {
       ["EN", "Birmingham FC"],
       ["EN", "Hove Albion"],
       ["EN", "Preston FC", "Preston"],
+      // Legal form only: BoIS.
+      ["SE", "Göteborg BoIS"],
+      ["SE", "Helsingborg BoIS"],
+      // The real club goes by the city adjective (Salernitana, Cremonese, Reggina, Sambenedettese).
+      ["IT", "Salerno Calcio"],
+      ["IT", "SS Cremona"],
+      ["IT", "US Reggio Calabria"],
+      ["IT", "SS San Benedetto del Tronto"],
+      // A district in place of the city keeps the real club's identity word.
+      ["AT", "Austria Favoriten"],
+      ["DE", "Fortuna Benrath"],
+      ["BE", "Standard Rocourt"],
+      ["SE", "Syrianska Södertälje"],
+      ["SE", "Syrianska Ronna"],
     ];
     for (const [code, name, place] of copies) expect(lookup.copiesRealClub(code, name, place), `${code} ${name}`).toBe(true);
     const fictional = [
@@ -57,6 +72,8 @@ describe("real club names (pure)", () => {
       ["EN", "Bexley FC", "Bexley"],
       ["ES", "Racing Valencia"],
       ["DE", "Eintracht Stuttgart"],
+      ["DE", "Eintracht Benrath"],
+      ["SE", "Syrianska Kiruna"],
     ];
     for (const [code, name, place] of fictional) expect(lookup.copiesRealClub(code, name, place), `${code} ${name}`).toBe(false);
   });

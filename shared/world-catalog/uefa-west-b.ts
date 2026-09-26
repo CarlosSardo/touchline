@@ -40,16 +40,17 @@ const codes = (spec: string): WeightedCode[] =>
 const links = (context: MigrationContext, spec: string): HeritageLink[] =>
   codes(spec).map((entry) => ({ ...entry, context }));
 const span = (top: number, bottom: number): Span => ({ top, bottom });
-/** One city per line: "name|size|region|maxClubs|district,district". */
+/** One city per line: "name|size|region|maxClubs|district,district|adjective". */
 function cityRows(rows: string, regions: Record<string, string> = {}): CitySpec[] {
   return rows.trim().split("\n").map((row) => {
-    const [name, size, region, max, districts] = row.split("|").map((field) => field.trim());
+    const [name, size, region, max, districts, adjective] = row.split("|").map((field) => field.trim());
     return {
       name,
       size: size as CitySize,
       region: regions[region] ?? region,
       ...(max ? { maxClubs: Number(max) } : {}),
       ...(districts ? { districts: districts.split(",").map((district) => district.trim()) } : {}),
+      ...(adjective ? { adjective } : {}),
     };
   });
 }
@@ -376,6 +377,7 @@ const FRANCE: NationSpec = {
 
 // ------------------------------------------------------------------ Italy
 
+// The adjective is the name real clubs go by (US Salernitana, Triestina), so "Salerno Calcio" is refused as their copy.
 const IT_CITIES = cityRows(`
 Roma|mega|Lazio|5|Trastevere,Testaccio,Prati,Ostiense,Monteverde,Tuscolano,Garbatella,Flaminio
 Milano|mega|Lombardia|4|Isola,Navigli,Lambrate,Baggio,Niguarda,Bovisa,Sesto San Giovanni
@@ -384,27 +386,27 @@ Torino|large|Piemonte|3|Lingotto,Mirafiori,San Salvario,Barriera di Milano
 Palermo|large|Sicilia|2|Mondello,Brancaccio
 Genova|large|Liguria|2|Sampierdarena,Sestri Ponente,Nervi,Cornigliano
 Bologna|large|Emilia-Romagna|2|Borgo Panigale,San Donato
-Firenze|large|Toscana|2|Rifredi,Campo di Marte,Novoli
+Firenze|large|Toscana|2|Rifredi,Campo di Marte,Novoli|Fiorentina
 Bari|medium|Puglia|2|Japigia,Carbonara,Poggiofranco,Palese,Santo Spirito,Torre a Mare
 Catania|medium|Sicilia|2|Librino,Ognina,Picanello,Nesima
 Venezia|medium|Veneto|2|Mestre,Lido,Marghera,Favaro Veneto
 Verona|medium|Veneto|2|Borgo Trento,San Zeno,Borgo Roma,Golosine
 Messina|medium|Sicilia|2|Gazzi,Giostra,Camaro,Contesse
 Padova|medium|Veneto|2|Arcella,Brusegana,Voltabarozzo,Mortise
-Trieste|medium|Friuli-Venezia Giulia|2|Servola,Opicina,Roiano,Barcola
+Trieste|medium|Friuli-Venezia Giulia|2|Servola,Opicina,Roiano,Barcola|Triestina
 Brescia|medium|Lombardia|2|Mompiano,Sanpolino,Chiesanuova,Folzano
 Parma|medium|Emilia-Romagna|2|Oltretorrente,San Leonardo,Montanara,San Lazzaro Parmense
 Taranto|medium|Puglia|2|Talsano,Paolo VI,Tamburi,Lama
 Prato|medium|Toscana|2|Galciana,Iolo,Mezzana,Tavola
 Modena|medium|Emilia-Romagna|2|Buon Pastore,Crocetta,Sacca,Madonnina
-Reggio Calabria|medium|Calabria|2|Gallico,Pellaro,Catona,Archi
-Reggio Emilia|medium|Emilia-Romagna|2|Rivalta,Canali,Ospizio,Mancasale
+Reggio Calabria|medium|Calabria|2|Gallico,Pellaro,Catona,Archi|Reggina
+Reggio Emilia|medium|Emilia-Romagna|2|Rivalta,Canali,Ospizio,Mancasale|Reggiana
 Perugia|medium|Umbria|2|Ponte San Giovanni,San Sisto,Ponte Felcino,Castel del Piano
 Livorno|medium|Toscana|2|Ardenza,Antignano,Salviano,Shangai
 Cagliari|medium|Sardegna|2|Pirri,Is Mirrionis,Sant'Avendrace,Monte Urpinu
 Foggia|medium|Puglia|2|Borgo Incoronata,Candelaro,Macchia Gialla
 Rimini|medium|Emilia-Romagna|2|Viserba,Miramare,Rivabella,Torre Pedrera
-Salerno|medium|Campania|2|Pastena,Mercatello,Fratte,Torrione
+Salerno|medium|Campania|2|Pastena,Mercatello,Fratte,Torrione|Salernitana
 Ferrara|medium|Emilia-Romagna|2|Pontelagoscuro,Porotto,Quacchio,Cona
 Monza|medium|Lombardia|2|San Fruttuoso,Triante,Cederna,Sant'Albino
 Bergamo|medium|Lombardia|2|Longuelo,Redona,Colognola,Boccaleone
@@ -414,13 +416,13 @@ Latina|medium|Lazio|2|Borgo Piave,Latina Scalo,Borgo Sabotino,Borgo Podgora
 Novara|medium|Piemonte|2|Sant'Agabio,Veveri,Pernate,Olengo
 Piacenza|medium|Emilia-Romagna|2|Farnesiana,Besurica,Mucinasso
 Ancona|medium|Marche|2|Torrette,Collemarino,Tavernelle,Pietralacroce
-Udine|medium|Friuli-Venezia Giulia|2|Paderno,Cussignacco,Chiavris,Godia
+Udine|medium|Friuli-Venezia Giulia|2|Paderno,Cussignacco,Chiavris,Godia|Udinese
 Trento|medium|Trentino-Alto Adige|2|Gardolo,Povo,Mattarello,Ravina
 Bolzano|small|Trentino-Alto Adige|1|Gries,Oltrisarco
 Lecce|small|Puglia|1|Frigole,San Cataldo
 Como|small|Lombardia|1|Camerlata,Albate,Rebbio
 Pisa|small|Toscana|1|Marina di Pisa,Putignano Pisano
-Cremona|small|Lombardia|1|Cavatigozzi,Picenengo
+Cremona|small|Lombardia|1|Cavatigozzi,Picenengo|Cremonese
 Sassuolo|small|Emilia-Romagna
 Empoli|small|Toscana
 La Spezia|small|Liguria
@@ -429,20 +431,20 @@ Cosenza|small|Calabria
 Crotone|small|Calabria|1|Papanice,Capocolonna
 Frosinone|small|Lazio
 Cesena|small|Emilia-Romagna|1|San Vittore,Ponte Abbadesse
-Terni|small|Umbria|1|Borgo Rivo,Piediluco
+Terni|small|Umbria|1|Borgo Rivo,Piediluco|Ternana
 Avellino|small|Campania|1|Picarelli,Bellizzi Irpino
 Benevento|small|Campania
-Caserta|small|Campania
+Caserta|small|Campania|||Casertana
 Siracusa|small|Sicilia
 Trapani|small|Sicilia
 Sassari|small|Sardegna|1|Li Punti,Ottava
 Olbia|small|Sardegna|1|Pittulongu,Berchiddeddu
 Arezzo|small|Toscana|1|Olmo,Indicatore
 Siena|small|Toscana|1|Taverne d'Arbia,Isola d'Arbia
-Lucca|small|Toscana|1|Sant'Anna,San Concordio
-Pistoia|small|Toscana|1|Bottegone,Candeglia
+Lucca|small|Toscana|1|Sant'Anna,San Concordio|Lucchese
+Pistoia|small|Toscana|1|Bottegone,Candeglia|Pistoiese
 Grosseto|small|Toscana|1|Marina di Grosseto,Roselle
-Carrara|small|Toscana|1|Avenza,Marina di Carrara
+Carrara|small|Toscana|1|Avenza,Marina di Carrara|Carrarese
 Alessandria|small|Piemonte|1|Spinetta Marengo,Cristo
 Asti|small|Piemonte
 Vercelli|small|Piemonte
@@ -456,7 +458,7 @@ Ravenna|small|Emilia-Romagna|1|Marina di Ravenna,Classe,Sant'Alberto
 Forlì|small|Emilia-Romagna|1|Ronco,Vecchiazzano
 Pesaro|small|Marche|1|Villa Fastiggi,Soria
 Ascoli Piceno|small|Marche
-San Benedetto del Tronto|small|Marche
+San Benedetto del Tronto|small|Marche|||Sambenedettese
 Teramo|small|Abruzzo
 L'Aquila|small|Abruzzo
 Potenza|small|Basilicata
@@ -482,13 +484,13 @@ Treviso|small|Veneto
 Pordenone|small|Friuli-Venezia Giulia
 Lumezzane|town|Lombardia
 Pontedera|town|Toscana
-Fermo|town|Marche
+Fermo|town|Marche|||Fermana
 Rieti|town|Lazio
-Viterbo|small|Lazio
-Nocera Inferiore|town|Campania
+Viterbo|small|Lazio|||Viterbese
+Nocera Inferiore|town|Campania|||Nocerina
 Acireale|town|Sicilia
 Agrigento|small|Sicilia
-Vibo Valentia|town|Calabria
+Vibo Valentia|town|Calabria|||Vibonese
 `);
 
 const IT_FOOTBALL: DomesticFootballSpec = {
@@ -643,6 +645,7 @@ Città di Varese|Città di Brindisi|Città di Campobasso|Città di Messina|Citt�
 Città di Gela|Città di Sant'Agata|Città di Ciampino|Città di Anagni|Città di Pontedera|Città di Castello|Città di Isernia|
 Atletico Catania|Atletico Roma|Atletico Ascoli|Real Vicenza|Union Brescia|Union Clodiense|Union Feltre|Pro Roma|Pro Gorizia|
 Pro Livorno|Virtus Bergamo|Virtus Lanciano|Trastevere Calcio|Ostiamare|Sestri Levante|Sampierdarenese|Alcione Milano|AC Mestre|
+US Viterbese|US Vibonese|Fidelis Andria|
 `),
     colors: ["#000000", "#FFFFFF", "#0068A8", "#8E1F2F", "#87CEEB", "#6A0DAD", "#FFD700", "#00843D", "#E30613", "#1E2A5A"],
   },
