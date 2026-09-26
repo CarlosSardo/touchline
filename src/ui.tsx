@@ -1018,12 +1018,14 @@ export function Modal({
   onClose,
   wide = false,
   className = "",
+  describedBy,
 }: {
   title: string;
   children: ReactNode;
   onClose: () => void;
   wide?: boolean;
   className?: string;
+  describedBy?: string;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
   const titleId = useId();
@@ -1048,6 +1050,7 @@ export function Modal({
       ref={ref}
       className={clsx("modal-sheet", wide && "modal-wide", className)}
       aria-labelledby={titleId}
+      aria-describedby={describedBy}
       onClick={(event) => {
         if (event.target === event.currentTarget) onClose();
       }}

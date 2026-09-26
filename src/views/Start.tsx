@@ -1,4 +1,4 @@
-import { Fragment, useDeferredValue, useEffect, useState } from "react";
+import { Fragment, useDeferredValue, useEffect, useId, useState } from "react";
 import {
   ArrowLeft,
   ArrowRight,
@@ -37,6 +37,12 @@ import {
   groupCareerSaves,
 } from "../../shared/rules.ts";
 import SavedCareers from "../SavedCareers.tsx";
+import { SaveReplacementWarning } from "../SaveReplacement.tsx";
+import {
+  oldestPhrase,
+  savesReplacedByManualSave,
+  type ListedSave,
+} from "../save-rotation.ts";
 import { CareerSheet } from "./Settings.tsx";
 import type { League } from "../../shared/types.ts";
 import type {
@@ -99,7 +105,7 @@ export default function Start() {
     data: saves,
     loading: savesLoading,
     error: savesError,
-  } = useResource<SaveSlot[]>("saves");
+  } = useResource<ListedSave[]>("saves");
   const [view, setView] = useState<"home" | "new" | "load">("home");
   const [name, setName] = useState(
     session?.user.displayName.slice(0, 50) ?? "",
@@ -123,6 +129,8 @@ export default function Start() {
   const [error, setError] = useState<string | null>(null);
   const [load, setLoad] = useState<SaveSlot | null>(null);
   const [remove, setRemove] = useState<SaveSlot | null>(null);
+  const [confirmStart, setConfirmStart] = useState(false);
+  const replacementId = useId();
   const [deleting, setDeleting] = useState(false);
   const [removeActive, setRemoveActive] = useState(false);
   const [confirmText, setConfirmText] = useState("");
@@ -198,6 +206,11 @@ export default function Start() {
     state?.careerId && saves
       ? saves.filter((slot) => slot.career?.id === state.careerId).length
       : null;
+  // Loading or starting another career first saves the current one as a manual save.
+  const archiveReplaces =
+    state && state.started !== false && saves
+      ? savesReplacedByManualSave(saves, state.careerId)
+      : [];
   function beginOperation() {
     setError(null);
     setOperationStart(Date.now());
@@ -575,7 +588,8 @@ export default function Start() {
             className="new-career-form"
             onSubmit={(event) => {
               event.preventDefault();
-              void createCareer();
+              if (archiveReplaces.length) setConfirmStart(true);
+              else void createCareer();
             }}
           >
             <section>
@@ -615,7 +629,9 @@ export default function Start() {
               {state?.started && (
                 <p className="career-save-notice">
                   <HardDrive size={15} />
-                  Your current career will be kept as a separate save.
+                  {archiveReplaces.length
+                    ? `Your current career will be kept as a separate save, replacing ${oldestPhrase(archiveReplaces.length)} of its manual saves.`
+                    : "Your current career will be kept as a separate save."}
                 </p>
               )}
               <Button
@@ -844,7 +860,11 @@ export default function Start() {
       )}
       {profile && <CareerSheet close={() => setProfile(false)} />}
       {load && (
-        <Modal title="Load this career?" onClose={() => setLoad(null)}>
+        <Modal
+          title="Load this career?"
+          describedBy={archiveReplaces.length ? replacementId : undefined}
+          onClose={() => setLoad(null)}
+        >
           <div className="sheet-body">
             <h3>{load.career?.name ?? load.name}</h3>
             <p className="sheet-description">
@@ -852,6 +872,12 @@ export default function Start() {
                 ? "Your current career will be saved before switching."
                 : "Open this saved career."}
             </p>
+            {archiveReplaces.length > 0 && (
+              <SaveReplacementWarning id={replacementId} saves={archiveReplaces}>
+                Saving your current career before switching permanently
+                deletes {oldestPhrase(archiveReplaces.length)}:
+              </SaveReplacementWarning>
+            )}
           </div>
           <footer className="sheet-footer">
             <Button variant="secondary" onClick={() => setLoad(null)}>
@@ -859,6 +885,35 @@ export default function Start() {
             </Button>
             <Button icon={FolderOpen} onClick={() => void loadCareer(load)}>
               Load career
+            </Button>
+          </footer>
+        </Modal>
+      )}
+      {confirmStart && (
+        <Modal
+          title="Replace your oldest save?"
+          describedBy={replacementId}
+          onClose={() => setConfirmStart(false)}
+        >
+          <div className="sheet-body">
+            <SaveReplacementWarning id={replacementId} saves={archiveReplaces}>
+              Keeping your current career as a separate save permanently
+              deletes {oldestPhrase(archiveReplaces.length)}:
+            </SaveReplacementWarning>
+          </div>
+          <footer className="sheet-footer">
+            <Button variant="secondary" onClick={() => setConfirmStart(false)}>
+              Cancel
+            </Button>
+            <Button
+              variant="danger"
+              icon={Play}
+              onClick={() => {
+                setConfirmStart(false);
+                void createCareer();
+              }}
+            >
+              Replace and start
             </Button>
           </footer>
         </Modal>

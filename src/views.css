@@ -1087,6 +1087,42 @@
 .delete-career-form .field input {
   width: 100%;
 }
+.save-replacement {
+  border-left: 2px solid var(--amber);
+  background: color-mix(in srgb, var(--amber) 8%, var(--surface));
+  padding: 14px 15px;
+  font-size: 0.86rem;
+  line-height: 1.6;
+}
+.save-replacement > p {
+  display: flex;
+  gap: 9px;
+  align-items: flex-start;
+  margin: 0 0 10px;
+}
+.save-replacement > p > svg {
+  flex-shrink: 0;
+  margin-top: 3px;
+  color: var(--amber);
+}
+.save-replacement ul {
+  margin: 0;
+  padding: 0 0 0 25px;
+  list-style: none;
+  display: grid;
+  gap: 8px;
+}
+.save-replacement li {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.save-replacement strong {
+  overflow-wrap: anywhere;
+}
+.save-replacement small {
+  color: var(--muted);
+}
 .career-menu-actions {
   display: flex;
   flex-direction: column;

@@ -17,6 +17,7 @@ import {
   money,
 } from "../shared/rules.ts";
 import { sortPlayers } from "../src/sort.ts";
+import { savesReplacedByManualSave, type ListedSave } from "../src/save-rotation.ts";
 
 test.describe.configure({ mode: "serial" });
 
@@ -1130,6 +1131,137 @@ test("career folders keep all autosaves together in the menu and settings", asyn
       ).status(),
     ).toBe(200);
   }
+});
+
+test("a manual save at the career limit names the save it replaces and waits for confirmation", async ({
+  page,
+  request,
+}) => {
+  let current = await bootstrapOf(request);
+  if (!current.state.careerId) {
+    expect(
+      (
+        await request.post("/api/saves", {
+          data: { name: "Rotation career" },
+          timeout: 180000,
+        })
+      ).status(),
+    ).toBe(200);
+    current = await bootstrapOf(request);
+  }
+  const career = {
+    id: current.state.careerId as string,
+    name: current.state.careerName ?? current.club.name,
+    director: current.state.director.name,
+    club: current.club.name,
+    date: "2026-07-01",
+    season: 2026,
+  };
+  const fake = (
+    index: number,
+    name: string,
+    extra: Partial<ListedSave> = {},
+  ): ListedSave => ({
+    name,
+    file: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}.touchline.gz`,
+    size: 1_000_000,
+    modified: new Date(Date.UTC(2020, 0, 1 + index, 12)).toISOString(),
+    compressed: true,
+    automatic: false,
+    imported: false,
+    career,
+    ...extra,
+  });
+  const files = (slots: ListedSave[]) => slots.map((slot) => slot.file);
+  const real: ListedSave[] = await (
+    await retryBusyResponse(() => request.get("/api/saves"))
+  ).json();
+  // The list is mocked so the check neither depends on nor writes real saves.
+  const others = real.filter(
+    (slot) => slot.automatic || slot.imported || slot.career?.id !== career.id,
+  );
+  const imported = fake(20, "Imported rotation check", {
+    imported: true,
+    modified: "2019-12-01T12:00:00.000Z",
+  });
+  const oldest = fake(0, "Oldest rotation check");
+  const newer = Array.from({ length: 9 }, (_, index) =>
+    fake(index + 1, `Rotation check ${index + 1}`),
+  );
+  let listed = [...others, imported, ...newer];
+  const posted: unknown[] = [];
+  await page.route("**/api/saves", async (route) => {
+    const method = route.request().method();
+    if (method === "GET") return route.fulfill({ json: listed });
+    if (method === "POST") {
+      posted.push(route.request().postDataJSON());
+      return route.fulfill({ json: { file: fake(30, "Posted").file, name: "Posted" } });
+    }
+    return route.fallback();
+  });
+  await page.goto("/#settings");
+  await page
+    .getByRole("navigation", { name: "Settings categories" })
+    .getByRole("button", { name: "Saves", exact: true })
+    .click();
+  const saveName = page.getByLabel("Save name", { exact: true });
+  const saveButton = page.getByRole("button", { name: "Save career", exact: true });
+  const replace = page.getByRole("dialog", { name: "Replace your oldest save?" });
+  await saveName.fill("Under the limit");
+  await saveButton.click();
+  await expect.poll(() => posted.length).toBe(1);
+  expect(posted[0]).toEqual({ name: "Under the limit" });
+  await expect(replace).toHaveCount(0);
+
+  listed = [...others, imported, oldest, ...newer];
+  expect(savesReplacedByManualSave(listed, career.id)).toEqual([oldest]);
+  await saveName.fill("Rotation confirmation");
+  await saveButton.click();
+  await expect(replace).toBeVisible();
+  await expect(replace).toContainText("“Rotation confirmation”");
+  await expect(replace).toContainText("Oldest rotation check");
+  await expect(replace).toContainText("saved 1 Jan 2020");
+  await expect(replace).not.toContainText("Rotation check 1");
+  await expect(replace).not.toContainText("Imported rotation check");
+  await expect(replace).toHaveAccessibleDescription(
+    /permanently deletes the oldest one:.*Oldest rotation check/,
+  );
+  await expect
+    .poll(() =>
+      page.evaluate(() => !!document.activeElement?.closest("dialog[open]")),
+    )
+    .toBe(true);
+  await page.keyboard.press("Escape");
+  await expect(replace).toHaveCount(0);
+  await expect(saveButton).toBeFocused();
+  await expect(saveName).toHaveValue("Rotation confirmation");
+  for (const width of [390, 320]) {
+    await page.setViewportSize({ width, height: 760 });
+    await saveButton.click();
+    await expect(replace).toBeVisible();
+    await noOverflow(page);
+    expect(
+      await replace.evaluate(
+        (dialog) =>
+          dialog.scrollWidth <= dialog.clientWidth + 1 &&
+          dialog.getBoundingClientRect().right <= innerWidth + 1,
+      ),
+    ).toBe(true);
+    await page.screenshot({ path: `test-results/save-replacement-${width}.png` });
+    await replace.getByRole("button", { name: "Cancel", exact: true }).click();
+    await expect(replace).toHaveCount(0);
+  }
+  expect(posted).toHaveLength(1);
+
+  await saveButton.click();
+  await replace.getByRole("button", { name: "Replace and save", exact: true }).click();
+  await expect.poll(() => posted.length).toBe(2);
+  expect(posted[1]).toEqual({ name: "Rotation confirmation" });
+  await expect(replace).toHaveCount(0);
+  await page.unroute("**/api/saves");
+  expect(
+    files(await (await retryBusyResponse(() => request.get("/api/saves"))).json()),
+  ).toEqual(files(real));
 });
 
 test("seeded local world and desktop dashboard", async ({ page, request }) => {
@@ -2884,7 +3016,19 @@ test("start menu creates, loads and safely deletes a separate career", async ({
     .locator(".club-chooser-list button")
     .filter({ has: page.getByText(choice.name, { exact: true }) })
     .click();
+  // Archiving the current career rotates its manual saves once it keeps 10.
+  const replaced = savesReplacedByManualSave(
+    await (await retryBusyResponse(() => request.get("/api/saves"))).json(),
+    (await bootstrapOf(request)).state.careerId,
+  );
   await page.getByRole("button", { name: "Start career", exact: true }).click();
+  if (replaced.length) {
+    const replace = page.getByRole("dialog", { name: "Replace your oldest save?" });
+    await expect(replace).toContainText(replaced[0].name);
+    await replace
+      .getByRole("button", { name: "Replace and start", exact: true })
+      .click();
+  }
   await expect(
     page.getByRole("heading", { name: "Good morning, Jamie." }),
   ).toBeVisible({ timeout: 480000 });

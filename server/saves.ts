@@ -141,7 +141,10 @@ function temporaryFile() {
   return join(tmpdir(), `touchline-${randomUUID()}.touchline.gz`);
 }
 
-function slotFromRow(row: CatalogRow): SaveSlot {
+/** Imported uploads never rotate away, so the client needs the flag to warn before a manual save replaces one. */
+export type ListedSaveSlot = SaveSlot & { imported: boolean };
+
+function slotFromRow(row: CatalogRow): ListedSaveSlot {
   if (!UUID.test(row.id))
     throw new SaveFormatError("Invalid save catalog identifier.");
   return {
@@ -151,6 +154,7 @@ function slotFromRow(row: CatalogRow): SaveSlot {
     modified: new Date(row.created_at).toISOString(),
     compressed: true,
     automatic: Boolean(row.automatic),
+    imported: Boolean(row.imported),
     career: row.career_metadata
       ? (JSON.parse(row.career_metadata) as SaveSlot["career"])
       : undefined,
@@ -742,7 +746,7 @@ export class Saves {
     });
   }
 
-  async list(): Promise<SaveSlot[]> {
+  async list(): Promise<ListedSaveSlot[]> {
     return (
       await this.store.all<CatalogRow>(
         `SELECT * FROM ${tableName(this.store, "save_slots")} WHERE complete = 1 ORDER BY created_at DESC,id DESC`,
