@@ -495,12 +495,14 @@ async function setData(store: Store, leagueId: number, data: CompetitionData) {
 export async function scheduleKnockout(
   store: Store,
   leagueId: number,
-  clubs: number[],
+  entrants: number[],
   season: number,
   date: string,
   round = 1,
   extra: CompetitionData = {},
 ) {
+  // A club paired with itself gets no fixture, so it must appear once per round.
+  const clubs = [...new Set(entrants)];
   return withFixtureBatch(store, season, async () => {
     const data: CompetitionData = {
       ...JSON.parse(
@@ -556,12 +558,12 @@ export async function scheduleKnockout(
         "",
         { tie },
       );
-      if (rules.legs === 2) {
+      if (rules.legs === 2 && firstDate) {
         await addFixture(
           store,
           leagueId,
           season,
-          addDays(firstDate!, 7),
+          addDays(firstDate, 7),
           seeded,
           opponent,
           stage,
@@ -2407,7 +2409,8 @@ export async function progressCompetitions(store: Store, date: string) {
         : table.length >= 24 && spec.confederation === "UEFA" && spec.age === "Senior"
           ? 8
           : 0;
-      if (spec.format === "Swiss" && !catalog?.zones && byes) {
+      // Small worlds: a play-off round needs two clubs; otherwise every qualifier goes straight into the knockout.
+      if (spec.format === "Swiss" && !catalog?.zones && byes && table.slice(byes, catalog?.advance ?? 24).length >= 2) {
         // League phase: 1st–8th skip the knockout play-offs, 9th–24th play them.
         await scheduleKnockout(
           store,
@@ -2426,9 +2429,12 @@ export async function progressCompetitions(store: Store, date: string) {
         const playoff = [...groups.map((group) => byGroup(group)[1]), ...((data.feedIns as number[]) ?? [])].filter(
           (id) => id !== undefined,
         );
-        await scheduleKnockout(store, league.id, playoff, state.season, nextDate, spec.rounds + 1, {
-          playoffByes: winners,
-        });
+        if (playoff.length >= 2)
+          await scheduleKnockout(store, league.id, playoff, state.season, nextDate, spec.rounds + 1, {
+            playoffByes: winners,
+          });
+        else if (winners.length + playoff.length >= 2)
+          await scheduleKnockout(store, league.id, [...winners, ...playoff], state.season, nextDate, spec.rounds + 1);
         continue;
       }
       if (spec.format === "Swiss" && !catalog?.zones) {

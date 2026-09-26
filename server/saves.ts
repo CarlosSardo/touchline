@@ -669,12 +669,10 @@ export class Saves {
   constructor(readonly store: Store) {}
 
   async currentState(): Promise<GameState | null> {
-    const rows = await this.store.all<{ key: string; value: string }>(
-      "SELECT [key], [value] FROM meta WHERE [key] IN ('state', 'worldBuild')",
-    );
     // An unfinished (or interrupted) world build is not a career yet; prepareCareer discards and rebuilds it.
-    if (rows.some((row) => row.key === "worldBuild")) return null;
-    const row = rows.find((candidate) => candidate.key === "state");
+    const row = await this.store.get<{ value: string }>(
+      "SELECT [value] FROM meta WHERE [key] = 'state' AND NOT EXISTS (SELECT 1 FROM meta WHERE [key] = 'worldBuild')",
+    );
     return row ? JSON.parse(row.value) as GameState : null;
   }
 

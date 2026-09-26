@@ -843,7 +843,8 @@ describe("game HTTP API and SQL saves", () => {
         ),
       ).toBe(true);
       const dossier = await request(app).get(`/api/players/${player.id}`);
-      expect(dossier.body.registration.status).toBe("Domestic work rights");
+      // The v4 fixture's clubs are Scottish and Irish; the FA endorsement applies only to English clubs.
+      expect(dossier.body.registration.status).toBe("No FA endorsement required");
     } finally {
       await store.run(
         "UPDATE players SET profile = ? WHERE id = ?",
@@ -982,11 +983,12 @@ describe("game HTTP API and SQL saves", () => {
       }
     }
     expect(ids).toEqual(expected.map((club) => club.id));
+    // v4 models Scotland (country 1) and Ireland with one senior division each.
     const division = await request(app).get("/api/world/clubs").query({
       type: "club",
       sort: "division",
       country: 1,
-      tier: 2,
+      tier: 1,
       pageSize: 100,
     });
     expect(division.status).toBe(200);
@@ -994,7 +996,7 @@ describe("game HTTP API and SQL saves", () => {
     expect(
       division.body.clubs.every(
         (club: { country_id: number; tier: number }) =>
-          club.country_id === 1 && club.tier === 2,
+          club.country_id === 1 && club.tier === 1,
       ),
     ).toBe(true);
     expect(await stateOf(store)).toEqual(original);
@@ -1002,22 +1004,32 @@ describe("game HTTP API and SQL saves", () => {
 
   it("validates minor application evidence and does not accept a parental exception from request data", async () => {
     const original = await stateOf(store);
-    const clubs = await store.all<{ id: number }>(
-      "SELECT MIN(clubs.id) AS id FROM clubs JOIN countries ON countries.id = clubs.country_id WHERE clubs.type = 'club' AND countries.code IN ('ES','DE') GROUP BY clubs.country_id ORDER BY MIN(clubs.id)",
-    );
+    // The v4 fixture (SCO, IE) has no EU/EEA club pair: an Irish club registers a club-less, never-registered
+    // Scottish-Spanish youth, the EU/EEA 16-17 route.
+    const irish = (await store.get<{ id: number }>(
+      "SELECT MIN(clubs.id) AS id FROM clubs JOIN countries ON countries.id = clubs.country_id WHERE clubs.type = 'club' AND countries.code = 'IE'",
+    ))!;
     const player = (await store.get<{
       id: number;
       profile: string;
       age: number;
       birth_date: string;
+      club_id: number;
+      squad_club_id: number | null;
+      country_id: number;
     }>(
-      "SELECT TOP (1) id,profile,age,birth_date FROM players WHERE club_id = ? AND age_group != 'Senior'",
-      clubs[0].id,
+      "SELECT TOP (1) players.id,players.profile,players.age,players.birth_date,players.club_id,players.squad_club_id,players.country_id FROM players JOIN countries ON countries.id = players.country_id WHERE countries.code = 'SCO' AND players.club_id IS NOT NULL AND players.parent_club_id IS NULL AND players.age_group != 'Senior' ORDER BY players.id",
     ))!;
+    const profile = JSON.parse(player.profile);
+    delete profile.registration;
+    delete profile.homeBased;
+    delete profile.familyMove;
+    profile.identity.nationalities = [{ countryId: player.country_id, code: "ES", country: "Spain", basis: "parent" }];
     try {
-      await store.setMeta("state", { ...original, clubId: clubs[1].id });
+      await store.setMeta("state", { ...original, clubId: irish.id });
       await store.run(
-        "UPDATE players SET age = 17,birth_date = '2009-01-01' WHERE id = ?",
+        "UPDATE players SET age = 17,birth_date = '2009-01-01',club_id = NULL,squad_club_id = NULL,profile = ? WHERE id = ?",
+        JSON.stringify(profile),
         player.id,
       );
       const safeguards = {
@@ -1093,10 +1105,12 @@ describe("game HTTP API and SQL saves", () => {
     } finally {
       await store.setMeta("state", original);
       await store.run(
-        "UPDATE players SET age = ?,birth_date = ?,profile = ? WHERE id = ?",
+        "UPDATE players SET age = ?,birth_date = ?,profile = ?,club_id = ?,squad_club_id = ? WHERE id = ?",
         player.age,
         player.birth_date,
         player.profile,
+        player.club_id,
+        player.squad_club_id,
         player.id,
       );
     }
@@ -1454,6 +1468,9 @@ describe("game HTTP API and SQL saves", () => {
 
   it("creates and restores a catalog checkpoint without losing the career", async () => {
     const saves = new Saves(store);
+    const players = async () =>
+      (await store.get<{ count: number }>("SELECT count(*) AS count FROM players"))!.count;
+    const savedPlayers = await players();
     const slot = await saves.create("Regression save");
     expect(slot.file).toMatch(
       /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}\.touchline\.gz$/i,
@@ -1471,11 +1488,8 @@ describe("game HTTP API and SQL saves", () => {
     });
     await saves.restore(slot.file);
     expect((await stateOf(store)).date).toBe("2026-07-01");
-    expect(
-      (await store.get<{ count: number }>(
-        "SELECT count(*) AS count FROM players",
-      ))!.count,
-    ).toBe(2700);
+    expect(savedPlayers).toBeGreaterThan(0);
+    expect(await players()).toBe(savedPlayers);
     await expect(saves.restore("../../escape.touchline.gz")).rejects.toThrow(
       "not found",
     );

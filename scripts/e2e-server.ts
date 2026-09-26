@@ -81,6 +81,7 @@ async function dropOwnedSchema() {
   );
   for (const table of tables)
     await store.exec(`DROP TABLE ${quote(schemaName)}.${quote(table.name)}`);
+  await store.exec(`DROP PROCEDURE IF EXISTS ${quote(schemaName)}.${quote("reseed_world_identity")}`);
   await store.exec(`DROP SCHEMA ${quote(schemaName)}`);
   ownsSchema = false;
 }

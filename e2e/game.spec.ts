@@ -51,35 +51,43 @@ async function retryBusyResponse(operation: () => Promise<APIResponse>) {
   return response;
 }
 
-test("association rules expose documented and unverified coverage for every country", async ({
+test("association rules expose the catalog coverage of every seeded association", async ({
   page,
   request,
 }) => {
   const audit = await (await request.get("/api/world/audit")).json();
   await page.goto("/#world");
   await page.locator(".association-audit > summary").click();
-  await expect(page.locator(".association-audit-table tbody tr")).toHaveCount(
+  const rules = page.locator(".association-audit-table tbody tr");
+  await expect(rules).toHaveCount(audit.countries.length);
+  // World v4: every catalog association is documented; only the reserve model differs.
+  await expect(rules.filter({ hasText: "Documented" })).toHaveCount(
     audit.countries.length,
   );
-  const germany = audit.countries.find(
-    (entry: { code: string }) => entry.code === "DE",
-  );
-  await page
-    .getByRole("combobox", { name: "World country", exact: true })
-    .selectOption(String(germany.id));
-  const rules = page.locator(".association-audit-table tbody tr");
-  await expect(rules).toHaveCount(1);
-  await expect(rules).toContainText("Documented");
-  await expect(
-    rules.getByRole("link", { name: "Reference source", exact: true }),
-  ).toHaveAttribute("href", germany.reservePolicy.source);
-  const luxembourg = audit.countries.find(
-    (entry: { code: string }) => entry.code === "LU",
-  );
-  await page
-    .getByRole("combobox", { name: "World country", exact: true })
-    .selectOption(String(luxembourg.id));
-  await expect(rules).toContainText("Permission unverified");
+  for (const [code, mode] of [
+    ["DE", "Senior pyramid"],
+    ["LU", "No reserve teams"],
+  ]) {
+    const association = audit.countries.find(
+      (entry: { code: string }) => entry.code === code,
+    );
+    await page
+      .getByRole("combobox", { name: "World country", exact: true })
+      .selectOption(String(association.id));
+    await expect(rules).toHaveCount(1);
+    await expect(rules).toContainText(mode);
+    await expect(rules).toContainText(association.reservePolicy.summary);
+    const source = rules.getByRole("link", {
+      name: "Reference source",
+      exact: true,
+    });
+    if (association.reservePolicy.source)
+      await expect(source).toHaveAttribute(
+        "href",
+        association.reservePolicy.source,
+      );
+    else await expect(source).toHaveCount(0);
+  }
   await rules.getByText("Regulatory limits", { exact: true }).click();
   await expect(rules).toContainText("not a complete federation rulebook");
   await page.setViewportSize({ width: 320, height: 844 });
@@ -405,7 +413,7 @@ test("future transfer agreements keep young players at their clubs and reserve m
   try {
     const before = await (await request.get("/api/bootstrap")).json();
     const country = before.countries.find(
-      (entry: { code: string }) => entry.code === "FR",
+      (entry: { code: string }) => entry.code === "DE",
     );
     const players = await (
       await request.get(
@@ -1112,7 +1120,7 @@ test("career folders keep all autosaves together in the menu and settings", asyn
   }
 });
 
-test("full local world and desktop dashboard", async ({ page, request }) => {
+test("seeded local world and desktop dashboard", async ({ page, request }) => {
   const failures: string[] = [];
   const external: string[] = [];
   page.on("pageerror", (error) => failures.push(error.message));
@@ -1124,10 +1132,17 @@ test("full local world and desktop dashboard", async ({ page, request }) => {
       external.push(request.url());
   });
   const bootstrap = await (await request.get("/api/bootstrap")).json();
-  expect(bootstrap.world.countries).toBeGreaterThanOrEqual(200);
-  expect(bootstrap.world.leagues).toBeGreaterThanOrEqual(1200);
-  expect(bootstrap.world.clubs).toBeGreaterThanOrEqual(3500);
-  expect(bootstrap.world.players).toBeGreaterThanOrEqual(160000);
+  // scripts/e2e-server.ts seeds EN, DE and LU, not the full 211-nation world.
+  expect(
+    bootstrap.countries.map((country: { code: string }) => country.code).sort(),
+  ).toEqual(["DE", "EN", "LU"]);
+  expect(bootstrap.world.countries).toBe(3);
+  expect(bootstrap.world.version).toBe(4);
+  expect(bootstrap.world.leagues).toBeGreaterThan(bootstrap.world.countries);
+  expect(bootstrap.world.clubs).toBeGreaterThanOrEqual(150);
+  expect(bootstrap.world.players).toBeGreaterThanOrEqual(
+    bootstrap.world.clubs * 20,
+  );
   expect(bootstrap.settings.cloudSync).toBe(false);
   await page.goto("/#office");
   await expect(
@@ -2651,11 +2666,17 @@ test("world browsing opens any team and linked player profiles", async ({
     "B team",
   );
   await page.getByRole("button", { name: "Reset world filters" }).click();
-  await page.getByLabel("Search world teams").fill("Kingsport City");
-  await page.locator(".world-table tbody .team-link").first().click();
+  // Senior clubs come first in reputation order, so a name search opens the club before its B team.
+  const club = (response.clubs as { name: string; type: string }[]).find(
+    (entry) => entry.type === "club",
+  )!;
+  await page.getByLabel("Search world teams").fill(club.name);
+  const result = page.locator(".world-table tbody .team-link").first();
+  await expect(result).toContainText(club.name);
+  await result.click();
   const team = page.getByRole("dialog", { name: "Team profile" });
   await expect(
-    team.getByRole("heading", { name: "Kingsport City", exact: true }),
+    team.getByRole("heading", { name: club.name, exact: true }),
   ).toBeVisible();
   await team.getByRole("tab", { name: /Squads/ }).click();
   await team.locator(".player-name").first().click();
@@ -2828,6 +2849,14 @@ test("start menu creates, loads and safely deletes a separate career", async ({
 }) => {
   test.setTimeout(720000);
   const before = await (await request.get("/api/bootstrap")).json();
+  // England has no B teams in world v4, so a club name matches exactly one picker entry.
+  const choice = (
+    await (
+      await request.get(
+        `/api/world/clubs?type=club&country=${before.club.country_id}&pageSize=30`,
+      )
+    ).json()
+  ).clubs.find((club: { id: number }) => club.id !== before.club.id);
   const saved = await (
     await request.post("/api/saves", {
       data: { name: "Career menu regression" },
@@ -2850,10 +2879,10 @@ test("start menu creates, loads and safely deletes a separate career", async ({
   await page
     .getByRole("combobox", { name: "Background", exact: true })
     .selectOption("Academy director");
-  await page.getByLabel("Find career club").fill("Kingsport City");
+  await page.getByLabel("Find career club").fill(choice.name);
   await page
     .locator(".club-chooser-list button")
-    .filter({ hasText: "Kingsport City" })
+    .filter({ has: page.getByText(choice.name, { exact: true }) })
     .click();
   await page.getByRole("button", { name: "Start career", exact: true }).click();
   await expect(
@@ -2862,7 +2891,7 @@ test("start menu creates, loads and safely deletes a separate career", async ({
   const created = await (await request.get("/api/bootstrap")).json();
   expect(created.state.date).toBe("2026-07-01");
   expect(created.state.careerName).toBe("Second career");
-  expect(created.club.id).toBe(2);
+  expect(created.club.id).toBe(choice.id);
   const localClubs = await (
     await request.get(
       `/api/world/clubs?type=club&country=${created.club.country_id}&pageSize=100`,

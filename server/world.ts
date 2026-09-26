@@ -1661,7 +1661,8 @@ export async function generateWorld(store: Store, options: WorldOptions = {}): P
       },
     });
   });
-  await ensureClubSupport(store);
+  // Club support hires a director assistant per club: people, so structure-only worlds skip it.
+  if (!options.structureOnly) await ensureClubSupport(store);
   await seedAssociationCoefficients(store, Number(START_DATE.slice(0, 4)));
 }
 

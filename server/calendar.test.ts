@@ -488,6 +488,40 @@ describe("competition-specific knockout regulations", () => {
       expectedWinners.sort(),
     );
   });
+
+  it("starts the knockout at once when a small league phase leaves one club for the play-offs", async () => {
+    const spec = COMPETITIONS.find((competition) => competition.name === "UEFA Conference League")!;
+    const id = Number(
+      (
+        await store.run(
+          "INSERT INTO leagues(name,confederation,tier,age_group,kind,reputation,format,data) VALUES (?,'UEFA',0,'Senior','continental',80,'Swiss',?)",
+          "Small league phase",
+          JSON.stringify({ spec, phase: "groups", season: 2026 }),
+        )
+      ).lastInsertRowid,
+    );
+    const clubs = [11, 12, 13, 14, 15, 16, 17, 18, 19];
+    await store.bulkInsert(
+      "standings",
+      clubs.map((club_id, index) => ({ league_id: id, club_id, group_name: "", points: 30 - index })),
+    );
+    await store.run(
+      "INSERT INTO fixtures(league_id,home_id,away_id,date,season,round,stage,seed,status,home_goals,away_goals,data) VALUES (?,11,12,'2026-12-18',2026,?,'League phase','small-league-phase','played',1,0,'{}')",
+      id,
+      spec.rounds,
+    );
+    await progressCompetitions(store, "2027-01-30");
+    const knockout = await store.all<Fixture>(
+      "SELECT * FROM fixtures WHERE league_id = ? AND status = 'scheduled' ORDER BY id",
+      id,
+    );
+    expect(knockout.map((fixture) => [fixture.home_id, fixture.away_id])).toEqual([
+      [19, 18],
+      [18, 19],
+    ]);
+    const data = JSON.parse((await store.get<League>("SELECT * FROM leagues WHERE id = ?", id))!.data);
+    expect(data.pendingByes).toEqual(clubs.slice(0, 7));
+  });
 });
 
 describe("UEFA league phase draw rules", () => {

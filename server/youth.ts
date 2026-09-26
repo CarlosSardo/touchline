@@ -513,11 +513,12 @@ export async function runYouthIntake(
       const { rest: surplus } = selectSquad(squad(bTeam.id, "Senior").filter((member) => !member.locked), cap, 2);
       for (const member of surplus) release(member);
     }
-    // Youth squad caps, keeping room in the U17 squad for this season's academy intake.
+    // Youth squad caps, keeping room for this season's academy intake (U17) and the goalkeepers the top-ups add.
     for (const group of ["U17", "U19"] as const) {
       const all = squad(club.id, group);
       const youth = all.filter((member) => !member.locked);
-      const cap = SQUAD_CAPS.youth - (group === "U17" ? (intakeSizes.get(club.id) ?? 0) : 0);
+      const keeperGap = Math.max(0, MIN_GOALKEEPERS - all.filter((member) => member.position === "GK").length);
+      const cap = SQUAD_CAPS.youth - keeperGap - (group === "U17" ? (intakeSizes.get(club.id) ?? 0) : 0);
       if (all.length <= cap) continue;
       const room = cap - (all.length - youth.length);
       for (const member of selectSquad(youth, Math.max(0, room), MIN_GOALKEEPERS).rest) release(member);

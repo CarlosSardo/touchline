@@ -71,16 +71,20 @@ describe("connected simulation", () => {
   });
 
   it("advances the calendar, develops players, updates market values and persists weekly accounts", async () => {
-    const before = (await store.get<Player>(
-      "SELECT * FROM players WHERE id = 1",
-    ))!;
+    // Player 1 is now an elite player at the 99 ceiling, where upward drift is clamped away: sample squads instead.
+    const before = await store.all<{ id: number; potential: number }>(
+      "SELECT TOP (40) id,potential FROM players WHERE club_id IS NOT NULL AND age <= 21 AND potential < 95 AND role != 'Retired' ORDER BY id",
+    );
     const result = await advance(store, 7);
     expect(result.date).toBe("2026-07-08");
     expect((await stateOf(store)).week).toBe(1);
-    expect(
-      (await store.get<Player>("SELECT * FROM players WHERE id = 1"))!
-        .potential,
-    ).not.toBe(before.potential);
+    const after = new Map(
+      (await store.all<{ id: number; potential: number }>(
+        `SELECT id,potential FROM players WHERE id IN (${before.map(() => "?").join(",")})`,
+        ...before.map((player) => player.id),
+      )).map((player) => [player.id, player.potential]),
+    );
+    expect(before.some((player) => after.get(player.id) !== player.potential)).toBe(true);
     expect(
       await store.all(
         "SELECT * FROM ledger WHERE club_id = 1 AND category = 'Player & staff wages'",
@@ -117,8 +121,10 @@ describe("connected simulation", () => {
   });
 
   it("updates a complete league table from the same result used by match analytics", async () => {
+    // Only the user's fixtures keep the snapshot and full stats; the rest are stored compact.
     const fixture = (await store.get<Fixture>(
-      "SELECT TOP (1) * FROM fixtures WHERE league_id = 1 AND stage = 'League' ORDER BY date",
+      "SELECT TOP (1) * FROM fixtures WHERE ? IN (home_id, away_id) AND stage = 'League' AND status = 'scheduled' ORDER BY date",
+      (await stateOf(store)).clubId,
     ))!;
     await playFixture(store, fixture);
     const result = (await store.get<Fixture>(
@@ -126,11 +132,13 @@ describe("connected simulation", () => {
       fixture.id,
     ))!;
     const home = (await store.get<Standing>(
-      "SELECT * FROM standings WHERE league_id = 1 AND club_id = ?",
+      "SELECT * FROM standings WHERE league_id = ? AND club_id = ?",
+      fixture.league_id,
       fixture.home_id,
     ))!;
     const away = (await store.get<Standing>(
-      "SELECT * FROM standings WHERE league_id = 1 AND club_id = ?",
+      "SELECT * FROM standings WHERE league_id = ? AND club_id = ?",
+      fixture.league_id,
       fixture.away_id,
     ))!;
     expect(home.played).toBe(1);
@@ -179,7 +187,8 @@ describe("connected simulation", () => {
     await playFixture(store, result);
     expect(
       (await store.get<Standing>(
-        "SELECT * FROM standings WHERE league_id = 1 AND club_id = ?",
+        "SELECT * FROM standings WHERE league_id = ? AND club_id = ?",
+        fixture.league_id,
         fixture.home_id,
       ))!.played,
     ).toBe(1);
@@ -187,7 +196,7 @@ describe("connected simulation", () => {
 
   it("backfills legacy saves without rewriting snapshots or duplicating appearances", async () => {
     const fixture = (await store.get<Fixture>(
-      "SELECT TOP (1) * FROM fixtures WHERE status = 'played' ORDER BY id",
+      "SELECT TOP (1) * FROM fixtures WHERE status = 'played' AND JSON_QUERY(data, '$.snapshot') IS NOT NULL ORDER BY id",
     ))!;
     const snapshot: MatchSnapshot = {
       ...JSON.parse(fixture.data).snapshot,
@@ -217,7 +226,10 @@ describe("connected simulation", () => {
     const snapshots = await store.all(
       "SELECT id,data FROM fixtures WHERE status = 'played' ORDER BY id",
     );
-    await store.run("DELETE FROM player_match_appearances");
+    // A legacy save has full data for every fixture; compact (non-user) fixtures keep their rows because they cannot be rebuilt.
+    await store.run(
+      "DELETE FROM player_match_appearances WHERE fixture_id IN (SELECT id FROM fixtures WHERE JSON_QUERY(data, '$.players') IS NOT NULL)",
+    );
     await store.run("DELETE FROM meta WHERE [key] = 'appearanceIndexVersion'");
     await store.schema();
     expect(
