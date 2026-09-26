@@ -5,7 +5,6 @@ import {
   ageGroupFor,
   competitionGroup,
   freeAgentChance,
-  IN_SEASON_MINIMUM,
   INTAKE,
   intakeSize,
   keepScore,
@@ -193,7 +192,7 @@ describe("population balance", () => {
     expect(leavesFreeAgency({ age: 17, ability: 40, potential: threshold + 5 }, threshold, 60)).toBe(true);
   });
 
-  it("keeps a synthetic league within 3% per season over six seasons with in-season checks, intake, targets and caps", () => {
+  it("keeps a synthetic league within 3% per season over six seasons with loans, in-season checks, intake, targets and caps", () => {
     const seasons = projectPopulation("population-balance", 6);
     let previous = seasons[0].start;
     for (const season of seasons) {
@@ -210,15 +209,19 @@ describe("population balance", () => {
 
 /**
  * Pure projection of one league's population (30 clubs) through the rollover rules and the in-season squad check:
- * generated squads (first team 27, U19/U17 20-24 by 1-July age), crisis promotions of youths to the first team,
- * weekly checks (U19 from spare U17 players, then grassroots trialists; nothing from June), free agents leaving when a
- * window closes, and rollovers (retirements, AI targets, intake 5-12, top-ups to the minimums, released players).
+ * generated squads (first team 27, U19/U17 20-24 by 1-July age), season-long loans of first-team players to the user's
+ * club in the windows, crisis promotions of youths to the first team, weekly checks (first teams to 25 from spare U19
+ * players aged 17+, free agents at the club's level, then U19 players anyway; U19 from spare U17 players, then
+ * grassroots trialists; nothing from June), free agents leaving when a window closes, and rollovers (loans back,
+ * retirements, AI targets, intake 5-12, first teams from spare U19 players, then released players or trialists, youth
+ * top-ups to the minimums, released players).
  */
 function projectPopulation(seed: string, seasonCount: number) {
   const random = seedrandom(seed);
   const positions: Position[] = ["GK", "CB", "CB", "LB", "RB", "DM", "CM", "CM", "AM", "LW", "RW", "ST", "GK"];
   type Group = "U17" | "U19" | "Senior";
-  type Person = { age: number; early: boolean; ability: number; potential: number; position: Position; club: number | null; group: Group; since?: number };
+  type Person = { age: number; early: boolean; ability: number; potential: number; position: Position; club: number | null; group: Group; since?: number; loanFrom?: number };
+  const USER_CLUB = -1;
   const levels = Array.from({ length: 30 }, (_, index) => 40 + index);
   const threshold = leaveThreshold(levels[0]);
   const rank: Record<Group, number> = { U17: 0, U19: 1, Senior: 2 };
@@ -235,24 +238,44 @@ function projectPopulation(seed: string, seasonCount: number) {
   };
   const squad = (club: number, group: Group) => people.filter((person) => person.club === club && person.group === group);
   const keepers = (list: Person[]) => list.filter((person) => person.position === "GK").length;
+  const byAbility = (left: Person, right: Person) => right.ability - left.ability;
+  const needsOf = (members: Person[], minimum: number) => {
+    const goalkeepers = Math.max(0, 2 - keepers(members));
+    return [...Array(Math.max(goalkeepers, minimum - members.length)).keys()].map((index): Position => (index < goalkeepers ? "GK" : "CM"));
+  };
   levels.forEach((level, id) => {
     for (let index = 0; index < 27; index++) add(id, 19 + (index % 16), level, "Senior", index);
     for (const [group, young] of [["U19", 16], ["U17", 14]] as const)
       for (let index = 0, size = 20 + Math.floor(random() * 5); index < size; index++)
         add(id, random() < 0.1 ? young : young + 1 + Math.floor(random() * 2), level, group, index);
   });
+  const flows = { signed: 0 };
   const check = () => {
     let created = 0;
     for (const person of people) if (person.club !== null && rank[eligible(person)] > rank[person.group]) person.group = eligible(person);
     levels.forEach((level, id) => {
+      // First teams: a U19 player aged 17+ the U19 can spare, a free agent at the club's level, then a U19 player anyway.
+      const band = level * 0.66 + 22;
+      for (const need of needsOf(squad(id, "Senior"), SQUAD_MINIMUMS.Senior)) {
+        const fits = (person: Person) => (need === "GK") === (person.position === "GK");
+        const u19 = squad(id, "U19");
+        const ready = u19.filter((person) => person.age >= 17 && fits(person)).sort(byAbility);
+        const spare = u19.length > SQUAD_MINIMUMS.U19 && (need !== "GK" || keepers(u19) > 2) ? ready[0] : undefined;
+        const free = spare
+          ? undefined
+          : people.find((person) => person.club === null && eligible(person) === "Senior" && person.age <= 34 && person.ability >= band - 10 && person.ability <= band + 6 && fits(person));
+        if (free) {
+          free.club = id;
+          free.group = "Senior";
+          flows.signed++;
+        } else if (spare ?? ready[0]) (spare ?? ready[0]).group = "Senior";
+      }
       for (const group of ["U19", "U17"] as const) {
         const members = squad(id, group);
-        const goalkeepers = Math.max(0, 2 - keepers(members));
-        const needs = [...Array(Math.max(goalkeepers, IN_SEASON_MINIMUM - members.length)).keys()].map((index): Position => (index < goalkeepers ? "GK" : "CM"));
-        for (const need of needs) {
+        for (const need of needsOf(members, SQUAD_MINIMUMS[group])) {
           const spare = group === "U19" ? squad(id, "U17") : [];
           const fits = spare.filter((person) => (need === "GK") === (person.position === "GK"));
-          if (spare.length > IN_SEASON_MINIMUM && fits.length && (need !== "GK" || keepers(spare) > 2)) fits[0].group = "U19";
+          if (spare.length > SQUAD_MINIMUMS.U17 && fits.length && (need !== "GK" || keepers(spare) > 2)) fits[0].group = "U19";
           else {
             add(id, group === "U17" ? 14 + Math.floor(random() * 2) : 16 + Math.floor(random() * 2), level, group, need === "GK" ? 0 : 6);
             created++;
@@ -262,30 +285,59 @@ function projectPopulation(seed: string, seasonCount: number) {
     });
     return created;
   };
-  const results: { season: number; start: number; end: number; inflow: number; outflow: number; trialists: number; created: number; retired: number; left: number }[] = [];
+  // Every AI squad at its minimum with two goalkeepers after each weekly check.
+  const assertMinimums = (label: string) => {
+    for (const id of levels.keys())
+      for (const group of ["Senior", "U19", "U17"] as const) {
+        const members = squad(id, group);
+        expect(members.length, `${label} club ${id} ${group}`).toBeGreaterThanOrEqual(SQUAD_MINIMUMS[group]);
+        expect(keepers(members), `${label} club ${id} ${group} GK`).toBeGreaterThanOrEqual(2);
+      }
+  };
+  const results: { season: number; start: number; end: number; inflow: number; outflow: number; trialists: number; created: number; retired: number; left: number; loans: number; signed: number }[] = [];
   for (let season = 1; season <= seasonCount; season++) {
     const start = people.length;
-    // In season: weekly checks, crisis clubs promoting their best youth aged 16+ each week, windows closing in weeks 9 and 31.
+    flows.signed = 0;
+    // In season: weekly checks, loans to the user's club and crisis promotions of the best youth aged 16+, windows closing in weeks 9 and 31.
     let trialists = check();
     const crisis = new Set([...levels.keys()].filter(() => random() < 0.15));
     let left = 0;
+    let loans = 0;
     for (let week = 1; week <= 44; week++) {
+      if ((week <= 9 || (week >= 27 && week <= 31)) && random() < 0.5) {
+        const from = Math.floor(random() * levels.length);
+        const players = squad(from, "Senior").filter((person) => person.age <= 31);
+        const loanee = players[Math.floor(random() * players.length)];
+        if (loanee) {
+          loanee.loanFrom = from;
+          loanee.club = USER_CLUB;
+          loans++;
+        }
+      }
       for (const id of crisis) {
         // Only a youth his squad can spare (the minimum and two goalkeepers stay).
         const youth = people
           .filter((person) => person.club === id && person.group !== "Senior" && person.age >= 16)
-          .sort((a, b) => b.ability - a.ability)
+          .sort(byAbility)
           .find((person) => {
             const mates = squad(id, person.group);
-            return mates.length > IN_SEASON_MINIMUM && (person.position !== "GK" || keepers(mates) > 2);
+            return mates.length > SQUAD_MINIMUMS[person.group as "U17" | "U19"] && (person.position !== "GK" || keepers(mates) > 2);
           });
         if (youth && week >= 10 && week < 30) youth.group = "Senior";
       }
       if (week === 9 || week === 31)
         people = people.filter((person) => person.club !== null || !leavesFreeAgency(person, threshold, week === 9 ? 63 : 215) || (left++, false));
-      if (week < 44) trialists += check();
+      if (week < 44) {
+        trialists += check();
+        assertMinimums(`season ${season} week ${week}`);
+      }
     }
-    // Rollover.
+    // Rollover: season-long loans end first.
+    for (const person of people)
+      if (person.loanFrom !== undefined) {
+        person.club = person.loanFrom;
+        person.loanFrom = undefined;
+      }
     let retired = 0;
     let created = 0;
     const leavers = new Set<Person>();
@@ -312,11 +364,17 @@ function projectPopulation(seed: string, seasonCount: number) {
     for (const person of released)
       if (person.age >= 18 && person.ability < threshold) leavers.add(person);
     levels.forEach((level, id) => {
+      const current = (group: Group) => squad(id, group).filter((person) => !leavers.has(person));
       for (const group of ["Senior", "U19", "U17"] as const) {
-        const minimum = SQUAD_MINIMUMS[group];
-        for (let gap = minimum - squad(id, group).filter((person) => !leavers.has(person)).length; gap > 0; gap--) {
-          const free = released.find((person) => person.club === null && !leavers.has(person) && eligible(person) === group);
-          if (free) {
+        for (let gap = SQUAD_MINIMUMS[group] - current(group).length; gap > 0; gap--) {
+          // First teams call up a U19 player aged 17+ the U19 can spare before a released player or a trialist.
+          const u19 = group === "Senior" ? current("U19") : [];
+          const prospect = u19.length > SQUAD_MINIMUMS.U19
+            ? u19.filter((person) => person.age >= 17 && (person.position !== "GK" || keepers(u19) > 2)).sort(byAbility)[0]
+            : undefined;
+          const free = prospect ? undefined : released.find((person) => person.club === null && !leavers.has(person) && eligible(person) === group);
+          if (prospect) prospect.group = "Senior";
+          else if (free) {
             free.club = id;
             free.group = group;
           } else {
@@ -339,7 +397,7 @@ function projectPopulation(seed: string, seasonCount: number) {
         expect(size, `season ${season} club ${id} ${group}`).toBeGreaterThanOrEqual(SQUAD_MINIMUMS[group]);
         expect(size, `season ${season} club ${id} ${group}`).toBeLessThanOrEqual(group === "Senior" ? SQUAD_CAPS.firstTeam : SQUAD_CAPS.youth);
       }
-    results.push({ season, start, end: people.length, inflow: trialists + created, outflow: retired + left, trialists, created, retired, left });
+    results.push({ season, start, end: people.length, inflow: trialists + created, outflow: retired + left, trialists, created, retired, left, loans, signed: flows.signed });
   }
   return results;
 }

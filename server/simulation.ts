@@ -2439,6 +2439,9 @@ export async function worldTransfers(store: Store, random: seedrandom.PRNG) {
   const maxId = (await store.get<{ id: number }>(
     "SELECT max(id) AS id FROM players",
   ))!.id;
+  const userFamily = new Set(
+    (await store.all<{ id: number }>("SELECT id FROM clubs WHERE id = ? OR parent_id = ?", state.clubId, state.clubId)).map((club) => club.id),
+  );
   for (
     let index = 0;
     index < quota * 6 && activity.completed < quota;
@@ -2451,7 +2454,7 @@ export async function worldTransfers(store: Store, random: seedrandom.PRNG) {
       state.date,
       addDays(state.date, -90),
     );
-    if (!player || player.club_id === state.clubId || player.value <= 0)
+    if (!player || userFamily.has(player.club_id!) || player.value <= 0)
       continue;
     const fee = Math.round(player.value * (0.95 + random() * 0.15));
     const newWage = Math.round(player.wage * 1.1);
@@ -2479,19 +2482,14 @@ export async function worldTransfers(store: Store, random: seedrandom.PRNG) {
       }
     }
     if (!buyer) continue;
-    const sellerCount = (await store.get<{ count: number }>(
-      "SELECT count(*) AS count FROM players WHERE club_id = ? AND age_group = 'Senior' AND role != 'Retired'",
-      player.club_id,
-    ))!.count;
-    if (sellerCount <= SQUAD_MINIMUMS.Senior) continue;
-    if (
-      player.position === "GK" &&
-      (await store.get<{ count: number }>(
-        "SELECT count(*) AS count FROM players WHERE club_id = ? AND position = 'GK' AND age_group = 'Senior' AND role != 'Retired'",
-        player.club_id,
-      ))!.count <= 2
-    )
-      continue;
+    // The seller keeps the player's squad at its minimum (first team 25 without B-team or youth players, B-team 20) and two goalkeepers.
+    const squad = (await store.get<{ type: string; players: number; keepers: number }>(
+      "SELECT clubs.type,count(players.id) AS players,coalesce(sum(CASE WHEN players.position = 'GK' THEN 1 ELSE 0 END),0) AS keepers FROM clubs LEFT JOIN players ON players.playing_club_id = clubs.id AND players.age_group = 'Senior' AND players.role != 'Retired' AND (players.contract_end >= ? OR players.parent_club_id IS NOT NULL) WHERE clubs.id = ? GROUP BY clubs.type",
+      state.date,
+      player.squad_club_id ?? player.club_id,
+    ))!;
+    if (squad.players <= (squad.type === "bteam" ? SQUAD_MINIMUMS.BTeam : SQUAD_MINIMUMS.Senior)) continue;
+    if (player.position === "GK" && squad.keepers <= MIN_GOALKEEPERS) continue;
     await ledger(
       store,
       buyer.id,
@@ -2964,7 +2962,7 @@ export async function advance(store: Store, days: number) {
       await processTransferPayments(store);
       await processAffiliateRequests(store);
       await processUnexpectedEvents(store);
-      // AI squads keep 20 eligible players (two goalkeepers) between windows too; self-throttles to weekly.
+      // AI squads keep their minimums (first team 25, B-team and youth 20; two goalkeepers) between windows too; self-throttles to weekly.
       await maintainSquads(store, state);
       await worldTransfers(store, random);
       await finishScouting(store);
