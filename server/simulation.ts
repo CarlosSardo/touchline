@@ -44,7 +44,7 @@ import {
   weeklyOperatingCosts,
 } from "./finance.ts";
 import { personName } from "./people.ts";
-import { runYouthIntake, signClublessPlayers } from "./youth.ts";
+import { maintainSquads, runYouthIntake, signClublessPlayers } from "./youth.ts";
 import { developBody } from "./growth.ts";
 import { nationByCode } from "../shared/world-catalog/index.ts";
 import { marketValueFactor } from "../shared/world-catalog/market.ts";
@@ -2936,6 +2936,8 @@ export async function advance(store: Store, days: number) {
       await processTransferPayments(store);
       await processAffiliateRequests(store);
       await processUnexpectedEvents(store);
+      // AI squads keep 20 eligible players (two goalkeepers) between windows too; self-throttles to weekly.
+      await maintainSquads(store, state);
       await worldTransfers(store, random);
       await finishScouting(store);
       const fixtures = await store.all<Fixture>(
