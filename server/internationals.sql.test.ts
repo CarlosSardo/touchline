@@ -39,13 +39,19 @@ describe.skipIf(process.env.SQL_INTEGRATION_TESTS !== "true")("youth national te
       "SELECT age_group, count(*) AS total FROM clubs WHERE type = 'national' GROUP BY age_group ORDER BY age_group",
     );
     expect(counts).toEqual(["Senior", "U17", "U19", "U20", "U21"].map((age_group) => ({ age_group, total: UEFA.length })));
-    await store.run("DELETE FROM clubs WHERE type = 'national' AND age_group = 'U21' AND country_id = (SELECT id FROM countries WHERE code = 'BE')");
+    // The generated U21 team already has fixtures and standings, so hide it rather than delete it.
+    const parked = (await store.get<Club>(
+      "SELECT clubs.* FROM clubs JOIN countries ON countries.id = clubs.country_id WHERE countries.code = 'BE' AND clubs.type = 'national' AND clubs.age_group = 'U21'",
+    ))!;
+    await store.run("UPDATE clubs SET type = 'club' WHERE id = ?", parked.id);
     await ensureNationalTeams(store);
     await ensureNationalTeams(store);
     const belgium = await store.all<Club>(
       "SELECT clubs.* FROM clubs JOIN countries ON countries.id = clubs.country_id WHERE countries.code = 'BE' AND clubs.type = 'national' AND clubs.age_group = 'U21'",
     );
     expect(belgium.map((club) => club.name)).toEqual(["Belgium U21"]);
+    await store.run("DELETE FROM clubs WHERE id = ?", belgium[0].id);
+    await store.run("UPDATE clubs SET type = 'national' WHERE id = ?", parked.id);
   });
 
   it("schedules the catalog youth tournaments for 2026/27 (U21 EURO finals, U19 EURO in July, no U-20 World Cup)", async () => {

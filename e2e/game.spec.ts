@@ -2797,9 +2797,10 @@ test("an outgoing loan honors its terms and can be recalled", async ({
   await dialog
     .getByRole("slider", { name: /Borrowing club salary share/ })
     .focus();
+  // A share below the parent's reference split is priced into its asking fee; a higher share keeps the fee.
   await dialog
     .getByRole("slider", { name: /Borrowing club salary share/ })
-    .press("ArrowLeft");
+    .press("ArrowRight");
   await dialog.getByRole("button", { name: "Submit club offer" }).click();
   await expect(page).toHaveURL(new RegExp(`#contract/${target.id}$`));
   await expect(
@@ -2832,7 +2833,7 @@ test("an outgoing loan honors its terms and can be recalled", async ({
     (item: { player_id: number }) => item.player_id === target.id,
   );
   expect(loan.status).toBe("active");
-  expect(JSON.parse(loan.terms).salarySplit).toBe(69);
+  expect(JSON.parse(loan.terms).salarySplit).toBe(71);
   await page.goto("/#loans");
   await page
     .locator("tbody tr")

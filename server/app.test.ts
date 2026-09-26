@@ -1066,7 +1066,8 @@ describe("game HTTP API and SQL saves", () => {
     const countries = await request(app)
       .get("/api/world/clubs")
       .query({ type: "national", country: 1 });
-    expect(countries.body.total).toBe(4);
+    // Senior, U21, U20, U19 and U17.
+    expect(countries.body.total).toBe(5);
     const profile = await request(app).get("/api/clubs/1");
     expect(profile.body.players.length).toBeGreaterThan(0);
     expect(profile.body.competitions.length).toBeGreaterThan(0);

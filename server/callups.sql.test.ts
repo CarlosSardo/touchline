@@ -98,6 +98,17 @@ describe.skipIf(process.env.SQL_INTEGRATION_TESTS !== "true")("call-ups in the u
       other.id,
       other.league_id,
     );
+    // Generated first teams can sit near the 32-player cap: leave room for three call-ups.
+    const { count } = (await store.get<{ count: number }>(
+      "SELECT count(*) AS count FROM players WHERE playing_club_id = ? AND age_group = 'Senior' AND role != 'Retired'",
+      clubId,
+    ))!;
+    if (count > 29)
+      await store.run(
+        "UPDATE TOP (?) players SET role = 'Retired' WHERE playing_club_id = ? AND age_group = 'Senior' AND role != 'Retired'",
+        count - 29,
+        clubId,
+      );
     for (const player of [prospect, veteran, travelled])
       await store.transaction(() => callUpPlayer(store, { playerId: player.id, clubId, ageGroup: "Senior", duration: { kind: "days", days: 3 } }));
     const debut = new Map((await callUpDesk(store)).active.map((entry) => [entry.playerId, !!entry.debut]));

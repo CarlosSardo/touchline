@@ -766,6 +766,8 @@ describe("director decisions and ownership boundaries", () => {
       "does not belong",
     );
     await store.setMeta("state", { ...(await stateOf(store)), clubId: 2 });
+    // The player must still want the move back (interest of at least 50).
+    await keenToJoin(player.id, 2);
     const result = await exerciseBuyBack(store, clause.id);
     expect(result.stage).toBe("Agent talks");
     expect((await playerOf(store, player.id)).club_id).toBe(1);
@@ -871,7 +873,8 @@ describe("director decisions and ownership boundaries", () => {
     expect((await counterIncomingOffer(store, id, 2000000, terms)).stage).toBe(
       "Offer received",
     );
-    expect((await counterIncomingOffer(store, id, 1000000, terms)).stage).toBe(
+    // Ceiling with these clauses: 1,000,000 x (1.06 - 0.10 x 0.4 - 0.05) = 970,000.
+    expect((await counterIncomingOffer(store, id, 950000, terms)).stage).toBe(
       "Agent talks",
     );
     const updated = JSON.parse(
@@ -907,10 +910,12 @@ describe("director decisions and ownership boundaries", () => {
       ),
       recall,
       duration: 365,
-      salarySplit: 65,
+      // Above the parent's 70% reference: no wage subsidy to price (transfer-finance.test covers the subsidy).
+      salarySplit: 75,
+      // A two-season loan's minutes bonus needs at least half of two seasons' league minutes.
+      ...(type === "Two-year loan" ? { mandatoryMinutes: 3600 } : {}),
     };
     const input = {
-      // A 65% wage share is below the parent's 70% reference, so the parent prices the subsidy into its fee.
       fee: Math.round(negotiation.asking_price * 2),
       wage: player.wage * 2,
       years: 3,
@@ -969,7 +974,7 @@ describe("director decisions and ownership boundaries", () => {
     const { player, loan, negotiation } = await agreedLoan(false);
     expect((await playerOf(store, player.id)).club_id).toBe(2);
     expect((await playerOf(store, player.id)).parent_club_id).toBe(1);
-    expect(JSON.parse(loan.terms).salarySplit).toBe(65);
+    expect(JSON.parse(loan.terms).salarySplit).toBe(75);
     expect(
       (await store.get<Negotiation>(
         "SELECT * FROM negotiations WHERE id = ?",
@@ -1074,10 +1079,10 @@ describe("director decisions and ownership boundaries", () => {
     const beforeBorrower = await weeklyWages(store, 2);
     const { player } = await agreedLoan(true);
     expect(await weeklyWages(store, 1)).toBeCloseTo(
-      beforeParent - player.wage * 0.65,
+      beforeParent - player.wage * 0.75,
     );
     expect(await weeklyWages(store, 2)).toBeCloseTo(
-      beforeBorrower + player.wage * 0.65,
+      beforeBorrower + player.wage * 0.75,
     );
   });
 
