@@ -211,6 +211,13 @@ export default function Start() {
     state && state.started !== false && saves
       ? savesReplacedByManualSave(saves, state.careerId)
       : [];
+  const loadReplaces =
+    load && state && state.started !== false && saves
+      ? savesReplacedByManualSave(saves, state.careerId, load.file)
+      : [];
+  // Keeping the loaded save changes the outcome only when plain rotation would delete it.
+  const loadSpared =
+    !!load && archiveReplaces.some((slot) => slot.file === load.file);
   function beginOperation() {
     setError(null);
     setOperationStart(Date.now());
@@ -862,7 +869,7 @@ export default function Start() {
       {load && (
         <Modal
           title="Load this career?"
-          describedBy={archiveReplaces.length ? replacementId : undefined}
+          describedBy={loadReplaces.length ? replacementId : undefined}
           onClose={() => setLoad(null)}
         >
           <div className="sheet-body">
@@ -872,10 +879,11 @@ export default function Start() {
                 ? "Your current career will be saved before switching."
                 : "Open this saved career."}
             </p>
-            {archiveReplaces.length > 0 && (
-              <SaveReplacementWarning id={replacementId} saves={archiveReplaces}>
+            {loadReplaces.length > 0 && (
+              <SaveReplacementWarning id={replacementId} saves={loadReplaces}>
                 Saving your current career before switching permanently
-                deletes {oldestPhrase(archiveReplaces.length)}:
+                deletes {oldestPhrase(loadReplaces.length)}
+                {loadSpared && " other than the save you are loading"}:
               </SaveReplacementWarning>
             )}
           </div>
