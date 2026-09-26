@@ -2699,15 +2699,17 @@ test("every player's seasonal history opens their complete individual match repo
   page,
   request,
 }) => {
+  // Only the user's club family plays on the full engine and keeps a replayable match snapshot.
+  const clubId = (await (await request.get("/api/bootstrap")).json()).club.id;
   const fixtures = await (
-    await request.get("/api/matches?club=2&status=played&age=Senior")
+    await request.get(`/api/matches?club=${clubId}&status=played&age=Senior`)
   ).json();
   expect(fixtures.length).toBeGreaterThan(0);
   const match = await (
     await request.get(`/api/matches/${fixtures[0].id}`)
   ).json();
   const side =
-    match.snapshot.away.id === 2 ? match.snapshot.away : match.snapshot.home;
+    match.snapshot.away.id === clubId ? match.snapshot.away : match.snapshot.home;
   const player =
     side.bench.find(
       (candidate: { id: number }) =>

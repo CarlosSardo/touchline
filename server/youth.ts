@@ -607,7 +607,8 @@ export async function runYouthIntake(
     for (const position of [...list.map((entry) => entry.position), ...extra]) counts.set(position, (counts.get(position) ?? 0) + 1);
     return counts;
   };
-  const staying = (list: Member[]) => list.filter((member) => member.contract_end >= date || member.locked);
+  // advance() releases every expired non-loan contract at the end of this day, negotiations included.
+  const staying = (list: Member[]) => list.filter((member) => member.contract_end >= date || member.parent_club_id !== null);
   const quotaUse = new Map<number, number>();
   // Club-less players registered in the club's association (or its home nation) first; seniors may also come from abroad.
   const take = (club: ClubRow, need: Position, test: (candidate: Available) => boolean, abroad = false) => {

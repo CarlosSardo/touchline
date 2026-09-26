@@ -96,6 +96,8 @@ export function fastExpectedGoals(snapshot: MatchSnapshot) {
     0.18,
     0.82,
   );
+  // A side below seven players forfeits; an empty lineup has no keeper to read.
+  if (teams.some((team) => team.lineup.length < 7)) return [0, 0, homeShare] as const;
   const weather =
     snapshot.weather === "Heavy rain" ? 0.03 : snapshot.weather === "Wind" ? 0.02 : 0;
   const sides = teams.map((team, index) => {
@@ -139,7 +141,6 @@ export function fastExpectedGoals(snapshot: MatchSnapshot) {
   const total =
     FAST_GOAL_RATE * ((sides[0].chances + sides[1].chances) / 2) * (1 + 0.055 * Math.abs(ratio));
   const home = total / (1 + Math.exp(-ratio));
-  if (teams.some((team) => team.lineup.length < 7)) return [0, 0, homeShare] as const;
   return [Math.max(0.05, home), Math.max(0.05, total - home), homeShare] as const;
 }
 

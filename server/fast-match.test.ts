@@ -154,6 +154,9 @@ describe("fast match model", () => {
     expect(simulateFastMatch(match, "same")).toEqual(simulateFastMatch(match, "same"));
     const short = { ...match, away: { ...match.away, lineup: match.away.lineup.slice(0, 6) } };
     expect(simulateFastMatch(short, "short").abandoned?.teamId).toBe(2);
+    const empty = { ...match, away: { ...match.away, lineup: [], bench: [] } };
+    expect(fastExpectedGoals(empty).slice(0, 2)).toEqual([0, 0]);
+    expect(simulateFastMatch(empty, "empty").abandoned?.teamId).toBe(2);
   });
 
   it("keeps the full engine for the user's club family", () => {
