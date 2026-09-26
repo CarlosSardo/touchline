@@ -237,7 +237,8 @@ deployment_schema_check() {
   deployment_sql -- node --import tsx --input-type=module - "${1:-}" "${2:-registered}" <<'NODE'
 import {Store} from './server/db.ts';
 import {registeredAccountSchemas} from './server/accounts.ts';
-import {maskSchema} from './scripts/career-delete.ts';
+import {maskIdentifier,maskSchema} from './scripts/career-delete.ts';
+import {LEGACY_OBJECT_ID} from './scripts/accounts-migrate.ts';
 const expectedVersion=process.argv[2], mode=process.argv[3];
 if(!['registered','legacy-rollback'].includes(mode)) throw new Error('Unknown schema verification mode.');
 const store=await Store.open();
@@ -260,8 +261,8 @@ try {
     try {
       const legacy=await registry.get("SELECT [tenant_id], [object_id] FROM [accounts].[users] WHERE [game_schema] = N'dbo'");
       if(!schemas.includes('dbo') || legacy?.tenant_id.toLowerCase()!==process.env.AZURE_TENANT_ID?.toLowerCase() ||
-         legacy?.object_id.toLowerCase()!=='13dbb944-b4fb-471b-b5a3-6420a5fb5139')
-        throw new Error('Release blocked: dbo must remain bound to Kiko (sardo.kiko@gmail.com, object ID 13dbb944-b4fb-471b-b5a3-6420a5fb5139) in the configured tenant, never implicitly to the platform owner. Review explicit account provisioning.');
+         legacy?.object_id.toLowerCase()!==LEGACY_OBJECT_ID)
+        throw new Error(`Release blocked: dbo must remain bound to the approved legacy guest (object ID ${maskIdentifier(LEGACY_OBJECT_ID)}, see scripts/accounts-migrate.ts) in the configured tenant, never implicitly to the platform owner. Review explicit account provisioning.`);
     } finally { await registry.close(); }
   }
   for(const schema of schemas) {
