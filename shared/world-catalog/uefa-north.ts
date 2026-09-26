@@ -527,7 +527,7 @@ AFC {city}|2.5|4,5,6
     importSources: codes(
       "FR:9 BR:8 IE:7 ES:6 PT:6 NL:5 SCO:5 BE:4 DE:4 AR:4 WAL:3 NIR:2 NG:3 GH:3 DK:3 JM:3 US:3 SN:2.5 NO:2 SE:2 CI:2 CO:2 UY:2 IT:2 CH:2 HR:2 PL:2 JP:2 AU:2 MA:2 CM:1.5 ML:1.5 CA:1.5 EC:1.5 CD:1.5 AT:1 RS:1 UA:1 CZ:1 TR:1 GR:1 KR:1 DZ:1 IS:0.8 HU:0.8 EG:0.8 PY:0.8 CL:0.8 MX:0.8 ZW:0.8 FI:0.6 SK:0.6 BA:0.6 AL:0.6 XK:0.6 NZ:0.6 VE:0.6 GE:0.6 CV:0.6 SI:0.5 IL:0.5 TN:0.5 CR:0.5 UZ:0.5 IR:0.5 GW:0.5 AO:0.5",
     ),
-    coefficients: { association: [24.357, 21.0, 23.0, 17.375, 29.464] },
+    coefficients: { association: [24.357, 21.0, 23.0, 17.375, 29.464], season2025: 28.68 },
   },
 };
 
@@ -700,7 +700,7 @@ CPD {city}|5
       colors: ["#C8102E", "#00843D", "#FFFFFF", "#000000", "#1B458F", "#FDB913", "#6CABDD"],
     },
     importSources: codes("EN:10 IE:1.5 SCO:1 NIR:0.8 NG:0.3 JM:0.3 US:0.3 FR:0.3 ES:0.3"),
-    coefficients: { association: [1.5, 1.5, 1.166, 0.625, 2.0] },
+    coefficients: { association: [1.5, 1.5, 1.166, 0.625, 2.0], season2025: 0.333 },
   },
   hostedAbroad: [
     {
@@ -897,7 +897,7 @@ Castle Douglas|town|Dumfries and Galloway|1
     importSources: codes(
       "EN:12 IE:5 NIR:3 WAL:1.5 AU:2 NL:2 FR:1.5 DK:1.5 NO:1.5 SE:1 JP:2 KR:1 US:1.5 CA:1 PL:1 DE:1 BE:1 ES:1 PT:1 BR:1 NG:1 GH:1 ZW:0.6 SN:0.6 CI:0.6 CM:0.5 CD:0.6 JM:0.6 HR:0.6 GR:0.5 IS:0.5 FI:0.5 NZ:0.5 IT:0.5 SK:0.4",
     ),
-    coefficients: { association: [8.5, 7.9, 3.5, 6.4, 9.25] },
+    coefficients: { association: [8.5, 7.9, 3.5, 6.4, 9.25], season2025: 5.0 },
   },
 };
 
@@ -1050,7 +1050,7 @@ Randalstown|town|Antrim|1
       colors: ["#1B458F", "#00843D", "#C8102E", "#FFFFFF", "#000000", "#FDB913", "#6CABDD"],
     },
     importSources: codes("IE:6 EN:5 SCO:3 WAL:0.5 US:0.3 NG:0.3 CA:0.2 PL:0.2"),
-    coefficients: { association: [2.833, 1.625, 1.25, 1.125, 1.5] },
+    coefficients: { association: [2.833, 1.625, 1.25, 1.125, 1.5], season2025: 1.75 },
   },
   hostedAbroad: [
     { host: "IE", tiers: [1], cities: ["Derry"], cups: "host", continental: "host", youth: "host", registration: "host" },
@@ -1202,7 +1202,7 @@ Trim|town|Leinster|1
     importSources: codes(
       "EN:8 SCO:3 NIR:3 WAL:1 US:0.8 NG:0.5 FR:0.4 NL:0.4 BR:0.4 AU:0.3 CA:0.3 ZA:0.3 JM:0.3 ES:0.3 PL:0.3 GH:0.2 CD:0.2 NZ:0.2 DE:0.2 IS:0.2",
     ),
-    coefficients: { association: [1.875, 2.875, 3.375, 1.5, 5.343] },
+    coefficients: { association: [1.875, 2.875, 3.375, 1.5, 5.343], season2025: 4.25 },
   },
 };
 
@@ -1393,7 +1393,7 @@ KF {city}|2
     importSources: codes(
       "DK:3 SE:2 NO:2 FO:1.5 EN:1.5 SCO:0.5 US:1 ES:1 PT:0.5 RS:1 BA:0.6 HR:0.6 PL:1 LT:0.5 LV:0.3 NG:0.5 GH:0.4 SN:0.3 CM:0.3 DE:0.5 NL:0.5 BE:0.3 FI:0.3 CA:0.4 JM:0.3",
     ),
-    coefficients: { association: [0.625, 1.5, 3.0, 3.833, 4.562] },
+    coefficients: { association: [0.625, 1.5, 3.0, 3.833, 4.562], season2025: 3.625 },
   },
 };
 
@@ -1595,7 +1595,7 @@ SK {city}|1
     importSources: codes(
       "SE:4 DK:3 IS:2 FI:1 NG:2 GH:2 GM:1.5 SN:1.5 CI:1 ML:0.8 CM:0.6 US:1 BR:1 CO:0.6 AR:0.5 ES:1 PT:0.6 FR:0.8 NL:1 BE:0.5 DE:1 EN:1 SCO:0.4 RS:0.8 BA:0.5 HR:0.5 XK:0.6 AL:0.4 PL:0.8 UA:0.5 LT:0.3 EE:0.3 LV:0.3 KR:0.5 JP:0.5 AU:0.5 CA:0.5 KE:0.4 SO:0.3 MA:0.5",
     ),
-    coefficients: { association: [6.5, 7.625, 5.75, 8.0, 11.812] },
+    coefficients: { association: [6.5, 7.625, 5.75, 8.0, 11.812], season2025: 8.05 },
   },
 };
 
@@ -1767,7 +1767,7 @@ GIF {city}|0.6
     importSources: codes(
       "NG:2 GH:2 GM:2 SN:1.5 CI:1 CM:0.8 ML:0.5 KE:0.6 NO:2 DK:2 FI:2 IS:1.5 EE:0.5 LV:0.3 LT:0.3 BA:1 RS:1 HR:0.8 XK:0.8 MK:0.5 AL:0.5 BR:1.5 AR:0.6 CO:0.8 US:1 CA:0.4 JP:0.6 KR:0.4 AU:0.6 NL:0.8 DE:0.8 EN:0.8 FR:0.6 ES:0.6 PT:0.5 PL:0.6 UA:0.4 SY:0.5 IQ:0.5 IR:0.4 TR:0.6 SO:0.3 ER:0.4 ET:0.3 SL:0.4 ZA:0.3",
     ),
-    coefficients: { association: [2.5, 5.125, 6.25, 1.875, 11.375] },
+    coefficients: { association: [2.5, 5.125, 6.25, 1.875, 11.375], season2025: 5.0 },
   },
 };
 
@@ -1911,7 +1911,7 @@ BK {city}|1
     importSources: codes(
       "SE:3 NO:3 IS:2 FO:1 FI:1 DE:2 NL:1.5 BE:0.6 EN:1 SCO:0.4 FR:0.8 ES:0.8 PT:0.6 IT:0.5 PL:0.8 HR:0.8 RS:0.8 BA:0.6 SI:0.4 AT:0.5 CH:0.4 UA:0.4 GE:0.4 NG:2 GH:2.5 CI:1 SN:1 ML:0.8 CM:0.6 GM:0.8 ZA:0.5 KE:0.4 BR:1.5 AR:0.6 CO:0.6 UY:0.4 EC:0.4 US:1 CA:0.4 JP:0.8 KR:0.6 AU:0.6 NZ:0.3 IL:0.4 TR:0.5 MA:0.5 IR:0.3",
     ),
-    coefficients: { association: [4.125, 7.8, 5.9, 8.5, 7.656] },
+    coefficients: { association: [4.125, 7.8, 5.9, 8.5, 7.656], season2025: 12.25 },
   },
 };
 
@@ -2064,7 +2064,7 @@ IF {city}|1
     importSources: codes(
       "SE:2 EE:1.5 NO:0.6 DK:0.6 IS:0.3 RU:0.5 UA:0.4 NG:1.5 GH:1.5 CM:0.8 CI:0.8 SN:0.8 GM:0.6 KE:0.4 BR:1.5 CO:0.6 AR:0.4 US:0.8 JM:0.5 EN:0.8 SCO:0.3 IE:0.4 NL:0.6 DE:0.5 ES:0.8 PT:0.5 FR:0.5 BA:0.4 RS:0.4 XK:0.4 AL:0.3 JP:0.8 KR:0.3 AU:0.4",
     ),
-    coefficients: { association: [1.375, 3.75, 2.625, 1.75, 2.25] },
+    coefficients: { association: [1.375, 3.75, 2.625, 1.75, 2.25], season2025: 3.625 },
   },
 };
 
@@ -2182,7 +2182,7 @@ SK {city}|1
     importSources: codes(
       "RU:1 UA:1.5 BY:0.6 LV:1 LT:0.6 FI:1 SE:0.3 NG:1 GH:0.8 SN:0.6 CI:0.5 CM:0.5 BR:0.8 CO:0.3 ES:0.5 PT:0.3 JP:0.8 KR:0.3 US:0.3 GE:0.4 KZ:0.2 MD:0.3 RS:0.3",
     ),
-    coefficients: { association: [1.375, 3.666, 1.166, 0.125, 1.625] },
+    coefficients: { association: [1.375, 3.666, 1.166, 0.125, 1.625], season2025: 1.625 },
   },
 };
 
@@ -2305,7 +2305,7 @@ FS {city}|0.7
     importSources: codes(
       "UA:1.5 RU:0.8 BY:0.8 LT:1 EE:0.8 GE:0.6 KZ:0.2 BR:1.5 NG:1.5 GH:1 CI:0.8 SN:0.8 CM:0.6 ML:0.4 JP:1 KR:0.4 ES:0.6 PT:0.5 FR:0.4 RS:0.5 HR:0.3 BA:0.3 MD:0.3 CO:0.5 AR:0.3 US:0.3",
     ),
-    coefficients: { association: [1.375, 2.625, 2.75, 1.625, 3.875] },
+    coefficients: { association: [1.375, 2.625, 2.75, 1.625, 3.875], season2025: 2.0 },
   },
 };
 
@@ -2423,7 +2423,7 @@ SK {city}|0.6
     importSources: codes(
       "UA:1.5 BY:1 RU:0.6 LV:1 EE:0.5 PL:0.5 GE:0.5 BR:1.2 NG:1 GH:0.8 SN:0.8 CI:0.6 CM:0.5 JP:0.6 ES:0.6 PT:0.5 FR:0.4 RS:0.5 HR:0.3 MD:0.3 CO:0.4 US:0.3 KZ:0.2 AR:0.3",
     ),
-    coefficients: { association: [1.625, 1.75, 2.375, 1.125, 1.375] },
+    coefficients: { association: [1.625, 1.75, 2.375, 1.125, 1.375], season2025: 1.125 },
   },
 };
 
@@ -2473,10 +2473,10 @@ export const UEFA_NORTH: CatalogFileData = {
  */
 export const UEFA_NORTH_REAL_CLUB_NAMES: Readonly<Record<string, readonly string[]>> = {
   EN: list(
-    "AFC Totton|Aveley|Hednesford Town|Arsenal|Aston Villa|Bournemouth|Brentford|Brighton & Hove Albion|Brighton Albion|Burnley|Chelsea|Crystal Palace|Everton|Fulham|Leeds United|Liverpool|Manchester City|Manchester United|Newcastle United|Nottingham Forest|Sunderland|Tottenham Hotspur|West Ham United|Wolverhampton Wanderers|Birmingham City|Blackburn Rovers|Bristol City|Charlton Athletic|Coventry City|Derby County|Hull City|Ipswich Town|Leicester City|Middlesbrough|Millwall|Norwich City|Oxford United|Portsmouth|Preston North End|Queens Park Rangers|Sheffield United|Sheffield Wednesday|Southampton|Stoke City|Watford|West Bromwich Albion|Wimbledon|Barnsley|Blackpool|Bolton Wanderers|Bradford City|Burton Albion|Doncaster Rovers|Exeter City|Huddersfield Town|Leyton Orient|Lincoln City|Luton Town|Mansfield Town|Northampton Town|Peterborough United|Plymouth Argyle|Port Vale|Reading|Rotherham United|Stevenage|Stockport County|Wigan Athletic|Wycombe Wanderers|Accrington Stanley|Barnet|Barrow|Bristol Rovers|Bromley|Cambridge United|Cheltenham Town|Chesterfield|Colchester United|Crawley Town|Crewe Alexandra|Fleetwood Town|Gillingham|Grimsby Town|Harrogate Town|Milton Keynes Dons|Notts County|Oldham Athletic|Salford City|Shrewsbury Town|Swindon Town|Tranmere Rovers|Walsall|Aldershot Town|Altrincham|Boreham Wood|Boston United|Brackley Town|Braintree Town|Carlisle United|Eastleigh|Halifax Town|Forest Green Rovers|Gateshead|Hartlepool United|Morecambe|Rochdale|Scunthorpe United|Solihull Moors|Southend United|Sutton United|Tamworth|Truro City|Wealdstone|Woking|Yeovil Town|York City|Fylde|Alfreton Town|Bedford Town|Buxton|Chester|Chorley|Curzon Ashton|Darlington|Hereford|Kidderminster Harriers|King's Lynn Town|Leamington|Macclesfield|Macclesfield Town|Marine|Oxford City|Peterborough Sports|Radcliffe|Scarborough Athletic|South Shields|Southport|Spennymoor Town|Telford United|Worksop Town|Bath City|Chelmsford City|Chesham United|Chippenham Town|Dagenham & Redbridge|Dorking Wanderers|Eastbourne Borough|Ebbsfleet United|Enfield Town|Farnborough|Hampton & Richmond Borough|Hemel Hempstead Town|Hornchurch|Horsham|Maidenhead United|Maidstone United|Salisbury|Slough Town|Tonbridge Angels|Torquay United|Weston-super-Mare|Worthing|Welling United|Dover Athletic|Weymouth|Havant & Waterlooville|St Albans City|Dartford|Chatham Town|Bury|Stafford Rangers|Nuneaton Borough|Kettering Town|Rushden & Diamonds|Stalybridge Celtic|Hyde United|Northwich Victoria|Witton Albion|Workington|Blyth Spartans|Gainsborough Trinity|Worcester City|Gloucester City|Cheshunt|Hitchin Town|Banbury United|Stourbridge|Rugby Town|Redditch United|Leek Town|Marlow|Winchester City|Bognor Regis Town|Chichester City|Harlow Town|Kendal Town|Consett|Canterbury City|Ashford United|Folkestone Invicta|Hastings United|Basingstoke Town|Poole Town|Aylesbury United|Taunton Town|Farsley Celtic|Guiseley|Stockton Town|Warrington Town|Bishop's Stortford|Newcastle Town|Cambridge City|Hinckley|Loughborough Dynamo|Stafford Town|Tooting & Mitcham United|Dulwich Hamlet|Kingstonian|Hendon|Harrow Borough|Croydon|Walthamstow|Clapton|Barking|Leyton|Woolwich Arsenal|Newton Heath",
+    "Sheffield FC|Coventry United|Coventry Sphinx|Leeds City|Newcastle Town|Newcastle Benfield|Newcastle Blue Star|Bristol Manor Farm|Liverpool Ramblers|Manchester Central|London Tigers|AFC Totton|Aveley|Hednesford Town|Arsenal|Aston Villa|Bournemouth|Brentford|Brighton & Hove Albion|Brighton Albion|Burnley|Chelsea|Crystal Palace|Everton|Fulham|Leeds United|Liverpool|Manchester City|Manchester United|Newcastle United|Nottingham Forest|Sunderland|Tottenham Hotspur|West Ham United|Wolverhampton Wanderers|Birmingham City|Blackburn Rovers|Bristol City|Charlton Athletic|Coventry City|Derby County|Hull City|Ipswich Town|Leicester City|Middlesbrough|Millwall|Norwich City|Oxford United|Portsmouth|Preston North End|Queens Park Rangers|Sheffield United|Sheffield Wednesday|Southampton|Stoke City|Watford|West Bromwich Albion|Wimbledon|Barnsley|Blackpool|Bolton Wanderers|Bradford City|Burton Albion|Doncaster Rovers|Exeter City|Huddersfield Town|Leyton Orient|Lincoln City|Luton Town|Mansfield Town|Northampton Town|Peterborough United|Plymouth Argyle|Port Vale|Reading|Rotherham United|Stevenage|Stockport County|Wigan Athletic|Wycombe Wanderers|Accrington Stanley|Barnet|Barrow|Bristol Rovers|Bromley|Cambridge United|Cheltenham Town|Chesterfield|Colchester United|Crawley Town|Crewe Alexandra|Fleetwood Town|Gillingham|Grimsby Town|Harrogate Town|Milton Keynes Dons|Notts County|Oldham Athletic|Salford City|Shrewsbury Town|Swindon Town|Tranmere Rovers|Walsall|Aldershot Town|Altrincham|Boreham Wood|Boston United|Brackley Town|Braintree Town|Carlisle United|Eastleigh|Halifax Town|Forest Green Rovers|Gateshead|Hartlepool United|Morecambe|Rochdale|Scunthorpe United|Solihull Moors|Southend United|Sutton United|Tamworth|Truro City|Wealdstone|Woking|Yeovil Town|York City|Fylde|Alfreton Town|Bedford Town|Buxton|Chester|Chorley|Curzon Ashton|Darlington|Hereford|Kidderminster Harriers|King's Lynn Town|Leamington|Macclesfield|Macclesfield Town|Marine|Oxford City|Peterborough Sports|Radcliffe|Scarborough Athletic|South Shields|Southport|Spennymoor Town|Telford United|Worksop Town|Bath City|Chelmsford City|Chesham United|Chippenham Town|Dagenham & Redbridge|Dorking Wanderers|Eastbourne Borough|Ebbsfleet United|Enfield Town|Farnborough|Hampton & Richmond Borough|Hemel Hempstead Town|Hornchurch|Horsham|Maidenhead United|Maidstone United|Salisbury|Slough Town|Tonbridge Angels|Torquay United|Weston-super-Mare|Worthing|Welling United|Dover Athletic|Weymouth|Havant & Waterlooville|St Albans City|Dartford|Chatham Town|Bury|Stafford Rangers|Nuneaton Borough|Kettering Town|Rushden & Diamonds|Stalybridge Celtic|Hyde United|Northwich Victoria|Witton Albion|Workington|Blyth Spartans|Gainsborough Trinity|Worcester City|Gloucester City|Cheshunt|Hitchin Town|Banbury United|Stourbridge|Rugby Town|Redditch United|Leek Town|Marlow|Winchester City|Bognor Regis Town|Chichester City|Harlow Town|Kendal Town|Consett|Canterbury City|Ashford United|Folkestone Invicta|Hastings United|Basingstoke Town|Poole Town|Aylesbury United|Taunton Town|Farsley Celtic|Guiseley|Stockton Town|Warrington Town|Bishop's Stortford|Newcastle Town|Cambridge City|Hinckley|Loughborough Dynamo|Stafford Town|Tooting & Mitcham United|Dulwich Hamlet|Kingstonian|Hendon|Harrow Borough|Croydon|Walthamstow|Clapton|Barking|Leyton|Woolwich Arsenal|Newton Heath",
   ),
   SCO: list(
-    "Aberdeen|Celtic|Dundee|Dundee United|Falkirk|Heart of Midlothian|Hibernian|Kilmarnock|Livingston|Motherwell|Rangers|St Mirren|Airdrieonians|Arbroath|Ayr United|Dunfermline Athletic|Greenock Morton|Partick Thistle|Queen's Park|Raith Rovers|Ross County|St Johnstone|Alloa Athletic|Cove Rangers|East Fife|Hamilton Academical|Inverness Caledonian Thistle|Kelty Hearts|Montrose|Peterhead|Queen of the South|Stenhousemuir|Annan Athletic|Clyde|Dumbarton|East Kilbride|Edinburgh City|Elgin City|Forfar Athletic|Spartans|Stirling Albion|Stranraer|Albion Rovers|Berwick Rangers|Brechin City|Cowdenbeath|Gretna|Clydebank|Bonnyrigg Rose|Linlithgow Rose|Fraserburgh|Buckie Thistle|Brora Rangers|Formartine United|Huntly|Forres Mechanics|Nairn County|Cumbernauld Colts|Broxburn Athletic|Musselburgh Athletic|Penicuik Athletic|Irvine Meadow|Kilwinning Rangers|Largs Thistle|Auchinleck Talbot|Pollok|Darvel|Leith Athletic|Third Lanark|Dunbar United|Wishaw|Bellshill Athletic|Inverurie Loco Works|Stonehaven|Girvan|Cumnock Juniors",
+    "Glasgow Rangers|Rangers FC|Glasgow Celtic|Celtic Glasgow|Glasgow City|FC Edinburgh|Edinburgh City|Edinburgh United|Edinburgh University|Glasgow University|Aberdeen University|Glasgow Academical|Edinburgh Academical|Glasgow Perthshire|Dundee North End|Dundee Violet|Inverness Thistle|Inverness Caledonian|Aberdeen|Celtic|Dundee|Dundee United|Falkirk|Heart of Midlothian|Hibernian|Kilmarnock|Livingston|Motherwell|Rangers|St Mirren|Airdrieonians|Arbroath|Ayr United|Dunfermline Athletic|Greenock Morton|Partick Thistle|Queen's Park|Raith Rovers|Ross County|St Johnstone|Alloa Athletic|Cove Rangers|East Fife|Hamilton Academical|Inverness Caledonian Thistle|Kelty Hearts|Montrose|Peterhead|Queen of the South|Stenhousemuir|Annan Athletic|Clyde|Dumbarton|East Kilbride|Edinburgh City|Elgin City|Forfar Athletic|Spartans|Stirling Albion|Stranraer|Albion Rovers|Berwick Rangers|Brechin City|Cowdenbeath|Gretna|Clydebank|Bonnyrigg Rose|Linlithgow Rose|Fraserburgh|Buckie Thistle|Brora Rangers|Formartine United|Huntly|Forres Mechanics|Nairn County|Cumbernauld Colts|Broxburn Athletic|Musselburgh Athletic|Penicuik Athletic|Irvine Meadow|Kilwinning Rangers|Largs Thistle|Auchinleck Talbot|Pollok|Darvel|Leith Athletic|Third Lanark|Dunbar United|Wishaw|Bellshill Athletic|Inverurie Loco Works|Stonehaven|Girvan|Cumnock Juniors",
   ),
   WAL: list(
     "The New Saints|Connah's Quay Nomads|Penybont|Bala Town|Caernarfon Town|Barry Town United|Barry Town|Cardiff Metropolitan University|Haverfordwest County|Flint Town United|Colwyn Bay|Llanelli Town|Briton Ferry Llansawel|Aberystwyth Town|Newtown|Cefn Druids|Airbus UK Broughton|Bangor City|Bangor 1876|Rhyl|Carmarthen Town|Port Talbot Town|Prestatyn Town|Merthyr Town|Pontypridd United|Swansea City|Cardiff City|Wrexham|Newport County|Llandudno|Holywell Town|Ammanford|Cwmbran Town|Cwmbran Celtic|Afan Lido|Taff's Well|Trefelin|Goytre United|Denbigh Town|Ruthin Town|Mold Alexandra|Buckley Town|Porthmadog|Caerau Ely|Llanidloes Town|Guilsfield|Holyhead Hotspur|Llangefni Town|Conwy Borough|Penrhyncoch|Abergavenny Town|Monmouth Town|Chepstow Town|Pontypool Town|Penarth Town|Pembroke Borough|Milford United|Cardigan Town|Lampeter Town|Welshpool Town|Newport YMCA|Swansea University|Maesteg Park|Ton Pentre|Aberdare Town|Llangollen Town|Gresford Athletic",

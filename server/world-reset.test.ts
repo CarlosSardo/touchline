@@ -9,6 +9,7 @@ import { generateWorld } from "./world.ts";
 import { verifyBackup } from "../scripts/data-export.ts";
 import {
   addForeignKeySql,
+  allResetSchemas,
   foreignKeys,
   planSchemaReset,
   resetSchema,
@@ -73,6 +74,18 @@ describe("world reset options (no database)", () => {
     expect(() => resetSchemaName("touchline_e2e_run", "accounts", false)).toThrow();
     expect(resetSchemaName("touchline_e2e_run", "accounts", true)).toBe("touchline_e2e_run");
     expect(resetSchemaName("touchline_user_0a1b", "accounts", false)).toBe("touchline_user_0a1b");
+  });
+
+  it("--all also covers unregistered worlds and reports the ones it may not touch", () => {
+    const worlds = ["accounts", "dbo", "touchline_e2e_run", "touchline_user_0a1b", "touchline_user_ffff"];
+    expect(allResetSchemas(["touchline_user_0a1b"], worlds, "accounts", false)).toEqual({
+      schemas: ["dbo", "touchline_user_0a1b", "touchline_user_ffff"],
+      skipped: [
+        { schema: "accounts", reason: expect.stringMatching(/left untouched/) },
+        { schema: "touchline_e2e_run", reason: expect.stringMatching(/left untouched/) },
+      ],
+    });
+    expect(allResetSchemas([], worlds, "accounts", true).schemas).toContain("touchline_e2e_run");
   });
 
   it("re-creates a foreign key with its referential actions and refuses odd column lists", () => {

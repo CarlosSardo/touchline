@@ -31,6 +31,7 @@ export default defineConfig({
           UI_PORT: uiPort,
         },
         url: `${baseURL}/api/health`,
+        stdout: "pipe",
         timeout: 900000,
         gracefulShutdown: { signal: "SIGTERM", timeout: 120000 },
         reuseExistingServer: false,

@@ -514,7 +514,7 @@ const TR: NationSpec = {
     importSources: weighted(
       "BR:10 FR:5 NG:5 SN:4 NL:4 BE:3 DE:3 PT:3 AR:3 CM:3 CI:3 GH:3 MA:3 BA:2 RS:2 HR:2 PL:2 UY:2 CO:2 NO:2 DK:2 ES:2 EN:2 GE:2 UA:2 DZ:2 CD:1 ML:1 GN:1 EG:1 CV:1 IT:1 CZ:1 SK:1 SE:1 AT:1 CH:1 XK:1 AL:1 MK:1 KR:1 AZ:1 US:1",
     ),
-    coefficients: { association: [3.1, 6.7, 11.8, 12.0, 10.3] },
+    coefficients: { association: [3.1, 6.7, 11.8, 12.0, 10.3], season2025: 11.075 },
   },
   abroad: { seniors: 25, youth: 10, destinations: weighted("DE:5 NL:3 ES:2 IT:2 BE:2 AT:2 FR:1 EN:1 PT:1 SA:1") },
 };
@@ -715,7 +715,7 @@ const RU: NationSpec = {
     importSources: weighted(
       "BR:10 RS:4 BY:5 AM:3 KZ:3 UZ:3 IR:3 CO:3 AR:3 UY:2 GE:2 BA:2 ME:2 TJ:2 NG:2 CM:2 CI:2 SN:2 KG:1 AZ:1 MK:1 SI:1 PY:1 VE:1 PE:1 CR:1 EG:1 MA:1 GH:1 ML:1 BF:1 GN:1 CD:1 CV:1 FR:1 PT:1",
     ),
-    coefficients: { association: [4.333, 5.3, 4.333, 4.333, 4.333] },
+    coefficients: { association: [4.333, 5.3, 4.333, 4.333, 4.333], season2025: 4.333 },
   },
   abroad: { seniors: 20, youth: 4, destinations: weighted("FR:3 ES:2 GR:2 TR:2 KZ:3 BY:2 CY:2 US:1 IT:1 AM:1 AE:1") },
 };
@@ -944,7 +944,7 @@ const RS: NationSpec = {
     importSources: weighted(
       "ME:5 BA:5 GH:4 NG:3 MK:3 CM:2 CI:2 SN:2 ML:2 GM:2 BR:3 RU:2 JP:1 GE:1 UA:1 BY:1 RO:1 BG:1 HU:1 SK:1 SI:1 HR:1 PT:1 FR:1 GN:1 ZM:1 CO:1",
     ),
-    coefficients: { association: [5.5, 9.5, 5.375, 1.4, 3.725] },
+    coefficients: { association: [5.5, 9.5, 5.375, 1.4, 3.725], season2025: 5.75 },
   },
   abroad: {
     seniors: 150,
@@ -1142,7 +1142,7 @@ const UA: NationSpec = {
     importSources: weighted(
       "BR:10 GE:3 NG:2 GH:2 CM:2 CI:2 MD:2 SN:1 ML:1 CO:1 AR:1 AM:1 AZ:1 PT:1 ES:1 HR:1 RS:1 SK:1 CZ:1 PL:1 LT:1 IL:1 VE:1",
     ),
-    coefficients: { association: [6.8, 4.2, 5.7, 4.1, 3.6] },
+    coefficients: { association: [6.8, 4.2, 5.7, 4.1, 3.6], season2025: 8.312 },
   },
   abroad: {
     seniors: 60,
@@ -1327,7 +1327,7 @@ const RO: NationSpec = {
     importSources: weighted(
       "PT:5 BR:4 MD:4 ES:3 FR:3 RS:3 IT:3 HR:2 BA:2 ME:2 MK:2 AL:2 BG:2 GR:2 NL:2 HU:2 UA:2 GE:2 NG:2 GH:2 CM:2 CI:2 SN:2 XK:1 BE:1 ML:1 GN:1 CV:1 AO:1 CO:1 AR:1 PL:1 SK:1 CZ:1 SI:1 TN:1 DZ:1 MA:1",
     ),
-    coefficients: { association: [3.75, 2.25, 6.25, 3.25, 7.75] },
+    coefficients: { association: [3.75, 2.25, 6.25, 3.25, 7.75], season2025: 5.75 },
   },
   abroad: {
     seniors: 60,
@@ -1578,7 +1578,7 @@ const BG: NationSpec = {
     importSources: weighted(
       "BR:5 PT:4 ES:3 FR:3 RS:3 MK:3 NL:2 NG:2 GH:2 CM:2 CI:2 SN:2 CV:2 BA:2 ME:2 HR:2 RO:2 PL:2 UA:2 GE:2 BE:1 ML:1 GN:1 AO:1 GW:1 CO:1 AR:1 SI:1 AL:1 XK:1 GR:1 CZ:1 SK:1 HU:1 AM:1 SE:1 NO:1 IL:1 TR:1 CD:1 MA:1",
     ),
-    coefficients: { association: [4.0, 3.375, 4.5, 4.375, 3.625] },
+    coefficients: { association: [4.0, 3.375, 4.5, 4.375, 3.625], season2025: 5.187 },
   },
   abroad: { seniors: 25, youth: 5, destinations: weighted("TR:3 CY:3 PL:2 RO:2 GR:2 RU:2 DE:1 IT:1 EN:1 HU:1 CZ:1 KZ:1 NL:1 US:1 SK:1") },
 };
@@ -1764,7 +1764,7 @@ const BA: NationSpec = {
       colors: ["#0000CD", "#800020", "#E4002B", "#FFFFFF", "#0033A0", "#000000", "#FFD100"],
     },
     importSources: weighted("HR:5 RS:4 ME:3 SI:2 MK:2 BR:2 NG:2 GH:1 CM:1 CI:1 SN:1 JP:1 AL:1 XK:1 TR:1 AT:1 DE:1 BG:1"),
-    coefficients: { association: [2.625, 1.625, 2.0, 2.25, 4.531] },
+    coefficients: { association: [2.625, 1.625, 2.0, 2.25, 4.531], season2025: 3.312 },
   },
   abroad: {
     seniors: 60,
@@ -1971,7 +1971,7 @@ const ME: NationSpec = {
       colors: ["#0033A0", "#FFFFFF", "#E4002B", "#000000", "#FFD100", "#006B3F", "#800020"],
     },
     importSources: weighted("RS:5 BA:3 MK:1 HR:1 AL:1 XK:1 BR:1 NG:1 GH:1 SN:1 JP:1 UA:1 RU:1"),
-    coefficients: { association: [1.625, 0.75, 1.0, 1.333, 2.5] },
+    coefficients: { association: [1.625, 0.75, 1.0, 1.333, 2.5], season2025: 1.0 },
   },
   abroad: {
     seniors: 50,
@@ -2138,7 +2138,7 @@ const XK: NationSpec = {
       colors: ["#0000CD", "#FFD700", "#FFFFFF", "#E4002B", "#000000", "#006B3F", "#800020"],
     },
     importSources: weighted("AL:5 MK:3 BR:2 NG:2 GH:2 CM:1 CI:1 SN:1 HR:1 BA:1 ME:1 SI:1 TR:1 DE:1 CH:1"),
-    coefficients: { association: [1.833, 2.333, 2.875, 3.0, 2.0] },
+    coefficients: { association: [1.833, 2.333, 2.875, 3.0, 2.0], season2025: 3.781 },
   },
   abroad: {
     seniors: 40,
@@ -2298,7 +2298,7 @@ const AL: NationSpec = {
       colors: ["#E4002B", "#000000", "#FFFFFF", "#0033A0", "#FFD700", "#006B3F", "#800020", "#1E90FF"],
     },
     importSources: weighted("BR:5 XK:3 NG:2 GH:2 CI:2 CM:2 SN:2 MK:2 ME:2 IT:2 ML:1 GN:1 CV:1 HR:1 BA:1 GR:1 AR:1 CO:1 PT:1 FR:1 ES:1 US:1"),
-    coefficients: { association: [2.0, 1.625, 0.875, 2.125, 1.25] },
+    coefficients: { association: [2.0, 1.625, 0.875, 2.125, 1.25], season2025: 2.25 },
   },
   abroad: {
     seniors: 50,
@@ -2534,7 +2534,7 @@ const GE: NationSpec = {
       colors: ["#0033A0", "#FFFFFF", "#000000", "#E4002B", "#FFD100", "#006B3F", "#800020"],
     },
     importSources: weighted("UA:3 RU:2 BR:3 NG:2 GH:2 CI:1 CM:2 SN:2 ML:1 BF:1 AM:1 AZ:1 BY:1 FR:1 PT:1 CO:1 JP:1 RS:1 TR:1"),
-    coefficients: { association: [1.75, 1.25, 1.125, 1.25, 1.25] },
+    coefficients: { association: [1.75, 1.25, 1.125, 1.25, 1.25], season2025: 1.125 },
   },
   abroad: {
     seniors: 45,
@@ -2679,7 +2679,7 @@ const AM: NationSpec = {
       colors: ["#E4002B", "#0033A0", "#F2A900", "#FFFFFF", "#000000", "#006B3F", "#800020"],
     },
     importSources: weighted("RU:4 BR:4 UA:2 NG:2 GH:2 CM:2 CI:2 SN:2 ML:1 CO:2 AR:2 VE:1 PT:1 FR:1 ES:1 GE:1 BY:1 KZ:1 RS:2 ME:1 HR:1 CV:1 JP:1 IR:1"),
-    coefficients: { association: [1.375, 1.875, 2.375, 2.25, 4.375] },
+    coefficients: { association: [1.375, 1.875, 2.375, 2.25, 4.375], season2025: 4.187 },
   },
   abroad: {
     seniors: 20,
@@ -2905,7 +2905,7 @@ const KZ: NationSpec = {
     importSources: weighted(
       "RU:5 BR:3 UA:3 BY:3 RS:3 GE:2 UZ:2 KG:1 TJ:1 AM:1 AZ:1 ME:2 BA:2 MK:1 HR:1 SI:1 AL:1 XK:1 NG:2 GH:1 CM:1 CI:1 SN:1 PT:1 ES:1 CO:1 PL:1 KR:1",
     ),
-    coefficients: { association: [1.0, 2.875, 1.125, 3.125, 3.0] },
+    coefficients: { association: [1.0, 2.875, 1.125, 3.125, 3.0], season2025: 3.625 },
   },
   abroad: { seniors: 10, youth: 2, destinations: weighted("RU:5 BY:1 TR:1 UZ:1 PL:1 CZ:1") },
 };
@@ -3050,7 +3050,7 @@ const BY: NationSpec = {
       colors: ["#0033A0", "#FFD700", "#E4002B", "#FFFFFF", "#000000", "#006B3F", "#F58025", "#1E90FF"],
     },
     importSources: weighted("RU:4 UA:2 BR:3 NG:2 GH:2 CM:2 CI:1 SN:1 ML:1 RS:2 ME:1 BA:1 MK:1 GE:2 AM:1 AZ:1 KZ:1 UZ:1 LT:1 LV:1 MD:1 CO:1"),
-    coefficients: { association: [1.5, 0.25, 0.625, 1.75, 1.875] },
+    coefficients: { association: [1.5, 0.25, 0.625, 1.75, 1.875], season2025: 2.125 },
   },
   abroad: { seniors: 12, youth: 2, destinations: weighted("RU:8 KZ:2 PL:1 LT:1 AM:1") },
 };
@@ -3204,7 +3204,7 @@ const MD: NationSpec = {
       colors: ["#FFD700", "#000000", "#006B3F", "#0033A0", "#E4002B", "#FFFFFF"],
     },
     importSources: weighted("BR:4 UA:3 RO:3 RU:2 BY:2 NG:2 GH:2 CM:2 CI:2 SN:2 ML:2 BF:2 CO:2 PT:2 ES:1 RS:1 BA:1 ME:1 MK:1 GE:1 AM:1 IL:1 AO:1 CV:1"),
-    coefficients: { association: [1.375, 5.25, 3.75, 2.0, 2.125] },
+    coefficients: { association: [1.375, 5.25, 3.75, 2.0, 2.125], season2025: 1.5 },
   },
   abroad: {
     seniors: 20,

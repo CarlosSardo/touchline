@@ -358,7 +358,7 @@ FC Union {city}|1
     importSources: codes(
       "AT:7 FR:6 NL:5 CH:5 DK:5 JP:5 HR:4 US:4 BE:3 PL:3 SE:3 NO:3 ES:3 CZ:3 HU:3 TR:3 BR:3 PT:2 SK:2 SI:2 BA:2 RS:2 KR:2 GH:2 CI:2 MA:2 EN:2 GR:1.5 IT:1.5 CM:1.5 SN:1.5 NG:1.5 GN:1.5 ML:1.5 UA:1.5 GE:1.5 XK:1.5 CA:1.5 DZ:1 TN:1 CD:1 IS:1 FI:1 AU:1 AR:1 CO:1 EC:1 AL:1 MK:0.8 BF:0.8 LU:0.5 IL:0.5 IE:0.5 SCO:0.5 UY:0.5",
     ),
-    coefficients: { association: [15.214, 16.214, 17.125, 19.357, 18.421] },
+    coefficients: { association: [15.214, 16.214, 17.125, 19.357, 18.421], season2025: 21.785 },
   },
 };
 
@@ -575,7 +575,7 @@ VV {city} '{founded2}|0.8|2
     importSources: codes(
       "BE:8 DE:5 DK:4 NO:4 SE:4 JP:3 US:3 MA:3 GH:2.5 NG:2.5 BR:2.5 CI:2 SN:2 CW:2 SR:1.5 ES:2 PT:1.5 FR:2 IT:1 EN:1.5 IE:1.5 SCO:1 IS:1.5 FI:1.5 PL:2 CZ:1.5 SK:1 HR:1.5 RS:1.5 GR:1.5 TR:1.5 CH:1 AT:1 MX:1 AR:1 UY:0.8 CO:0.8 KR:1 AU:1 CA:1 ID:1 CV:1 GN:0.8 CM:1 ML:0.8 BF:0.6",
     ),
-    coefficients: { association: [9.2, 19.2, 13.5, 10.0, 15.25] },
+    coefficients: { association: [9.2, 19.2, 13.5, 10.0, 15.25], season2025: 9.979 },
   },
 };
 
@@ -653,7 +653,7 @@ SV {city}|1
     },
     importSources: codes("CH:10 AT:6 DE:5 IT:2.5 PT:2 XK:1.5 AL:1.5 HR:1.5 RS:1 BA:1 ES:1 FR:1 TR:1 BR:1 SI:0.5"),
     // Vaduz is the only entrant, so association points equal its results.
-    coefficients: { association: [0.5, 0, 6.5, 0.5, 0.5] },
+    coefficients: { association: [0.5, 0, 6.5, 0.5, 0.5], season2025: 1.0 },
   },
   hostedAbroad: [
     // FC Vaduz won the 2025/26 Challenge League and plays the 2026/27 Super League.
@@ -908,7 +908,7 @@ CS {city}|0.8
     importSources: codes(
       "FR:6 DE:4 IT:3 PT:3 ES:2 AT:2 XK:2 AL:2 RS:1.5 HR:1.5 BA:1 MK:1 CM:1.5 SN:1.5 CI:1.5 GN:1 ML:1 NG:1 GH:1 CD:1 BR:2 AR:1 CO:1 JP:1 KR:0.8 DK:1 SE:1 NO:0.8 BE:1 NL:1 CZ:0.8 HU:0.6 SI:0.6 GR:0.6 TR:1 MA:1 DZ:0.8 TN:0.6 US:1 CA:0.6 EN:0.6 IE:0.4 LI:0.5",
     ),
-    coefficients: { association: [5.125, 7.75, 8.5, 5.2, 7.05] },
+    coefficients: { association: [5.125, 7.75, 8.5, 5.2, 7.05], season2025: 6.2 },
   },
 };
 
@@ -1100,7 +1100,7 @@ Admira {city}|0.6
     importSources: codes(
       "DE:8 HR:4 BA:3 RS:3 SI:3 HU:3 CZ:2.5 SK:2.5 CH:2 IT:1.5 FR:1.5 ES:1.5 PT:1 NL:1 BE:1 DK:1.5 SE:1 NO:1 PL:1.5 RO:1 BG:0.6 GR:0.6 TR:2 XK:1.5 AL:1 MK:1 GE:1.5 UA:1.5 BR:2.5 AR:1 CO:1 JP:2 KR:1.5 US:1 CA:0.6 NG:2 GH:1.5 CI:1.5 ML:1.5 SN:1.5 CM:1 BF:1 GN:1 ZM:1 CD:0.8 MA:0.8 IL:0.8 IS:0.5 FI:0.5 AU:0.8 LI:0.3",
     ),
-    coefficients: { association: [6.7, 10.4, 4.9, 4.8, 9.65] },
+    coefficients: { association: [6.7, 10.4, 4.9, 4.8, 9.65], season2025: 4.1 },
   },
 };
 

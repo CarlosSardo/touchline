@@ -312,6 +312,15 @@ FC {city}|3
     founded: { top: [1872, 1970], bottom: [1897, 2015] },
     shortName: "city",
     avoid: list(`
+RC Paris|Racing Paris|Racing Club de Paris|Racing Club de France|Racing CF|Olympique de Paris|Olympique Paris|Stade Français|
+Stade Reims|Stade Rennes|Stade Brest|Stade Laval|Stade Lavallois|Stade Caen|Stade Malherbe Caen|Stade Toulouse|Stade Toulousain|
+Stade Bordelais|Stade Bordeaux|Stade Poitevin|Stade Poitiers|Stade Briochin|Stade Saint-Brieuc|Stade Beaucairois|Stade Quimpérois|
+Stade Quimper|Stade Marseillais|Racing Lens|Racing Club de Lens|Racing Club de Strasbourg|Racing Besançon|RC Besançon|RC Roubaix|
+Racing Roubaix|RC Épernay|RC Grasse|RC Toulon|Racing Toulon|Olympique Nice|Olympique de Nice|Nice|Montpellier|Strasbourg|Lens|
+Reims|Rennes|Olympique Alès|Olympique Saint-Quentin|Nîmes Olympique|Olympique Nîmes|AS Nancy|AS Nancy-Lorraine|AS Cannes|
+AS Béziers|AS Beauvais|AS Poissy|AS Vitré|AS Lyon-Duchère|FC Lyon|US Orléans|US Créteil|US Boulogne|US Concarneau|US Quevilly|
+US Dunkerque|USL Dunkerque|US Chauny|US Avranches|US Marseille Endoume|SO Cholet|SO Châtellerault|SO Romorantin|CS Sedan|
+En Avant Guingamp|EA Guingamp|US Valenciennes|ES Wasquehal|
 Paris Saint-Germain|Paris FC|Red Star|Olympique de Marseille|Olympique Marseille|Olympique Lyonnais|Olympique Lyon|AS Monaco|
 Lille OSC|OGC Nice|RC Lens|Stade Rennais|Stade de Reims|Stade Brestois|RC Strasbourg|Racing Strasbourg|FC Nantes|
 Toulouse FC|FC Toulouse|Montpellier HSC|FC Lorient|FC Metz|Angers SCO|AJ Auxerre|Le Havre AC|AC Le Havre|
@@ -332,7 +341,7 @@ US Colomiers|FC Rennes|Stade Toulousain|AS Poissy|US Lusitanos Saint-Maur|Racing
     "SN:6 CI:5 BR:5 ML:4 CM:4 MA:4 DZ:4 PT:4 BE:3 CD:3 GN:3 ES:2 BF:2 GH:2 NG:2 AR:2 US:2 CG:1.2 NL:1.5 CH:1.5 EN:1.5 JP:1.5 TN:1.5 GA:1 TG:1 BJ:1 GM:1 GW:1 HT:1 CV:1 CO:1 GE:1 DE:1 IT:1 DK:1 SE:1 NO:1 KR:1 AO:0.8 UY:0.8 EC:0.8 RS:0.8 HR:0.8 UA:0.8 MG:0.6 KM:0.6 CA:0.6 PY:0.5 AL:0.5 XK:0.5 AT:0.5 PL:0.5 TR:0.5 IE:0.4 AU:0.4 CZ:0.4 GR:0.4 ZM:0.4 RO:0.3 MX:0.3 IL:0.3",
   ),
   // UEFA association season points 2020/21 … 2024/25 (UEFA 2025 country ranking).
-  coefficients: { association: [7.916, 18.416, 12.583, 16.25, 17.928] },
+  coefficients: { association: [7.916, 18.416, 12.583, 16.25, 17.928], season2025: 18.321 },
 };
 
 const FRANCE: NationSpec = {
@@ -597,6 +606,18 @@ Hellas {city}|0.4
     founded: { top: [1893, 1930], bottom: [1905, 2012] },
     shortName: "city",
     avoid: list(`
+AC Milano|Milano|Inter Milano|Internazionale Milano|AS Bari|SSC Bari|FC Bari 1908|Bari|AC Firenze|Firenze|Genova|Genova 1893|
+SS Napoli|AS Napoli|AC Napoli|Napoli Calcio|Calcio Napoli|Napoli Soccer|US Palermo|US Città di Palermo|Palermo Calcio|SSD Palermo|
+Palermo|Virtus Roma|Virtus Bologna|Virtus Verona|Virtus Entella|Pro Vercelli|Pro Sesto|Pro Piacenza|Pro Patria|AS Livorno|Livorno|
+AC Perugia|Perugia Calcio|AC Pisa|Pisa Calcio|Pisa SC|Pisa|AC Siena|Robur Siena|AC Reggiana|Reggiana|AC Cesena|Cesena FC|AC Mantova|
+Mantova Calcio|Mantova|AC Prato|AC Ancona|US Ancona|AC Venezia|Venezia|Parma AC|AC Parma|AS Varese|Varese Calcio|AS Lucchese|
+AS Cittadella|AS Gubbio|US Cremonese|US Salernitana|US Catanzaro|US Foggia|Calcio Foggia|US Avellino|US Triestina|US Alessandria|
+US Pistoiese|US Massese|SS Arezzo|SS Juve Stabia|SS Monopoli|SS Teramo|SS Campobasso|Calcio Catania|Catania Calcio|Catania|
+Calcio Padova|Padova|Calcio Como|Como Calcio|Calcio Lecco|Brescia Calcio|Brescia|Spezia Calcio|La Spezia Calcio|La Spezia|Frosinone Calcio|Benevento Calcio|
+Pescara Calcio|Modena FC|Modena Calcio|Modena|Vicenza Calcio|LR Vicenza|Piacenza Calcio|Novara Calcio|Cosenza Calcio|Reggina Calcio|
+ACR Messina|FC Messina|Taranto FC|AS Taranto|Trapani Calcio|Rimini Calcio|Rimini FC|Ravenna Calcio|Ravenna FC|Latina Calcio|
+Potenza Calcio|Matera Calcio|Siracusa Calcio|L'Aquila Calcio|Pordenone Calcio|Treviso FBC|FC Treviso|AC Trento|Ascoli Calcio|
+Carrarese Calcio|Ternana Calcio|FC Crotone|Cagliari|Empoli|Monza|Lecce|Cremonese|Frosinone|Spezia|Cittadella|Catanzaro|
 Juventus|Inter|Internazionale|AC Milan|Milan|AS Roma|Roma|SS Lazio|Lazio|SSC Napoli|Napoli|Atalanta|ACF Fiorentina|Fiorentina|
 Bologna FC|Bologna 1909|Torino FC|Torino Calcio|Genoa CFC|Genoa|UC Sampdoria|Sampdoria|Udinese Calcio|Udinese|Cagliari Calcio|
 Hellas Verona|Verona|Parma Calcio|Parma Calcio 1913|US Lecce|Como 1907|Empoli FC|Venezia FC|AC Monza|US Sassuolo|Sassuolo Calcio|
@@ -617,7 +638,7 @@ Calcio Padova|Treviso FC|Pordenone Calcio|Arzignano Valchiampo|Feralpisalò|Perg
     "AR:5 BR:5 FR:4 NG:3 SN:3 ES:3 PT:2.5 NL:2.5 BE:2.5 DE:2 HR:2.5 RS:2 AL:2.5 RO:2 MA:2 CI:2 GH:2 DK:2 SE:1.5 NO:1.5 PL:2 UY:2 CO:1.5 CH:1.5 AT:1 CZ:1 SK:1 SI:1 GR:1 GM:1.2 ML:1 CM:1 GN:0.8 TR:1 US:1.2 EN:1 SCO:0.4 UA:0.8 GE:0.8 XK:0.8 ME:0.8 MK:0.6 BA:0.6 HU:0.6 VE:0.6 PY:0.6 CL:0.5 EC:0.5 MX:0.4 TN:0.6 DZ:0.6 EG:0.3 CD:0.6 BF:0.5 KE:0.3 AU:0.4 CA:0.5 JP:0.5 KR:0.4 IS:0.3 FI:0.4 IE:0.3 LT:0.3 BG:0.4 MD:0.3 LU:0.2 SM:0.2 MT:0.2",
   ),
   // UEFA association season points 2020/21 … 2024/25 (UEFA 2025 country ranking).
-  coefficients: { association: [16.285, 15.714, 22.357, 21.0, 21.875] },
+  coefficients: { association: [16.285, 15.714, 22.357, 21.0, 21.875], season2025: 19.0 },
 };
 
 const ITALY: NationSpec = {
@@ -809,7 +830,7 @@ Xanthi|Veria|PAE Veria|Trikala|AO Trikala|Iraklis Larisa|Ethnikos Asteras|Panele
     "BR:3 AR:3 PT:3 ES:3 FR:2 RS:2 AL:2 HR:1.5 CY:1.5 NG:1.5 PL:1.5 NL:1.2 DE:1.2 IT:1.2 SE:1 NO:1 CI:1 SN:1 GH:1 MA:1 BE:1 UY:1 CO:1 CM:1 GE:1 BA:0.8 ME:0.8 EN:0.8 MK:0.6 BG:0.6 RO:0.6 UA:0.6 SK:0.6 CZ:0.6 DK:0.6 US:0.6 GN:0.6 CD:0.6 DZ:0.6 AT:0.5 CH:0.5 VE:0.5 PY:0.5 IL:0.5 XK:0.5 ML:0.5 HU:0.4 FI:0.4 IS:0.4 AU:0.4 CR:0.4 EC:0.4 CL:0.4 SI:0.4 GM:0.4 BF:0.4 CV:0.4 GW:0.4 IE:0.3 TR:0.3 LT:0.3 LV:0.3 TG:0.3 BJ:0.3 AO:0.3 ZM:0.3",
   ),
   // UEFA association season points 2020/21 … 2024/25 (UEFA 2025 country ranking; 2023/24 includes Olympiacos's UECL title).
-  coefficients: { association: [5.1, 8.0, 2.125, 11.4, 12.687] },
+  coefficients: { association: [5.1, 8.0, 2.125, 11.4, 12.687], season2025: 14.2 },
 };
 
 const GREECE: NationSpec = {
@@ -956,7 +977,7 @@ Othellos Athienou|Onisilos Sotira|Anagennisi Deryneia|Omonia 29M|MEAP Nisou|Achy
       "PT:5 BR:4 GR:6 ES:4 FR:3 AR:2 NG:2 SE:1.5 NO:1.5 PL:1.5 RS:1.5 HR:1.2 NL:1.5 BE:1 DE:1 IT:1 SN:1 CI:1 GH:1 CM:1 CV:1 GW:1 BG:1 RO:1 GE:1.2 UA:0.8 LT:0.6 LV:0.5 SK:0.6 CZ:0.6 SI:0.6 ME:0.6 MK:0.6 AL:0.6 BA:0.6 IS:0.4 EN:1 IE:0.4 CO:0.6 UY:0.6 VE:0.5 CD:0.5 GN:0.5 ML:0.5 MA:0.5 DZ:0.5 TN:0.4 IL:0.6 AM:0.4",
     ),
     // UEFA association season points 2020/21 … 2024/25 (UEFA 2025 country ranking).
-    coefficients: { association: [4.0, 4.125, 5.1, 3.75, 10.562] },
+    coefficients: { association: [4.0, 4.125, 5.1, 3.75, 10.562], season2025: 12.156 },
   },
 };
 
@@ -1055,7 +1076,7 @@ San Marino Calcio|Victor San Marino|
     },
     importSources: codes("IT:20 AR:0.5 AL:0.4 RO:0.3 MA:0.2"),
     // UEFA association season points 2020/21 … 2024/25 (UEFA 2025 country ranking).
-    coefficients: { association: [0.5, 0.166, 0.833, 0.333, 0.666] },
+    coefficients: { association: [0.5, 0.166, 0.833, 0.333, 0.666], season2025: 0.833 },
   },
 };
 
@@ -1173,7 +1194,7 @@ Rabat Ajax|Victoria Hotspurs|St. Andrews|Swieqi United|Lija Athletic|Msida St. J
       "BR:5 IT:4 AR:2 RS:2 EN:2 NG:2 ES:1.5 PT:1.5 CO:1.2 FR:1 GH:1 SN:1 CI:1 ME:1 MK:0.8 HR:0.8 BA:0.6 AL:0.6 BG:0.6 RO:0.6 UA:0.5 GE:0.5 VE:0.6 UY:0.5 AU:0.5 LY:0.4 TN:0.4",
     ),
     // UEFA association season points 2020/21 … 2024/25 (UEFA 2025 country ranking).
-    coefficients: { association: [1.5, 1.875, 2.625, 1.5, 1.0] },
+    coefficients: { association: [1.5, 1.875, 2.625, 1.5, 1.0], season2025: 2.0 },
   },
 };
 

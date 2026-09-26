@@ -471,8 +471,10 @@ const LUSOPHONE = pool(
 );
 const CABOVERDEAN = pool(
   "caboverdean",
-  `Garry Ryan Kenny Dylan Jamiro Lisandro Logan Sidny Deroy Willy Kevin Steven Jeffry Roberto Wagner Patrick Laros
-   Dailon Telmo Hélio Yannick Admilson Anilton Nilson Gerson Sidney Kelvin Nuno Jeferson`,
+  `António José Manuel Carlos João Paulo Pedro Luís Jorge Mário Fernando Nelson Hélder Adilson Edson Ivanildo Elton
+   Emerson Evandro Nilton Nilson Wilson Arlindo Danilo Márcio Rui Ricardo Sandro Valdir Adriano Alexandre Bruno Cláudio
+   Daniel Domingos Eduardo Emanuel Fábio Francisco Gilson Jailson Joel Leonel Mauro Miguel Odair Osvaldo Rodrigo Sérgio
+   Tiago Vítor Kevin Patrick Nuno Yannick`,
   `Monteiro|Pina|Fortes|Semedo|Varela|Lopes|Tavares|Gomes|Correia|Barros|Rocha|Fernandes|Andrade|Borges|Brito|Cabral|
    Cardoso|Delgado|Duarte|Évora|Furtado|Graça|Leite|Lima|Livramento|Medina|Mendes|Moreira|Neves|Oliveira|Pereira|
    Ramos|Rodrigues|Santos|Silva|Soares|Sousa|Spencer|Teixeira|Vaz|Vieira|Almeida|Alves|Baptista|Carvalho|Costa|
@@ -1281,8 +1283,19 @@ const NG: NationSpec = {
       templates: templates(
         `{city} United:3; {city} Stars:3; {city} City:2; {city} Rangers:2; {city} Warriors:2; {city} Tornadoes:1;
          {city} Pillars:1; {city} Sharks:1; {city} Wolves:1; {city} Lions:1; {city} Leopards:1; {city} Royals:1;
-         {city} Rovers:1; {city} Crusaders:1; {city} Strikers:1; {region} United:1; {region} Stars:1`,
+         {city} Rovers:1; {city} Strikers:1; {region} United:1; {region} Stars:1`,
       ),
+      // "Crusaders" only in the Christian-majority south-south and south-east, never in the Muslim north.
+      regional: [
+        {
+          regions: ["Rivers", "Edo", "Abia", "Anambra", "Enugu", "Delta", "Akwa Ibom", "Imo", "Cross River", "Bayelsa", "Ebonyi"],
+          templates: templates(
+            `{city} United:3; {city} Stars:3; {city} City:2; {city} Rangers:2; {city} Warriors:2; {city} Tornadoes:1;
+             {city} Pillars:1; {city} Sharks:1; {city} Wolves:1; {city} Lions:1; {city} Leopards:1; {city} Royals:1;
+             {city} Rovers:1; {city} Crusaders:1; {city} Strikers:1; {region} United:1; {region} Stars:1`,
+          ),
+        },
+      ],
       founded: { top: [1945, 2015], bottom: [1960, 2022] },
       avoid: list(
         `Enyimba|Rangers International|Enugu Rangers|Kano Pillars|Rivers United|Shooting Stars|Remo Stars|Plateau United|
@@ -1553,7 +1566,7 @@ const DZ: NationSpec = {
         ),
         founded: { top: [1898, 2000], bottom: [1920, 2015] },
         avoid: list(
-          `MC Alger|USM Alger|CR Belouizdad|JS Kabylie|ES Sétif|CS Constantine|MC Oran|ASM Oran|USM Annaba|JSM Béjaïa|
+          `AS El Khroub|MC Alger|USM Alger|CR Belouizdad|JS Kabylie|ES Sétif|CS Constantine|MC Oran|ASM Oran|USM Annaba|JSM Béjaïa|
            MO Béjaïa|USM Blida|WA Tlemcen|MC El Eulma|CA Batna|MSP Batna|US Biskra|JS Saoura|NC Magra|ASO Chlef|
            Paradou AC|USM Khenchela|MC El Bayadh|Olympique Akbou|ES Mostaganem|ES Ben Aknoun|RC Arbaâ|CR Témouchent|
            JSM Tiaret|US Souf|HB Chelghoum Laïd|RC Kouba|NA Hussein Dey|USM El Harrach|Hydra AC|RC Relizane|
@@ -1684,7 +1697,7 @@ const TN: NationSpec = {
         ),
         founded: { top: [1919, 1990], bottom: [1925, 2010] },
         avoid: list(
-          `Espérance de Tunis|Espérance Sportive de Tunis|Étoile du Sahel|Étoile Sportive du Sahel|Club Africain|
+          `JS El Omrane|Olympique Béja|Olympique Le Kef|AS La Marsa|Espérance de Tunis|Espérance Sportive de Tunis|Étoile du Sahel|Étoile Sportive du Sahel|Club Africain|
            CS Sfaxien|Club Sportif Sfaxien|US Monastir|US Monastirienne|Stade Tunisien|US Ben Guerdane|CA Bizertin|
            Olympique de Béja|OB Béja|AS Soliman|EGS Gafsa|JS Omrane|Stade Gabèsien|AS Gabès|ES Métlaoui|US Tataouine|
            CS Hammam-Lif|ES Zarzis|AS Marsa|JS Kairouan|JS Kairouanaise|EO Sidi Bouzid|Stade Sportif Sfaxien|
@@ -1954,7 +1967,7 @@ const CM: NationSpec = {
         ],
         founded: { top: [1930, 2012], bottom: [1945, 2020] },
         avoid: list(
-          `Coton Sport|Coton Sport de Garoua|Canon Yaoundé|Canon Sportif de Yaoundé|Tonnerre Yaoundé|Tonnerre Kalara Club|
+          `Canon de Yaoundé|Tonnerre de Yaoundé|Coton Sport|Coton Sport de Garoua|Canon Yaoundé|Canon Sportif de Yaoundé|Tonnerre Yaoundé|Tonnerre Kalara Club|
            Union Douala|Union Sportive de Douala|Dynamo Douala|Dynamo de Douala|Les Astres|Fovu Club|Racing Bafoussam|
            Racing Club de Bafoussam|Bamboutos|Colombe Sportive|Colombe de Sangmélima|PWD Bamenda|PWD Kumba|YOSA|
            Young Sport Academy|Aigle Royal de Dschang|Aigle Royal|Stade Renard|Victoria United|Gazelle FA|AS Fortuna|
@@ -2526,7 +2539,8 @@ const CV: NationSpec = {
         ),
         founded: { top: [1919, 1990], bottom: [1930, 2010] },
         avoid: list(
-          `Sporting Clube da Praia|Sporting da Praia|CD Travadores|Travadores|Académica da Praia|Boavista da Praia|
+          `Sporting de Praia|Académica de Praia|Desportivo de Praia|Benfica de Praia|Académica de Mindelo|Benfica de Mindelo|
+         Académica de Porto Novo|Sporting de Porto Novo|Sporting Clube da Praia|Sporting da Praia|CD Travadores|Travadores|Académica da Praia|Boavista da Praia|
            Mindelense|CS Mindelense|Derby|FC Derby|Batuque|Académica do Mindelo|Salamansa|Castilho|Académico do Aeroporto|
            Sal Rei|Sporting da Brava|Vulcânicos|Académica do Fogo|Paulense|Rosariense|Solpontense|Ultramarina|
            Scorpion Vermelho|Varandinha|Os Garridos|Onze Unidos|Juventude do Sal|Benfica da Praia|Desportivo da Praia|
@@ -2647,7 +2661,8 @@ const AO: NationSpec = {
         ),
         founded: { top: [1920, 2010], bottom: [1940, 2020] },
         avoid: list(
-          `Petro de Luanda|Petro Atlético|Atlético Petróleos de Luanda|Primeiro de Agosto|1º de Agosto|Interclube|
+          `Progresso de Sambizanga|Ferroviário de Huambo|Petro de Huambo|Benfica de Lubango|Académica de Lobito|Recreativo de Uíge|
+         Atlético de Namibe|Académica de Soyo|Recreativo de Caála|Petro de Luanda|Petro Atlético|Atlético Petróleos de Luanda|Primeiro de Agosto|1º de Agosto|Interclube|
            Sagrada Esperança|Kabuscorp|Progresso do Sambizanga|Desportivo da Huíla|Recreativo do Libolo|Bravos do Maquis|
            Wiliete|Académica do Lobito|Académica Petróleos do Lobito|Santa Rita de Cássia|Sporting de Cabinda|
            Recreativo da Caála|Ferroviário do Huambo|Petro do Huambo|Primeiro de Maio|Atlético Sport Aviação|ASA|
@@ -2764,7 +2779,7 @@ const MZ: NationSpec = {
         ),
         founded: { top: [1920, 2012], bottom: [1940, 2020] },
         avoid: list(
-          `Ferroviário de Maputo|Ferroviário da Beira|Ferroviário de Nampula|Ferroviário de Nacala|Ferroviário de Lichinga|
+          `Ferroviário de Beira|Sporting de Beira|União Desportiva de Songo|Ferroviário de Maputo|Ferroviário da Beira|Ferroviário de Nampula|Ferroviário de Nacala|Ferroviário de Lichinga|
            Ferroviário de Quelimane|Ferroviário de Pemba|Ferroviário de Inhambane|Ferroviário de Gaza|Costa do Sol|
            Black Bulls|Liga Desportiva de Maputo|Liga Muçulmana|UD Songo|União Desportiva do Songo|Desportivo de Maputo|
            Maxaquene|Textáfrica|Textáfrica do Chimoio|Chingale|Matchedje|Incomáti|Baía de Pemba|Clube de Chibuto|

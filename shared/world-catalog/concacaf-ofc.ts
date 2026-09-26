@@ -1943,24 +1943,23 @@ const PR: NationSpec = {
 
 const PAPIAMENTO = pool(
   "papiamento",
-  `Leandro Juninho Cuco Eloy Rangelo Kenji Tahith Jürgen Gervane Juriën Sherel Roshon Armando Livano Jearl Brandley
-   Kevin Godfried Tyrick Jeremy Shurandy Deveron Jurich Joshua Sontje Jarchinio Jafar Rigino Anthony Darryl Richairo
-   Ayrton Gino Quenten Nathangelo Jaïro Denzel Dwight Rensy Edson Javier Raymond Marlon Erwin Glenn Vurnon Shanon
-   Charlison Emilio Dyron`,
-  `Martina Bacuna Maria Martha Lachman Isenia Janga Zimmerman Pinedo Francisca Room Gorré Chong Locadia Kastaneer Gaari
-   Floranus Obispo Comenencia Margaritha Kuwas Felida Roemeratoe Bodak Antonisse Sambo Fonville Carolina Brenet Anita
-   Anthonia Bernabela Cijntje Leito Martis Nepomuceno Pieternella Rosaria Schoop Statia Winklaar Croes Wever Erasmus
-   Britten Bislip Oduber Ridderstap Geerman Rasmijn Arends Kock Dijkhoff Werleman Every Vrolijk Silberie Donata`,
+  `Leandro Eloy Jürgen Armando Kevin Jeremy Joshua Anthony Darryl Ayrton Gino Denzel Dwight Edson Javier Raymond Marlon
+   Erwin Glenn Emilio Ronald Edwin Hubert Ricardo Eduardo Rudy Franklin Hensley Ivan Luis Carlos José Juan Pedro Miguel
+   Rafael Roberto Gregory Randall Ruben Rodney Jeffrey Richard Steven Michael Mauricio Sidney Eugene Orlando Angelo`,
+  `Martina Maria Martha Isenia Zimmerman Pinedo Francisca Carolina Sambo Anita Anthonia Bernabela Cijntje Leito Martis
+   Nepomuceno Pieternella Rosaria Statia Winklaar Croes Wever Erasmus Britten Bislip Oduber Ridderstap Geerman Rasmijn
+   Arends Kock Dijkhoff Werleman Every Vrolijk Silberie Donata Constancia Juliana Clemencia Mercelina Paulina Victoria
+   Josephina Rojer Koeiman Girigorie Tromp Lacle Boekhoudt Figaroa Semeleer Thijsen`,
 );
 const SURINAMESE_CREOLE = pool(
   "surinamese-creole",
-  `Ramon Denzel Giovanni Kenneth Delano Clifton Marvin Quincy Sheraldo Tjaronn Myenty Gleofilo Richonell Shaquille
-   Warner Radinio Djevencio Anfernee Tyrone Ryan Kelvin Etienne Virgil Mitchell Romeo Dion Stefano Nigel Regillio
-   Jimmy Edgar Ruud Clarence Aron Jerry Henk Frank Gerald Stanley Winston Orlando Dhoraso Florian`,
-  `Pinas Burgzorg Hasselbaink Essed Pengel Kappel Redan Donk Becker Chery Vlijter Leerdam Abena Margaret Misidjan
-   Seedorf Kluivert Rijkaard Wijnaldum Promes Emanuelson Zeefuik Ondaan Fer Gravenberch Oosterwolde Refos Sabajo
-   Nelom Linger Mijnals Aloema Amoksi Asabina Macnack Kerk Paal Fraenk Rustenberg Vanenburg Sporkslede Rellum Wooter
-   Brandon Tokomo Gefferie`,
+  `Ramon Denzel Giovanni Kenneth Delano Clifton Marvin Quincy Warner Tyrone Ryan Kelvin Etienne Virgil Mitchell Romeo
+   Dion Stefano Nigel Jimmy Edgar Ruud Clarence Aron Jerry Henk Frank Gerald Stanley Winston Orlando Florian Romano
+   Ricardo Edwin Glenn Roy Hugo Iwan Rudy Harold Franklin Errol Humphrey Gregory Rodney Randy Roland Lloyd Earl Eugene
+   Marciano Roel Sergio Jeffrey Raoul Carlo Andy Remy`,
+  `Pinas Essed Pengel Kappel Redan Becker Abena Margaret Ondaan Refos Sabajo Nelom Linger Aloema Asabina
+   Macnack Kerk Fraenk Rustenberg Sporkslede Rellum Wooter Brandon Tokomo Gefferie Esajas Wijngaarde Sno Deekman Kross
+   Held Plet Kolader Neede Vrede Tjin Amelo Karsters Doelwijt Leter Stuger Blijd`,
 );
 const HINDUSTANI_CARIBBEAN = pool(
   "hindustani-caribbean",
@@ -2870,11 +2869,11 @@ const TAHITIAN = pool(
 const KANAK = pool(
   "kanak",
   `Jean Georges Jacques Christian Willy Alain Patrick Didier Bertrand Emile Joël Cédric Marius Pierre Paul Sylvain
-   Raphaël Lionel Yann Roy Kiam Jekob Richard Brice Dick Wassissi Hnalaine Jean-Philippe Michel Rocky`,
-  `Wamytan Wetewea Hnepeune Goprou Gope Luepack Wakanumune Qaeze Gorohouna Ukeiwé Tjibaou Wéa Kasarhérou Neaoutyine
-   Waheo Kaloi Hnamuko Wadriako Poatinda Kecine Trolue Xowie Kakue Haocas Tidjite Tein Waia Karembeu Kaï Kayara Saïko
-   Wanesse Wajoka Sele Jeno Gope-Fenepej Gope-Iwate Dahité Hmae Ihage Kaudre Poiwi Wahnawe Waiwa Watrone Hnaweo
-   Kutrue Pouroudi`,
+   Raphaël Lionel Yann Richard Brice Jean-Philippe Michel Mathieu Nicolas Julien Olivier Laurent Thierry André Joseph
+   Samuel Daniel Éric Sébastien`,
+  `Wetewea Hnepeune Goprou Gope Luepack Qaeze Gorohouna Waheo Kaloi Hnamuko Wadriako Poatinda Kecine Trolue
+   Xowie Kakue Haocas Tidjite Tein Waia Kayara Wanesse Sele Jeno Hmae Ihage Kaudre Poiwi
+   Wahnawe Waiwa Watrone Hnaweo Kutrue Pouroudi`,
 );
 const COOK_ISLANDS = pool(
   "cook-islands",
@@ -3296,7 +3295,7 @@ const REAL_CLUB_NAMES: Readonly<Record<string, readonly string[]>> = {
   ),
   HT: list(
     `Violette AC|Racing Club Haïtien|Don Bosco FC|AS Capoise|Baltimore SC|Arcahaie FC|Tempête FC|Real Hope FA|AS Cavaly|
-     AS Mirebalais|FICA|Racing FC des Gonaïves|América des Cayes|Ouanaminthe FC|Juventus des Cayes|Aigle Noir AC|
+     AS Mirebalais|FICA|Racing FC des Gonaïves|Racing FC Gonaïves|Racing Gonaïves|América des Cayes|Ouanaminthe FC|Juventus des Cayes|Aigle Noir AC|
      Victory SC|Étoile Haïtienne|Cosmopolite|Triomphe de Liancourt|Real du Cap`,
   ),
   DO: list(

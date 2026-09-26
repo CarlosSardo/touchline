@@ -15,6 +15,12 @@ const PROFESSIONAL_SENIORS =
 export const payrollScale = (wageBudget: number, baseTotal: number) =>
   clamp((0.88 * Math.max(0, wageBudget)) / Math.max(1, baseTotal), 0.02, 4);
 
+/** Weekly professional wage floor as generated: 50, or 10–50 where 88% of the budget cannot pay 50 each. */
+export const professionalWageFloor = (wageBudget: number, allowances: number, professionals: number) =>
+  professionals > 0
+    ? clamp(Math.floor((0.88 * wageBudget - allowances) / professionals / 10) * 10, 10, 50)
+    : 50;
+
 export async function wageScale(store: Store, clubId: number) {
   const row = (await store.get<{ budget: number; base: number }>(
     `SELECT clubs.wage_budget AS budget,(SELECT coalesce(sum(${BASE_WAGE_SQL}),0) FROM players WHERE ((players.club_id = clubs.id AND players.parent_club_id IS NULL) OR players.parent_club_id = clubs.id) AND ${PROFESSIONAL_SENIORS}) AS base FROM clubs WHERE clubs.id = ?`,

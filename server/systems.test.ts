@@ -3,6 +3,7 @@ import { Store } from "./db.ts";
 import { generateWorld } from "./world.ts";
 import { mediaFeed } from "./media.ts";
 import { assessPlayerInterest } from "./recruitment.ts";
+import { heldNationalities, passportGroup } from "./registration.ts";
 import { addDays, DEFAULT_TRANSFER_TERMS } from "../shared/rules.ts";
 import {
   assignScout,
@@ -181,10 +182,13 @@ describe("director decisions and ownership boundaries", () => {
       "SELECT TOP (1) * FROM players WHERE club_id = 2 AND age >= 18 AND age_group = 'Senior' AND parent_club_id IS NULL ORDER BY id",
     ))!;
     const deal = await enquire(store, target.id, "Permanent transfer");
+    // Club 2's first senior is an elite player priced above the default £100M budget; the fee is not under test.
+    await store.run("UPDATE clubs SET transfer_budget = ? WHERE id = 1", deal.asking_price * 2);
     await negotiationStep(store, deal.id, "formalize");
     const terms = {
       fee: deal.asking_price,
-      wage: 500000,
+      // Well above the target's expectation (its current wage plus the agent's markup).
+      wage: Math.max(500000, target.wage * 3),
       years: 3,
       role: "Fringe player",
       promises: [],
@@ -936,9 +940,16 @@ describe("director decisions and ownership boundaries", () => {
   });
 
   it("does not grant English registration based on ability alone", async () => {
-    const foreign = (await store.get<Player>(
-      "SELECT TOP (1) * FROM players WHERE country_id = 2 AND club_id IN (SELECT id FROM clubs WHERE country_id = 2)",
-    ))!;
+    // Some v4 Spaniards hold British citizenship through a parent (domestic work rights), so skip them.
+    const foreign = (
+      await store.all<Player>(
+        "SELECT TOP (50) * FROM players WHERE country_id = 2 AND club_id IN (SELECT id FROM clubs WHERE country_id = 2) ORDER BY id",
+      )
+    ).find((player) =>
+      heldNationalities("ES", JSON.parse(player.profile)).every(
+        (code) => !["GB", "IE"].includes(passportGroup(code)),
+      ),
+    )!;
     await store.run(
       "UPDATE players SET ability = 99, potential = 99, wage = 5000, value = 1000000, age = 25 WHERE id = ?",
       foreign.id,

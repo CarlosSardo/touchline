@@ -348,7 +348,7 @@ export async function verifyWorld(
 
 /** Reserved and used KB and rows per table of the store's schema. */
 export async function tableSizes(store: Store) {
-  return store.all<{ name: string; rows: number; reservedKb: number; usedKb: number }>(
+  const rows = await store.all<{ name: string; rows: number | string; reservedKb: number | string; usedKb: number | string }>(
     `SELECT tables.name, max(CASE WHEN partitions.index_id IN (0, 1) THEN partitions.rows ELSE 0 END) AS rows,
        sum(units.total_pages) * 8 AS reservedKb, sum(units.used_pages) * 8 AS usedKb
      FROM sys.tables AS tables
@@ -358,6 +358,8 @@ export async function tableSizes(store: Store) {
      GROUP BY tables.name ORDER BY reservedKb DESC`,
     store.schemaName,
   );
+  // bigint columns arrive as strings; summing them unconverted concatenated the text (reservedMb 1.6e67).
+  return rows.map((row) => ({ name: row.name, rows: Number(row.rows), reservedKb: Number(row.reservedKb), usedKb: Number(row.usedKb) }));
 }
 
 const within = (actual: number, target: number, tolerance = 0.1) =>

@@ -206,7 +206,7 @@ jobs:
         run: |
           npm run --silent db:footprint -- --all 2>&1 | tee ci-logs/footprint.log
           { echo '### Database footprint'; echo '```'; grep -E '^[A-Za-z0-9_]+: [0-9.]+ MB reserved' ci-logs/footprint.log || true; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
-      - name: Backup and world reset smoke (legacy dbo world and the CI schema)
+      - name: Backup and world reset smoke (legacy dbo, account registry, unregistered world, resumed backup)
         if: ${{ !cancelled() && steps.sql.outcome == 'success' }}
         run: |
           set -o pipefail
@@ -214,10 +214,27 @@ jobs:
           # dbo stands in for the legacy world: the full backup skips test schemas and test mode only allows them.
           SQL_TEST_MODE=false SQL_SCHEMA=dbo npm run --silent db:migrate -- --apply --yes > ci-logs/dbo-migrate.log 2>&1
           SQL_TEST_MODE=false SQL_SCHEMA=dbo npm run --silent db:seed -- --seed ci-reset --nations FO --squads minimum --apply --yes > ci-logs/dbo-seed.log 2>&1
+          # Production-shaped registry: the legacy guest keeps dbo, a throwaway owner gets a fresh touchline_user_ world.
+          legacy_id=$(npx tsx -e 'import("./scripts/accounts-migrate.ts").then((m) => console.log(m.LEGACY_OBJECT_ID))')
+          legacy_email=$(npx tsx -e 'import("./scripts/accounts-migrate.ts").then((m) => console.log(m.LEGACY_EMAIL))')
+          SQL_TEST_MODE=false SQL_SCHEMA=dbo OWNER_OBJECT_ID="$(cat /proc/sys/kernel/random/uuid)" ALLOWED_USER_OBJECT_IDS="$legacy_id" \
+            npm run --silent accounts:migrate -- --tenant-id "$(cat /proc/sys/kernel/random/uuid)" --legacy-object-id "$legacy_id" \
+            --legacy-email "$legacy_email" --apply --yes > ci-logs/accounts-migrate.log 2>&1
+          # A world nobody is registered for (e.g. a deleted account): --all must report and reset it too.
+          SQL_TEST_MODE=false SQL_SCHEMA="touchline_user_$(cat /proc/sys/kernel/random/uuid | tr -d -)" npm run --silent db:migrate -- --apply --yes > ci-logs/orphan-migrate.log 2>&1
           SQL_TEST_MODE=false npm run --silent data:export -- --everything --out-dir "$backup" 2>&1 | tee ci-logs/backup.log
+          # An interrupted backup resumes: the same --out-dir redoes only the missing file.
+          rm "$backup/dbo/world.touchline.gz"
+          SQL_TEST_MODE=false npm run --silent data:export -- --everything --out-dir "$backup" 2>&1 | tee ci-logs/backup-resume.log
+          if ! grep -q 'Backed up dbo/world ' ci-logs/backup-resume.log || grep -q 'Backed up registry ' ci-logs/backup-resume.log; then
+            echo "::error::the resumed backup did not redo exactly the missing file"; exit 1
+          fi
           npm run --silent data:export -- --verify "$backup" 2>&1 | tee ci-logs/backup-verify.log
-          reset() { SQL_TEST_MODE=false npm run --silent world:reset -- --schema dbo --schema "$SQL_SCHEMA" "$@"; }
+          reset() { SQL_TEST_MODE=false npm run --silent world:reset -- --all "$@"; }
           reset 2>&1 | tee ci-logs/world-reset-dry-run.log
+          if ! grep -q '"present": true' ci-logs/world-reset-dry-run.log || ! grep -q '"registered": false' ci-logs/world-reset-dry-run.log; then
+            echo "::error::world:reset --all did not see the account registry and the unregistered world"; exit 1
+          fi
           reset --apply --yes 2>&1 | tee ci-logs/world-reset.log
           reset 2>&1 | tee ci-logs/world-reset-after.log
           if grep -Eq '"truncate": \[$|"snapshots": [1-9]' ci-logs/world-reset-after.log; then

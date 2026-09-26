@@ -25,6 +25,20 @@ describe("ACL Elite zone league stage", () => {
     expect(draw.constraints.associationProtection).toBe(true);
     expect(draw.fixtures.some((fixture) => countries[fixture.homeId - 1] === countries[fixture.awayId - 1])).toBe(false);
   });
+
+  it("draws the 2026/27 16-club zone: four pots of four, eight rounds, four home matches each", () => {
+    const sixteen = drawZoneLeaguePhase(field([1, 2, 3, 4, 1, 2, 3, 5, 1, 2, 4, 6, 1, 3, 5, 7]), "2026:acle:east");
+    expect(sixteen.pots.map((pot) => pot.length)).toEqual([4, 4, 4, 4]);
+    expect(sixteen.fixtures).toHaveLength(64);
+    for (let id = 1; id <= 16; id++) {
+      const own = sixteen.fixtures.filter((fixture) => fixture.homeId === id || fixture.awayId === id);
+      const opponents = own.map((fixture) => (fixture.homeId === id ? fixture.awayId : fixture.homeId));
+      expect(new Set(opponents).size).toBe(8);
+      expect(own.filter((fixture) => fixture.homeId === id)).toHaveLength(4);
+      expect(new Set(own.map((fixture) => fixture.round)).size).toBe(8);
+      for (const pot of sixteen.pots) expect(opponents.filter((opponent) => pot.includes(opponent))).toHaveLength(2);
+    }
+  });
 });
 
 describe("group-stage draw", () => {

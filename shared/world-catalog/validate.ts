@@ -823,7 +823,10 @@ export function validateCatalog(
     weights(`${path}.importSources`, football.importSources, "import source", nation.code);
     const seed = football.coefficients?.association;
     if (nation.confederation !== "OFC" && (!seed || seed.length !== 5 || seed.some((value) => !within(value, 0, 40))))
-      error(`${path}.coefficients`, "needs 5 association coefficient seasons (2021-2025), each 0-40");
+      error(`${path}.coefficients`, "needs 5 association coefficient seasons (2020/21-2024/25), each 0-40");
+    const season2025 = football.coefficients?.season2025;
+    if (season2025 !== undefined && !within(season2025, 0, 40))
+      error(`${path}.coefficients.season2025`, "2025/26 points must be 0-40");
   }
 
   function checkCrossBorder(nation: NationSpec, spec: CrossBorderSpec, path: string) {
@@ -956,6 +959,14 @@ export function validateCatalog(
   const continental = catalog.continental;
   if (continental.coefficientConfederations.includes("OFC"))
     error("continental", "OFC records no coefficients (no OFC club competition)");
+  for (const [code, seed] of Object.entries(continental.rankingOnly ?? {})) {
+    const at = `continental.rankingOnly.${code}`;
+    const nation = nations.get(code);
+    if (!nation || nation.football || !continental.coefficientConfederations.includes(nation.confederation))
+      error(at, "ranking-only seeds are for ranked associations without clubs in the game");
+    if (!seed || seed.association.length !== 5 || [...seed.association, seed.season2025 ?? 0].some((value) => !within(value, 0, 40)))
+      error(at, "needs 5 association coefficient seasons (2020/21-2024/25), each 0-40");
+  }
   const ids = new Set<string>();
   continental.competitions.forEach((competition, index) => {
     const at = `continental.competitions[${index}]`;
@@ -971,7 +982,7 @@ export function validateCatalog(
     if (!legsValid(competition.legs, competition.finalLegs)) error(at, "legs must be 1 or 2");
     if (!MONTH_DAY.test(competition.start)) error(at, "start must be MM-DD");
     for (const zone of competition.zones ?? [])
-      for (const code of zone.nations) reference(at, code, "zone nation", true);
+      for (const code of zone.nations) reference(at, code, "zone nation", !continental.rankingOnly?.[code as keyof typeof continental.rankingOnly]);
   });
   continental.competitions.forEach((competition, index) => {
     const at = `continental.competitions[${index}]`;

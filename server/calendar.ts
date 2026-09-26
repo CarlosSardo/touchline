@@ -68,6 +68,45 @@ export interface CompetitionSpec {
   catalog?: ContinentalCompetitionSpec;
 }
 
+type BracketSize = "playoff" | "16" | "8" | "4" | "2";
+
+/**
+ * Real phase dates inside the July–June season. CONMEBOL's calendar-year editions (February–November) keep their
+ * cadence six months later: Recopa and qualifying from late July, groups September–November, knockouts January–May.
+ */
+export const CADENCE: Record<
+  string,
+  {
+    start?: string;
+    qualifying?: Partial<Record<QualifyingStage, string>>;
+    matchdays?: string[];
+    knockout?: Partial<Record<BracketSize, string>>;
+    /** Days between rounds of a single-venue tournament. */
+    gap?: number;
+  }
+> = {
+  "copa-libertadores": {
+    start: "09-16",
+    qualifying: { q1: "07-22", q2: "08-05", q3: "08-19" },
+    matchdays: ["09-16", "09-23", "10-14", "10-28", "11-04", "11-25"],
+    knockout: { "16": "02-10", "8": "03-10", "4": "04-14", "2": "05-29" },
+  },
+  "copa-sudamericana": {
+    start: "09-17",
+    qualifying: { q1: "08-20" },
+    matchdays: ["09-17", "09-24", "10-15", "10-29", "11-05", "11-26"],
+    knockout: { playoff: "01-20", "16": "02-11", "8": "03-11", "4": "04-15", "2": "05-22" },
+  },
+  "recopa-sudamericana": { start: "08-19" },
+  "libertadores-sub-20": { start: "08-12", gap: 3 },
+  // 2025/26 knockout calendars: quarter-finals in March, finals in May (the ACL Elite finals are centralised).
+  "afc-champions-league-elite": { knockout: { "16": "03-03", "8": "04-25", "4": "04-29", "2": "05-03" } },
+  "afc-champions-league-two": { knockout: { "16": "02-11", "8": "03-04", "4": "04-08", "2": "05-17" } },
+  "caf-champions-league": { knockout: { "8": "03-13", "4": "04-10", "2": "05-15" } },
+  "caf-confederation-cup": { knockout: { "8": "03-14", "4": "04-11", "2": "05-16" } },
+  "concacaf-champions-cup": { start: "03-10", knockout: { "8": "04-07", "4": "04-28", "2": "05-30" } },
+};
+
 const continentalSpec = (catalog: ContinentalCompetitionSpec): CompetitionSpec => ({
   name: catalog.name,
   confederation: catalog.confederation,
@@ -77,7 +116,7 @@ const continentalSpec = (catalog: ContinentalCompetitionSpec): CompetitionSpec =
   format: catalog.format === "league-phase" ? "Swiss" : catalog.format === "groups" ? "Groups" : "Knockout",
   rounds: catalog.matchdays ?? (catalog.groupSize ?? 2) * 2 - ((catalog.groupSize ?? 2) % 2 ? 0 : 2),
   qualifies: catalog.advance,
-  start: catalog.start,
+  start: CADENCE[catalog.id]?.start ?? catalog.start,
   qualifier: true,
   catalog,
 });
@@ -366,7 +405,9 @@ async function addFixture(
     if (ageGroup === "Senior" && !batch.national.has(home))
       while (internationalBreak(scheduled)) scheduled = addDays(scheduled, 1);
     if (++attempts > 150)
-      throw new Error("The competition calendar has no safe fixture slot.");
+      throw new Error(
+        `The competition calendar has no safe fixture slot (league ${leagueId}, ${stage} ${round}, clubs ${home} v ${away}, from ${date}).`,
+      );
   }
   batch.rows.push({
     id: ++batch.nextId,
@@ -613,17 +654,25 @@ async function catalogMainPhase(
       const name = `Group ${String.fromCharCode(65 + letter++)}`;
       rows.push(...group.map((clubId) => ({ club_id: clubId, group_name: name })));
       const firstLeg = roundrobin(group.length, group);
-      [...firstLeg, ...firstLeg.map((pairs) => pairs.map(([home, away]) => [away, home] as [number, number]))].forEach(
+      // Single-venue groups (Libertadores Sub-20) are one round robin.
+      [...firstLeg, ...(catalog.legs === 1 ? [] : firstLeg.map((pairs) => pairs.map(([home, away]) => [away, home] as [number, number])))].forEach(
         (pairs, round) => pairs.forEach(([home, away]) => matches.push({ home, away, round: round + 1, group: name })),
       );
     }
   }
   if (!rows.length) return false;
   await store.bulkInsert("standings", rows.map((row) => ({ league_id: leagueId, ...row })));
-  const gap = ["CONMEBOL", "CONCACAF"].includes(catalog.confederation) ? 7 : 14;
+  const cadence = CADENCE[catalog.id];
+  const gap = cadence?.gap ?? (["CONMEBOL", "CONCACAF"].includes(catalog.confederation) ? 7 : 14);
+  const planned = cadence?.matchdays?.map((monthDay) => seasonDate(season, monthDay));
+  const delay = planned ? Math.max(0, daysBetween(planned[0], start)) : 0;
   const dates: string[] = [];
   for (let round = 0; round < Math.max(0, ...matches.map((match) => match.round)); round++) {
-    let date = round ? addDays(dates[round - 1], gap) : start;
+    let date = planned?.[round]
+      ? addDays(planned[round], delay)
+      : round
+        ? addDays(dates[round - 1], gap)
+        : start;
     while (internationalBreak(date)) date = addDays(date, 7);
     dates.push(date);
   }
@@ -1242,6 +1291,19 @@ function continentalRoundDate(date: string, season: number, clubs: number) {
   return next;
 }
 
+/** A knockout round on its real date (at least three days after the last round), or the next single-venue round. */
+function cadenceRoundDate(catalogId: string, date: string, season: number, alive: number, playoff = false) {
+  const cadence = CADENCE[catalogId];
+  if (cadence?.gap) return addDays(date, cadence.gap);
+  const bracket = playoff || alive > 16 ? "playoff" : (String(2 ** Math.ceil(Math.log2(Math.max(2, alive)))) as BracketSize);
+  const planned = cadence?.knockout?.[bracket];
+  if (!planned) return undefined;
+  let next = seasonDate(season, planned);
+  if (next < addDays(date, 3)) next = addDays(date, 3);
+  while (internationalBreak(next)) next = addDays(next, 1);
+  return next;
+}
+
 interface QualifyingData extends CompetitionData {
   catalogQualifying: true;
   qualificationFor: number;
@@ -1424,10 +1486,11 @@ async function advanceQualifying(store: Store, leagueId: number, season: number,
     const sorted = playing.sort((left, right) => (data.seeds[right] ?? 0) - (data.seeds[left] ?? 0) || left - right);
     const { byes, pairs } = pairQualifyingRound(sorted, ties, (clubId) => data.paths[clubId] ?? "");
     const round = (data.nextRound ?? 0) + 1;
-    const planned = UEFA_STAGE_DATES[stage];
+    const stageDates = CADENCE[catalog.id]?.qualifying ?? (catalog.confederation === "UEFA" ? UEFA_STAGE_DATES : undefined);
+    const planned = stageDates?.[stage];
     let first = date;
-    if (catalog.confederation === "UEFA" && planned && nextIndex > index) {
-      const fixed = addDays(seasonDate(season, planned), catalog.level === 1 ? 0 : 1);
+    if (planned && nextIndex > index) {
+      const fixed = addDays(seasonDate(season, planned), catalog.confederation === "UEFA" && catalog.level !== 1 ? 1 : 0);
       if (fixed > first) first = fixed;
     }
     const rules = knockoutRules(league.name, "Qualifying");
@@ -1510,7 +1573,12 @@ async function setupContinental(store: Store, spec: CompetitionSpec, season: num
   );
   if (!separate) for (const entry of entries) usedSenior.add(entry.club.id);
   const mainId = await createLeague(store, spec);
-  const qualifying = entries.filter((entry) => entry.stage !== "main");
+  const direct = new Set(entries.filter((entry) => entry.stage === "main").map((entry) => entry.club.id));
+  // A club listed twice keeps one place: the main phase, else its first qualifying stage.
+  const listed = new Set(direct);
+  const qualifying = entries.filter(
+    (entry) => entry.stage !== "main" && !listed.has(entry.club.id) && Boolean(listed.add(entry.club.id)),
+  );
   const codes = new Map(
     (await store.all<Country>("SELECT * FROM countries")).map((country) => [country.id, country.code]),
   );
@@ -1524,11 +1592,17 @@ async function setupContinental(store: Store, spec: CompetitionSpec, season: num
     spec,
     season,
     phase: "awaiting qualifiers",
-    direct: entries.filter((entry) => entry.stage === "main").map((entry) => entry.club.id),
+    direct: [...direct],
     qualifiers: [],
     qualification: entries.map(({ club, ...entry }) => ({ clubId: club.id, ...entry })),
     regulationsVersion: 2,
   };
+  // Before qualifying: a qualifying round with no ties can start the main phase at once (its own standings).
+  if (direct.size)
+    await store.bulkInsert(
+      "standings",
+      [...direct].map((clubId) => ({ league_id: mainId, club_id: clubId, group_name: "Qualified" })),
+    );
   if (qualifying.length || sources.length) {
     const qualifyingSpec: CompetitionSpec = {
       ...spec,
@@ -1571,15 +1645,12 @@ async function setupContinental(store: Store, spec: CompetitionSpec, season: num
     const counts: Partial<Record<QualifyingStage, number>> = {};
     for (const [stage, clubs] of Object.entries(stageEntrants)) counts[stage as QualifyingStage] = clubs.length;
     const rounds = Math.max(1, qualifyingPlan(counts, spec.teams - (data.direct?.length ?? 0)).length);
-    const counted = addDays(seasonDate(season, catalog.start), -(rounds * 14 + 7));
+    const counted = CADENCE[catalog.id]?.qualifying
+      ? `${season}-07-02`
+      : addDays(seasonDate(season, spec.start), -(rounds * 14 + 7));
     await advanceQualifying(store, qualifyingId, season, counted < `${season}-07-02` ? `${season}-07-02` : counted);
   } else await setData(store, mainId, data);
-  if (data.direct?.length)
-    await store.bulkInsert(
-      "standings",
-      data.direct.map((clubId) => ({ league_id: mainId, club_id: clubId, group_name: "Qualified" })),
-    );
-  await tryStartMain(store, mainId, season, addDays(seasonDate(season, catalog.start), -3));
+  await tryStartMain(store, mainId, season, addDays(seasonDate(season, spec.start), -3));
 }
 
 export async function createCalendar(store: Store) {
@@ -2237,7 +2308,9 @@ export async function progressCompetitions(store: Store, date: string) {
           : new Set(round.flatMap((fixture) => [fixture.home_id, fixture.away_id])).size / 2 +
             (data.pendingByes?.length ?? 0) +
             (data.playoffByes?.length ?? 0);
-      nextDate = continentalRoundDate(date, state.season, alive);
+      nextDate =
+        cadenceRoundDate(spec.catalog.id, date, state.season, alive, data.phase === "groups" && Boolean(spec.catalog.byes)) ??
+        continentalRoundDate(date, state.season, alive);
     } else if (league.kind === "continental")
       while (internationalBreak(nextDate)) nextDate = addDays(nextDate, 7);
     if (spec.national && spec.age === "Senior")

@@ -3,6 +3,8 @@ import { CONTINENTAL } from "./world-catalog/continental.ts";
 import {
   coefficientSeedRows,
   coefficientTotal,
+  frozenAssociationPoints,
+  knockoutRules,
   rankAssociations,
   resolveContinentalAccess,
   type AccessEntrant,
@@ -49,10 +51,11 @@ describe("UEFA access list 2024–27", () => {
   it("fills the 36-team league phases from the list, titleholders and performance spots", () => {
     expect(count(entrants, "uefa-champions-league", "main")).toBe(29);
     expect(count(entrants, "uefa-champions-league", "playoff")).toBe(4);
-    expect(count(entrants, "uefa-champions-league", "q3")).toBe(8);
-    expect(count(entrants, "uefa-champions-league", "q2")).toBe(10);
-    expect(count(entrants, "uefa-champions-league", "q1")).toBe(33);
-    expect(count(entrants, "uefa-europa-league", "main")).toBe(14);
+    expect(count(entrants, "uefa-champions-league", "q3")).toBe(5);
+    expect(count(entrants, "uefa-champions-league", "q2")).toBe(14);
+    expect(count(entrants, "uefa-champions-league", "q1")).toBe(31);
+    expect(count(entrants, "uefa-europa-league", "main")).toBe(13);
+    expect(count(entrants, "uefa-europa-league", "q1")).toBe(18);
     expect(count(entrants, "uefa-conference-league", "main")).toBe(0);
     expect(count(entrants, "uefa-super-cup")).toBe(2);
     expect(entrants.filter((item) => item.basis === "European Performance Spot").map((item) => item.clubId))
@@ -84,11 +87,51 @@ describe("UEFA access list 2024–27", () => {
     expect(count(rebalanced, "uefa-champions-league", "main")).toBe(26);
     const promoted = rebalanced.find((item) => item.basis.includes("rebalancing"))!;
     expect([promoted.nation, promoted.domesticPosition, promoted.stage]).toEqual(["N11", 1, "main"]);
+    // With club coefficients the best champions-path club moves up (2026/27: Shakhtar from CP Q2), never a league-path club.
+    const strong = nations.map((item) => item.code === "N20" ? { ...item, coefficients: { [item.table[0]]: 95 } }
+      : item.code === "N12" ? { ...item, coefficients: { [item.table[0]]: 90, [item.table[1]]: 99 } } : item);
+    const byCoefficient = resolveContinentalAccess(CONTINENTAL, {
+      confederation: "UEFA", ranking: codes, nations: strong,
+      titleholders: { "uefa-champions-league": byCode.get("N01")!.table[0] },
+    }).find((item) => item.basis.includes("titleholder rebalancing"))!;
+    expect([byCoefficient.nation, byCoefficient.domesticPosition]).toEqual(["N20", 1]);
   });
 
-  it("builds the Youth League from the UCL league phase and 32 domestic champions", () => {
+  it("builds the Youth League from the UCL league phase and every U19 champion", () => {
     expect(count(entrants, "uefa-youth-league", "main")).toBe(29);
-    expect(count(entrants, "uefa-youth-league", "q1")).toBe(32);
+    expect(count(entrants, "uefa-youth-league", "q2")).toBe(30);
+    expect(count(entrants, "uefa-youth-league", "q1")).toBe(23);
+  });
+});
+
+describe("real association positions (no rank compression)", () => {
+  // 2025 ranking: IL 18, RU 26 (suspended), AZ 30, FO 40 and MK 51 have no clubs in the game; LI 44 has only a cup.
+  const absent = new Map([[18, "IL"], [26, "RU"], [30, "AZ"], [40, "FO"], [51, "MK"], [44, "LI"]]);
+  const ranking = Array.from({ length: 55 }, (_, index) => absent.get(index + 1) ?? `N${String(index + 1).padStart(2, "0")}`);
+  const nations = ranking.filter((code) => code.startsWith("N")).map((code) => nation(code, Number(code.slice(1))));
+  nations.push({ code: "LI", table: [], cupWinner: 4_000 });
+  const entrants = resolveContinentalAccess(CONTINENTAL, { confederation: "UEFA", ranking, nations });
+  const ofNation = (code: string) => entrants.filter((item) => item.nation === code && item.competition !== "uefa-youth-league");
+
+  it("keeps every association at its real rank", () => {
+    expect(ofNation("N19").map((item) => `${item.competition}:${item.stage}:${item.associationRank}`)).toEqual([
+      "uefa-champions-league:q2:19", "uefa-europa-league:q1:19", "uefa-conference-league:q2:19", "uefa-conference-league:q2:19",
+    ]);
+    // Rank 34: cup winner in UECL Q2 by the list; both league clubs move up into places vacated by IL, RU and AZ.
+    expect(ofNation("N34").map((item) => `${item.competition}:${item.stage}`)).toEqual([
+      "uefa-champions-league:q1", "uefa-conference-league:q2", "uefa-conference-league:q2", "uefa-conference-league:q2",
+    ]);
+    expect(entrants.some((item) => ["IL", "RU", "AZ", "FO", "MK"].includes(item.nation))).toBe(false);
+  });
+
+  it("moves vacated places to the best entrants of the previous round", () => {
+    const championsQ2 = entrants.filter((item) => item.competition === "uefa-champions-league" && item.stage === "q2" && item.path === "champions");
+    expect(championsQ2).toHaveLength(8);
+    expect(championsQ2.filter((item) => item.basis.includes("vacancy")).map((item) => item.associationRank)).toEqual([23]);
+    expect(count(entrants, "uefa-champions-league", "q1")).toBe(27);
+    expect(count(entrants, "uefa-europa-league", "q1")).toBe(15);
+    // UECL Q2: IL and RU (two each) and AZ (one) vacate five places, filled from Q1.
+    expect(entrants.filter((item) => item.competition === "uefa-conference-league" && item.basis.includes("vacancy"))).toHaveLength(5);
   });
 });
 
@@ -99,7 +142,10 @@ describe("other confederations", () => {
       confederation: "CONMEBOL", ranking: codes, nations: codes.map((code, index) => nation(code, index)),
     });
     expect(count(entrants, "copa-libertadores", "main")).toBe(26);
-    expect(count(entrants, "copa-libertadores")).toBe(26 + 13 + 6);
+    expect(count(entrants, "copa-libertadores", "q2")).toBe(13);
+    expect(count(entrants, "copa-libertadores", "q1")).toBe(6);
+    expect(entrants.filter((item) => item.competition === "copa-libertadores" && item.stage === "main" && item.nation === "AR")).toHaveLength(5);
+    expect(entrants.filter((item) => item.competition === "copa-libertadores" && item.stage === "main" && item.nation === "CL")).toHaveLength(2);
     expect(count(entrants, "copa-sudamericana", "main")).toBe(12);
     expect(count(entrants, "copa-sudamericana", "q1")).toBe(32);
     expect(count(entrants, "libertadores-sub-20")).toBe(10);
@@ -110,16 +156,18 @@ describe("other confederations", () => {
     const codes = Array.from({ length: 19 }, (_, index) => `C${index}`);
     const entrants = resolveContinentalAccess(CONTINENTAL, { confederation: "CAF", ranking: codes, nations: codes.map((code, index) => nation(code, index)) });
     expect(count(entrants, "caf-champions-league")).toBe(31);
-    expect(count(entrants, "caf-champions-league", "q2")).toBe(8);
+    expect(count(entrants, "caf-champions-league", "q1")).toBe(31);
     expect(count(entrants, "caf-confederation-cup")).toBe(31);
     expectOnePlacePerClub(entrants, ["caf-champions-league", "caf-confederation-cup"]);
   });
 
   it("ranks AFC associations within the West and East zones", () => {
-    const codes = ["SA", "JP", "KR", "QA", "AE", "IR", "UZ", "TH", "CN", "AU", "IQ", "VN", "IN", "ID", "PH"];
+    const codes = ["SA", "JP", "KR", "AE", "QA", "IR", "TH", "CN", "UZ", "AU", "IQ", "VN", "IN", "ID", "PH"];
     const entrants = resolveContinentalAccess(CONTINENTAL, { confederation: "AFC", ranking: codes, nations: codes.map((code, index) => nation(code, index)) });
-    expect(count(entrants, "afc-champions-league-elite", "main")).toBe(22);
-    expect(count(entrants, "afc-champions-league-elite", "playoff")).toBe(4);
+    // 2026/27: 14 league-stage places and 4 preliminary-round clubs per zone (16 per zone after 2 ties).
+    expect(count(entrants, "afc-champions-league-elite", "main")).toBe(28);
+    expect(count(entrants, "afc-champions-league-elite", "playoff")).toBe(8);
+    expect(entrants.filter((item) => item.competition === "afc-champions-league-elite" && item.nation === "SA")).toHaveLength(5);
     expect(count(entrants, "afc-champions-league-two")).toBe(30);
     expect(count(entrants, "afc-challenge-league")).toBe(8);
     expectOnePlacePerClub(entrants, ["afc-champions-league-elite", "afc-champions-league-two", "afc-challenge-league"]);
@@ -137,6 +185,8 @@ describe("other confederations", () => {
     });
     expect(count(entrants, "concacaf-champions-cup", "main")).toBe(5);
     expect(count(entrants, "concacaf-champions-cup", "q1")).toBe(22);
+    const byNation = (code: string) => entrants.filter((item) => item.competition === "concacaf-champions-cup" && item.nation === code && item.basis !== "Leagues Cup qualifier");
+    expect([byNation("US").length, byNation("CA").length]).toEqual([6, 3]);
     expect(count(entrants, "leagues-cup")).toBe(36);
     expect(count(entrants, "concacaf-central-american-cup")).toBe(20);
     expect(count(entrants, "campeones-cup")).toBe(2);
@@ -145,8 +195,16 @@ describe("other confederations", () => {
 });
 
 describe("association coefficients", () => {
-  it("sums five seasons and ranks by total, then last season", () => {
-    expect(coefficientTotal(new Map([[2021, 10], [2025, 5], [2026, 99]]), 2026)).toBe(15);
+  it("plays Youth League qualifying over two legs and the ACL Elite preliminary round as one match", () => {
+    expect(knockoutRules("UEFA Youth League", "Qualifying").legs).toBe(2);
+    expect(knockoutRules("UEFA Youth League", "Round of 32").legs).toBe(1);
+    expect(knockoutRules("AFC Champions League Elite", "Qualifying").legs).toBe(1);
+    expect(knockoutRules("UEFA Champions League Qualifying", "Qualifying").legs).toBe(2);
+  });
+
+  it("ranks with the five seasons before last (one-season lag), then the latest ranked season", () => {
+    expect(coefficientTotal(new Map([[2020, 10], [2024, 5], [2025, 99]]), 2026)).toBe(15);
+    expect(coefficientTotal(new Map([[2020, 10], [2024, 5], [2025, 99]]), 2026, true)).toBe(35);
     expect(rankAssociations([
       { code: "B", points: 50, previous: 9 },
       { code: "A", points: 50, previous: 10 },
@@ -154,17 +212,27 @@ describe("association coefficients", () => {
     ])).toEqual(["C", "A", "B"]);
   });
 
-  it("writes seeds once and never for suspended or OFC nations", () => {
+  it("writes seeds once, including 2025/26 and suspended nations, never OFC", () => {
     const countries = [
       { id: 1, code: "EN", confederation: "UEFA" },
       { id: 2, code: "RU", confederation: "UEFA" },
       { id: 3, code: "NZ", confederation: "OFC" },
     ];
-    const seeds = (code: string) => (code === "NZ" ? [1, 1, 1, 1, 1] : [20, 21, 22, 23, 24]) as [number, number, number, number, number];
-    const suspended = (code: string) => code === "RU";
-    const first = coefficientSeedRows(countries, new Set(), 2026, seeds, suspended);
-    expect(first.map((row) => `${row.entityId}:${row.season}`)).toEqual(["1:2021", "1:2022", "1:2023", "1:2024", "1:2025"]);
+    const seeds = (code: string) => code === "EN"
+      ? { association: [20, 21, 22, 23, 24] as [number, number, number, number, number], season2025: 25 }
+      : { association: [4.333, 5.3, 4.333, 4.333, 4.333] as [number, number, number, number, number] };
+    const first = coefficientSeedRows(countries, new Set(), 2026, seeds);
+    expect(first.map((row) => `${row.entityId}:${row.season}`)).toEqual([
+      "1:2020", "1:2021", "1:2022", "1:2023", "1:2024", "1:2025", "2:2020", "2:2021", "2:2022", "2:2023", "2:2024",
+    ]);
     const existing = new Set(first.map((row) => `${row.entityId}:${row.season}`));
-    expect(coefficientSeedRows(countries, existing, 2026, seeds, suspended)).toEqual([]);
+    expect(coefficientSeedRows(countries, existing, 2026, seeds)).toEqual([]);
+    expect(frozenAssociationPoints(seeds("RU"), true)).toBe(4.333);
+    expect(frozenAssociationPoints(seeds("EN"), false)).toBe(22.5);
+  });
+
+  it("seeds the real 2025/26 season for the ranking-only UEFA associations", () => {
+    const uefa = ["IL", "AZ", "FO", "MK"].map((code) => CONTINENTAL.rankingOnly?.[code as "IL"]);
+    expect(uefa.every((seed) => seed?.season2025 !== undefined)).toBe(true);
   });
 });

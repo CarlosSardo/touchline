@@ -265,13 +265,13 @@ const KYRGYZ = pool(
 // Modern spellings of Uzbek footballers, alongside faker uz_UZ_latin.
 const UZBEK = pool(
   "uzbek",
-  `Eldor Abbosbek Jaloliddin Otabek Oston Jamshid Khojimat Azizbek Husniddin Abdukodir Dostonbek Sherzod
-   Khojiakbar Rustam Odil Server Ikromjon Igor Utkir Farrukh Ulugbek Bobur Sardor Jasur Nodirbek Shakhzod
-   Akmal Asilbek Diyor Ibrokhimkhalil Behruz Umid Alibek Mukhammadali Islom Temur Oybek Sanjar Vladimir Egor`,
-  `Shomurodov Fayzullaev Khusanov Masharipov Shukurov Urunov Iskanderov Sergeev Yusupov Ahmedov Alijonov
+  `Eldor Abbosbek Jaloliddin Otabek Jamshid Azizbek Abdukodir Dostonbek Sherzod Rustam Odil Ikromjon Utkir Farrukh
+   Ulugbek Bobur Sardor Jasur Nodirbek Shakhzod Akmal Asilbek Diyor Behruz Umid Alibek Mukhammadali Islom Temur Oybek
+   Sanjar Aziz Bekzod Davron Doniyor Elyor Ilhom Jahongir Javlon Mansur Nurbek Rasul Shohrukh Zafar`,
+  `Shomurodov Fayzullaev Khusanov Masharipov Shukurov Urunov Iskanderov Yusupov Ahmedov Alijonov
    Nasrullaev Ashurmatov Khamrobekov Tursunov Abdikholikov Ergashev Sayfiev Hamdamov Nematov Erkinov
-   Rakhmonaliev Norchaev Mozgovoy Djeparov Denisov Haydarov Ganiev Bikmaev Kapadze Karimov Rakhimov Sidikov
-   Tukhtasinov Aliqulov Yuldoshev Esanov Abduraimov Makhmudov Mirzaev Jiyanov Krimets Filiposyan`,
+   Rakhmonaliev Norchaev Haydarov Ganiev Bikmaev Karimov Rakhimov Sidikov Rakhmatov Usmonov Qodirov Toshmatov
+   Tukhtasinov Aliqulov Yuldoshev Esanov Abduraimov Makhmudov Mirzaev Jiyanov Saidov Rasulov Nazarov Umarov`,
 );
 const GULF = pool(
   "gulf",
@@ -1440,7 +1440,7 @@ const QA: NationSpec = {
       importSources: weighted(
         "BR:6 DZ:3 MA:3 TN:2 EG:2 SN:2 GH:2 CI:2 FR:2 ES:2 PT:2 NL:1 AR:1 CO:1 NG:1 IR:1 KR:1 JP:1 IQ:1 SY:1 JO:1 OM:1",
       ),
-      coefficients: { association: [12, 11.5, 12.5, 12, 12.5] },
+      coefficients: { association: [10, 10.5, 11.5, 13, 11.5] },
     },
   ),
   // Aspire loans to European partner clubs.
@@ -1735,7 +1735,7 @@ const AE: NationSpec = {
       importSources: weighted(
         "BR:8 MA:3 DZ:2 TN:1 EG:2 SN:2 NG:2 GH:2 CI:1 CM:1 AR:2 CO:2 UY:1 VE:1 PT:2 ES:2 FR:2 NL:1 RS:1 IR:2 UZ:2 JO:1 SY:1 IQ:1 OM:1 KR:1",
       ),
-      coefficients: { association: [10, 10.5, 11.5, 13, 11.5] },
+      coefficients: { association: [12, 11.5, 12.5, 12, 12.5] },
     },
   ),
   abroad: { seniors: 2, youth: 2, destinations: weighted("SA:1 QA:1 PT:1") },
@@ -1874,7 +1874,7 @@ const CN: NationSpec = {
       importSources: weighted(
         "BR:12 PT:2 ES:2 RS:2 NG:2 CO:2 KR:3 HR:1 BA:1 ME:1 CM:1 CI:1 GH:1 SN:1 CD:1 AR:1 UY:1 VE:1 JP:1 AU:1 NL:1 FR:1 GE:1 MK:1 SI:1",
       ),
-      coefficients: { association: [7, 4, 6.5, 8.5, 9] },
+      coefficients: { association: [7.5, 8, 8, 8, 9] },
     },
   ),
   abroad: { seniors: 4, youth: 6, destinations: weighted("PT:2 JP:1 ES:1 DE:1") },

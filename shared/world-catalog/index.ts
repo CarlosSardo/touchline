@@ -80,6 +80,16 @@ export function clubNameKey(name: string): string {
   return bare || words;
 }
 
+const CONNECTORS = new Set(["de", "da", "do", "das", "dos", "di", "del", "della", "du", "des", "la", "le", "el", "the", "of"]);
+/** Near-copy key of a clubNameKey: connectors dropped, a final "o" trimmed (AC Milano ~ AC Milan, Stade Reims ~ Stade de Reims). */
+export function looseClubNameKey(key: string): string {
+  return key
+    .split(" ")
+    .filter((word) => !CONNECTORS.has(word))
+    .map((word) => (word.length >= 5 ? word.replace(/o$/, "") : word))
+    .join(" ");
+}
+
 export function catalogLookup(catalog: WorldCatalog): CatalogLookup {
   const nationIndex = new Map<string, NationSpec>();
   const poolIndex = new Map<string, NamePool>();

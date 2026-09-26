@@ -7,9 +7,11 @@ import {
 } from "../shared/world-catalog/index.ts";
 import type { ContinentalStage } from "../shared/world-catalog/types.ts";
 import {
+  associationSeed,
   clubCompetitionEligible,
   coefficientSeedRows,
   coefficientTotal,
+  frozenAssociationPoints,
   resolveContinentalAccess,
   type AccessNation,
 } from "../shared/competition-rules.ts";
@@ -34,7 +36,7 @@ async function insertHistory(
   });
 }
 
-/** Writes the catalog 2021–2025 association coefficients (seasons firstSeason-5..-1); idempotent. */
+/** Writes the catalog 2020/21–2025/26 association coefficients (seasons firstSeason-6..-1); idempotent. */
 export async function seedAssociationCoefficients(
   store: Store,
   firstSeason: number,
@@ -44,7 +46,7 @@ export async function seedAssociationCoefficients(
     (
       await store.all<{ entity_id: number; season: number }>(
         "SELECT entity_id,season FROM history WHERE entity_type = 'associationCoefficient' AND season BETWEEN ? AND ?",
-        firstSeason - 5,
+        firstSeason - 6,
         firstSeason - 1,
       )
     ).map((row) => `${row.entity_id}:${row.season}`),
@@ -56,8 +58,7 @@ export async function seedAssociationCoefficients(
     countries,
     existing,
     firstSeason,
-    (code) => nationByCode(code)?.football?.coefficients?.association,
-    (code) => isSuspended(code, "club"),
+    (code) => associationSeed(code, nationByCode(code)?.football?.coefficients),
   ).map((row) => ({
     season: row.season,
     entity_type: "associationCoefficient",
@@ -79,7 +80,10 @@ export interface AssociationCoefficient {
   code: string;
   name: string;
   points: number;
+  /** Points of season-1: European Performance Spots. */
   previousSeason: number;
+  /** Points of season-2, the latest ranked season: tie-break. */
+  latestRanked: number;
   rank: number;
 }
 export interface QualificationEntry {
@@ -108,7 +112,7 @@ export async function associationCoefficients(
   }>(
     "SELECT history.entity_id,history.season,history.data FROM history JOIN countries ON countries.id = history.entity_id WHERE history.entity_type = 'associationCoefficient' AND countries.confederation = ? AND history.season BETWEEN ? AND ? ORDER BY history.season DESC,history.id",
     confederation,
-    season - 5,
+    season - 6,
     season - 1,
   );
   const histories = new Map<number, typeof history>();
@@ -117,8 +121,10 @@ export async function associationCoefficients(
     rows.push(row);
     histories.set(row.entity_id, rows);
   }
+  // Real positions: suspended and club-less associations stay ranked (their places are vacated in the resolver).
   return countries
-    .filter((country) => nationByCode(country.code)?.football && !isSuspended(country.code, "club"))
+    .filter((country) => associationSeed(country.code, nationByCode(country.code)?.football?.coefficients) ||
+      nationByCode(country.code)?.football)
     .map((country) => {
       const seasons = histories.get(country.id) ?? [];
       const totals = new Map(
@@ -131,15 +137,16 @@ export async function associationCoefficients(
         countryId: country.id,
         code: country.code,
         name: country.name,
-        points: coefficientTotal(totals, season),
+        points: coefficientTotal(totals, season, confederation === "CAF"),
         previousSeason: totals.get(season - 1) ?? 0,
+        latestRanked: totals.get(season - 2) ?? 0,
         rank: 0,
       };
     })
     .sort(
       (left, right) =>
         right.points - left.points ||
-        right.previousSeason - left.previousSeason ||
+        right.latestRanked - left.latestRanked ||
         left.countryId - right.countryId,
     )
     .map((entry, index) => ({ ...entry, rank: index + 1 }));
@@ -250,6 +257,7 @@ async function accessNation(store: Store, country: Country, season: number): Pro
   return {
     code: country.code,
     table,
+    coefficients: Object.fromEntries(clubs.map((club) => [club.id, club.reputation])),
     ...(champion !== undefined && { champion }),
     ...(national && {
       cupWinner:
@@ -278,8 +286,8 @@ export async function continentalEntries(
   const ranked = new Set(associations.map((entry) => entry.countryId));
   const nations: AccessNation[] = [];
   for (const country of countries)
-    if (ranked.has(country.id)) nations.push(await accessNation(store, country, season));
-  const withClubs = new Set(nations.filter((nation) => nation.table.length || nation.cupWinner).map((nation) => nation.code));
+    if (ranked.has(country.id) && nationByCode(country.code)?.football && !isSuspended(country.code, "club"))
+      nations.push(await accessNation(store, country, season));
   const titleholders: Record<string, number> = {};
   const feederResults: Record<string, number[]> = {};
   for (const item of CONTINENTAL.competitions.filter((entry) => entry.confederation === spec.confederation)) {
@@ -297,7 +305,7 @@ export async function continentalEntries(
   }
   const resolved = resolveContinentalAccess(CONTINENTAL, {
     confederation: spec.confederation,
-    ranking: associations.map((entry) => entry.code).filter((code) => withClubs.has(code)),
+    ranking: associations.map((entry) => entry.code),
     nations,
     titleholders,
     feederResults,
@@ -350,7 +358,8 @@ export async function recordAssociationCoefficients(
       `SELECT * FROM countries WHERE confederation IN (${confederations.map(() => "?").join(",")}) ORDER BY id`,
       ...confederations,
     )
-  ).filter((country) => nationByCode(country.code)?.football && !isSuspended(country.code, "club"));
+  ).filter((country) => associationSeed(country.code, nationByCode(country.code)?.football?.coefficients) ||
+    nationByCode(country.code)?.football);
   const byCode = new Map(countries.map((country) => [country.code, country.id]));
   // Hosted clubs earn points for the association whose access list they use (Welsh clubs in England count for England).
   const perClub = new Map<number, { countryId: number; points: number }>();
@@ -364,9 +373,13 @@ export async function recordAssociationCoefficients(
   const history: Record<string, string | number>[] = [];
   for (const country of countries) {
     const clubs = rows.filter((row) => row.country_id === country.id);
-    const points = clubs.length
+    const football = nationByCode(country.code)?.football;
+    const seed = associationSeed(country.code, football?.coefficients);
+    const suspended = isSuspended(country.code, "club");
+    const frozen = seed && (suspended || !football) ? frozenAssociationPoints(seed, suspended) : undefined;
+    const points = frozen ?? (clubs.length
       ? clubs.reduce((total, club) => total + club.points, 0) / clubs.length
-      : 0;
+      : 0);
     history.push({
       season,
       entity_type: "associationCoefficient",
@@ -375,8 +388,9 @@ export async function recordAssociationCoefficients(
       data: JSON.stringify({
         points: Math.round(points * 1000) / 1000,
         participants: clubs.length,
-        basis:
-          "Continental match points per entrant; seeded prehistory until five simulated seasons exist",
+        basis: frozen === undefined
+          ? "Continental match points per entrant; seeded prehistory until five simulated seasons exist"
+          : "No clubs in the game: frozen per-season points",
       }),
     });
   }

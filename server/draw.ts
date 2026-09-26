@@ -380,31 +380,34 @@ function scheduleRounds(matches: [number, number][], rounds: number, random: see
 }
 
 /**
- * ACL Elite league stage for one zone: 12 clubs in four pots of three by coefficient; every club meets two clubs of
- * each pot (one at home, one away), eight different opponents, avoiding same-association pairings where possible.
+ * ACL Elite league stage for one zone: 16 clubs (2026/27; 12 before) in four pots by coefficient; every club meets two
+ * clubs of each pot (one at home, one away), eight different opponents, avoiding same-association pairings where possible.
  */
 export function drawZoneLeaguePhase(entrants: DrawEntrant[], seed: string): LeaguePhaseDraw {
-  if (entrants.length !== 12 || new Set(entrants.map((entrant) => entrant.id)).size !== 12)
-    throw new Error("An ACL Elite zone draw requires 12 distinct clubs.");
+  const size = entrants.length / 4;
+  if (![3, 4].includes(size) || new Set(entrants.map((entrant) => entrant.id)).size !== entrants.length)
+    throw new Error("An ACL Elite zone draw requires 12 or 16 distinct clubs.");
   const random = seedrandom(seed);
   const sorted = [...entrants].sort((left, right) => right.coefficient - left.coefficient || left.id - right.id);
-  const pots = [0, 1, 2, 3].map((index) => sorted.slice(index * 3, index * 3 + 3).map((entrant) => entrant.id));
+  const pots = [0, 1, 2, 3].map((index) => sorted.slice(index * size, index * size + size).map((entrant) => entrant.id));
   const country = new Map(entrants.map((entrant) => [entrant.id, entrant.countryId]));
   const clashes = (edges: [number, number][]) =>
     edges.filter(([home, away]) => country.get(home) === country.get(away)).length;
   const matches: [number, number][] = [];
   for (const pot of pots) {
-    const [first, second, third] = shuffle(pot, random);
-    matches.push([first, second], [second, third], [third, first]);
+    const cycle = shuffle(pot, random);
+    matches.push(...cycle.map((club, index): [number, number] => [club, cycle[(index + 1) % size]]));
   }
-  const orders = [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]];
+  const permutations = (items: number[]): number[][] =>
+    items.length <= 1 ? [items] : items.flatMap((item) => permutations(items.filter((other) => other !== item)).map((rest) => [item, ...rest]));
+  const orders = permutations(Array.from({ length: size }, (_, index) => index));
   for (let upper = 0; upper < 4; upper++)
     for (let lower = upper + 1; lower < 4; lower++) {
-      // A six-cycle between two pots: each club is home to one and away to one club of the other pot.
+      // A cycle through both pots: each club is home to one and away to one club of the other pot.
       const cycle = (order: number[]) =>
         order.flatMap((target, index): [number, number][] => [
           [pots[upper][index], pots[lower][target]],
-          [pots[lower][target], pots[upper][(index + 1) % 3]],
+          [pots[lower][target], pots[upper][(index + 1) % size]],
         ]);
       matches.push(...shuffle(orders, random).map(cycle).sort((left, right) => clashes(left) - clashes(right))[0]);
     }

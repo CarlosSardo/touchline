@@ -12,7 +12,7 @@ import {
   type PlayerSpec,
   type Rng,
 } from "./people.ts";
-import { baseWage, marketWage, wageScale, wageScales } from "./finance.ts";
+import { baseWage, marketWage, professionalWageFloor, wageScale, wageScales } from "./finance.ts";
 import {
   assessRegistration,
   clubRegistration,
@@ -177,7 +177,7 @@ const pickPosition = (random: Rng) =>
 interface ClubRow
   extends Pick<
     Club,
-    "id" | "name" | "type" | "parent_id" | "country_id" | "league_id" | "reputation" | "academy" | "facilities" | "balance" | "philosophy" | "data"
+    "id" | "name" | "type" | "parent_id" | "country_id" | "league_id" | "reputation" | "academy" | "facilities" | "balance" | "philosophy" | "data" | "wage_budget"
   > {
   code: string;
   nation_level: number;
@@ -283,7 +283,7 @@ export async function runYouthIntake(
   const countries = await store.all<Country>("SELECT * FROM countries ORDER BY id");
   const people = peopleContext(countries);
   const clubs = await store.all<ClubRow>(
-    `SELECT clubs.id,clubs.name,clubs.type,clubs.parent_id,clubs.country_id,clubs.league_id,clubs.reputation,clubs.academy,clubs.facilities,clubs.balance,clubs.philosophy,clubs.data,countries.code,countries.reputation AS nation_level,leagues.tier,(SELECT code FROM countries AS league_country WHERE league_country.id = leagues.country_id) AS league_code,coalesce(leagues.reputation,countries.reputation) AS league_reputation,coalesce((SELECT max(ability) FROM staff WHERE staff.club_id = clubs.id AND staff.role = 'Head of youth'),50) AS head_of_youth,coalesce((SELECT avg(CONVERT(float,ability)) FROM staff WHERE staff.club_id = clubs.id AND staff.role = 'Scout'),50) AS recruitment FROM clubs JOIN countries ON countries.id = clubs.country_id LEFT JOIN leagues ON leagues.id = clubs.league_id WHERE clubs.type IN ('club','bteam') ORDER BY clubs.id`,
+    `SELECT clubs.id,clubs.name,clubs.type,clubs.parent_id,clubs.country_id,clubs.league_id,clubs.reputation,clubs.academy,clubs.facilities,clubs.balance,clubs.wage_budget,clubs.philosophy,clubs.data,countries.code,countries.reputation AS nation_level,leagues.tier,(SELECT code FROM countries AS league_country WHERE league_country.id = leagues.country_id) AS league_code,coalesce(leagues.reputation,countries.reputation) AS league_reputation,coalesce((SELECT max(ability) FROM staff WHERE staff.club_id = clubs.id AND staff.role = 'Head of youth'),50) AS head_of_youth,coalesce((SELECT avg(CONVERT(float,ability)) FROM staff WHERE staff.club_id = clubs.id AND staff.role = 'Scout'),50) AS recruitment FROM clubs JOIN countries ON countries.id = clubs.country_id LEFT JOIN leagues ON leagues.id = clubs.league_id WHERE clubs.type IN ('club','bteam') ORDER BY clubs.id`,
   );
   const clubById = new Map(clubs.map((club) => [club.id, club]));
   const firstTeams = clubs.filter((club) => club.type === "club");
@@ -355,8 +355,22 @@ export async function runYouthIntake(
   const available: Available[] = [];
   const touched = (member: Member) => changed.set(member.id, member);
   const scales = await wageScales(store);
+  const payroll = new Map<number, { professionals: number; allowances: number }>();
+  for (const member of members) {
+    const payer = member.parent_club_id ?? member.club_id!;
+    const entry = payroll.get(payer) ?? { professionals: 0, allowances: 0 };
+    if ((member.contract_status ?? "professional") === "professional") entry.professionals++;
+    else entry.allowances += member.wage;
+    payroll.set(payer, entry);
+  }
+  const floors = new Map(
+    clubs.map((club) => {
+      const entry = payroll.get(club.id);
+      return [club.id, professionalWageFloor(club.wage_budget, entry?.allowances ?? 0, entry?.professionals ?? 0)];
+    }),
+  );
   const wageFor = (member: Pick<Member, "ability" | "age">, clubId: number) =>
-    Math.max(50, Math.round((baseWage(member.ability) * (scales.get(clubId) ?? 1) * (member.age <= 20 ? 0.75 : 1)) / 10) * 10);
+    Math.max(floors.get(clubId) ?? 50, Math.round((baseWage(member.ability) * (scales.get(clubId) ?? 1) * (member.age <= 20 ? 0.75 : 1)) / 10) * 10);
   const signProfessional = (member: Member, clubId: number, random: Rng) => {
     member.wage = wageFor(member, clubId);
     member.contract_end = `${season + contractYears(member.age, random)}-06-30`;
@@ -678,6 +692,7 @@ export async function runYouthIntake(
         potential: Math.round(clamp(ability + random() * (age < 22 ? 14 : 6), ability, 99)),
         contract: "professional",
         wageScale: scales.get(club.id) ?? 1,
+        wageFloor: floors.get(club.id) ?? 50,
         role: "Squad player",
         intake: { season, source: "trial" },
       }, random);

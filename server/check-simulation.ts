@@ -253,7 +253,7 @@ export async function checkMinors(store: Store, date: string) {
     identity: string;
     family: string | null;
   }>(
-    "SELECT players.id,players.birth_date,countries.code,club_country.code AS club_code,clubs.data AS club_data,JSON_QUERY(players.profile,'$.identity') AS identity,JSON_QUERY(players.profile,'$.familyMove') AS family FROM players JOIN countries ON countries.id = players.country_id JOIN clubs ON clubs.id = players.club_id JOIN countries AS club_country ON club_country.id = clubs.country_id WHERE players.birth_date > ? AND players.role != 'Retired' AND clubs.type != 'national'",
+    "SELECT players.id,players.birth_date,countries.code,club_country.code AS club_code,clubs.data AS club_data,JSON_QUERY(players.profile,'$.identity') AS [identity],JSON_QUERY(players.profile,'$.familyMove') AS family FROM players JOIN countries ON countries.id = players.country_id JOIN clubs ON clubs.id = players.club_id JOIN countries AS club_country ON club_country.id = clubs.country_id WHERE players.birth_date > ? AND players.role != 'Retired' AND clubs.type != 'national'",
     cutoff,
   );
   const illegal = minors.filter((minor) => {

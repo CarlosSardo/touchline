@@ -1,8 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Store } from "./db.ts";
 import { hasMinorRoute, verifyWorld } from "./check-world.ts";
-import { generateWorld, planWorld, worldPlayers, worldStaff, type WorldPlan } from "./world.ts";
-import { clubNameKey, worldCatalog } from "../shared/world-catalog/index.ts";
+import { assertPlanStandings, generateWorld, planWorld, worldPlayers, worldStaff, type WorldPlan } from "./world.ts";
+import { clubNameKey, looseClubNameKey, worldCatalog } from "../shared/world-catalog/index.ts";
 import { MIN_GOALKEEPERS, SQUAD_MINIMUMS, WORLD_VERSION } from "../shared/world-rules.ts";
 import type { GameState, PlayerProfile } from "../shared/types.ts";
 import type { PlayerRow } from "./people.ts";
@@ -41,6 +41,23 @@ describe("world plan (pure)", () => {
     }
     expect(plan.counts.nationalTeams).toBe(NATIONS.length * 4);
     expect(plan.rows.countries.map((country) => country.code)[0]).toBe("EN");
+  });
+
+  it("rejects duplicate standings and plans hosted-club and home-pool-only subsets", () => {
+    const small = planWorld({ nations: ["SCO"], structureOnly: true });
+    const duplicate = { ...small.rows, standings: [...small.rows.standings, { ...small.rows.standings[0] }] };
+    expect(() => assertPlanStandings(duplicate)).toThrow(/stands in Senior leagues/);
+    for (const nations of [["US", "CA", "CH", "LI"], ["EN", "WAL", "ES"], ["SCO", "IE"]])
+      expect(() => planWorld({ nations, structureOnly: true }), nations.join()).not.toThrow();
+    // Faroe Islands has no own league: national teams, free staff and home-based players only (db:seed --nations FO).
+    const pool = planWorld({ nations: ["FO"], squads: "minimum" });
+    expect(pool.rows.leagues).toEqual([]);
+    expect(pool.clubs).toEqual([]);
+    expect(pool.counts.nationalTeams).toBe(4);
+    expect(worldStaff(pool).staff.every((row) => row.club_id === null)).toBe(true);
+    const homeBased = [...worldPlayers(pool)];
+    expect(homeBased.length).toBeGreaterThan(0);
+    expect(homeBased.every((row) => row.club_id === null)).toBe(true);
   });
 
   it("puts every first team in one U19 and one U17 league of 2-16 clubs and gives B-teams none", () => {
@@ -84,13 +101,17 @@ describe("world plan (pure)", () => {
     expect(clubs.filter((club) => club.tier === 1).length).toBeLessThan(clubs.length / 2 + 1);
   });
 
-  it("never reproduces a real club name and keeps names unique per nation", () => {
-    for (const code of NATIONS) {
-      const keys = plan.clubs.filter((club) => club.code === code && club.type === "club").map((club) => clubNameKey(String(club.row.name)));
-      expect(new Set(keys).size, code).toBe(keys.length);
-      const avoided = lookup.avoidedClubNames(code);
-      expect(keys.filter((key) => avoided.has(key)), code).toEqual([]);
-    }
+  it("never reproduces a real club name, or a near-copy of one, and keeps names unique per nation", () => {
+    // Italian and Lusophone templates can render near-copies (La Spezia Calcio, Académica de Praia).
+    const nearCopies = planWorld({ nations: ["IT", "CV", "AO", "MZ", "TN", "EC"].filter((code) => lookup.nationByCode(code)), structureOnly: true });
+    for (const [world, codes] of [[plan, NATIONS], [nearCopies, nearCopies.nations.map((nation) => nation.code)]] as const)
+      for (const code of codes) {
+        const keys = world.clubs.filter((club) => club.code === code && club.type === "club").map((club) => clubNameKey(String(club.row.name)));
+        expect(new Set(keys).size, code).toBe(keys.length);
+        const avoided = lookup.avoidedClubNames(code);
+        const loose = new Set([...avoided].map(looseClubNameKey));
+        expect(keys.filter((key) => avoided.has(key) || loose.has(looseClubNameKey(key))), code).toEqual([]);
+      }
     expect(lookup.avoidedClubNames("EN").size).toBeGreaterThan(0);
   });
 
@@ -250,6 +271,7 @@ describe("generated world (SQL)", () => {
     const world = await store.meta<Record<string, number>>("world");
     expect(world).toMatchObject({ version: WORLD_VERSION, nations: NATIONS.length });
     expect(world).not.toHaveProperty("expanded");
+    expect((world as Record<string, unknown>).options).toEqual({ nations: NATIONS, squads: "minimum" });
     const state = await store.meta<GameState>("state");
     const top = await store.get<{ id: number }>(
       "SELECT TOP (1) clubs.id FROM clubs JOIN leagues ON leagues.id = clubs.league_id JOIN countries ON countries.id = clubs.country_id WHERE countries.code = 'EN' AND leagues.tier = 1 AND clubs.type = 'club' ORDER BY clubs.reputation DESC, clubs.id",
@@ -264,8 +286,17 @@ describe("generated world (SQL)", () => {
       await generateWorld(structure, { nations: ["SCO", "IS"], structureOnly: true });
       const count = async (table: string) => (await structure.get<{ total: number }>(`SELECT count(*) AS total FROM ${table}`))!.total;
       expect(await count("players")).toBe(0);
+      expect(await count("staff")).toBe(0);
       expect(await count("leagues")).toBeGreaterThan(4);
-      expect(await count("clubs")).toBeGreaterThan(8 * 4);
+      // v4 models SCO and IS with one senior division each: 24 clubs plus 8 national teams.
+      const planned = planWorld({ nations: ["SCO", "IS"] }).rows;
+      expect(await count("clubs")).toBe(planned.clubs.length);
+      expect(await count("standings")).toBe(planned.standings.length);
+      expect((await structure.meta<Record<string, unknown>>("world")).options).toEqual({
+        nations: ["SCO", "IS"],
+        squads: "full",
+        structureOnly: true,
+      });
     } finally {
       await structure.close();
     }

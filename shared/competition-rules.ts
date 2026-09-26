@@ -2,6 +2,7 @@ import type { Club, Fixture, League } from "./types.ts";
 import { CONTINENTAL } from "./world-catalog/continental.ts";
 import type {
   AccessEntry,
+  CoefficientSeed,
   ContinentalCatalog,
   ContinentalCompetitionSpec,
   ContinentalStage,
@@ -44,9 +45,10 @@ export function knockoutRules(name: string, stage: string): KnockoutRules {
   if (spec) {
     // ACL Elite: two-legged round of 16, then single matches at a centralised venue.
     const centralised = spec.id === "afc-champions-league-elite" && /Quarter|Semi|Final/i.test(stage);
+    const qualifying = stage === "Qualifying" || competition !== name;
     return {
       version: 1,
-      legs: final ? spec.finalLegs : centralised ? 1 : spec.legs,
+      legs: final ? spec.finalLegs : centralised ? 1 : qualifying ? spec.qualifyingLegs ?? spec.legs : spec.legs,
       extraTime: spec.age === "Senior" && spec.id !== "leagues-cup",
       awayGoals: false,
       neutral: (final && spec.neutralFinal) || centralised,
@@ -124,10 +126,12 @@ export interface AccessNation {
   leagueCupWinner?: number;
   u19Champion?: number;
   u20Champion?: number;
+  /** Club coefficients (titleholder rebalancing picks the best); missing clubs keep list order. */
+  coefficients?: Record<number, number>;
 }
 export interface AccessInput {
   confederation: string;
-  /** Association codes in coefficient order; suspended and club-less associations already removed. */
+  /** Association codes in coefficient order at their real positions, including associations without clubs. */
   ranking: string[];
   nations: AccessNation[];
   /** Last season's winner per competition id. */
@@ -150,10 +154,13 @@ export interface AccessEntrant {
 
 export const STAGE_ORDER: readonly ContinentalStage[] = ["main", "playoff", "q4", "q3", "q2", "q1"];
 
-/** Five-season sum (seasons season-5..season-1); missing seasons count 0. */
-export function coefficientTotal(points: ReadonlyMap<number, number>, season: number) {
+/**
+ * Ranking used for access in `season`: the five seasons season-6..season-2 (UEFA/AFC one-season lag); missing count 0.
+ * `weighted`: CAF 5-year ranking, oldest season ×1 … latest ×5.
+ */
+export function coefficientTotal(points: ReadonlyMap<number, number>, season: number, weighted = false) {
   let total = 0;
-  for (let year = season - 5; year < season; year++) total += points.get(year) ?? 0;
+  for (let year = season - 6; year < season - 1; year++) total += (points.get(year) ?? 0) * (weighted ? year - season + 7 : 1);
   return Math.round(total * 1000) / 1000;
 }
 
@@ -163,25 +170,40 @@ export function rankAssociations(rows: { code: string; points: number; previous:
     .map((row) => row.code);
 }
 
-/** Seed rows (seasons firstSeason-5..-1) missing from `existing` ("entityId:season"); never OFC or suspended nations. */
+/**
+ * Seed rows missing from `existing` ("entityId:season"): 2020/21..2024/25 as seasons firstSeason-6..-2 and the real
+ * 2025/26 as firstSeason-1. Suspended and ranking-only associations are seeded too (they keep their rank); never OFC.
+ */
 export function coefficientSeedRows(
   countries: { id: number; code: string; confederation: string }[],
   existing: ReadonlySet<string>,
   firstSeason: number,
-  seeds: (code: string) => readonly number[] | undefined,
-  suspended: (code: string) => boolean,
+  seeds: (code: string) => CoefficientSeed | undefined,
 ) {
   const confederations = new Set<string>(CONTINENTAL.coefficientConfederations);
   const rows: { entityId: number; season: number; points: number }[] = [];
   for (const country of countries) {
-    const points = seeds(country.code);
-    if (!points || !confederations.has(country.confederation) || suspended(country.code)) continue;
+    const seed = seeds(country.code);
+    if (!seed || !confederations.has(country.confederation)) continue;
+    const points = [...seed.association, ...(seed.season2025 === undefined ? [] : [seed.season2025])];
     points.forEach((value, index) => {
-      const season = firstSeason - 5 + index;
+      const season = firstSeason - 6 + index;
       if (!existing.has(`${country.id}:${season}`)) rows.push({ entityId: country.id, season, points: value });
     });
   }
   return rows;
+}
+
+/** Catalog seed of an association: its own football spec's, else a ranking-only entry (no clubs in the game). */
+export function associationSeed(code: string, own: CoefficientSeed | undefined): CoefficientSeed | undefined {
+  return own ?? (CONTINENTAL.rankingOnly as Readonly<Record<string, CoefficientSeed | undefined>> | undefined)?.[code];
+}
+
+/** Per-season points of an association without entrants: suspended ones stay frozen (UEFA: Russia 4.333), others repeat their seeded average. */
+export function frozenAssociationPoints(seed: CoefficientSeed, suspended: boolean) {
+  const points = [...seed.association, ...(seed.season2025 === undefined ? [] : [seed.season2025])];
+  if (suspended) return points[points.length - 1];
+  return Math.round((points.reduce((total, value) => total + value, 0) / points.length) * 1000) / 1000;
 }
 
 const BASIS: Record<AccessEntry["source"], string> = {
@@ -193,9 +215,19 @@ const BASIS: Record<AccessEntry["source"], string> = {
   "u20-champion": "U20 champion",
 };
 
+interface Vacancy {
+  competition: string;
+  stage: ContinentalStage;
+  path?: "champions" | "league";
+  /** Zone nations: a vacated zone place stays in its zone. */
+  nations?: readonly string[];
+  /** Index in STAGE_ORDER of this competition path's first round. */
+  entry: number;
+}
 interface PoolState {
   assigned: Map<number, { competition: ContinentalCompetitionSpec; stage: ContinentalStage }>;
   entrants: AccessEntrant[];
+  vacancies: Vacancy[];
 }
 
 function pickClub(nation: AccessNation, entry: AccessEntry, taken: ReadonlyMap<number, unknown>) {
@@ -225,7 +257,7 @@ function resolvePool(
   mirrored: AccessEntrant[],
 ): PoolState {
   const byCode = new Map(input.nations.map((nation) => [nation.code, nation]));
-  const state: PoolState = { assigned: new Map(), entrants: [] };
+  const state: PoolState = { assigned: new Map(), entrants: [], vacancies: [] };
   const add = (competition: ContinentalCompetitionSpec, entrant: AccessEntrant) => {
     state.assigned.set(entrant.clubId, { competition, stage: entrant.stage });
     state.entrants.push(entrant);
@@ -240,7 +272,7 @@ function resolvePool(
       for (const entrant of mirrored.filter((item) => item.competition === competition.mirrors && item.stage === "main"))
         if (!state.assigned.has(entrant.clubId))
           add(competition, { ...entrant, competition: competition.id, basis: `${entrant.basis} (Champions League Path)` });
-    const slots: { code: string; rank: number; entry: AccessEntry }[] = [];
+    const slots: { code: string; rank: number; entry: AccessEntry; nations?: readonly string[] }[] = [];
     for (const rule of catalog.access.filter((item) => item.competition === competition.id)) {
       if (rule.basis === "fixed") {
         for (const group of rule.fixed ?? [])
@@ -254,14 +286,27 @@ function resolvePool(
       ranking.forEach((code, index) => {
         for (const band of rule.bands ?? [])
           if (index + 1 >= band.ranks[0] && index + 1 <= band.ranks[1])
-            for (const entry of band.entries) slots.push({ code, rank: index + 1, entry });
+            for (const entry of band.entries) slots.push({ code, rank: index + 1, entry, nations: zone?.nations });
       });
+    }
+    const entry = new Map<string, number>();
+    for (const slot of slots) {
+      const key = slot.entry.path ?? "";
+      entry.set(key, Math.max(entry.get(key) ?? 0, STAGE_ORDER.indexOf(slot.entry.stage)));
     }
     for (const slot of slots) {
       const nation = byCode.get(slot.code);
-      if (!nation) continue;
-      const clubId = pickClub(nation, slot.entry, state.assigned);
-      if (clubId === undefined) continue;
+      const clubId = nation && pickClub(nation, slot.entry, state.assigned);
+      if (!nation || clubId === undefined) {
+        state.vacancies.push({
+          competition: competition.id,
+          stage: slot.entry.stage,
+          ...(slot.entry.path && { path: slot.entry.path }),
+          ...(slot.nations && { nations: slot.nations }),
+          entry: entry.get(slot.entry.path ?? "")!,
+        });
+        continue;
+      }
       add(competition, {
         competition: competition.id,
         clubId,
@@ -306,6 +351,28 @@ function entrantOrder(left: AccessEntrant, right: AccessEntrant) {
 }
 
 /**
+ * A place vacated above a path's first round goes to the best-ranked entrant of the previous round, whose place then
+ * moves down the same way (UEFA list rebalancing). First-round vacancies only shrink that round (odd rounds give byes).
+ */
+function rebalanceVacancies(state: PoolState) {
+  const level = (stage: ContinentalStage) => STAGE_ORDER.indexOf(stage);
+  const pending = state.vacancies.filter((item) => level(item.stage) < item.entry);
+  while (pending.length) {
+    pending.sort((left, right) => level(left.stage) - level(right.stage));
+    const vacancy = pending.shift()!;
+    const candidates = state.entrants.filter((item) =>
+      item.competition === vacancy.competition && item.path === vacancy.path && level(item.stage) > level(vacancy.stage) &&
+      (!vacancy.nations || vacancy.nations.includes(item.nation)));
+    if (!candidates.length) continue;
+    const from = Math.min(...candidates.map((item) => level(item.stage)));
+    const promoted = candidates.filter((item) => level(item.stage) === from).sort(entrantOrder)[0];
+    promoted.stage = vacancy.stage;
+    promoted.basis = `${promoted.basis} (vacancy rebalancing)`;
+    if (from < vacancy.entry) pending.push({ ...vacancy, stage: STAGE_ORDER[from] });
+  }
+}
+
+/**
  * Resolves one confederation's continental entrants for a season from the access lists. Each club holds at most one
  * place per pool (senior club competitions, each age group, each feeder and each super cup are separate pools).
  */
@@ -337,7 +404,7 @@ export function resolveContinentalAccess(catalog: ContinentalCatalog, input: Acc
     const first = resolvePool(catalog, input, pool, [], result);
     const preassigned: AccessEntrant[] = [];
     const upgrades: { clubId: number; basis: string }[] = [];
-    const vacancies = new Map<string, number>();
+    const vacancies: { competition: string; path?: "champions" | "league" }[] = [];
     for (const competition of pool) {
       for (const holder of competition.titleholders ?? []) {
         const clubId = holderOf(holder.from);
@@ -346,7 +413,7 @@ export function resolveContinentalAccess(catalog: ContinentalCatalog, input: Acc
         const qualified = current && (current.competition.level < competition.level ||
           (current.competition === competition && current.stage === "main"));
         if (competition.kind !== "super" && qualified)
-          vacancies.set(competition.id, (vacancies.get(competition.id) ?? 0) + 1);
+          vacancies.push({ competition: competition.id, ...(holder.vacancyPath && { path: holder.vacancyPath }) });
         else preassigned.push(holderEntrant(competition, holder.from, holder.stage, clubId));
       }
       if (competition.confederation === "UEFA" && competition.level === 1 && competition.age === "Senior" && competition.kind === "club")
@@ -380,17 +447,17 @@ export function resolveContinentalAccess(catalog: ContinentalCatalog, input: Acc
       entrant.basis = upgrade.basis;
       delete entrant.path;
     }
-    for (const [competition, count] of vacancies) {
-      const candidates = second.entrants
-        .filter((item) => item.competition === competition && item.stage !== "main")
-        .sort(entrantOrder)
-        .slice(0, count);
-      for (const entrant of candidates) {
-        entrant.stage = "main";
-        entrant.basis = `${entrant.basis} (titleholder rebalancing)`;
-        delete entrant.path;
-      }
+    const coefficient = new Map(input.nations.flatMap((nation) => Object.entries(nation.coefficients ?? {})).map(([id, value]) => [Number(id), value]));
+    for (const vacancy of vacancies) {
+      const [entrant] = second.entrants
+        .filter((item) => item.competition === vacancy.competition && item.stage !== "main" && (!vacancy.path || item.path === vacancy.path))
+        .sort((left, right) => (coefficient.get(right.clubId) ?? -1) - (coefficient.get(left.clubId) ?? -1) || entrantOrder(left, right));
+      if (!entrant) continue;
+      entrant.stage = "main";
+      entrant.basis = `${entrant.basis} (titleholder rebalancing)`;
+      delete entrant.path;
     }
+    rebalanceVacancies(second);
     result.push(...second.entrants);
   }
   return result.sort(

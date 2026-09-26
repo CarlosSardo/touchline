@@ -26,6 +26,7 @@ import {
   marketWage,
   payrollScale,
   postWeeklyAccounts,
+  professionalWageFloor,
   recordFinancialItem,
   sellPlayerAsset,
   type ClubEconomyInput,
@@ -362,6 +363,13 @@ describe("wage levels", () => {
     expect(payrollScale(10, 1_000_000)).toBe(0.02);
     expect(payrollScale(100_000_000, 1)).toBe(4);
     expect(payrollScale(-5, 100)).toBe(0.02);
+  });
+
+  it("lowers the professional wage floor to 10-50 on thin budgets, as generated", () => {
+    expect(professionalWageFloor(100_000, 500, 30)).toBe(50);
+    expect(professionalWageFloor(1_500, 900, 20)).toBe(20);
+    expect(professionalWageFloor(200, 300, 20)).toBe(10);
+    expect(professionalWageFloor(0, 0, 0)).toBe(50);
   });
 
   it("prices weekly wages by ability, club budget and age group, never below 50 or the current wage", () => {

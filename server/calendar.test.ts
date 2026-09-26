@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Store } from "./db.ts";
-import { generateWorld } from "./world.ts";
+import { generateWorld, planWorld } from "./world.ts";
 import {
+  CADENCE,
   COMPETITIONS,
   createCalendar,
   progressCompetitions,
@@ -12,6 +13,13 @@ import type { Fixture, League } from "../shared/types.ts";
 import { drawLeaguePhase } from "./draw.ts";
 import { clubCompetitionEligible } from "../shared/competition-rules.ts";
 import { CONTINENTAL } from "../shared/world-catalog/index.ts";
+import {
+  baseMatchdays,
+  leagueDates,
+  miniLeagueRounds,
+  readLeagueData,
+  splitMatchdays,
+} from "../shared/league-rules.ts";
 
 describe("club competition entry rules", () => {
   it("keeps B-team academies in domestic leagues but excludes reserves and inactive additions from cups and continental events", () => {
@@ -32,7 +40,28 @@ describe("club competition entry rules", () => {
     }, "continental", 2027)).toBe(false);
   });
 });
-
+describe("CONMEBOL cadence (pure)", () => {
+  const dated = (monthDay: string) => `${Number(monthDay.slice(0, 2)) >= 7 ? 2026 : 2027}-${monthDay}`;
+  it("spreads Libertadores and Sudamericana over the season: qualifying, groups, a mid-season break, knockouts, a May final", () => {
+    for (const id of ["copa-libertadores", "copa-sudamericana"]) {
+      const cadence = CADENCE[id];
+      const qualifying = Object.values(cadence.qualifying ?? {}).map(dated);
+      const groups = (cadence.matchdays ?? []).map(dated);
+      const knockout = (["playoff", "16", "8", "4", "2"] as const).flatMap((size) =>
+        cadence.knockout?.[size] ? [dated(cadence.knockout[size]!)] : [],
+      );
+      const all = [...qualifying, ...groups, ...knockout];
+      expect(all.every((date, index) => !index || date > all[index - 1]), id).toBe(true);
+      expect(all.every((date) => !internationalBreak(date) && date >= "2026-07-01" && date <= "2027-06-30"), id).toBe(true);
+      expect(COMPETITIONS.find((spec) => spec.catalog?.id === id)?.start).toBe(cadence.matchdays![0]);
+      expect(groups).toHaveLength(6);
+      expect(groups[0] > qualifying.at(-1)!).toBe(true);
+      expect(knockout[0] >= "2027-01-01", id).toBe(true);
+      expect(knockout.at(-1)!.slice(5, 7), id).toBe("05");
+    }
+    expect(dated(CADENCE["recopa-sudamericana"].start!) < dated(CADENCE["copa-libertadores"].start!)).toBe(true);
+  });
+});
 // Every UEFA association (Russia included, to prove its exclusion), all of CONMEBOL and the clubs of the other access lists.
 const CALENDAR_NATIONS = [
   ..."EN ES DE IT FR PT NL BE TR CZ AT CH LI LU SCO DK GR NO PL HR RS UA SE HU IL RO CY SK SI BG IE IS FI KZ AZ GE AM MD BA AL MK ME XK MT GI AD SM FO EE LV LT WAL NIR BY RU".split(" "),
@@ -42,14 +71,63 @@ const CALENDAR_NATIONS = [
   ..."US CA MX PA CR HN SV GT JM HT DO PR NZ".split(" "),
 ];
 
+/** One U19 and one U17 league per B-team academy: the parent's group, else the country's first youth league. */
+async function academyStandings(store: Store) {
+  const youth = await store.all<{ id: number; country_id: number; age_group: string }>(
+    "SELECT id,country_id,age_group FROM leagues WHERE kind = 'league' AND age_group IN ('U19','U17') ORDER BY id",
+  );
+  const members = await store.all<{ league_id: number; club_id: number }>(
+    "SELECT standings.league_id,standings.club_id FROM standings JOIN leagues ON leagues.id = standings.league_id WHERE leagues.kind = 'league' AND leagues.age_group IN ('U19','U17')",
+  );
+  const member = new Set(members.map((row) => `${row.league_id}:${row.club_id}`));
+  const rows: { league_id: number; club_id: number }[] = [];
+  for (const club of await store.all<{ id: number; parent_id: number; country_id: number }>(
+    "SELECT id,parent_id,country_id FROM clubs WHERE type = 'bteam' ORDER BY id",
+  ))
+    for (const age of ["U19", "U17"]) {
+      const leagues = youth.filter((league) => league.age_group === age);
+      if (leagues.some((league) => member.has(`${league.id}:${club.id}`))) continue;
+      const league =
+        leagues.find((row) => member.has(`${row.id}:${club.parent_id}`)) ??
+        leagues.find((row) => row.country_id === club.country_id);
+      if (league) rows.push({ league_id: league.id, club_id: club.id });
+    }
+  return rows;
+}
+
+describe("domestic league capacity (pure)", () => {
+  it("puts every club in one league per age group and gives every league enough matchdays", () => {
+    const plan = planWorld({ nations: CALENDAR_NATIONS, structureOnly: true });
+    const leagues = (plan.rows.leagues as unknown as League[]).filter((league) => league.kind === "league");
+    const byId = new Map(leagues.map((league) => [league.id, league]));
+    const seats = new Map<string, number>();
+    const sizes = new Map<number, number>();
+    for (const row of plan.rows.standings as { league_id: number; club_id: number }[]) {
+      const league = byId.get(row.league_id);
+      if (!league) continue;
+      const seat = `${league.age_group}:${row.club_id}`;
+      expect(seats.get(seat), `${seat} in ${league.name}`).toBeUndefined();
+      seats.set(seat, league.id);
+      sizes.set(league.id, (sizes.get(league.id) ?? 0) + 1);
+    }
+    for (const league of leagues) {
+      const format = readLeagueData(league.data, league.tier);
+      const conferences = format.conferences?.length ?? 0;
+      const matchdays =
+        baseMatchdays(sizes.get(league.id) ?? 0, format.roundRobins, conferences, format.interConference ?? 0) +
+        splitMatchdays(format.split) +
+        miniLeagueRounds(format.championship, Math.max(1, conferences));
+      expect(leagueDates(2026, matchdays), league.name).toHaveLength(matchdays);
+    }
+  });
+});
+
 describe("football calendar", () => {
   let store: Store;
   beforeAll(async () => {
     store = await Store.createTest("calendar");
     await generateWorld(store, { nations: CALENDAR_NATIONS, structureOnly: true });
-    await store.run(
-      "INSERT INTO standings(league_id,club_id) SELECT leagues.id,clubs.id FROM clubs JOIN leagues ON leagues.country_id = clubs.country_id WHERE clubs.type = 'bteam' AND leagues.kind = 'league' AND leagues.age_group IN ('U19','U17') AND NOT EXISTS (SELECT 1 FROM standings WHERE standings.league_id = leagues.id AND standings.club_id = clubs.id)",
-    );
+    await store.bulkInsert("standings", await academyStandings(store));
     await createCalendar(store);
   }, 600000);
   afterAll(async () => {

@@ -15,6 +15,8 @@ if (
     "E2E setup requires SQL_TEST_MODE=true and a fresh touchline_e2e_<uuid> schema.",
   );
 const schemaName: string = schema;
+// EN hosts the user club (club 1); the association audit spec needs DE (documented) and LU (unverified) rules.
+const E2E_NATIONS = ["EN", "DE", "LU"];
 const port = Number(process.env.API_PORT ?? 3002);
 if (!Number.isInteger(port) || port < 1 || port > 65535)
   throw new Error("API_PORT must be a valid port.");
@@ -36,7 +38,11 @@ async function initialize() {
   if (stopping) return;
   await store.schema();
   if (stopping) return;
-  await generateWorld(store);
+  const started = performance.now();
+  await generateWorld(store, { nations: E2E_NATIONS });
+  console.log(
+    `E2E world ${E2E_NATIONS.join(",")} generated in ${Math.round((performance.now() - started) / 1000)}s.`,
+  );
   if (stopping) return;
   await createCalendar(store);
   if (stopping) return;

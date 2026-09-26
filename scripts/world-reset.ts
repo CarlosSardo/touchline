@@ -25,11 +25,14 @@ Empties Touchline worlds fast: per schema it drops the foreign keys, TRUNCATEs e
 (minimal logging, identities restart at 1), then re-adds the same foreign keys WITH CHECK, all in one transaction under
 the world writer lock. Tables, schema_migrations, the reseed procedure and every grant stay, so the runtime identity keeps
 working and signed-in accounts simply start a new career. The account registry (accounts.users) is never modified.
---all resets the legacy dbo world plus every world registered in the account registry.
+--all resets the legacy dbo world, every world registered in the account registry and every other Touchline world
+(schema with schema_migrations) whose name is a valid world schema; the dry run marks those "registered": false.
 Dry-run is the default and prints what would be emptied; --apply --yes performs it. Back up first:
   npm run data:export -- --everything --out-dir <dir>
 Stop or scale the app to zero before applying: --apply refuses while other user sessions use the database (listed in the
-dry run; --allow-sessions overrides after you have checked none is a Touchline replica). Run it through scripts/azure-sql.sh for Azure.`;
+dry run; --allow-sessions overrides after you have checked none is a Touchline replica). Without VIEW DATABASE STATE (Azure SQL)
+or VIEW SERVER STATE (SQL Server) other sessions are invisible, so --apply refuses unless --allow-sessions is given.
+Run it through scripts/azure-sql.sh for Azure.`;
 
 function isLocalServer(environment: NodeJS.ProcessEnv = process.env) {
   return LOCAL_SERVERS.includes(environment.SQL_SERVER ?? "127.0.0.1");
@@ -233,9 +236,20 @@ export async function resetSchema(world: Store) {
   });
 }
 
-/** User sessions on this database other than this process's pool (visible with VIEW DATABASE STATE). */
+/** Sessions are only listable with VIEW DATABASE STATE (Azure SQL Database) or VIEW SERVER STATE (SQL Server). */
+export async function sessionsVisible(root: Store) {
+  const row = await root.get<{ visible: number | null }>(
+    `SELECT CASE WHEN CONVERT(int, SERVERPROPERTY('EngineEdition')) = 5
+      THEN HAS_PERMS_BY_NAME(NULL, N'DATABASE', N'VIEW DATABASE STATE')
+      ELSE HAS_PERMS_BY_NAME(NULL, NULL, N'VIEW SERVER STATE') END AS [visible]`,
+  );
+  return row?.visible === 1;
+}
+
+/** User sessions on this database other than this process's pool; without the permission only our own session shows. */
 export async function otherSessions(root: Store) {
-  return root.all<{ program: string; sessions: number }>(
+  if (!(await sessionsVisible(root))) return { visible: false, sessions: [] };
+  const sessions = await root.all<{ program: string; sessions: number }>(
     `SELECT ISNULL(other.[program_name], N'') AS [program], COUNT(*) AS [sessions]
     FROM sys.dm_exec_sessions AS other
     CROSS JOIN (SELECT [host_name], [host_process_id] FROM sys.dm_exec_sessions WHERE [session_id] = @@SPID) AS mine
@@ -244,6 +258,22 @@ export async function otherSessions(root: Store) {
         AND ISNULL(other.[host_process_id], -1) = ISNULL(mine.[host_process_id], -1))
     GROUP BY ISNULL(other.[program_name], N'')`,
   );
+  return { visible: true, sessions };
+}
+
+/** --all: dbo, registered worlds, then every other world schema that passes the same name checks as --schema. */
+export function allResetSchemas(registered: string[], worlds: string[], accountSchema: string, local = isLocalServer()) {
+  const chosen = new Map(["dbo", ...registered].map((schema) => [schema.toLowerCase(), schema]));
+  const skipped: { schema: string; reason: string }[] = [];
+  for (const world of worlds) {
+    if (chosen.has(world.toLowerCase())) continue;
+    try {
+      chosen.set(world.toLowerCase(), resetSchemaName(world, accountSchema, local));
+    } catch {
+      skipped.push({ schema: maskSchema(world), reason: "Not a resettable world schema name here; left untouched." });
+    }
+  }
+  return { schemas: [...chosen.values()], skipped };
 }
 
 async function accountRegistry(root: Store, accountSchema: string) {
@@ -285,14 +315,13 @@ export async function main(args = process.argv.slice(2), log = (line: string) =>
   try {
     const registry = await accountRegistry(root, options.accountSchema);
     const registered = new Set(registry.schemas.map((schema) => schema.toLowerCase()));
-    const schemas = options.all
-      ? [...new Map(["dbo", ...registry.schemas].map((schema) => [schema.toLowerCase(), schema])).values()]
-      : options.schemas;
-    const worlds = await root.all<{ name: string }>(
+    const worlds = (await root.all<{ name: string }>(
       `SELECT schema_row.[name] FROM sys.tables AS table_row
       INNER JOIN sys.schemas AS schema_row ON schema_row.[schema_id] = table_row.[schema_id]
       WHERE table_row.[name] = N'schema_migrations' ORDER BY schema_row.[name]`,
-    );
+    )).map((world) => world.name);
+    const all = options.all ? allResetSchemas(registry.schemas, worlds, options.accountSchema) : undefined;
+    const schemas = all?.schemas ?? options.schemas;
     const chosen = new Set(schemas.map((schema) => schema.toLowerCase()));
     const plans: SchemaResetPlan[] = [];
     for (const schema of schemas) plans.push(await planSchemaReset(root.forSchema(schema)));
@@ -300,9 +329,9 @@ export async function main(args = process.argv.slice(2), log = (line: string) =>
     const summary = {
       database: root.database,
       accountRegistry: { schema: options.accountSchema, present: registry.present, accounts: registry.accounts, modified: false },
-      otherSessions: sessions,
+      otherSessions: sessions.visible ? sessions.sessions : "not visible: this login lacks VIEW DATABASE STATE / VIEW SERVER STATE",
       schemas: plans.map((plan) => describePlan(plan, plan.schema.toLowerCase() === "dbo" || registered.has(plan.schema.toLowerCase()))),
-      untouchedWorlds: worlds.map((world) => world.name).filter((name) => !chosen.has(name.toLowerCase())).map(maskSchema),
+      untouchedWorlds: all?.skipped ?? worlds.filter((name) => !chosen.has(name.toLowerCase())).map(maskSchema),
     };
     const blocked = plans.filter((plan) => plan.refused && plan.touchline);
     if (!options.apply) {
@@ -316,8 +345,10 @@ export async function main(args = process.argv.slice(2), log = (line: string) =>
       return;
     }
     if (blocked.length) throw new Error(`Refusing to reset: ${blocked.map((plan) => `${maskSchema(plan.schema)} (${plan.refused})`).join("; ")}`);
-    if (sessions.length && !options.allowSessions)
-      throw new Error(`Refusing to reset while ${sessions.reduce((total, row) => total + row.sessions, 0)} other session(s) use the database (${sessions.map((row) => row.program || "unnamed").join(", ")}). Stop the app, or pass --allow-sessions once you have checked them.`);
+    if (!sessions.visible && !options.allowSessions)
+      throw new Error("Refusing to reset: this login cannot see other sessions (needs VIEW DATABASE STATE on Azure SQL, VIEW SERVER STATE on SQL Server). Stop the app, then pass --allow-sessions once you have checked.");
+    if (sessions.sessions.length && !options.allowSessions)
+      throw new Error(`Refusing to reset while ${sessions.sessions.reduce((total, row) => total + row.sessions, 0)} other session(s) use the database (${sessions.sessions.map((row) => row.program || "unnamed").join(", ")}). Stop the app, or pass --allow-sessions once you have checked them.`);
     log(JSON.stringify({ applying: true, ...summary }, null, 2));
     const results = [];
     for (const plan of plans.filter((candidate) => candidate.touchline)) {
@@ -333,6 +364,7 @@ export async function main(args = process.argv.slice(2), log = (line: string) =>
 
 if (isMain(import.meta.url))
   void main().catch((error: unknown) => {
-    console.error(error instanceof Error ? error.message : "World reset failed.");
+    // Refusals print their message; unexpected failures (TypeError, RequestError, ...) keep their stack.
+    console.error(error instanceof Error ? (error.constructor === Error ? error.message : error.stack ?? error.message) : "World reset failed.");
     process.exitCode = 1;
   });

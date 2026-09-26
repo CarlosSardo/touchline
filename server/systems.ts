@@ -631,11 +631,12 @@ export async function initialInbox(store: Store) {
   )
     return;
   const club = await clubOf(store);
-  const scout = (await store.get<Staff>(
+  // Worlds made only of home-pool nations (db:seed --nations FO) start at a national team without staff.
+  const scout = await store.get<Staff>(
     "SELECT TOP (1) * FROM staff WHERE club_id = ? AND role = 'Scout' ORDER BY id",
     club.id,
-  ))!;
-  const prospects = await store.all<Player>(
+  );
+  const prospects = !scout ? [] : await store.all<Player>(
     "SELECT TOP (5) * FROM players WHERE club_id != ? AND age BETWEEN 18 AND 23 AND ability BETWEEN 65 AND 77 AND potential >= 82 ORDER BY potential DESC, value ASC,id",
     club.id,
   );
@@ -644,7 +645,7 @@ export async function initialInbox(store: Store) {
       "UPDATE players SET shortlisted = 1 WHERE id = ?",
       player.id,
     );
-    await createReport(store, player, scout);
+    await createReport(store, player, scout!);
   }
   await news(
     store,
@@ -658,7 +659,7 @@ export async function initialInbox(store: Store) {
     store,
     "Scouting",
     "The first shortlist is on your desk",
-    `${scout.name} has prepared ${prospects.length} initial reports. There are still unknowns around personality, adaptation and development.`,
+    `${scout?.name ?? "Your scouting department"} has prepared ${prospects.length} initial reports. There are still unknowns around personality, adaptation and development.`,
     "info",
     "scouting",
   );

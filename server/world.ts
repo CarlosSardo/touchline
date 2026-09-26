@@ -30,6 +30,7 @@ import {
   hostedClubKey,
   isClubNation,
   leagueKey,
+  looseClubNameKey,
   reserveClubKey,
   reserveLeagueKey,
   tierMatchdays,
@@ -275,6 +276,8 @@ interface NationState {
   names: Set<string>;
   /** clubNameKey()s of real clubs (catalog avoid lists). */
   avoid: ReadonlySet<string>;
+  /** looseClubNameKey()s of the avoided names, so near-copies (AC Milano, Stade Reims) are refused too. */
+  avoidLoose: ReadonlySet<string>;
 }
 
 /**
@@ -365,7 +368,7 @@ function uniqueClubName(
   const tokens = tokensFor(token);
   const taken = (name: string) => {
     const key = clubNameKey(name);
-    return !key || state.names.has(key) || state.avoid.has(key);
+    return !key || state.names.has(key) || state.avoid.has(key) || state.avoidLoose.has(looseClubNameKey(key));
   };
   const accept = (name: string, used = token) => {
     state.names.add(clubNameKey(name));
@@ -603,6 +606,24 @@ function conferenceOf(clubs: PlanClub[], names: readonly string[]): Map<number, 
 const expectationFor = (rank: number, size: number) =>
   rank < 3 ? 3 : rank < size / 2 ? Math.ceil(size / 2) : size - 2;
 
+/** Standings rows are unique: each club once in its own senior league and at most once per youth age group. */
+export function assertPlanStandings(rows: Pick<WorldPlan["rows"], "leagues" | "clubs" | "standings">) {
+  const ageOf = new Map(rows.leagues.map((league) => [Number(league.id), String(league.age_group)]));
+  const byAge = new Map<string, number>();
+  for (const row of rows.standings) {
+    const leagueId = Number(row.league_id);
+    const key = `${row.club_id}:${ageOf.get(leagueId)}`;
+    if (byAge.has(key))
+      throw new Error(
+        `World plan: club ${row.club_id} stands in ${ageOf.get(leagueId)} leagues ${byAge.get(key)} and ${leagueId}.`,
+      );
+    byAge.set(key, leagueId);
+  }
+  for (const club of rows.clubs)
+    if (club.league_id !== null && byAge.get(`${club.id}:Senior`) !== Number(club.league_id))
+      throw new Error(`World plan: club ${club.id} has no standings row in its league ${club.league_id}.`);
+}
+
 /** Leagues, clubs (first teams, cross-border, B-teams), youth leagues and national teams; pure and seed-independent. */
 export function planWorld(
   options: WorldOptions = {},
@@ -665,6 +686,7 @@ export function planWorld(
         extraIndex: 0,
         names: new Set(),
         avoid: lookup.avoidedClubNames(nation.code),
+        avoidLoose: new Set([...lookup.avoidedClubNames(nation.code)].map(looseClubNameKey)),
       };
       states.set(nation.code, state);
     }
@@ -1182,6 +1204,7 @@ export function planWorld(
     }
   }
 
+  assertPlanStandings(rows);
   return {
     seed,
     lookup,
@@ -1630,6 +1653,12 @@ export async function generateWorld(store: Store, options: WorldOptions = {}): P
       nationalTeams: plan.counts.nationalTeams,
       players,
       homeBased,
+      // Read back when a career regenerates this world (saves.ts regenerationOptions).
+      options: {
+        ...(nations ? { nations } : {}),
+        squads: plan.squads,
+        ...(options.structureOnly ? { structureOnly: true } : {}),
+      },
     });
   });
   await ensureClubSupport(store);

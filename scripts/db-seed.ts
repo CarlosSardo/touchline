@@ -83,6 +83,7 @@ export async function main(args = process.argv.slice(2)) {
 
 if (isMain(import.meta.url))
   void main().catch((error: unknown) => {
-    console.error(error instanceof Error ? error.message : String(error));
+    // Usage errors print their message; unexpected failures (TypeError, RequestError, ...) keep their stack.
+    console.error(error instanceof Error ? (error.constructor === Error ? error.message : error.stack ?? error.message) : String(error));
     process.exitCode = 1;
   });

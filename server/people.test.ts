@@ -11,6 +11,7 @@ import {
   type PeopleContext,
 } from "./people.ts";
 import { catalogLookup, worldCatalog } from "../shared/world-catalog/index.ts";
+import { isRealPersonName } from "../shared/world-catalog/real-names.ts";
 import type {
   NamePool,
   NationSpec,
@@ -517,5 +518,15 @@ describe("regional name cultures", () => {
     expect(share("Cataluña")).toBeGreaterThan(0.35);
     expect(share("Madrid")).toBeLessThan(0.15);
     expect(share()).toBeLessThan(0.15);
+  });
+
+  it("redraws a name that matches a listed real person", () => {
+    // Spanish, Portuguese and Uruguayan pools yield a listed name about 2-4 times per 1,000 draws before the redraw.
+    const random = seedrandom("real-person-names");
+    for (const code of ["ES", "PT", "UY"].filter((entry) => lookup.nationByCode(entry)))
+      for (let index = 0; index < 3000; index++) {
+        const name = personName(random, code, { catalog: lookup });
+        expect(isRealPersonName(name), `${code}: ${name}`).toBe(false);
+      }
   });
 });

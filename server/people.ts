@@ -12,6 +12,7 @@ import {
   type NameSource,
   type NationSpec,
 } from "../shared/world-catalog/index.ts";
+import { isRealPersonName } from "../shared/world-catalog/real-names.ts";
 import {
   ATTRIBUTE_GROUPS,
   PERSONALITY_KEYS,
@@ -191,11 +192,23 @@ function familySource(
  * Name in the culture of nameCode (catalog NameConfig); givenCode optionally supplies the given-name culture
  * (diaspora). Within one culture the family name keeps the given name's source unless NameConfig.mixRate mixes.
  * `region` (birthplace CitySpec.region in the nameCode nation) selects NameConfig.regional lists.
+ * A draw matching a listed real person (real-names.ts) is redrawn.
  */
 export function personName(
   random: Rng,
   nameCode: string | Pick<Country, "code">,
   options: { givenCode?: string; catalog?: CatalogLookup; region?: string } = {},
+): string {
+  let name = drawPersonName(random, nameCode, options);
+  for (let attempt = 0; attempt < 20 && isRealPersonName(name); attempt++)
+    name = drawPersonName(random, nameCode, options);
+  return name;
+}
+
+function drawPersonName(
+  random: Rng,
+  nameCode: string | Pick<Country, "code">,
+  options: { givenCode?: string; catalog?: CatalogLookup; region?: string },
 ): string {
   const catalog = options.catalog ?? worldCatalog();
   const family = nameCulture(
@@ -808,7 +821,13 @@ export function createPlayer(
     attributes,
     personality,
     traits: [pick(random, TRAITS[0]), pick(random, TRAITS[1])],
-    lifestyle: pick(random, ["disciplined", "nightlife", "family-focused", "luxury-obsessed", "gym-rat"]),
+    // Minors never get adult-only lifestyles (RAI); one draw either way keeps the seed sequence.
+    lifestyle: pick(
+      random,
+      age < 18
+        ? ["disciplined", "family-focused", "gym-rat"]
+        : ["disciplined", "nightlife", "family-focused", "luxury-obsessed", "gym-rat"],
+    ),
     mentalHealth: {
       confidence: integer(random, 45, 85),
       anxiety: integer(random, 8, 40),

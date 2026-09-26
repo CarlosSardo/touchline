@@ -308,7 +308,7 @@ Grupo Desportivo {of} {city}|1|2,3
       founded: { top: [1893, 1925], bottom: [1908, 2012] },
       shortName: "city",
       avoid: list(
-        "FC Porto|SC Braga|Sporting de Braga|Vitória de Guimarães|Vitória de Setúbal|Vitória SC|Vitória FC|GD Chaves|CD Tondela|CD Mafra|CD Santa Clara|CD Montijo|FC Famalicão|FC Vizela|FC Penafiel|FC Paços de Ferreira|FC Felgueiras|FC Arouca|FC Alverca|FC Maia|FC Amarante|SC Espinho|Sporting de Espinho|SC Covilhã|Sporting de Covilhã|Sporting da Covilhã|SC Vila Real|GD Bragança|GD Estoril|Estoril Praia|AD Fafe|UD Leiria|União de Leiria|União de Santarém|União de Coimbra|União de Tomar|União da Madeira|Académico de Viseu|Académico de Coimbra|Académica de Coimbra|Estrela da Amadora|Leixões SC|Varzim SC|Atlético de Portugal|SC Beira-Mar|FC Barreirense|SC Olhanense|SC Farense|CD Nacional|CS Marítimo|Moreirense FC|Rio Ave FC|Gil Vicente FC|Casa Pia AC|Boavista FC|SL Benfica|Sporting CP|Belenenses",
+        "Sporting de Lisboa|Sporting Lisboa|Sporting Clube de Portugal|Sporting CP|Sporting de Portugal|Académico do Porto|Académico FC|Académica de Coimbra|Académico de Coimbra|União de Coimbra|Académico de Viseu|União de Leiria|União da Madeira|União de Tomar|União de Lamas|União de Santarém|Atlético Clube de Portugal|Atlético CP|Sporting da Covilhã|Sporting de Covilhã|Sporting de Pombal|Sporting de Faro|Sporting de Olhão|Sporting de Viana do Castelo|Sporting de Mirandela|Sporting da Marinha Grande|Sporting de Salgueiros|Salgueiros|SC Farense|Farense|SC Olhanense|Olhanense|Sporting de Espinho|FC Porto|SC Braga|Sporting de Braga|Vitória de Guimarães|Vitória de Setúbal|Vitória SC|Vitória FC|GD Chaves|CD Tondela|CD Mafra|CD Santa Clara|CD Montijo|FC Famalicão|FC Vizela|FC Penafiel|FC Paços de Ferreira|FC Felgueiras|FC Arouca|FC Alverca|FC Maia|FC Amarante|SC Espinho|Sporting de Espinho|SC Covilhã|Sporting de Covilhã|Sporting da Covilhã|SC Vila Real|GD Bragança|GD Estoril|Estoril Praia|AD Fafe|UD Leiria|União de Leiria|União de Santarém|União de Coimbra|União de Tomar|União da Madeira|Académico de Viseu|Académico de Coimbra|Académica de Coimbra|Estrela da Amadora|Leixões SC|Varzim SC|Atlético de Portugal|SC Beira-Mar|FC Barreirense|SC Olhanense|SC Farense|CD Nacional|CS Marítimo|Moreirense FC|Rio Ave FC|Gil Vicente FC|Casa Pia AC|Boavista FC|SL Benfica|Sporting CP|Belenenses",
       ),
       colors: ["#E30613", "#00428C", "#00805A", "#FFFFFF", "#000000", "#C8102E", "#FFD100", "#1E3A8A", "#7B1E1E", "#006B3F"],
     },
@@ -316,7 +316,7 @@ Grupo Desportivo {of} {city}|1|2,3
       "BR:22 CV:3 AO:3 GW:2 MZ:1 ST:0.5 ES:3 FR:3 AR:3 UY:3 CO:3 VE:1.5 PY:1 EC:1 CL:0.8 PE:0.5 MX:1 US:1 CA:0.8 CR:0.5 NG:2 GH:2 CI:1.5 SN:1.5 CM:1.5 CD:1 GN:1 ML:1 MA:1 DZ:0.5 TN:0.5 JP:2 KR:0.5 IR:0.5 AU:0.5 NL:1 BE:1 SE:1 DK:1 NO:1 UA:1 RS:1 HR:1 GE:1 PL:1 IT:1 DE:1 EN:0.8 CH:0.5",
     ),
     // UEFA association season points 2020/21..2024/25 (UEFA 2025 country ranking).
-    coefficients: { association: [9.6, 12.916, 12.5, 11.0, 16.25] },
+    coefficients: { association: [9.6, 12.916, 12.5, 11.0, 16.25], season2025: 20.5 },
   },
 };
 
@@ -654,7 +654,7 @@ Club Deportivo {city}|1|3,4
       founded: { top: [1889, 1930], bottom: [1905, 2015] },
       shortName: "city",
       avoid: list(
-        "Real Madrid|FC Barcelona|Atlético Madrid|Atlético de Madrid|Sevilla FC|Real Betis|Valencia CF|Villarreal CF|Real Sociedad|Athletic Club|CA Osasuna|Getafe CF|Rayo Vallecano|RCD Mallorca|RCD Espanyol|Deportivo Alavés|Girona FC|Celta de Vigo|Elche CF|Levante UD|Real Oviedo|UD Las Palmas|Cádiz CF|Granada CF|UD Almería|Real Valladolid|Málaga CF|Córdoba CF|CD Leganés|SD Eibar|Burgos CF|Racing Santander|Racing de Santander|Sporting Gijón|Sporting de Gijón|Albacete Balompié|CD Castellón|Real Zaragoza|SD Huesca|Deportivo A Coruña|Deportivo de La Coruña|CD Tenerife|FC Cartagena|Real Murcia|Hércules CF|CD Lugo|Cultural Leonesa|AD Ceuta|UD Ibiza|UD Eivissa|CD Ibiza|Real Unión|Pontevedra CF|Racing Ferrol|Racing de Ferrol|CE Sabadell|Terrassa FC|Gimnàstic de Tarragona|CF Reus|UE Olot|CE Manresa|CF Badalona|CE L'Hospitalet|CE Mataró|UE Lleida|Lleida Esportiu|AD Alcorcón|CF Fuenlabrada|CD Móstoles|RSD Alcalá|CF Talavera|CD Guadalajara|CD Toledo|UD Salamanca|Zamora CF|CF Palencia|CD Badajoz|AD Mérida|Linares Deportivo|Real Jaén|Recreativo de Huelva|Algeciras CF|Marbella FC|CD Antequera|Orihuela CF|CF Gandía|Benidorm CF|CD Lorca|Lorca FC|CD Calahorra|Barakaldo CF|CD Vitoria|Real Avilés|UD Melilla|CD Manacor|Real Burgos|SD Compostela|UD Ourense|CD Ourense|CD Teruel|CD Don Benito|CD Lucena|Motril CF|AD Torrejón|CF Pozuelo|Rayo Majadahonda|Gimnástica Segoviana|Gimnástica de Torrelavega|Real Balompédica Linense|CD Alcoyano|CD Eldense",
+        "Club Deportivo A Coruña|Deportivo A Coruña|Deportivo La Coruña|Deportivo de La Coruña|Real Madrid|FC Barcelona|Atlético Madrid|Atlético de Madrid|Sevilla FC|Real Betis|Valencia CF|Villarreal CF|Real Sociedad|Athletic Club|CA Osasuna|Getafe CF|Rayo Vallecano|RCD Mallorca|RCD Espanyol|Deportivo Alavés|Girona FC|Celta de Vigo|Elche CF|Levante UD|Real Oviedo|UD Las Palmas|Cádiz CF|Granada CF|UD Almería|Real Valladolid|Málaga CF|Córdoba CF|CD Leganés|SD Eibar|Burgos CF|Racing Santander|Racing de Santander|Sporting Gijón|Sporting de Gijón|Albacete Balompié|CD Castellón|Real Zaragoza|SD Huesca|Deportivo A Coruña|Deportivo de La Coruña|CD Tenerife|FC Cartagena|Real Murcia|Hércules CF|CD Lugo|Cultural Leonesa|AD Ceuta|UD Ibiza|UD Eivissa|CD Ibiza|Real Unión|Pontevedra CF|Racing Ferrol|Racing de Ferrol|CE Sabadell|Terrassa FC|Gimnàstic de Tarragona|CF Reus|UE Olot|CE Manresa|CF Badalona|CE L'Hospitalet|CE Mataró|UE Lleida|Lleida Esportiu|AD Alcorcón|CF Fuenlabrada|CD Móstoles|RSD Alcalá|CF Talavera|CD Guadalajara|CD Toledo|UD Salamanca|Zamora CF|CF Palencia|CD Badajoz|AD Mérida|Linares Deportivo|Real Jaén|Recreativo de Huelva|Algeciras CF|Marbella FC|CD Antequera|Orihuela CF|CF Gandía|Benidorm CF|CD Lorca|Lorca FC|CD Calahorra|Barakaldo CF|CD Vitoria|Real Avilés|UD Melilla|CD Manacor|Real Burgos|SD Compostela|UD Ourense|CD Ourense|CD Teruel|CD Don Benito|CD Lucena|Motril CF|AD Torrejón|CF Pozuelo|Rayo Majadahonda|Gimnástica Segoviana|Gimnástica de Torrelavega|Real Balompédica Linense|CD Alcoyano|CD Eldense",
       ),
       colors: ["#FFFFFF", "#A50044", "#004D98", "#CB3524", "#00954C", "#FDB913", "#0067B1", "#E30613", "#000000", "#6F263D", "#1B4F9C", "#7AC143"],
     },
@@ -662,7 +662,7 @@ Club Deportivo {city}|1|3,4
       "AR:6 BR:6 FR:6 UY:4 PT:4 CO:3 MA:3 VE:2 EC:2 MX:2 PY:1.5 CL:1.5 NL:2 DE:2 BE:2 EN:2 IT:2 NG:2 GH:2 SN:2 CI:1.5 CM:1.5 GN:1 ML:1 GQ:1 DZ:1 JP:1.5 KR:1 US:1.5 GE:1 HR:1.5 RS:1.5 UA:1 PL:1 SE:1 DK:1 NO:1 CH:1 AT:1 TR:1 DO:1 HN:0.5 CR:0.5 PE:0.5 CD:0.5 CV:0.5 GW:0.5 AO:0.5",
     ),
     // UEFA association season points 2020/21..2024/25 (UEFA 2025 country ranking).
-    coefficients: { association: [19.5, 18.428, 16.571, 16.062, 23.892] },
+    coefficients: { association: [19.5, 18.428, 16.571, 16.062, 23.892], season2025: 22.093 },
   },
 };
 
@@ -757,7 +757,7 @@ Inter {city}|1.5
     },
     importSources: codes("ES:10 PT:5 FR:3 AR:2 BR:2 UY:1 VE:1 MA:1 CO:1 SN:0.5"),
     // UEFA association season points 2020/21..2024/25 (UEFA 2025 country ranking).
-    coefficients: { association: [0.666, 1.5, 0.666, 1.666, 1.0] },
+    coefficients: { association: [0.666, 1.5, 0.666, 1.666, 1.0], season2025: 2.0 },
   },
   // FC Andorra, promoted to Segunda División for 2025/26.
   hostedAbroad: [
@@ -865,7 +865,7 @@ FC {city}|4
     },
     importSources: codes("ES:10 EN:4 MA:2 PT:1 AR:1 IT:1 FR:0.5 SCO:0.5 IE:0.5 NG:0.5"),
     // UEFA association season points 2020/21..2024/25 (UEFA 2025 country ranking).
-    coefficients: { association: [1.666, 1.25, 0.875, 0.166, 1.5] },
+    coefficients: { association: [1.666, 1.25, 0.875, 0.166, 1.5], season2025: 3.333 },
   },
 };
 

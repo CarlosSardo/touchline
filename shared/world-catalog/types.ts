@@ -441,9 +441,11 @@ export interface CrossBorderSpec {
   youth: "host" | "home";
   registration: "host" | "home";
 }
-/** Association coefficient points per entrant (win 2, draw 1, qualifying halved) for seasons 2021..2025, oldest first. */
+/** Association coefficient points per entrant (win 2, draw 1, qualifying halved) for seasons 2020/21..2024/25, oldest first. */
 export interface CoefficientSeed {
   association: [number, number, number, number, number];
+  /** Real 2025/26 points: the 2026/27 European Performance Spots and, one season lagged, the 2027/28 ranking. */
+  season2025?: number;
 }
 export interface DomesticFootballSpec {
   /** Own tiers; length must equal the directive count (LI: none, clubs hosted in CH). */
@@ -559,7 +561,8 @@ export interface ContinentalCompetitionSpec {
   neutralFinal: boolean;
   /** "MM-DD" main-phase start within the July–June season. */
   start: string;
-  titleholders?: { from: string; stage: ContinentalStage }[];
+  /** `vacancyPath`: a titleholder place left free (holder qualified otherwise) goes to that path's best club. */
+  titleholders?: { from: string; stage: ContinentalStage; vacancyPath?: "champions" | "league" }[];
   /** Regional routes, e.g. Central American Cup top 6 → Champions Cup. */
   feeds?: { to: string; positions: [number, number]; stage: ContinentalStage }[];
   /** Regional qualifier: its entrants may also hold a direct place elsewhere. */
@@ -568,6 +571,8 @@ export interface ContinentalCompetitionSpec {
   mirrors?: string;
   /** Main-phase places that skip the knockout play-off round (UEFA 1st–8th). */
   byes?: number;
+  /** Legs of qualifying rounds when they differ from `legs` (UYL Domestic Champions Path 2, ACL Elite preliminary 1). */
+  qualifyingLegs?: 1 | 2;
   /** Qualifying losers moving to another competition (UCL Q3 losers → UEL). */
   drops?: { from: ContinentalStage; path?: "champions" | "league"; to: string; stage: ContinentalStage }[];
 }
@@ -576,6 +581,11 @@ export interface ContinentalCatalog {
   access: AccessRule[];
   /** Confederations that record association coefficients (never OFC). */
   coefficientConfederations: ConfederationCode[];
+  /**
+   * Associations ranked without clubs in the game (suspended Russia, nations without leagues): real seeds, then their
+   * seeded average each season, so they keep their real rank while their access places are vacated.
+   */
+  rankingOnly?: Partial<Record<NationCode, CoefficientSeed>>;
 }
 
 // -------------------------------------------------------------- catalog

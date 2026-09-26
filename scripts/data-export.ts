@@ -326,7 +326,14 @@ export async function exportEverything(root: Store, options: EverythingOptions) 
       await writeJson(join(directory, schema, "snapshots.json"), slots);
       for (const slot of slots) {
         const id = String(slot.id).toLowerCase();
-        if (!/^[a-f0-9-]{36}$/.test(id) || !slot.complete) continue;
+        if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(id)) {
+          const key = `${schema}/snapshots/${encodeURIComponent(id).slice(0, 80)}`;
+          manifest.failures[key] = "Snapshot id is not a UUID, so it has no safe file name; it was not exported.";
+          log(`FAILED ${masked(key)}: ${manifest.failures[key]}`);
+          await save();
+          continue;
+        }
+        if (!slot.complete) continue;
         await attempt(`${schema}/snapshots/${id}`, async () => {
           const file = join(schema, "snapshots", `${id}.touchline.gz`);
           const partial = join(directory, `${file}.partial`);
@@ -472,6 +479,7 @@ export async function main(args = process.argv.slice(2)) {
 
 if (isMain(import.meta.url))
   void main().catch((error: unknown) => {
-    console.error(error instanceof Error ? error.message : String(error));
+    // Usage errors print their message; unexpected failures (TypeError, RequestError, ...) keep their stack.
+    console.error(error instanceof Error ? (error.constructor === Error ? error.message : error.stack ?? error.message) : String(error));
     process.exitCode = 1;
   });

@@ -1812,7 +1812,7 @@ const REAL_CLUB_NAMES: Readonly<Record<string, readonly string[]>> = {
      Mineros de Ciudad Guayana`,
   ),
   EC: real(
-    `Barcelona|Barcelona Sporting Club|Emelec|Club Sport Emelec|Liga Deportiva Universitaria|LDU Quito|Liga de Quito|
+    `La Libertad|Barcelona|Barcelona Sporting Club|Emelec|Club Sport Emelec|Liga Deportiva Universitaria|LDU Quito|Liga de Quito|
      Liga Deportiva Quito|Liga Deportiva Loja|Liga de Loja|Liga Deportiva Portoviejo|Liga de Portoviejo|
      Liga Deportiva Cuenca|Independiente del Valle|Aucas|Sociedad Deportiva Aucas|Sociedad Deportiva Quito|
      Deportivo Quito|Deportivo Cuenca|Club Deportivo Cuenca|Deportivo Azogues|El Nacional|Universidad Católica|
