@@ -2,14 +2,18 @@ import seedrandom from "seedrandom";
 import { describe, expect, it } from "vitest";
 import {
   ageGroupFor,
+  freeAgentChance,
   INTAKE,
   intakeSize,
   keepScore,
+  leaveThreshold,
   missingPositions,
   retirementChance,
   selectSquad,
+  SQUAD_CAPS,
   youthRatings,
 } from "./youth.ts";
+import { SQUAD_MINIMUMS } from "../shared/world-rules.ts";
 import type { Position } from "../shared/types.ts";
 
 const club = (level: number) => ({ academy: level, facilities: level, reputation: level });
@@ -106,5 +110,83 @@ describe("squad planning", () => {
     expect(retirementChance(40, 90, false)).toBe(1);
     expect(retirementChance(36, 60, false)).toBeGreaterThan(retirementChance(34, 60, false));
     expect(retirementChance(34, 60, true)).toBeGreaterThan(retirementChance(34, 60, false));
+  });
+});
+
+describe("population balance", () => {
+  it("sends most released players out of football and good adults to the free-agent market", () => {
+    const threshold = leaveThreshold(40);
+    expect(freeAgentChance({ age: 16, ability: 30, potential: threshold + 10 }, threshold)).toBe(0);
+    expect(freeAgentChance({ age: 16, ability: 40, potential: threshold + 25 }, threshold)).toBeLessThanOrEqual(0.25);
+    expect(freeAgentChance({ age: 24, ability: threshold - 1, potential: 70 }, threshold)).toBe(0);
+    expect(freeAgentChance({ age: 24, ability: threshold + 30, potential: 80 }, threshold)).toBe(0.9);
+    expect(freeAgentChance({ age: 33, ability: threshold + 30, potential: 80 }, threshold)).toBeLessThan(0.5);
+  });
+
+  it("keeps a synthetic league within 10% over six rollovers with intake, squad targets and caps", () => {
+    const random = seedrandom("population-balance");
+    const positions: Position[] = ["GK", "CB", "CB", "LB", "RB", "DM", "CM", "CM", "AM", "LW", "RW", "ST", "GK"];
+    type Person = { age: number; ability: number; potential: number; position: Position; club: number | null; freeSince?: number };
+    const levels = Array.from({ length: 30 }, (_, index) => 40 + index);
+    const threshold = leaveThreshold(levels[0]);
+    const people: Person[] = [];
+    const add = (club: number, age: number, level: number, index: number) => {
+      const youth = age < 19 ? youthRatings(random, { reputation: level, academy: level, headOfYouth: 50, age }) : undefined;
+      const ability = youth?.ability ?? Math.round(level * 0.66 + 22 + (random() - 0.5) * 12);
+      people.push({ age, ability, potential: youth?.potential ?? ability + Math.max(0, 24 - age), position: positions[index % positions.length], club });
+    };
+    const group = (person: Person) => (person.age < 17 ? "U17" : person.age < 19 ? "U19" : "Senior");
+    levels.forEach((level, id) => {
+      for (let index = 0; index < 27; index++) add(id, 19 + (index % 16), level, index);
+      for (let index = 0; index < 21; index++) add(id, 17 + (index % 2), level, index);
+      for (let index = 0; index < 22; index++) add(id, 14 + (index % 3), level, index);
+    });
+    const initial = people.length;
+    for (let season = 1; season <= 6; season++) {
+      const leavers = new Set<Person>();
+      for (const person of people) {
+        person.age++;
+        person.ability = Math.min(person.potential, person.ability + (person.age <= 23 ? (person.potential - person.ability) * 0.3 : person.age >= 31 ? -2 : 0));
+        const clubless = person.club === null;
+        if ((clubless && person.freeSince! < season) || (group(person) === "Senior" && random() < retirementChance(person.age, person.ability, clubless)))
+          leavers.add(person);
+      }
+      const released: Person[] = [];
+      levels.forEach((level, id) => {
+        const squad = (name: string) => people.filter((person) => person.club === id && !leavers.has(person) && group(person) === name);
+        const intake = intakeSize(club(level), context(50), random);
+        expect(intake).toBeGreaterThanOrEqual(INTAKE.min);
+        expect(intake).toBeLessThanOrEqual(INTAKE.max);
+        released.push(...selectSquad(squad("Senior"), 27, 3).rest);
+        released.push(...selectSquad(squad("U19"), SQUAD_CAPS.youth, 2).rest);
+        released.push(...selectSquad(squad("U17"), SQUAD_CAPS.youth - intake, 2).rest);
+        for (let index = 0; index < intake; index++) add(id, random() < 0.55 ? 14 : 15, level, index + season);
+      });
+      for (const person of released) {
+        person.club = null;
+        person.freeSince = season;
+      }
+      levels.forEach((level, id) => {
+        for (const [name, minimum, age] of [["Senior", SQUAD_MINIMUMS.Senior, 19], ["U19", SQUAD_MINIMUMS.U19, 17], ["U17", SQUAD_MINIMUMS.U17, 15]] as const) {
+          const size = people.filter((person) => person.club === id && !leavers.has(person) && group(person) === name).length;
+          for (let gap = minimum - size; gap > 0; gap--) {
+            const free = people.find((person) => person.club === null && !leavers.has(person) && group(person) === name);
+            if (free) free.club = id;
+            else add(id, age, level, gap);
+          }
+        }
+      });
+      for (const person of released)
+        if (person.club === null && random() >= freeAgentChance(person, threshold)) leavers.add(person);
+      const kept = people.filter((person) => !leavers.has(person));
+      people.splice(0, people.length, ...kept);
+      for (const id of levels.keys())
+        for (const [name, minimum] of [["Senior", SQUAD_MINIMUMS.Senior], ["U19", SQUAD_MINIMUMS.U19], ["U17", SQUAD_MINIMUMS.U17]] as const) {
+          const size = people.filter((person) => person.club === id && group(person) === name).length;
+          expect(size, `season ${season} club ${id} ${name}`).toBeGreaterThanOrEqual(minimum);
+          expect(size, `season ${season} club ${id} ${name}`).toBeLessThanOrEqual(name === "Senior" ? SQUAD_CAPS.firstTeam : SQUAD_CAPS.youth);
+        }
+      expect(Math.abs(people.length - initial) / initial, `season ${season}: ${people.length} vs ${initial}`).toBeLessThanOrEqual(0.1);
+    }
   });
 });

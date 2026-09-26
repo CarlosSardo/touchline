@@ -466,12 +466,12 @@ export const ageOn = (birth: string, date: string) =>
   (date.slice(5) < birth.slice(5) ? 1 : 0);
 export const internationalBreak = (date: string) => {
   const monthDay = date.slice(5);
+  // FIFA 2026/27 windows: one merged September–October window (Nations League 24 Sep – 6 Oct), then Nov, Mar, June.
   return [
-    ["09-01", "09-15"],
-    ["10-05", "10-13"],
+    ["09-21", "10-06"],
     ["11-09", "11-17"],
     ["03-22", "03-30"],
-    ["06-01", "06-15"],
+    ["06-07", "06-15"],
   ].some(([start, end]) => monthDay >= start && monthDay <= end);
 };
 export const transferWindow = (date: string) => {
@@ -920,6 +920,8 @@ export function valuation(
   context: {
     date: string;
     leagueReputation: number;
+    /** Market price level of the league nation (world-catalog MARKET_VALUE_FACTOR, server-side); default 1. */
+    marketFactor?: number;
     balance: number;
     philosophy: string;
     inflation: number;
@@ -953,7 +955,8 @@ export function valuation(
   }[player.position];
   // Ability already separates the leagues; this is the market premium of richer leagues for equal quality.
   const league =
-    0.3 + 0.8 * (clamp(context.leagueReputation, 0, 100) / 100) ** 2;
+    (0.3 + 0.8 * (clamp(context.leagueReputation, 0, 100) / 100) ** 2) *
+    clamp(context.marketFactor ?? 1, 0.1, 1.5);
   const months = clamp(
     daysBetween(context.date, player.contract_end) / 30.44,
     0,

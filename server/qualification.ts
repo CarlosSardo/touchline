@@ -306,6 +306,12 @@ export async function continentalEntries(
   const resolved = resolveContinentalAccess(CONTINENTAL, {
     confederation: spec.confederation,
     ranking: associations.map((entry) => entry.code),
+    // Youth League Domestic Champions Path: the ranking published a season later (N-5..N-1, not N-6..N-2).
+    ...(spec.id === "uefa-youth-league" && {
+      rankings: {
+        [spec.id]: (await associationCoefficients(store, spec.confederation, season + 1)).map((entry) => entry.code),
+      },
+    }),
     nations,
     titleholders,
     feederResults,

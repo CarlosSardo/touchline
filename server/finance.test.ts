@@ -13,6 +13,7 @@ import {
   valuation,
   VALUE_RANGE,
 } from "../shared/rules.ts";
+import { MARKET_VALUE_FACTOR, marketValueFactor } from "../shared/world-catalog/market.ts";
 import {
   acquirePlayerAsset,
   annualAmortization,
@@ -178,6 +179,19 @@ describe("heuristic player valuation", () => {
     });
     expect(value).toBeGreaterThanOrEqual(scenario.minimum);
     expect(value).toBeLessThanOrEqual(scenario.maximum);
+  });
+
+  it("prices equal quality lower in cheaper league markets, the big European leagues at 1", () => {
+    const star = { ability: 80, potential: 82, age: 26, position: "ST" as const };
+    const europe = estimate(star, { leagueReputation: 70 }).value;
+    expect(estimate(star, { leagueReputation: 70, marketFactor: 1 }).value).toBe(europe);
+    expect(estimate(star, { leagueReputation: 70, marketFactor: marketValueFactor("JP") }).value).toBeCloseTo(europe * 0.27, -5);
+    expect(estimate(star, { leagueReputation: 70, marketFactor: 0 }).value).toBeGreaterThanOrEqual(europe * 0.1 - 100);
+    for (const code of ["EN", "ES", "DE", "IT", "FR", "PT", undefined, null]) expect(marketValueFactor(code), String(code)).toBe(1);
+    for (const factor of Object.values(MARKET_VALUE_FACTOR)) {
+      expect(factor).toBeGreaterThan(0.2);
+      expect(factor).toBeLessThan(1);
+    }
   });
 
   it("is monotonic in quality and league reputation, including band boundaries", () => {
@@ -376,9 +390,9 @@ describe("wage levels", () => {
 
   it("prices weekly wages by ability, club budget and age group, never below 50 or the current wage", () => {
     const player = { ability: 74, age: 26, age_group: "Senior" as AgeGroup, wage: 0 };
-    // Mid-table Premier League payroll factor ≈ 2.5: about £55k a week for a squad player.
-    expect(marketWage(player, 2.5)).toBeGreaterThan(40_000);
-    expect(marketWage(player, 2.5)).toBeLessThan(80_000);
+    // Mid-table Premier League payroll factor ≈ 1.75 (player wage budget = 62% of the catalog wage bill): about £40k a week.
+    expect(marketWage(player, 1.75)).toBeGreaterThan(30_000);
+    expect(marketWage(player, 1.75)).toBeLessThan(55_000);
     expect(marketWage({ ...player, ability: 92 }, 4)).toBeGreaterThan(250_000);
     expect(marketWage({ ...player, ability: 99 }, 4)).toBeLessThanOrEqual(1_200_000);
     expect(marketWage({ ...player, ability: 55 }, 0.3)).toBeLessThan(1500);

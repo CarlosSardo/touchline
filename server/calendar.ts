@@ -86,32 +86,76 @@ export const CADENCE: Record<
     gap?: number;
   }
 > = {
+  // 2026/27 league phases and finals; knockout rounds before the finals follow UEFA's usual weeks (inferred).
+  "uefa-champions-league": {
+    start: "09-08",
+    matchdays: ["09-08", "10-13", "10-20", "11-03", "11-24", "12-08", "01-19", "01-27"],
+    knockout: { playoff: "02-16", "16": "03-09", "8": "04-06", "4": "04-27", "2": "06-05" },
+  },
+  "uefa-europa-league": {
+    start: "09-17",
+    matchdays: ["09-17", "10-15", "10-22", "11-05", "11-26", "12-10", "01-21", "01-28"],
+    knockout: { playoff: "02-18", "16": "03-11", "8": "04-08", "4": "04-29", "2": "05-26" },
+  },
+  "uefa-conference-league": {
+    start: "10-15",
+    matchdays: ["10-15", "10-22", "11-05", "11-26", "12-10", "12-17"],
+    knockout: { playoff: "02-18", "16": "03-11", "8": "04-08", "4": "04-29", "2": "06-02" },
+  },
+  // UCL Path on UCL matchdays 1–6; Domestic Champions Path rounds 1–3 (the third repeats round 2); final 19 April.
+  "uefa-youth-league": {
+    start: "09-08",
+    matchdays: ["09-08", "10-13", "10-20", "11-03", "11-24", "12-08"],
+    qualifying: { q1: "09-16", q2: "10-28", q3: "11-25" },
+    knockout: { playoff: "02-09", "16": "02-23", "8": "03-09", "4": "04-16", "2": "04-19" },
+  },
+  "uefa-super-cup": { start: "08-12" },
+  // Groups avoid the September–October FIFA window (MD2 after it).
   "copa-libertadores": {
     start: "09-16",
     qualifying: { q1: "07-22", q2: "08-05", q3: "08-19" },
-    matchdays: ["09-16", "09-23", "10-14", "10-28", "11-04", "11-25"],
+    matchdays: ["09-16", "10-07", "10-14", "10-28", "11-04", "11-25"],
     knockout: { "16": "02-10", "8": "03-10", "4": "04-14", "2": "05-29" },
   },
   "copa-sudamericana": {
     start: "09-17",
     qualifying: { q1: "08-20" },
-    matchdays: ["09-17", "09-24", "10-15", "10-29", "11-05", "11-26"],
+    matchdays: ["09-17", "10-08", "10-15", "10-29", "11-05", "11-26"],
     knockout: { playoff: "01-20", "16": "02-11", "8": "03-11", "4": "04-15", "2": "05-22" },
   },
   "recopa-sudamericana": { start: "08-19" },
   "libertadores-sub-20": { start: "08-12", gap: 3 },
-  // Domestic Champions Path, two legs: round 1 in October, round 2 (top 30 champions enter) in November.
-  "uefa-youth-league": { qualifying: { q1: "10-01", q2: "11-05" } },
-  // 2025/26 knockout calendars: quarter-finals in March, finals in May (the ACL Elite finals are centralised).
-  "afc-champions-league-elite": { knockout: { "16": "03-03", "8": "04-25", "4": "04-29", "2": "05-03" } },
-  "afc-champions-league-two": { knockout: { "16": "02-11", "8": "03-04", "4": "04-08", "2": "05-17" } },
-  "caf-champions-league": { qualifying: { q1: "09-19", q2: "10-17" }, knockout: { "8": "03-13", "4": "04-10", "2": "05-15" } },
+  // Single-match preliminaries in August (ACL Two East really plays 31 August); finals 1 May (centralised) and 15 May.
+  "afc-champions-league-elite": {
+    qualifying: { playoff: "08-11" },
+    knockout: { "16": "03-03", "8": "04-23", "4": "04-27", "2": "05-01" },
+  },
+  "afc-champions-league-two": {
+    start: "09-15",
+    qualifying: { playoff: "08-12" },
+    knockout: { "16": "02-11", "8": "03-04", "4": "04-08", "2": "05-15" },
+  },
+  // Qualifying 4 Sep – 25 Oct (both competitions, no play-off round); CL groups from 27 Nov, final 24/31 May.
+  "caf-champions-league": {
+    start: "11-27",
+    qualifying: { q1: "09-05", q2: "10-17" },
+    knockout: { "8": "03-13", "4": "04-10", "2": "05-24" },
+  },
   "caf-confederation-cup": {
-    qualifying: { q1: "09-19", playoff: "10-31" },
+    qualifying: { q1: "09-05", q2: "10-17" },
     knockout: { "8": "03-14", "4": "04-11", "2": "05-16" },
   },
+  // 2026 feeders: Leagues Cup 4 Aug – 6 Sep, Central American Cup to 2/6 Dec, Caribbean Cup 4 Aug – 1/5 Dec.
+  "leagues-cup": { start: "08-04", knockout: { "8": "08-25", "4": "09-02", "2": "09-06" } },
+  "concacaf-central-american-cup": { knockout: { "8": "09-08", "4": "10-20", "2": "12-02" } },
+  "concacaf-caribbean-cup": { start: "08-04", knockout: { "4": "10-13", "2": "12-01" } },
   "concacaf-champions-cup": { start: "03-10", knockout: { "8": "04-07", "4": "04-28", "2": "05-30" } },
+  // Played on 23 September until 2025; the week before is the closest date outside the merged FIFA window.
+  "campeones-cup": { start: "09-16" },
 };
+
+/** Senior national-team matchdays inside the 2026/27 FIFA windows (Nations League league-phase weeks). */
+export const NATIONS_SERIES_DATES = ["09-24", "09-27", "10-01", "10-04", "11-12", "11-15"];
 
 const continentalSpec = (catalog: ContinentalCompetitionSpec): CompetitionSpec => ({
   name: catalog.name,
@@ -254,7 +298,7 @@ export const COMPETITIONS: CompetitionSpec[] = [
       format: "Groups" as const,
       rounds: 6,
       qualifies: 8,
-      start: "09-03",
+      start: NATIONS_SERIES_DATES[0],
       national: true,
     }),
   ),
@@ -280,6 +324,19 @@ export interface CompetitionData {
 
 const seasonDate = (season: number, monthDay: string) =>
   `${Number(monthDay.slice(0, 2)) >= 7 ? season : season + 1}-${monthDay}`;
+
+/** Planned matchdays moved by `delay`, clear of the FIFA windows and at least three days apart. */
+function plannedMatchdays(monthDays: readonly string[], season: number, delay: number) {
+  const dates: string[] = [];
+  for (const monthDay of monthDays) {
+    const previous = dates.at(-1);
+    let date = addDays(seasonDate(season, monthDay), delay);
+    if (previous && daysBetween(previous, date) < 3) date = addDays(previous, 7);
+    while (internationalBreak(date)) date = addDays(date, 7);
+    dates.push(date);
+  }
+  return dates;
+}
 
 /** Clubs per conference in catalog order; clubs without a valid conference fill the smallest ones (persisted). */
 async function conferenceGroups(
@@ -538,6 +595,12 @@ export async function scheduleKnockout(
           neutral: stage === "Final" && Boolean(cup.neutralFinal),
         }
       : base;
+    // Senior club rounds keep out of the FIFA windows; national-team rounds are played inside them.
+    const clear = (day: string, step: number) => {
+      if (data.spec?.age === "Senior" && !data.spec.national)
+        while (internationalBreak(day)) day = addDays(day, step);
+      return day;
+    };
     for (let index = 0; index < playing.length / 2; index++) {
       const seeded = playing[index];
       const opponent = playing[playing.length - 1 - index];
@@ -550,7 +613,7 @@ export async function scheduleKnockout(
         store,
         leagueId,
         season,
-        date,
+        clear(date, 1),
         rules.legs === 2 ? opponent : seeded,
         rules.legs === 2 ? seeded : opponent,
         stage,
@@ -563,7 +626,7 @@ export async function scheduleKnockout(
           store,
           leagueId,
           season,
-          addDays(firstDate, 7),
+          clear(addDays(firstDate, 7), 7),
           seeded,
           opponent,
           stage,
@@ -681,6 +744,7 @@ async function catalogMainPhase(
       : round
         ? addDays(dates[round - 1], gap)
         : start;
+    if (round && daysBetween(dates[round - 1], date) < 3) date = addDays(dates[round - 1], 7);
     while (internationalBreak(date)) date = addDays(date, 7);
     dates.push(date);
   }
@@ -732,7 +796,13 @@ export async function setupMainCompetition(
       await scheduleKnockout(store, leagueId, uniqueClubs, season, start);
       return;
     }
+    const planned = spec.catalog && CADENCE[spec.catalog.id]?.matchdays;
+    // Planned matchdays move together when the main phase starts late (qualifying finished after the first one).
+    const plannedDates = planned
+      ? plannedMatchdays(planned, season, Math.max(0, daysBetween(seasonDate(season, planned[0]), start)))
+      : [];
     if (
+      plannedDates.length &&
       [
         "UEFA Champions League",
         "UEFA Europa League",
@@ -765,37 +835,12 @@ export async function setupMainCompetition(
           group_name: "League phase",
         })),
       );
-      const dates =
-        spec.name === "UEFA Conference League"
-          ? ["10-01", "10-22", "11-05", "11-26", "12-10", "12-17"]
-          : [
-              "09-16",
-              "09-30",
-              "10-21",
-              "11-04",
-              "11-25",
-              "12-09",
-              "01-20",
-              "01-27",
-            ];
-      const weekdayOffset = spec.name === "UEFA Europa League" ? 1 : 0;
-      const firstRoundDate = addDays(
-        seasonDate(season, dates[0]),
-        weekdayOffset,
-      );
-      const scheduleDelay = earliestDate
-        ? Math.max(0, daysBetween(firstRoundDate, earliestDate))
-        : 0;
       for (const fixture of draw.fixtures) {
-        const date = addDays(
-          seasonDate(season, dates[fixture.round - 1]),
-          weekdayOffset + scheduleDelay,
-        );
         await addFixture(
           store,
           leagueId,
           season,
-          date,
+          plannedDates[fixture.round - 1],
           fixture.homeId,
           fixture.awayId,
           "League phase",
@@ -845,46 +890,11 @@ export async function setupMainCompetition(
         ),
       ].slice(0, spec.rounds);
       for (const [round, pairs] of schedule.entries()) {
-        let date = addDays(start, round * gap);
-        if (spec.confederation === "UEFA" && spec.format === "Swiss") {
-          const roundDates = [
-            "09-16",
-            "09-30",
-            "10-21",
-            "11-04",
-            "11-25",
-            "12-09",
-            "01-20",
-            "01-27",
-          ];
-          date = seasonDate(season, roundDates[round] ?? "01-27");
-          if (
-            spec.name === "UEFA Europa League" ||
-            spec.name === "UEFA Conference League"
-          )
-            date = addDays(date, 1);
-          const firstRoundDate = addDays(
-            seasonDate(season, roundDates[0]),
-            spec.name === "UEFA Champions League" ? 0 : 1,
-          );
-          if (earliestDate)
-            date = addDays(
-              date,
-              Math.max(0, daysBetween(firstRoundDate, earliestDate)),
-            );
-        }
+        let date = plannedDates[round] ?? addDays(start, round * gap);
         if (spec.kind === "continental" || spec.name === "UEFA Youth League")
           while (internationalBreak(date)) date = addDays(date, 7);
-        if (spec.national && spec.age === "Senior")
-          date =
-            [
-              `${season}-09-03`,
-              `${season}-09-08`,
-              `${season}-10-07`,
-              `${season}-10-12`,
-              `${season}-11-11`,
-              `${season}-11-16`,
-            ][round] ?? date;
+        if (spec.national && spec.age === "Senior" && NATIONS_SERIES_DATES[round])
+          date = seasonDate(season, NATIONS_SERIES_DATES[round]);
         for (const [home, away] of pairs)
           await addFixture(
             store,
@@ -1292,7 +1302,7 @@ const UEFA_STAGE_DATES: Partial<Record<QualifyingStage, string>> = {
 /** Next continental knockout round: two weeks apart, compressed (at least 3 days) so the final is played by June. */
 function continentalRoundDate(date: string, season: number, clubs: number) {
   const rounds = Math.max(1, Math.ceil(Math.log2(Math.max(2, clubs))));
-  // The June FIFA window (15 days) has no club matches.
+  // Leaves room for the June FIFA window (9 days) and a margin: no club matches in it.
   const days = daysBetween(date, `${season + 1}-06-27`) - 15;
   let next = addDays(date, Math.max(3, Math.min(14, Math.floor(days / rounds) - 7)));
   while (internationalBreak(next)) next = addDays(next, 7);
@@ -1534,6 +1544,7 @@ async function advanceQualifying(store: Store, leagueId: number, season: number,
       const fixed = addDays(seasonDate(season, planned), catalog.confederation === "UEFA" && catalog.level !== 1 ? 1 : 0);
       if (fixed > first) first = fixed;
     }
+    while (internationalBreak(first)) first = addDays(first, 7);
     const rules = knockoutRules(league.name, "Qualifying");
     await withFixtureBatch(store, season, async () => {
       for (const [tieIndex, [seeded, opponent]] of pairs.entries()) {
@@ -1551,11 +1562,15 @@ async function advanceQualifying(store: Store, leagueId: number, season: number,
           "",
           details,
         );
-        if (rules.legs === 2)
-          await addFixture(store, leagueId, season, addDays(firstDate!, 7), seeded, opponent, "Qualifying", round, "", {
+        if (rules.legs === 2) {
+          // A tie may straddle a FIFA window (UYL Domestic Champions Path round 1: 16 September, then October).
+          let second = addDays(firstDate!, 7);
+          while (internationalBreak(second)) second = addDays(second, 7);
+          await addFixture(store, leagueId, season, second, seeded, opponent, "Qualifying", round, "", {
             ...details,
             tie: { ...tie, leg: 2 },
           });
+        }
       }
     });
     await setData(store, leagueId, { ...data, stage, carried: byes, nextRound: round, phase: "knockout" });

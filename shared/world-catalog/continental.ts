@@ -101,21 +101,24 @@ const COMPETITIONS: ContinentalCompetitionSpec[] = [
     finalLegs: 1, neutralFinal: true, start: "09-14", qualifyingLegs: 1,
     drops: [{ from: "playoff", to: ACL2, stage: "main" }],
   },
+  // Preliminary stage: single matches within each zone; its losers join the Challenge League group stage.
   {
     id: ACL2, name: "AFC Champions League Two", shortName: "ACL Two", confederation: "AFC", age: "Senior", level: 2,
     kind: "club", format: "groups", teams: 32, groupSize: 4, advance: 16, zones: AFC_ZONES, legs: 2, finalLegs: 1,
-    neutralFinal: false, start: "09-16",
+    neutralFinal: false, start: "09-16", qualifyingLegs: 1,
+    drops: [{ from: "playoff", to: ACGL, stage: "main" }],
   },
+  // 2026/27: no in-game association enters directly; only ACL Two preliminary losers reach it.
   {
     id: ACGL, name: "AFC Challenge League", shortName: "Challenge League", confederation: "AFC", age: "Senior",
     level: 3, kind: "club", format: "groups", teams: 8, groupSize: 4, advance: 4, zones: AFC_ZONES, legs: 2,
     finalLegs: 2, neutralFinal: false, start: "10-21",
   },
+  // 2026/27: second-round losers are eliminated (no Confederation Cup play-off round).
   {
     id: CAFCL, name: "CAF Champions League", shortName: "Champions League", confederation: "CAF", age: "Senior",
     level: 1, kind: "club", format: "groups", teams: 16, groupSize: 4, advance: 8, legs: 2, finalLegs: 2,
     neutralFinal: false, start: "11-21",
-    drops: [{ from: "q2", to: CAFCC, stage: "playoff" }],
   },
   {
     id: CAFCC, name: "CAF Confederation Cup", shortName: "Confederation Cup", confederation: "CAF", age: "Senior",
@@ -245,7 +248,9 @@ const CONMEBOL_ACCESS: AccessRule[] = [
 ];
 
 // Ranks per zone (AFC allocates by region). 2026/27 Elite slots: rank 1 4+1, 2 3+1, 3 3, 4 2, 5 1+1 by the
-// regular-season table, 6 1, 7 0+1 ("playoff" = preliminary round).
+// regular-season table, 6 1, 7 0+1 ("playoff" = preliminary round). ACL Two: ranks 1-7 one group-stage club each
+// (a cup winner already in the Elite passes down the table); IN (2), ID and PH (1 each) enter its preliminary stage.
+// Every in-game association holds Elite or ACL Two places, so none enters the Challenge League directly.
 const AFC_ACCESS: AccessRule[] = ["West", "East"].flatMap((zone): AccessRule[] => [
   {
     competition: ACLE, basis: "association-rank", zone, bands: [
@@ -260,19 +265,11 @@ const AFC_ACCESS: AccessRule[] = ["West", "East"].flatMap((zone): AccessRule[] =
   },
   {
     competition: ACL2, basis: "association-rank", zone, bands: [
-      band(1, 1, league(4, "main"), league(5, "main")),
-      band(2, 2, league(4, "main")),
-      band(3, 4, league(2, "main"), league(3, "main")),
-      band(5, 5, cup("main"), league(2, "main")),
+      band(1, 7, cup("main")),
       ...(zone === "West"
-        ? [band(6, 8, champion("main"), cup("main"), league(2, "main"))]
-        : [band(6, 9, champion("main"), cup("main"))]),
+        ? [band(8, 8, champion("playoff"), cup("playoff"))]
+        : [band(8, 9, champion("playoff"))]),
     ],
-  },
-  {
-    competition: ACGL, basis: "association-rank", zone, bands: zone === "West"
-      ? [band(4, 4, league(4, "main")), band(5, 5, league(3, "main")), band(6, 8, league(3, "main"))]
-      : [band(5, 5, league(3, "main")), band(6, 9, league(3, "main"))],
   },
 ]);
 
@@ -328,10 +325,11 @@ const RANKING_ONLY: ContinentalCatalog["rankingOnly"] = {
   MK: { association: [1.75, 0.625, 1.625, 1.5, 0.666], season2025: 3.343 },
   MY: { association: [7, 7, 7, 7.5, 7.5] },
   JO: { association: [5.5, 6, 6, 6.5, 6] },
-  // CAF: inside the real 2025/26 two-club top 12 (between CI and CM on the catalog scale); order within it approximate.
+  // CAF 2026/27 two-club top 12 (order within it approximate): TZ and SD inside, ML 10th; LY drops out to 13th.
   TZ: { association: [6, 6, 6.5, 6.5, 7] },
-  LY: { association: [5.5, 6, 6, 6, 6.5] },
+  ML: { association: [4, 5, 5.5, 6.5, 7.5] },
   SD: { association: [5, 5.5, 5.5, 5, 5] },
+  LY: { association: [6, 6, 5.5, 5, 4] },
 };
 
 // Owner: Lead-competitions — club competitions and access lists per confederation (directive decisions 7, 8, 17).

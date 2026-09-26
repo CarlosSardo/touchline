@@ -163,6 +163,15 @@ export function retirementChance(age: number, ability: number, clubless: boolean
 export const leaveThreshold = (weakestClubReputation: number) =>
   weakestClubReputation * 0.66 + 22 - 10;
 
+/**
+ * Chance that a player released at the rollover, and not re-signed by another club's top-up, tries the free-agent
+ * market for one window instead of leaving the modeled game. Released academy players mostly drop out at once.
+ */
+export function freeAgentChance(player: { age: number; ability: number; potential: number }, threshold: number) {
+  if (player.age < 18) return player.potential >= threshold + 20 ? 0.25 : 0;
+  return clamp((player.ability - threshold) / 25, 0, 0.9) * (player.age >= 32 ? 0.5 : 1);
+}
+
 /** Age group for the season starting on `date`, as the rollover assigns it: U17 below 17, U19 below 19. */
 export function ageGroupFor(birthDate: string, date: string): AgeGroup {
   const age = ageOn(birthDate, date);
@@ -417,7 +426,6 @@ export async function runYouthIntake(
   );
   const poolSize = new Map<number, number>();
   const winterClosed = `${season}-01-01`;
-  const yearAgo = `${season - 1}-07-01`;
   for (const row of clubless) {
     const profile = JSON.parse(row.profile) as PlayerProfile;
     const member: Member = { ...row, contract_status: profile.contract?.status ?? null, age: ageOn(row.birth_date, date), locked: locked.has(row.id) };
@@ -439,8 +447,8 @@ export async function runYouthIntake(
       available.push({ ...member, association: member.country_id, nationalities: heldNationalities(row.code, profile), profile, homeBased: member.country_id });
       continue;
     }
-    const below = member.ability < leaveThreshold(weakest.get(association) ?? weakest.get(member.country_id) ?? 0);
-    if (!member.locked && unsigned && (member.age < 18 || below || member.contract_end < yearAgo)) {
+    // Unsigned through a whole transfer window: out of the modeled game.
+    if (!member.locked && unsigned) {
       leave(member, "left-football");
       continue;
     }
@@ -500,7 +508,7 @@ export async function runYouthIntake(
         attach(member);
         if (graduate) signProfessional(member, club.id, random);
         else touched(member);
-      } else if (expiring || graduate || count >= firstTeamCap(club.league_code, club.tier)) release(member);
+      } else if (expiring || graduate || count >= squadTarget(club)) release(member);
       else count++;
     }
     for (const bTeam of bTeams) {
@@ -551,6 +559,7 @@ export async function runYouthIntake(
       club,
       representCode: spec.representCode ?? club.code,
       contextCode: club.code,
+      marketCode: club.league_code ?? club.code,
       date,
       leagueReputation: club.league_reputation,
     });
@@ -748,6 +757,13 @@ export async function runYouthIntake(
       }
     }
   }
+  // Released players nobody re-signed: most leave the modeled game now, the rest try the free-agent market.
+  const market = rng("free-agents");
+  for (const member of available)
+    if (releasedFrom.has(member.id) && !gone.has(member) && market() >= freeAgentChance(member, leaveThreshold(weakest.get(member.association) ?? 0))) {
+      releasedFrom.delete(member.id);
+      leave(member, "left-football");
+    }
 
   // 6. Home-based pools of nations without an own league.
   let pools = 0;

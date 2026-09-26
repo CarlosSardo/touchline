@@ -13,6 +13,7 @@ import {
   type NationSpec,
 } from "../shared/world-catalog/index.ts";
 import { isRealPersonName } from "../shared/world-catalog/real-names.ts";
+import { marketValueFactor } from "../shared/world-catalog/market.ts";
 import {
   ATTRIBUTE_GROUPS,
   PERSONALITY_KEYS,
@@ -693,6 +694,8 @@ export interface PlayerSpec {
   ability: number;
   potential: number;
   leagueReputation: number;
+  /** League nation for the market value factor when it differs from contextCode (hosted clubs). */
+  marketCode?: string;
   /** Payroll calibration factor, default 1. */
   wageScale?: number;
   /** Weekly professional minimum, default 50; thin club budgets pay less. */
@@ -875,6 +878,7 @@ export function createPlayer(
     {
       date: spec.date,
       leagueReputation: spec.leagueReputation,
+      marketFactor: marketValueFactor(spec.marketCode ?? spec.contextCode),
       balance: spec.club?.balance ?? 0,
       philosophy: spec.club?.philosophy ?? "",
       inflation: 4,

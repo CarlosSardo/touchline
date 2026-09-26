@@ -487,7 +487,8 @@ function clubEconomy(
     academy,
     facilities,
     capacity,
-    wage_budget: Math.max(Math.round(wageBill / 52), allowances),
+    // Catalog wage bills are total staff costs; base player salaries are about 62% of them.
+    wage_budget: Math.max(Math.round((wageBill * 0.62) / 52), allowances),
     transfer_budget: transferBudget,
     balance: Math.max(finances.balance, Math.round(1.25 * transferBudget)),
   };
@@ -1509,6 +1510,7 @@ function* clubPlayers(club: PlanClub, slots: Slot[], people: PeopleContext, rand
       ability: draft.ability,
       potential: draft.potential,
       leagueReputation: club.leagueReputation,
+      marketCode: club.market,
       wageScale,
       wageFloor,
       contract: draft.contract,

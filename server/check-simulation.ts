@@ -307,9 +307,10 @@ export async function checkRollover(store: Store, initialPlayers: number, height
   assert.equal(wrongAge, 0, "Academy intake players must be aged 14-15");
   await checkSquads(store, `after the ${state.season} rollover`);
   const players = await activePlayers(store);
+  const flows = await store.meta<{ count: number; retired: number; leftFootball: number }>("lastIntake");
   assert(
     Math.abs(players - initialPlayers) <= initialPlayers * 0.1,
-    `Population ${players} is more than 10% from the initial ${initialPlayers}`,
+    `Population ${players} is more than 10% from the initial ${initialPlayers} (rollover: ${flows.count} created, ${flows.retired} retired, ${flows.leftFootball} left football)`,
   );
   const badMoney = (await store.get<{ total: number }>(
     `SELECT count(*) AS total FROM players WHERE role != 'Retired' AND (value IS NULL OR value < ${VALUE_RANGE.min} OR value > ${VALUE_RANGE.max} OR wage IS NULL OR wage < 0 OR wage > 1200000)`,
@@ -352,6 +353,16 @@ export async function seasonSoak(seasons: number, fullWorld = false, nations: re
     const rollovers: (Omit<Awaited<ReturnType<typeof checkRollover>>, "heights"> & { worldMB: number; seasonMB: number | undefined })[] = [];
     let simulated = 0;
     let weeks = 0;
+    let advanceSeconds = 0;
+    const timing = () => {
+      const perWeek = advanceSeconds / Math.max(1, weeks);
+      return {
+        matchesPerSecond: Math.round((simulated / Math.max(0.01, advanceSeconds)) * 10) / 10,
+        secondsPerWeek: Math.round(perWeek * 10) / 10,
+        // First-order scaling by fixture volume: ~110k fixtures a season in the full v4 world.
+        fullWorldSecondsPerWeek: Math.round((perWeek * (110_000 / 52)) / Math.max(1, simulated / Math.max(1, weeks))),
+      };
+    };
     while ((await stateOf(store)).date < end) {
       const current = await stateOf(store);
       if (current.gameOver)
@@ -374,6 +385,7 @@ export async function seasonSoak(seasons: number, fullWorld = false, nations: re
         rollovers.push({ ...summary, ...footprint });
       }
       simulated += result.matches;
+      advanceSeconds += result.seconds;
       weeks++;
       const invalid = (await store.get<{ total: number }>(
         "SELECT count(*) AS total FROM players WHERE ability < 1 OR ability > 99 OR potential < ability OR potential > 99 OR morale < 0 OR morale > 100",
@@ -383,10 +395,12 @@ export async function seasonSoak(seasons: number, fullWorld = false, nations: re
         "SELECT count(*) AS total FROM standings WHERE played != wins + draws + losses OR points != wins * 3 + draws - deducted",
       ))!.total;
       assert.equal(badTable, 0, `Table conservation failed on ${result.date}`);
-      if (weeks % 13 === 0)
+      if (weeks % 13 === 0) {
+        const { matchesPerSecond, secondsPerWeek, fullWorldSecondsPerWeek } = timing();
         console.log(
-          `Soak ${result.date}: ${simulated} matches; ${await activePlayers(store)} active players`,
+          `Soak ${result.date}: ${simulated} matches; ${await activePlayers(store)} active players; ${matchesPerSecond} matches/s, ${secondsPerWeek} s per simulated week (full world ≈ ${fullWorldSecondsPerWeek} s/week)`,
         );
+      }
     }
     assert.equal(rollovers.length, seasons, "Every season must roll over");
     await checkSqlConstraints(store);
@@ -396,6 +410,7 @@ export async function seasonSoak(seasons: number, fullWorld = false, nations: re
       nations: fullWorld ? "all" : nations.join(","),
       date: (await stateOf(store)).date,
       matches: simulated,
+      timing: timing(),
       initialPlayers,
       players: await activePlayers(store),
       generatedWorldMB: generated.worldMB,

@@ -102,6 +102,21 @@ describe("UEFA access list 2024–27", () => {
     expect(count(entrants, "uefa-youth-league", "q2")).toBe(30);
     expect(count(entrants, "uefa-youth-league", "q1")).toBe(23);
   });
+
+  it("enters the Youth League Domestic Champions Path by its own ranking", () => {
+    const youth = [...codes];
+    [youth[29], youth[30]] = [youth[30], youth[29]];
+    const plain = resolveContinentalAccess(CONTINENTAL, { confederation: "UEFA", ranking: codes, nations });
+    const shifted = resolveContinentalAccess(CONTINENTAL, {
+      confederation: "UEFA", ranking: codes, rankings: { "uefa-youth-league": youth }, nations,
+    });
+    const stages = (list: AccessEntrant[], code: string, competition: string) =>
+      list.filter((item) => item.nation === code && item.competition === competition).map((item) => item.stage);
+    expect(stages(shifted, "N31", "uefa-youth-league")).toEqual(["q2"]);
+    expect(stages(shifted, "N30", "uefa-youth-league")).toEqual(["q1"]);
+    expect(shifted.filter((item) => item.competition !== "uefa-youth-league"))
+      .toEqual(plain.filter((item) => item.competition !== "uefa-youth-league"));
+  });
 });
 
 describe("real association positions (no rank compression)", () => {
@@ -159,6 +174,8 @@ describe("other confederations", () => {
     expect(count(entrants, "caf-champions-league", "q1")).toBe(31);
     expect(count(entrants, "caf-confederation-cup")).toBe(31);
     expectOnePlacePerClub(entrants, ["caf-champions-league", "caf-confederation-cup"]);
+    // 2026/27: Champions League second-round losers are eliminated (no Confederation Cup play-off round).
+    expect(CONTINENTAL.competitions.find((item) => item.id === "caf-champions-league")?.drops).toBeUndefined();
   });
 
   it("ranks AFC associations within the West and East zones", () => {
@@ -168,9 +185,25 @@ describe("other confederations", () => {
     expect(count(entrants, "afc-champions-league-elite", "main")).toBe(28);
     expect(count(entrants, "afc-champions-league-elite", "playoff")).toBe(8);
     expect(entrants.filter((item) => item.competition === "afc-champions-league-elite" && item.nation === "SA")).toHaveLength(5);
-    expect(count(entrants, "afc-champions-league-two")).toBe(30);
-    expect(count(entrants, "afc-challenge-league")).toBe(8);
+    expect(count(entrants, "afc-champions-league-two", "main")).toBe(14);
+    expect(count(entrants, "afc-champions-league-two", "playoff")).toBe(1);
+    expect(count(entrants, "afc-challenge-league")).toBe(0);
     expectOnePlacePerClub(entrants, ["afc-champions-league-elite", "afc-champions-league-two", "afc-challenge-league"]);
+  });
+
+  it("builds ACL Two 2026/27 from real zone positions (JO and MY have no clubs in the game)", () => {
+    const codes = ["SA", "JP", "KR", "AE", "QA", "IR", "TH", "CN", "UZ", "AU", "MY", "IQ", "JO", "VN", "IN", "ID", "PH"];
+    const nations = codes.filter((code) => code !== "JO" && code !== "MY").map((code, index) => nation(code, index));
+    const entrants = resolveContinentalAccess(CONTINENTAL, { confederation: "AFC", ranking: codes, nations });
+    const acl2 = entrants.filter((item) => item.competition === "afc-champions-league-two");
+    // Ranks 1-7 one group-stage club each; the JO and MY places go to the best preliminary-stage entrant of the zone.
+    expect(acl2.filter((item) => item.stage === "main")).toHaveLength(14);
+    expect(acl2.filter((item) => item.basis.includes("vacancy")).map((item) => item.nation)).toEqual(["IN", "ID"]);
+    expect(acl2.filter((item) => item.stage === "playoff").map((item) => `${item.nation}:${item.domesticPosition}`))
+      .toEqual(["IN:7", "PH:1"]);
+    expect(count(entrants, "afc-challenge-league")).toBe(0);
+    const spec = CONTINENTAL.competitions.find((item) => item.id === "afc-champions-league-two")!;
+    expect([spec.qualifyingLegs, spec.drops]).toEqual([1, [{ from: "playoff", to: "afc-challenge-league", stage: "main" }]]);
   });
 
   it("fills the CONCACAF Champions Cup from leagues and the regional cups", () => {

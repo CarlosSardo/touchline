@@ -5,10 +5,11 @@ import {
   CADENCE,
   COMPETITIONS,
   createCalendar,
+  NATIONS_SERIES_DATES,
   progressCompetitions,
   scheduleKnockout,
 } from "./calendar.ts";
-import { internationalBreak } from "../shared/rules.ts";
+import { addDays, daysBetween, internationalBreak } from "../shared/rules.ts";
 import type { Fixture, League } from "../shared/types.ts";
 import { drawLeaguePhase } from "./draw.ts";
 import { clubCompetitionEligible } from "../shared/competition-rules.ts";
@@ -60,6 +61,62 @@ describe("CONMEBOL cadence (pure)", () => {
       expect(knockout.at(-1)!.slice(5, 7), id).toBe("05");
     }
     expect(dated(CADENCE["recopa-sudamericana"].start!) < dated(CADENCE["copa-libertadores"].start!)).toBe(true);
+  });
+});
+describe("2026/27 FIFA windows and continental dates (pure)", () => {
+  const dated = (monthDay: string) => `${Number(monthDay.slice(0, 2)) >= 7 ? 2026 : 2027}-${monthDay}`;
+  const spaced = (dates: string[]) => dates.every((date, index) => !index || daysBetween(dates[index - 1], date) >= 3);
+  it("uses the merged September–October window and a June window after the Champions League final", () => {
+    for (const date of ["2026-09-21", "2026-10-06", "2026-11-09", "2027-03-30", "2027-06-07", "2027-06-15"])
+      expect(internationalBreak(date), date).toBe(true);
+    for (const date of ["2026-09-08", "2026-09-20", "2026-10-07", "2026-10-13", "2027-06-05", "2027-06-16"])
+      expect(internationalBreak(date), date).toBe(false);
+    const national = NATIONS_SERIES_DATES.map(dated);
+    expect(national.every((date) => internationalBreak(date)) && spaced(national)).toBe(true);
+  });
+
+  it("keeps every planned round inside the season, outside the FIFA windows and at least three days apart", () => {
+    for (const [id, cadence] of Object.entries(CADENCE)) {
+      const qualifying = (["q1", "q2", "q3", "q4", "playoff"] as const).flatMap((stage) =>
+        cadence.qualifying?.[stage] ? [dated(cadence.qualifying[stage]!)] : [],
+      );
+      const matchdays = (cadence.matchdays ?? []).map(dated);
+      const knockout = (["playoff", "16", "8", "4", "2"] as const).flatMap((size) =>
+        cadence.knockout?.[size] ? [dated(cadence.knockout[size]!)] : [],
+      );
+      for (const dates of [qualifying, matchdays, knockout, cadence.start ? [dated(cadence.start)] : []]) {
+        expect(spaced(dates), id).toBe(true);
+        expect(dates.every((date) => !internationalBreak(date) && date >= "2026-07-01" && date <= "2027-06-30"), id).toBe(true);
+      }
+      if (matchdays.length) {
+        expect(COMPETITIONS.find((spec) => spec.catalog?.id === id)?.start, id).toBe(cadence.matchdays![0]);
+        if (knockout.length) expect(knockout[0] > matchdays.at(-1)!, id).toBe(true);
+      }
+    }
+  });
+
+  it("plays the real 2026/27 UEFA league phases, Youth League champions path and finals", () => {
+    const uefa = (id: string) => CADENCE[`uefa-${id}`];
+    expect([uefa("champions-league"), uefa("europa-league"), uefa("conference-league")].map((cadence) => [
+      cadence.matchdays![0],
+      cadence.matchdays!.at(-1),
+      cadence.knockout!["2"],
+    ])).toEqual([["09-08", "01-27", "06-05"], ["09-17", "01-28", "05-26"], ["10-15", "12-17", "06-02"]]);
+    expect(uefa("youth-league").qualifying).toEqual({ q1: "09-16", q2: "10-28", q3: "11-25" });
+    expect(uefa("youth-league").matchdays).toEqual(uefa("champions-league").matchdays!.slice(0, 6));
+    expect(uefa("youth-league").knockout!["2"]).toBe("04-19");
+    expect(COMPETITIONS.find((spec) => spec.catalog?.id === "uefa-super-cup")?.start).toBe("08-12");
+  });
+
+  it("ends the AFC finals on 1 and 15 May, CAF qualifying without a play-off round and CONCACAF feeders from 4 August", () => {
+    expect(CADENCE["afc-champions-league-elite"].knockout!["2"]).toBe("05-01");
+    expect(CADENCE["afc-champions-league-two"]).toMatchObject({ qualifying: { playoff: "08-12" }, knockout: { "2": "05-15" } });
+    expect(CADENCE["caf-confederation-cup"].qualifying).toEqual(CADENCE["caf-champions-league"].qualifying);
+    expect(CADENCE["caf-champions-league"].start).toBe("11-27");
+    expect(addDays(dated(CADENCE["caf-champions-league"].knockout!["2"]!), 7)).toBe("2027-05-31");
+    for (const id of ["leagues-cup", "concacaf-caribbean-cup"])
+      expect(COMPETITIONS.find((spec) => spec.catalog?.id === id)?.start, id).toBe("08-04");
+    expect(CADENCE["leagues-cup"].knockout!["2"]).toBe("09-06");
   });
 });
 // Every UEFA association (Russia included, to prove its exclusion), all of CONMEBOL and the clubs of the other access lists.
@@ -358,7 +415,7 @@ describe("football calendar", () => {
     ).toEqual([]);
   });
 
-  it("plays the Youth League Domestic Champions Path over two legs from October, top 30 champions entering in round 2", async () => {
+  it("plays the Youth League Domestic Champions Path over two legs from 16 September, top 30 champions entering in round 2", async () => {
     const qualifying = (await store.get<League>(
       "SELECT * FROM leagues WHERE name = 'UEFA Youth League Qualifying' AND country_id IS NULL",
     ))!;
@@ -367,7 +424,8 @@ describe("football calendar", () => {
     const fixtures = await store.all<Fixture>("SELECT * FROM fixtures WHERE league_id = ? ORDER BY date", qualifying.id);
     expect(fixtures.length).toBeGreaterThan(0);
     expect(fixtures.every((fixture) => JSON.parse(fixture.data).tie?.legs === 2)).toBe(true);
-    expect(fixtures[0].date >= "2026-10-01").toBe(true);
+    expect(fixtures[0].date >= "2026-09-16").toBe(true);
+    expect(fixtures.every((fixture) => !internationalBreak(fixture.date))).toBe(true);
     const roundTwo = new Set(data.stageEntrants.q2);
     expect(fixtures.filter((fixture) => roundTwo.has(fixture.home_id) || roundTwo.has(fixture.away_id))).toEqual([]);
   });

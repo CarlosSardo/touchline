@@ -133,6 +133,8 @@ export interface AccessInput {
   confederation: string;
   /** Association codes in coefficient order at their real positions, including associations without clubs. */
   ranking: string[];
+  /** Per-competition ranking in the same form (UEFA Youth League: seasons N-5..N-1). */
+  rankings?: Record<string, string[]>;
   nations: AccessNation[];
   /** Last season's winner per competition id. */
   titleholders?: Record<string, number>;
@@ -282,7 +284,8 @@ function resolvePool(
         continue;
       }
       const zone = rule.zone ? competition.zones?.find((item) => item.name === rule.zone) : undefined;
-      const ranking = zone ? input.ranking.filter((code) => zone.nations.includes(code)) : input.ranking;
+      const base = input.rankings?.[competition.id] ?? input.ranking;
+      const ranking = zone ? base.filter((code) => zone.nations.includes(code)) : base;
       ranking.forEach((code, index) => {
         for (const band of rule.bands ?? [])
           if (index + 1 >= band.ranks[0] && index + 1 <= band.ranks[1])
