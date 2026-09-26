@@ -896,6 +896,33 @@ if (process.env.SQL_SAVE_TESTS === "true") {
       }
     }, 300_000);
 
+    it("keeps the save being loaded when the pre-load save rotates that career's manual saves", async () => {
+      const { SAVE_SLOT_LIMITS } = await import("./saves.ts");
+      const state = await store.meta<GameState>("state");
+      await store.setMeta("state", { ...state, careerId: "load-rotation-career" });
+      try {
+        const manual = [];
+        for (let index = 0; index < SAVE_SLOT_LIMITS.manual; index++)
+          manual.push(await saves.create(`Manual ${index}`));
+        const [oldest, nextOldest] = manual;
+        const archived = await store.transaction(async () => {
+          const snapshot = await saves.create("Before load", false, oldest.file);
+          await saves.restore(oldest.file);
+          return snapshot;
+        });
+        const career = (await saves.list())
+          .filter((slot) => slot.career?.id === "load-rotation-career" && !slot.automatic)
+          .map((slot) => slot.file);
+        expect(career.sort()).toEqual([oldest.file, ...manual.slice(2).map((slot) => slot.file), archived.file].sort());
+        expect(career).not.toContain(nextOldest.file);
+        expect((await store.meta<GameState>("state")).careerId).toBe("load-rotation-career");
+        await saves.create("After load");
+        expect((await saves.list()).map((slot) => slot.file)).not.toContain(oldest.file);
+      } finally {
+        await store.setMeta("state", state);
+      }
+    }, 300_000);
+
     it("does not reuse a legacy unstarted world with an initialized inbox or archive it as a started career", async () => {
       const world = await import("./world.ts");
       const original = await store.meta<GameState>("state");

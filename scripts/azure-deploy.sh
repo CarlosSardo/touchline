@@ -22,7 +22,9 @@ deploy_usage() {
     'Building (no --image) also requires GHCR_TOKEN with read:packages/write:packages and working Docker permissions.' \
     'Prefer a separate read:packages-only GHCR_PULL_TOKEN. Supply secrets locally, never in chat or CLI arguments.' \
     'Optional AUTH_SMOKE_TOKEN: owner access token for the configured app audience; never acquired automatically.' \
-    'With --skip-db-prepare the authenticated account probe is skipped to avoid profile refresh writes; owner verification remains pending.' \
+    '/api/health is SQL-free: only a signed-in /api/me proves that the new revision reaches SQL and a valid account registry.' \
+    'With --skip-db-prepare the authenticated account probe is skipped to avoid profile refresh writes.' \
+    'Without the probe, the owner /api/me check right after promotion is mandatory.' \
     'Optional ALLOWED_USER_OBJECT_IDS: comma-separated guest object IDs; unset preserves the deployed list, empty removes guests.' \
     'Register the single-tenant auth app and its HTTPS /.auth/login/aad/callback web redirect yourself.' \
     'SQL access uses scripts/azure-sql.sh; the dbo export precedes --registered world migrations and runtime authorization.' \
@@ -235,7 +237,8 @@ deployment_schema_check() {
   deployment_sql -- node --import tsx --input-type=module - "${1:-}" "${2:-registered}" <<'NODE'
 import {Store} from './server/db.ts';
 import {registeredAccountSchemas} from './server/accounts.ts';
-import {maskSchema} from './scripts/career-delete.ts';
+import {maskIdentifier,maskSchema} from './scripts/career-delete.ts';
+import {LEGACY_OBJECT_ID} from './scripts/accounts-migrate.ts';
 const expectedVersion=process.argv[2], mode=process.argv[3];
 if(!['registered','legacy-rollback'].includes(mode)) throw new Error('Unknown schema verification mode.');
 const store=await Store.open();
@@ -258,8 +261,8 @@ try {
     try {
       const legacy=await registry.get("SELECT [tenant_id], [object_id] FROM [accounts].[users] WHERE [game_schema] = N'dbo'");
       if(!schemas.includes('dbo') || legacy?.tenant_id.toLowerCase()!==process.env.AZURE_TENANT_ID?.toLowerCase() ||
-         legacy?.object_id.toLowerCase()!=='13dbb944-b4fb-471b-b5a3-6420a5fb5139')
-        throw new Error('Release blocked: dbo must remain bound to Kiko (sardo.kiko@gmail.com, object ID 13dbb944-b4fb-471b-b5a3-6420a5fb5139) in the configured tenant, never implicitly to the platform owner. Review explicit account provisioning.');
+         legacy?.object_id.toLowerCase()!==LEGACY_OBJECT_ID)
+        throw new Error(`Release blocked: dbo must remain bound to the approved legacy guest (object ID ${maskIdentifier(LEGACY_OBJECT_ID)}, see scripts/accounts-migrate.ts) in the configured tenant, never implicitly to the platform owner. Review explicit account provisioning.`);
     } finally { await registry.close(); }
   }
   for(const schema of schemas) {
@@ -277,7 +280,7 @@ NODE
 
 deployment_firewall() {
   local outbound rules plan operation rule_name address
-  printf '%s\n' '[sql-firewall] Waiting up to 180 seconds for advertised ACA egress; SQL startup may initially retry.'
+  printf '%s\n' '[sql-firewall] Waiting up to 180 seconds for advertised ACA egress; the app opens SQL on its first signed-in request.'
   azure resource wait --ids "$app_id" --api-version 2024-03-01 \
     --custom 'length(properties.outboundIpAddresses || `[]`) > `0`' --interval 5 --timeout 180 --output none
   outbound="$(azure containerapp show --name "$AZURE_APP" --resource-group "$AZURE_RESOURCE_GROUP" --query properties.outboundIpAddresses --output json)"
@@ -360,7 +363,7 @@ const deadline=Date.now()+300000;
 let healthy=false, attempt=0;
 while(Date.now()<deadline) {
   attempt++;
-  if(attempt===1 || attempt%10===0) console.log(`[readiness] Guarded HTTP wake/health attempt ${attempt} (300-second deadline; SQL startup may retry).`);
+  if(attempt===1 || attempt%10===0) console.log(`[readiness] Guarded HTTP wake/health attempt ${attempt} (300-second deadline; /api/health is SQL-free and proves only that the revision serves HTTP).`);
   try {
     const response=await fetch(`${origin}/api/health`, {redirect:'manual', signal:AbortSignal.timeout(Math.max(1,Math.min(10000,deadline-Date.now())))});
     if(response.status===200 && (await response.json()).status==='ok') { healthy=true; break; }
@@ -380,11 +383,24 @@ for(const path of ['/','/api/health/details']) {
   if(denied.status!==302 || !expectedLogin) throw new Error('Anonymous game/API access must redirect to the configured sign-in provider.');
 }
 if(process.env.AUTH_SMOKE_TOKEN) {
-  const response=await fetch(`${origin}/api/me`, {
-    redirect:'manual', signal:AbortSignal.timeout(30000),
-    headers:{Authorization:`Bearer ${process.env.AUTH_SMOKE_TOKEN}`},
-  });
-  if(response.status!==200) throw new Error('Owner smoke token was rejected.');
+  // The first signed-in request opens SQL and checks the registry: up to 90 s of connection retries, then 503.
+  let response;
+  for(let attempt=1;;attempt++) {
+    try {
+      response=await fetch(`${origin}/api/me`, {
+        redirect:'manual', signal:AbortSignal.timeout(120000),
+        headers:{Authorization:`Bearer ${process.env.AUTH_SMOKE_TOKEN}`},
+      });
+    } catch {
+      throw new Error('Owner smoke /api/me failed or did not answer within 120 seconds; ingress will close.');
+    }
+    if(response.status!==503 || attempt===2) break;
+    if((await response.json().catch(()=>null))?.code!=='database_unavailable') break;
+    console.log('[smoke] /api/me: 503 database_unavailable (SQL starting or unavailable); retrying once.');
+    await setTimeout(1000*Math.min(30,Math.max(1,Number(response.headers.get('retry-after'))||5)));
+  }
+  if(response.status===503) throw new Error('Owner smoke /api/me returned 503: the new revision could not open SQL or validate the account registry; ingress will close.');
+  if(response.status!==200) throw new Error(`Owner smoke /api/me returned ${response.status}; ingress will close.`);
   const session=await response.json();
   const idle=typeof session.hasWorld==='boolean' && session.activity===null;
   const busy=session.hasWorld===null && session.activity!==null && typeof session.activity==='object' &&
@@ -668,7 +684,7 @@ renameSync('.touchline-deployment.json.tmp','.touchline-deployment.json');
 NODE
   completed=true
   printf 'Deployed %s\nImage: %s\nRevision: %s\nOwner login: %s/.auth/login/aad\nRegister redirect: %s/.auth/login/aad/callback\n' "$origin" "$image" "$revision" "$origin" "$origin"
-  [[ -n "$smoke_token" && "$skip_db_prepare" != true ]] || printf '%s\n' 'Owner smoke NOT verified: manual owner sign-in is still required.'
+  [[ -n "$smoke_token" && "$skip_db_prepare" != true ]] || printf 'Owner smoke NOT verified and REQUIRED now: /api/health is SQL-free, so SQL and the account registry of this revision are unproven.\nSign in, open %s/api/me and allow 120 s (SQL retries for up to 90 s; on 503 database_unavailable reload once after 5 s). Anything but 200: close ingress.\n' "$origin"
   rm -rf -- "$temp_dir"
   trap - EXIT
 }

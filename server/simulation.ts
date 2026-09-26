@@ -44,11 +44,11 @@ import {
   weeklyOperatingCosts,
 } from "./finance.ts";
 import { personName } from "./people.ts";
-import { runYouthIntake, signClublessPlayers } from "./youth.ts";
+import { maintainSquads, runYouthIntake, signClublessPlayers, youthBirthCutoff } from "./youth.ts";
 import { developBody } from "./growth.ts";
 import { nationByCode } from "../shared/world-catalog/index.ts";
 import { marketValueFactor } from "../shared/world-catalog/market.ts";
-import { SQUAD_MINIMUMS } from "../shared/world-rules.ts";
+import { MIN_GOALKEEPERS, SQUAD_MINIMUMS } from "../shared/world-rules.ts";
 import {
   clubOf,
   closeNegotiation,
@@ -2124,19 +2124,47 @@ async function weeklyStaffAndPolitics(store: Store, random: seedrandom.PRNG) {
       );
     }
   }
-  for (const troubled of await store.all<Club>(
+  const troubledClubs = await store.all<Club>(
     "SELECT TOP (100) * FROM clubs WHERE type = 'club' AND crisis > 60 AND id != ? ORDER BY id",
     state.clubId,
-  )) {
-    const youth = await store.get<Player>(
-      "SELECT TOP (1) * FROM players WHERE club_id = ? AND age_group != 'Senior' AND age >= 16 ORDER BY ability DESC,id",
-      troubled.id,
+  );
+  if (troubledClubs.length) {
+    // Only a youth his squad can spare: the weekly squad check refills youth squads to the minimum, not above it.
+    const ids = JSON.stringify(troubledClubs.map((troubled) => troubled.id));
+    const squads = new Map(
+      (
+        await store.all<{ club_id: number; age_group: string; players: number; keepers: number }>(
+          "SELECT coalesce(squad_club_id,club_id) AS club_id,age_group,count(*) AS players,sum(CASE WHEN position = 'GK' THEN 1 ELSE 0 END) AS keepers FROM players WHERE coalesce(squad_club_id,club_id) IN (SELECT CAST([value] AS int) FROM OPENJSON(?)) AND club_id IS NOT NULL AND age_group IN ('U17','U19') AND role != 'Retired' AND (contract_end >= ? OR parent_club_id IS NOT NULL) AND birth_date >= CASE age_group WHEN 'U17' THEN ? ELSE ? END GROUP BY coalesce(squad_club_id,club_id),age_group",
+          ids,
+          state.date,
+          youthBirthCutoff("U17", state.season),
+          youthBirthCutoff("U19", state.season),
+        )
+      ).map((row) => [`${row.club_id}:${row.age_group}`, row]),
     );
-    if (youth)
+    const candidates = await store.all<{ id: number; club_id: number; squad_club_id: number | null; age_group: string; position: string }>(
+      "SELECT id,club_id,squad_club_id,age_group,position FROM players WHERE club_id IN (SELECT CAST([value] AS int) FROM OPENJSON(?)) AND age_group != 'Senior' AND age >= 16 ORDER BY club_id,ability DESC,id",
+      ids,
+    );
+    const squadOf = (player: (typeof candidates)[number]) => squads.get(`${player.squad_club_id ?? player.club_id}:${player.age_group}`);
+    for (const troubled of troubledClubs) {
+      const youth = candidates.find((player) => {
+        const squad = player.club_id === troubled.id ? squadOf(player) : undefined;
+        return (
+          !!squad &&
+          squad.players > SQUAD_MINIMUMS[player.age_group as "U17" | "U19"] &&
+          (player.position !== "GK" || squad.keepers > MIN_GOALKEEPERS)
+        );
+      });
+      if (!youth) continue;
+      const squad = squadOf(youth)!;
+      squad.players--;
+      if (youth.position === "GK") squad.keepers--;
       await store.run(
         "UPDATE players SET age_group = 'Senior', role = 'Prospect', morale = LEAST(99,morale + 5) WHERE id = ?",
         youth.id,
       );
+    }
   }
   if (
     club.crisis > 50 &&
@@ -2411,6 +2439,9 @@ export async function worldTransfers(store: Store, random: seedrandom.PRNG) {
   const maxId = (await store.get<{ id: number }>(
     "SELECT max(id) AS id FROM players",
   ))!.id;
+  const userFamily = new Set(
+    (await store.all<{ id: number }>("SELECT id FROM clubs WHERE id = ? OR parent_id = ?", state.clubId, state.clubId)).map((club) => club.id),
+  );
   for (
     let index = 0;
     index < quota * 6 && activity.completed < quota;
@@ -2423,7 +2454,7 @@ export async function worldTransfers(store: Store, random: seedrandom.PRNG) {
       state.date,
       addDays(state.date, -90),
     );
-    if (!player || player.club_id === state.clubId || player.value <= 0)
+    if (!player || userFamily.has(player.club_id!) || player.value <= 0)
       continue;
     const fee = Math.round(player.value * (0.95 + random() * 0.15));
     const newWage = Math.round(player.wage * 1.1);
@@ -2451,19 +2482,14 @@ export async function worldTransfers(store: Store, random: seedrandom.PRNG) {
       }
     }
     if (!buyer) continue;
-    const sellerCount = (await store.get<{ count: number }>(
-      "SELECT count(*) AS count FROM players WHERE club_id = ? AND age_group = 'Senior' AND role != 'Retired'",
-      player.club_id,
-    ))!.count;
-    if (sellerCount <= SQUAD_MINIMUMS.Senior) continue;
-    if (
-      player.position === "GK" &&
-      (await store.get<{ count: number }>(
-        "SELECT count(*) AS count FROM players WHERE club_id = ? AND position = 'GK' AND age_group = 'Senior' AND role != 'Retired'",
-        player.club_id,
-      ))!.count <= 2
-    )
-      continue;
+    // The seller keeps the player's squad at its minimum (first team 25 without B-team or youth players, B-team 20) and two goalkeepers.
+    const squad = (await store.get<{ type: string; players: number; keepers: number }>(
+      "SELECT clubs.type,count(players.id) AS players,coalesce(sum(CASE WHEN players.position = 'GK' THEN 1 ELSE 0 END),0) AS keepers FROM clubs LEFT JOIN players ON players.playing_club_id = clubs.id AND players.age_group = 'Senior' AND players.role != 'Retired' AND (players.contract_end >= ? OR players.parent_club_id IS NOT NULL) WHERE clubs.id = ? GROUP BY clubs.type",
+      state.date,
+      player.squad_club_id ?? player.club_id,
+    ))!;
+    if (squad.players <= (squad.type === "bteam" ? SQUAD_MINIMUMS.BTeam : SQUAD_MINIMUMS.Senior)) continue;
+    if (player.position === "GK" && squad.keepers <= MIN_GOALKEEPERS) continue;
     await ledger(
       store,
       buyer.id,
@@ -2731,12 +2757,43 @@ export async function seasonRollover(store: Store) {
         countryShortfalls,
       );
       for (const [leagueId, short] of countryShortfalls) shortfalls[leagueId] = short;
-      // Only when a relegated parent cannot stay up either: the B-team leaves the senior pyramid (to === null).
-      for (const move of planned.filter((item) => item.to === null)) {
-        await store.run("DELETE FROM standings WHERE league_id = ? AND club_id = ?", move.from, move.clubId);
-        await store.run("UPDATE clubs SET league_id = NULL WHERE id = ?", move.clubId);
+      // A B-team with no legal modeled tier is parked: squad and registrations stay, no league place until its
+      // parent's division allows it back into the league it left.
+      for (const move of planned.filter((item) => item.reason === "parked" || item.reason === "readmitted")) {
+        const parked = move.reason === "parked";
+        if (parked) {
+          await store.run("DELETE FROM standings WHERE league_id = ? AND club_id = ?", move.from, move.clubId);
+          await store.run(
+            "UPDATE clubs SET league_id = NULL, data = JSON_MODIFY(data,'$.parkedLeagueId',CAST(? AS int)) WHERE id = ?",
+            move.parkedIn ?? move.from,
+            move.clubId,
+          );
+        } else {
+          await store.run(
+            "INSERT INTO standings(league_id,club_id) SELECT source.league_id,source.club_id FROM (VALUES (?,?)) AS source(league_id,club_id) WHERE NOT EXISTS (SELECT 1 FROM standings WITH (UPDLOCK,HOLDLOCK) WHERE standings.league_id = source.league_id AND standings.club_id = source.club_id)",
+            move.to,
+            move.clubId,
+          );
+          await store.run(
+            "UPDATE clubs SET league_id = ?, data = JSON_MODIFY(data,'$.parkedLeagueId',NULL) WHERE id = ?",
+            move.to,
+            move.clubId,
+          );
+        }
+        const owner = await store.get<{ parent_id: number | null }>("SELECT parent_id FROM clubs WHERE id = ?", move.clubId);
+        if (owner?.parent_id === state.clubId)
+          await news(
+            store,
+            "Club",
+            parked ? "B-team withdrawn from league play" : "B-team re-admitted",
+            parked
+              ? "With the first team now in its division and no lower league available, the B-team plays no league football this season. Its squad and registrations are unchanged; it returns once the first team goes up."
+              : "The first team's promotion lets the B-team return to its league this season.",
+            parked ? "warning" : "success",
+            "competitions",
+          );
       }
-      const moves = planned.filter((move) => move.to !== null);
+      const moves = planned.filter((move) => move.from !== null && move.to !== null);
       for (const tier of pyramid.tiers)
         if (JSON.parse(pyramid.leagues.find((league) => league.id === tier.leagueId)!.data).split)
           await store.run("UPDATE standings SET group_name = '' WHERE league_id = ?", tier.leagueId);
@@ -2905,6 +2962,8 @@ export async function advance(store: Store, days: number) {
       await processTransferPayments(store);
       await processAffiliateRequests(store);
       await processUnexpectedEvents(store);
+      // AI squads keep their minimums (first team 25, B-team and youth 20; two goalkeepers) between windows too; self-throttles to weekly.
+      await maintainSquads(store, state);
       await worldTransfers(store, random);
       await finishScouting(store);
       const fixtures = await store.all<Fixture>(

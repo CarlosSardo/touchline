@@ -332,10 +332,10 @@ describe("promotion and relegation", () => {
     expect(sizes(tiers, moves)).toEqual([10, 10, 10]);
   });
 
-  it("pushes a B-team down when its parent is relegated onto its tier, with a replacement moving up", () => {
+  it("relegates the parent onto its B-team's tier, pushes the B-team down and reprieves the best-placed relegated club (RFEF)", () => {
     const tiers = [
       tier(1, 1, ids(100, 10), { upper: 1, promoted: 1, relegated: 1 }),
-      tier(2, 2, [...ids(200, 5), 900, ...ids(205, 4)], { upper: 2, promoted: 1, relegated: 1 }),
+      tier(2, 2, [...ids(200, 5), 900, ...ids(205, 4)], { upper: 2, promoted: 2, relegated: 2 }),
       tier(3, 3, ids(300, 10), null),
     ];
     const clubs = new Map<number, PyramidClub>([
@@ -343,8 +343,26 @@ describe("promotion and relegation", () => {
     ]);
     const moves = planMovement({ tiers, clubs });
     expect(moves.find((move) => move.clubId === 109)).toMatchObject({ to: 2, promoted: false });
+    expect(moves.find((move) => move.clubId === 900)).toMatchObject({ from: 2, to: 3, reason: "reserve-ceiling" });
+    // 207 (best-placed of the two relegated) stays up; 208 still goes down; promotions are untouched.
+    expect(moves.some((move) => move.clubId === 207)).toBe(false);
+    expect(moves.find((move) => move.clubId === 208)).toMatchObject({ to: 3, promoted: false });
+    expect(moves.filter((move) => move.to === 2 && move.promoted).map((move) => move.clubId)).toEqual([300, 301]);
+    expect(sizes(tiers, moves)).toEqual([10, 10, 10]);
+  });
+
+  it("promotes the lower tier's nearest miss when the B-team's tier relegated nobody", () => {
+    const tiers = [
+      tier(1, 1, ids(100, 10), { upper: 1, promoted: 1, relegated: 1 }),
+      tier(2, 2, [900, ...ids(200, 9)], { upper: 2, promoted: 0, relegated: 0 }),
+      tier(3, 3, ids(300, 10), null),
+    ];
+    const clubs = new Map<number, PyramidClub>([
+      [900, { clubId: 900, reserve: { parentId: 109, highestTier: 2, minGapBelowParent: 1 } }],
+    ]);
+    const moves = planMovement({ tiers, clubs });
     expect(moves.find((move) => move.clubId === 900)).toMatchObject({ to: 3, reason: "reserve-ceiling" });
-    expect(moves.find((move) => move.clubId === 301)).toMatchObject({ to: 2, reason: "replacement" });
+    expect(moves.find((move) => move.clubId === 300)).toMatchObject({ to: 2, promoted: true, reason: "replacement" });
     expect(sizes(tiers, moves)).toEqual([10, 10, 10]);
   });
 
@@ -365,33 +383,43 @@ describe("promotion and relegation", () => {
     expect(plans[1].promoted).toEqual([903, 300]);
   });
 
-  it("keeps a relegated parent up when its B-team has no lower modeled tier, cancelling the weakest promotion", () => {
-    const reserve = { clubId: 905, reserve: { parentId: 103, highestTier: 2, minGapBelowParent: 1 } };
+  it("relegates the parent on merit and parks its B-team when no lower modeled tier exists (Jong and U23 sides)", () => {
+    const reserve = { parentId: 103, highestTier: 2, minGapBelowParent: 1 };
     const bottom = [tier(1, 1, ids(100, 4), { upper: 1, promoted: 1, relegated: 1 }), tier(2, 2, [905, ...ids(200, 3)], null)];
     const shortfalls = new Map<number, number>();
-    const moves = planMovement({ tiers: bottom, clubs: new Map([[905, reserve]]) }, shortfalls);
-    expect(moves).toEqual([]);
-    expect(sizes(bottom, moves)).toEqual([4, 4]);
-    expect(shortfalls).toEqual(new Map([[1, 1]]));
-    // Two places each way: the other relegated club still goes down, the best promoted club still goes up.
+    const moves = planMovement({ tiers: bottom, clubs: new Map([[905, { clubId: 905, reserve }]]) }, shortfalls);
+    expect(moves).toEqual([
+      { clubId: 103, from: 1, to: 2, promoted: false, reason: "automatic" },
+      { clubId: 200, from: 2, to: 1, promoted: true, reason: "automatic" },
+      { clubId: 905, from: 2, to: null, parkedIn: 2, promoted: false, reason: "parked" },
+    ]);
+    // The bottom tier runs one club short while the B-team is parked; the boundary still moves its full quota.
+    expect(sizes(bottom, moves)).toEqual([4, 3]);
+    expect(shortfalls.size).toBe(0);
     const wider = [
       tier(1, 1, ids(100, 6), { upper: 1, promoted: 2, relegated: 2 }),
       tier(2, 2, [905, ...ids(200, 5)], null),
     ];
-    const widerShort = new Map<number, number>();
-    const widerMoves = planMovement(
-      { tiers: wider, clubs: new Map([[905, { clubId: 905, reserve: { ...reserve.reserve, parentId: 105 } }]]) },
-      widerShort,
-    );
-    expect(widerMoves.map((move) => [move.clubId, move.to])).toEqual([[104, 2], [200, 1]]);
-    expect(sizes(wider, widerMoves)).toEqual([6, 6]);
-    expect(widerShort).toEqual(new Map([[1, 1]]));
-    // A lower modeled tier still takes the B-team down, with that tier's best non-promoted club moving up.
-    const deeper = [...wider.slice(0, 1), tier(2, 2, [905, ...ids(200, 5)], { upper: 2, promoted: 1, relegated: 1 }), tier(3, 3, ids(300, 6), null)];
-    const deeperMoves = planMovement({ tiers: deeper, clubs: new Map([[905, { clubId: 905, reserve: { ...reserve.reserve, parentId: 105 } }]]) });
-    expect(deeperMoves.find((move) => move.clubId === 905)).toMatchObject({ to: 3, reason: "reserve-ceiling" });
-    expect(deeperMoves.find((move) => move.clubId === 301)).toMatchObject({ to: 2, reason: "replacement" });
-    expect(sizes(deeper, deeperMoves)).toEqual([6, 6, 6]);
+    const widerMoves = planMovement({ tiers: wider, clubs: new Map([[905, { clubId: 905, reserve: { ...reserve, parentId: 105 } }]]) });
+    expect(widerMoves.map((move) => [move.clubId, move.to])).toEqual([[104, 2], [105, 2], [200, 1], [201, 1], [905, null]]);
+    expect(sizes(wider, widerMoves)).toEqual([6, 5]);
+  });
+
+  it("re-admits a parked B-team to the league it left once its parent goes back up", () => {
+    const reserve = { parentId: 210, highestTier: 2, minGapBelowParent: 1 };
+    const tiers = [tier(1, 1, ids(100, 4), { upper: 1, promoted: 1, relegated: 1 }), tier(2, 2, [210, 200, 201], null)];
+    const parked = new Map([[905, { clubId: 905, reserve, parkedLeagueId: 2 }]]);
+    const moves = planMovement({ tiers, clubs: parked });
+    expect(moves).toEqual([
+      { clubId: 103, from: 1, to: 2, promoted: false, reason: "automatic" },
+      { clubId: 210, from: 2, to: 1, promoted: true, reason: "automatic" },
+      { clubId: 905, from: null, to: 2, promoted: false, reason: "readmitted" },
+    ]);
+    expect(sizes(tiers, moves)).toEqual([4, 4]);
+    // Still parked while the parent stays in the B-team's league; never in a league with its parent.
+    const stays = planMovement({ tiers, clubs: new Map([[905, { clubId: 905, reserve: { ...reserve, parentId: 201 }, parkedLeagueId: 2 }]]) });
+    expect(stays.some((move) => move.clubId === 905)).toBe(false);
+    expect(sizes(tiers, stays)).toEqual([4, 3]);
   });
 
   it("reports the fixed moves of a boundary and the shortfall of an unstaged play-off", () => {
@@ -519,6 +547,20 @@ describe("season schedules", () => {
     const homes = new Map<number, number>();
     for (const pairs of inter) for (const [home] of pairs) homes.set(home, (homes.get(home) ?? 0) + 1);
     for (const clubId of [...ids(1, 4), ...ids(11, 4)]) expect(homes.get(clubId) ?? 0).toBe(2);
+  });
+
+  it("gives an odd field one bye per round robin and the same fixtures for every club (a parked B-team)", () => {
+    const clubs = ids(1, 19);
+    const schedule = baseSchedule([clubs], 2);
+    expect(schedule).toHaveLength(baseSchedule([ids(1, 20)], 2).length);
+    const met = opponents(schedule);
+    for (const clubId of clubs) {
+      expect(met.get(clubId)).toHaveLength(36);
+      expect(new Set(met.get(clubId)).size).toBe(18);
+      expect(schedule.filter((pairs) => pairs.some(([home]) => home === clubId)).length).toBe(18);
+      expect(schedule.filter((pairs) => !pairs.flat().includes(clubId))).toHaveLength(2);
+    }
+    for (const pairs of schedule) expect(new Set(pairs.flat()).size).toBe(pairs.length * 2);
   });
 
   it("reserves split and mini-league dates after the base rounds within the season", () => {

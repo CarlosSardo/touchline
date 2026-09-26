@@ -7,7 +7,7 @@ import { generateWorld } from "./world.ts";
 import { checkSqlConstraints } from "./check-world.ts";
 import { advance } from "./simulation.ts";
 import { stateOf } from "./systems.ts";
-import { firstTeamCap, INTAKE, SQUAD_CAPS } from "./youth.ts";
+import { firstTeamCap, INTAKE, SQUAD_CAPS, youthBirthCutoff } from "./youth.ts";
 import {
   clubRegistration,
   familyResidence,
@@ -244,6 +244,93 @@ export async function checkSquads(store: Store, label: string) {
   return rows.length;
 }
 
+/** Quarterly in-season squad checkpoints (month-day): after the summer window, as the winter window opens, after it. */
+export const SQUAD_CHECKPOINTS = ["10-01", "01-01", "04-01"] as const;
+/** Share of AI squads that may be short at a checkpoint (erosion between two weekly repairs) before the soak fails. */
+export const SQUAD_SHORTFALL_TOLERANCE = 0.005;
+
+/** Checkpoint dates of the season that starts in July of `season`. */
+export const squadCheckpoints = (season: number) =>
+  SQUAD_CHECKPOINTS.map((day) => `${day >= "07-01" ? season : season + 1}-${day}`);
+
+export interface SquadCount {
+  id: number;
+  name: string;
+  type: string;
+  squad: "Senior" | "U19" | "U17";
+  players: number;
+  keepers: number;
+}
+
+const squadLabel = (row: Pick<SquadCount, "type" | "squad">) =>
+  row.type === "bteam" ? "B-team" : row.squad === "Senior" ? "first team" : row.squad;
+
+/** Eligible counts against the minimums (first team 25, B-team 20, U19/U17 20, two goalkeepers each), worst squads first. */
+export function squadShortfalls(rows: readonly SquadCount[], date: string) {
+  const minimum = (row: SquadCount) => (row.type === "bteam" ? SQUAD_MINIMUMS.BTeam : SQUAD_MINIMUMS[row.squad]);
+  const gap = (row: SquadCount) => Math.max(0, minimum(row) - row.players) + Math.max(0, MIN_GOALKEEPERS - row.keepers);
+  const short = rows.filter((row) => gap(row) > 0).sort((left, right) => gap(right) - gap(left) || left.id - right.id);
+  const bySquad: Record<string, number> = {};
+  for (const row of short) bySquad[squadLabel(row)] = (bySquad[squadLabel(row)] ?? 0) + 1;
+  const smallest: Record<string, { players: number; keepers: number }> = {};
+  for (const row of rows) {
+    const size = (smallest[squadLabel(row)] ??= { players: row.players, keepers: row.keepers });
+    size.players = Math.min(size.players, row.players);
+    size.keepers = Math.min(size.keepers, row.keepers);
+  }
+  const allowed = Math.floor(rows.length * SQUAD_SHORTFALL_TOLERANCE);
+  return {
+    date,
+    squads: rows.length,
+    short: short.length,
+    allowed,
+    ok: short.length <= allowed,
+    bySquad,
+    smallest,
+    worst: short.slice(0, 10).map((row) => `${row.name} (${row.id}) ${squadLabel(row)} ${row.players}/${minimum(row)} players, ${row.keepers} GK`),
+  };
+}
+
+export type SquadCheck = ReturnType<typeof squadShortfalls>;
+
+export const describeSquadCheck = (report: SquadCheck) =>
+  `${report.date}: ${report.short} of ${report.squads} AI squads short of the minimums (tolerance ${report.allowed})` +
+  (report.short
+    ? `; ${Object.entries(report.bySquad).map(([label, count]) => `${label} ${count}`).join(", ")}; worst ${report.worst.join("; ")}`
+    : "") +
+  `; fewest players/GK: ${Object.entries(report.smallest).map(([label, size]) => `${label} ${size.players}/${size.keepers}`).join(", ")}`;
+
+/**
+ * In-season squad minimums of AI clubs (the user's club family and national teams excluded), counted as
+ * `maintainSquads` counts them: running contract or on loan, U19/U17 players born on or after the season's cutoff.
+ */
+export async function checkInSeasonSquads(store: Store) {
+  const state = await stateOf(store);
+  const rows = await store.all<SquadCount>(
+    "SELECT clubs.id,clubs.name,clubs.type,squads.squad,count(players.id) AS players,coalesce(sum(CASE WHEN players.position = 'GK' THEN 1 ELSE 0 END),0) AS keepers FROM clubs CROSS APPLY (VALUES ('Senior'),('U19'),('U17')) AS squads(squad) LEFT JOIN players ON coalesce(players.squad_club_id,players.club_id) = clubs.id AND players.club_id IS NOT NULL AND players.age_group = squads.squad AND players.role != 'Retired' AND (players.contract_end >= ? OR players.parent_club_id IS NOT NULL) AND (squads.squad = 'Senior' OR players.birth_date >= CASE squads.squad WHEN 'U17' THEN ? ELSE ? END) WHERE (clubs.type = 'club' OR (clubs.type = 'bteam' AND squads.squad = 'Senior')) AND clubs.id != ? AND coalesce(clubs.parent_id,0) != ? GROUP BY clubs.id,clubs.name,clubs.type,squads.squad",
+    state.date,
+    youthBirthCutoff("U17", state.season),
+    youthBirthCutoff("U19", state.season),
+    state.clubId,
+    state.clubId,
+  );
+  return squadShortfalls(rows, state.date);
+}
+
+type InSeasonTotals = Record<"moved" | "left" | "promoted" | "signed" | "registered", number>;
+
+/** Season totals of the weekly in-season squad check (`maintainSquads`), undefined if none were recorded for `season`. */
+async function inSeasonTotals(store: Store, season: number) {
+  const row = await store.get<{ value: string }>("SELECT [value] FROM meta WHERE [key] = 'youthSquadCheck'");
+  const check = row ? (JSON.parse(row.value) as { season: number; totals?: InSeasonTotals }) : undefined;
+  return check?.season === season ? check.totals : undefined;
+}
+
+const describeInSeason = (totals: InSeasonTotals | undefined) =>
+  totals
+    ? `${totals.registered} trialists registered, ${totals.signed} free agents signed, ${totals.left} free agents left football, ${totals.promoted} academy promotions, ${totals.moved} over-age youths moved up`
+    : "none recorded";
+
 /** Every minor's registration could have been made under Article 19 (nationality, residence, family move, 16+ EU/UK). */
 export async function checkMinors(store: Store, date: string) {
   const cutoff = `${Number(date.slice(0, 4)) - 18}${date.slice(4)}`;
@@ -308,9 +395,9 @@ export const leagueSizes = (places: readonly SeniorPlace[]) => {
 };
 
 /**
- * Section 8 invariant 6 after a rollover: league sizes as at world start, closed tiers unchanged, moves per boundary
- * equal to the movement spec (less the planner's recorded shortfalls, plus B-team ceiling swaps), B-teams below
- * their parent.
+ * Section 8 invariant 6 after a rollover: league sizes as at world start less one per parked B-team, closed tiers
+ * unchanged, moves per boundary equal to the movement spec (less the planner's recorded shortfalls, plus B-team
+ * ceiling swaps), B-teams below their parent, parked B-teams without a league place.
  */
 export async function checkMovement(store: Store, before: readonly SeniorPlace[], initialSizes: ReadonlyMap<number, number>) {
   const state = await stateOf(store);
@@ -322,9 +409,18 @@ export async function checkMovement(store: Store, before: readonly SeniorPlace[]
   );
   const failures: string[] = [];
   const sizes = leagueSizes(after);
+  const parked = (
+    await store.all<{ id: number; parent_id: number | null; league_id: number | null; data: string }>(
+      "SELECT id,parent_id,league_id,data FROM clubs WHERE type = 'bteam' AND JSON_VALUE(data,'$.parkedLeagueId') IS NOT NULL",
+    )
+  ).map((club) => ({ ...club, leagueId: Number(JSON.parse(club.data).parkedLeagueId) }));
+  const parkedIn = new Map<number, number>();
+  for (const club of parked) parkedIn.set(club.leagueId, (parkedIn.get(club.leagueId) ?? 0) + 1);
   for (const league of leagues)
-    if ((sizes.get(league.id) ?? 0) !== (initialSizes.get(league.id) ?? 0))
-      failures.push(`${league.name} has ${sizes.get(league.id) ?? 0} clubs (${initialSizes.get(league.id) ?? 0} at world start)`);
+    if ((sizes.get(league.id) ?? 0) !== (initialSizes.get(league.id) ?? 0) - (parkedIn.get(league.id) ?? 0))
+      failures.push(
+        `${league.name} has ${sizes.get(league.id) ?? 0} clubs (${initialSizes.get(league.id) ?? 0} at world start, ${parkedIn.get(league.id) ?? 0} B-teams parked)`,
+      );
   const raw = new Map(leagues.map((league) => [league.id, JSON.parse(league.data) as Record<string, unknown>]));
   const own = leagues.filter((league) => league.tier > 0 && !["true", true, 1].includes(raw.get(league.id)!.reserveOnly as string));
   const byId = new Map(leagues.map((league) => [league.id, league]));
@@ -391,6 +487,30 @@ export async function checkMovement(store: Store, before: readonly SeniorPlace[]
       : league.tier > parent.tier;
     if (!legal) failures.push(`B-team ${club.id} in ${league.name} (tier ${league.tier}), parent in ${parent.name} (tier ${parent.tier})`);
   }
+  // Parked B-teams hold no league place and stay parked only while their parent's division rules their league out.
+  for (const club of parked) {
+    const league = byId.get(club.leagueId);
+    if (club.league_id !== null || to.has(club.id)) {
+      failures.push(`parked B-team ${club.id} still has a league place`);
+      continue;
+    }
+    if (!league) {
+      failures.push(`parked B-team ${club.id} left unknown league ${club.leagueId}`);
+      continue;
+    }
+    const parent = byId.get(to.get(club.parent_id ?? 0) ?? 0);
+    const pyramid = JSON.parse(club.data).reservePolicy?.pyramid;
+    const parentTier = parent && parent.country_id === league.country_id && own.includes(parent) ? parent.tier : undefined;
+    if (
+      !pyramid ||
+      reserveTierAllowed(
+        { parentId: club.parent_id ?? 0, highestTier: Number(pyramid.highestTier), minGapBelowParent: Number(pyramid.minGapBelowParent) },
+        league.tier,
+        parentTier,
+      )
+    )
+      failures.push(`parked B-team ${club.id} was not re-admitted to ${league.name} (parent tier ${parentTier ?? "none"})`);
+  }
   assert.equal(failures.length, 0, `Movement invariants failed after the ${state.season} rollover: ${failures.slice(0, 8).join("; ")}`);
   return { leagues: leagues.length, moved: [...to].filter(([clubId, leagueId]) => from.get(clubId) !== leagueId).length };
 }
@@ -422,12 +542,23 @@ export async function checkContinentalEntries(store: Store) {
     );
     if (!separate) for (const entry of expected) used.add(entry.club.id);
     const main = await store.get<{ data: string }>("SELECT data FROM leagues WHERE name = ? AND country_id IS NULL", spec.name);
-    const data = JSON.parse(main?.data ?? "{}") as { season?: number; qualification?: { clubId: number; stage: string }[] };
+    const data = JSON.parse(main?.data ?? "{}") as {
+      season?: number;
+      phase?: string;
+      qualification?: { clubId: number; stage: string }[];
+    };
     if (data.season !== season) {
       if (expected.length) failures.push(`${spec.name} was not created for ${season} (${expected.length} clubs qualify)`);
       continue;
     }
-    if (!Array.isArray(data.qualification)) continue;
+    if (!Array.isArray(data.qualification)) {
+      // The calendar stores every access list; only a competition not held, with nobody qualifying, may lack one.
+      if (data.phase !== "not held" || expected.length)
+        failures.push(
+          `${spec.name}: no stored qualification list for ${season} (phase ${data.phase ?? "none"}, ${expected.length} clubs qualify)`,
+        );
+      continue;
+    }
     const entries = data.qualification;
     total += entries.length;
     const want = expected.map((entry) => `${entry.club.id}:${entry.stage}`).sort();
@@ -510,10 +641,11 @@ export async function checkRollover(
   assert.equal(wrongAge, 0, "Academy intake players must be aged 14-15");
   await checkSquads(store, `after the ${state.season} rollover`);
   const players = await activePlayers(store);
-  const flows = await store.meta<{ count: number; retired: number; leftFootball: number }>("lastIntake");
+  const flows = await store.meta<{ count: number; academy: number; topUps: number; pools: number; retired: number; leftFootball: number }>("lastIntake");
+  const inSeason = await inSeasonTotals(store, state.season - 1);
   assert(
     Math.abs(players - initialPlayers) <= initialPlayers * 0.1,
-    `Population ${players} is more than 10% from the initial ${initialPlayers} (rollover: ${flows.count} created, ${flows.retired} retired, ${flows.leftFootball} left football)`,
+    `Population ${players} is more than 10% from the initial ${initialPlayers} (rollover: ${flows.count} created, ${flows.retired} retired, ${flows.leftFootball} left football; weekly squad check ${state.season - 1}: ${describeInSeason(inSeason)})`,
   );
   const badMoney = (await store.get<{ total: number }>(
     `SELECT count(*) AS total FROM players WHERE role != 'Retired' AND (value IS NULL OR value < ${VALUE_RANGE.min} OR value > ${VALUE_RANGE.max} OR wage IS NULL OR wage < 0 OR wage > 1200000)`,
@@ -524,6 +656,8 @@ export async function checkRollover(
   return {
     season: state.season,
     players,
+    flows,
+    inSeason,
     academy: Object.values(intake.clubs).reduce((total, count) => total + count, 0),
     minors,
     moved: moved.moved,
@@ -558,7 +692,14 @@ export async function seasonSoak(seasons: number, fullWorld = false, nations: re
     await checkSquads(store, "world start");
     await checkMinors(store, (await stateOf(store)).date);
     let heights = await checkYouthHeights(store, (await stateOf(store)).date, new Map());
-    const rollovers: (Omit<Awaited<ReturnType<typeof checkRollover>>, "heights"> & { worldMB: number; seasonMB: number | undefined })[] = [];
+    const rollovers: (Omit<Awaited<ReturnType<typeof checkRollover>>, "heights"> & {
+      worldMB: number;
+      seasonMB: number | undefined;
+      seasonStartPlayers: number;
+      playersBeforeRollover: number;
+    })[] = [];
+    const squadChecks: SquadCheck[] = [];
+    let seasonStartPlayers = initialPlayers;
     let simulated = 0;
     let weeks = 0;
     let advanceSeconds = 0;
@@ -583,17 +724,26 @@ export async function seasonSoak(seasons: number, fullWorld = false, nations: re
       );
       const before =
         daysBetween(current.date, `${current.season + 1}-07-01`) <= step ? await seniorPlaces(store) : undefined;
+      const playersBeforeRollover = before ? await activePlayers(store) : undefined;
       const result = await advance(store, step);
-      if ((await stateOf(store)).season !== current.season) {
-        assert(before, "A rollover ran before the step that reaches 1 July");
+      const now = await stateOf(store);
+      if (now.season !== current.season) {
+        assert(before && playersBeforeRollover !== undefined, "A rollover ran before the step that reaches 1 July");
         const { heights: next, ...summary } = await checkRollover(store, initialPlayers, heights, { before, initialSizes });
         heights = next;
         console.log(
           `Rollover ${summary.season}: ${summary.players} players, ${summary.academy} academy intake, ${summary.minors} minors checked, ${summary.moved} clubs moved, ${summary.continentalEntries} continental entries, ${summary.forfeits.forfeits} forfeits in ${summary.forfeits.fixtures} fixtures`,
         );
+        const change = (value: number) => `${value >= 0 ? "+" : ""}${value}`;
+        const { flows, inSeason } = summary;
+        console.log(
+          `Population ${summary.season - 1}/${String(summary.season).slice(-2)}: ${seasonStartPlayers} at the start; ${playersBeforeRollover} before the rollover (${change(playersBeforeRollover - seasonStartPlayers)}; weekly squad check: ${describeInSeason(inSeason)}); ` +
+            `${summary.players} after it (${change(summary.players - playersBeforeRollover)}; ${flows.count} created incl. ${flows.academy} academy, ${flows.topUps} top-up places, ${flows.pools} home-pool entrants, ${flows.retired} retired, ${flows.leftFootball} left football)`,
+        );
         const footprint = await reportFootprint(store, `after the ${summary.season} rollover`, worldMB);
         worldMB = footprint.worldMB;
-        rollovers.push({ ...summary, ...footprint });
+        rollovers.push({ ...summary, ...footprint, seasonStartPlayers, playersBeforeRollover });
+        seasonStartPlayers = summary.players;
       }
       simulated += result.matches;
       advanceSeconds += result.seconds;
@@ -606,6 +756,14 @@ export async function seasonSoak(seasons: number, fullWorld = false, nations: re
         "SELECT count(*) AS total FROM standings WHERE played != wins + draws + losses OR points != wins * 3 + draws - deducted",
       ))!.total;
       assert.equal(badTable, 0, `Table conservation failed on ${result.date}`);
+      // First step on or after each checkpoint; failures are reported now and fail the soak at the end.
+      if (squadCheckpoints(now.season).some((date) => date <= now.date && !squadChecks.some((check) => check.date >= date))) {
+        const report = await checkInSeasonSquads(store);
+        squadChecks.push(report);
+        console.log(`In-season squads ${describeSquadCheck(report)}`);
+        if (!report.ok && process.env.GITHUB_ACTIONS === "true")
+          console.log(`::error title=In-season squads::${describeSquadCheck(report)}`);
+      }
       if (weeks % 13 === 0) {
         const { matchesPerSecond, secondsPerWeek, fullWorldSecondsPerWeek } = timing();
         console.log(
@@ -615,6 +773,12 @@ export async function seasonSoak(seasons: number, fullWorld = false, nations: re
     }
     assert.equal(rollovers.length, seasons, "Every season must roll over");
     await checkSqlConstraints(store);
+    const failedChecks = squadChecks.filter((check) => !check.ok);
+    assert.equal(
+      failedChecks.length,
+      0,
+      `In-season squad minimums failed at ${failedChecks.length} of ${squadChecks.length} checkpoints: ${failedChecks.map(describeSquadCheck).join(" | ")}`,
+    );
     const result = {
       seasons,
       fullWorld,
@@ -626,6 +790,7 @@ export async function seasonSoak(seasons: number, fullWorld = false, nations: re
       players: await activePlayers(store),
       generatedWorldMB: generated.worldMB,
       rollovers,
+      squadChecks,
       archivedLeagueSeasons: (await store.get<{ total: number }>(
         "SELECT count(*) AS total FROM history WHERE entity_type = 'league'",
       ))!.total,

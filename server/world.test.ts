@@ -12,6 +12,8 @@ import {
   type WorldPlan,
 } from "./world.ts";
 import { clubNameKey, worldCatalog } from "../shared/world-catalog/index.ts";
+import { START_DATE } from "../shared/rules.ts";
+import { youthBirthCutoff } from "./youth.ts";
 import { MIN_GOALKEEPERS, SQUAD_MINIMUMS, WORLD_VERSION } from "../shared/world-rules.ts";
 import type { GameState, PlayerProfile } from "../shared/types.ts";
 import type { PlayerRow } from "./people.ts";
@@ -108,6 +110,14 @@ describe("world plan (pure)", () => {
     expect(clubs.length).toBeLessThanOrEqual(london.maxClubs ?? 6);
     expect(new Set(clubs.map((club) => club.tier)).size).toBeGreaterThanOrEqual(3);
     expect(clubs.filter((club) => club.tier === 1).length).toBeLessThan(clubs.length / 2 + 1);
+  });
+
+  it("births every U17 and U19 player on or after the group's competition cutoff", () => {
+    const season = Number(START_DATE.slice(0, 4));
+    const youths = players.filter((row) => row.age_group === "U17" || row.age_group === "U19");
+    expect(youths.length).toBeGreaterThan(1000);
+    const overAge = youths.filter((row) => String(row.birth_date) < youthBirthCutoff(row.age_group as "U17" | "U19", season));
+    expect(overAge.map((row) => `${row.age_group} ${row.birth_date}`)).toEqual([]);
   });
 
   it("never reproduces a real club name, or a near-copy of one, and keeps names unique per nation", () => {

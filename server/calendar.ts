@@ -1933,21 +1933,27 @@ export async function countryPyramid(store: Store, countryId: number, season?: n
     )
   ).filter((row) => ids.has(row.league_id));
   const clubs = new Map<number, PyramidClub>();
-  for (const row of rows) {
-    const pyramid = row.parent_id ? JSON.parse(row.club_data).reservePolicy?.pyramid : undefined;
-    clubs.set(row.club_id, {
-      clubId: row.club_id,
-      ...(pyramid
-        ? {
-            reserve: {
-              parentId: row.parent_id!,
-              highestTier: Number(pyramid.highestTier),
-              minGapBelowParent: Number(pyramid.minGapBelowParent),
-              ...(pyramid.maxPerTier ? { maxPerTier: Number(pyramid.maxPerTier) } : {}),
-            },
-          }
-        : {}),
-    });
+  const reserveOf = (parentId: number | null, data: string) => {
+    const pyramid = parentId ? JSON.parse(data).reservePolicy?.pyramid : undefined;
+    return pyramid
+      ? {
+          reserve: {
+            parentId: parentId!,
+            highestTier: Number(pyramid.highestTier),
+            minGapBelowParent: Number(pyramid.minGapBelowParent),
+            ...(pyramid.maxPerTier ? { maxPerTier: Number(pyramid.maxPerTier) } : {}),
+          },
+        }
+      : {};
+  };
+  for (const row of rows) clubs.set(row.club_id, { clubId: row.club_id, ...reserveOf(row.parent_id, row.club_data) });
+  // Parked B-teams (no league place) come back to the league they left once their parent's division allows it.
+  for (const row of await store.all<{ id: number; parent_id: number | null; data: string }>(
+    "SELECT id,parent_id,data FROM clubs WHERE type = 'bteam' AND league_id IS NULL AND TRY_CONVERT(int, JSON_VALUE(data,'$.parkedLeagueId')) IN (SELECT id FROM leagues WHERE country_id = ?)",
+    countryId,
+  )) {
+    const parkedLeagueId = Number(JSON.parse(row.data).parkedLeagueId);
+    if (ids.has(parkedLeagueId)) clubs.set(row.id, { clubId: row.id, ...reserveOf(row.parent_id, row.data), parkedLeagueId });
   }
   const raw = new Map(leagues.map((league) => [league.tier, JSON.parse(league.data)]));
   const tiers = leagues.map((league): PyramidTier => {

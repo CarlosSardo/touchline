@@ -81,3 +81,82 @@ describe("savesReplacedByManualSave", () => {
     ).toEqual(["Save 1"]);
   });
 });
+
+// server/saves.ts create(): the new and kept saves sort first, then newest first; rows past the limit are deleted.
+function serverDeletes(slots: ListedSave[], careerId: string, keep?: string) {
+  const created = save(99, { careerId });
+  const first = (slot: ListedSave) =>
+    slot.file === created.file || slot.file === keep ? 0 : 1;
+  return [
+    ...slots.filter(
+      (slot) =>
+        !slot.automatic && !slot.imported && slot.career?.id === careerId,
+    ),
+    created,
+  ]
+    .toSorted(
+      (left, right) =>
+        first(left) - first(right) ||
+        right.modified.localeCompare(left.modified) ||
+        right.file.localeCompare(left.file),
+    )
+    .slice(MANUAL_SAVE_LIMIT)
+    .reverse();
+}
+
+describe("savesReplacedByManualSave while loading a save", () => {
+  const names = (slots: ListedSave[]) => slots.map((slot) => slot.name);
+
+  it("keeps the loaded save when it is the oldest and names the next oldest", () => {
+    const slots = manual(10);
+    expect(
+      names(savesReplacedByManualSave(slots, "career-a", slots[0].file)),
+    ).toEqual(["Save 2"]);
+    expect(
+      savesReplacedByManualSave(manual(9), "career-a", slots[0].file),
+    ).toEqual([]);
+  });
+
+  it("still names the oldest when a newer save of the career is loaded", () => {
+    const slots = manual(10);
+    expect(
+      names(savesReplacedByManualSave(slots, "career-a", slots[4].file)),
+    ).toEqual(["Save 1"]);
+  });
+
+  it("ignores a loaded save outside the career's manual rotation", () => {
+    const slots = [
+      ...manual(10),
+      save(20, { careerId: "career-a", automatic: true }),
+      save(21, { careerId: "career-a", imported: true }),
+      save(22, { careerId: "career-b" }),
+    ];
+    for (const loaded of [...slots.slice(10), save(23)])
+      expect(
+        names(savesReplacedByManualSave(slots, "career-a", loaded.file)),
+      ).toEqual(["Save 1"]);
+  });
+
+  it("matches the server query for every loaded save, and differs only when it spares that save", () => {
+    for (const count of [8, 9, 10, 11, 13]) {
+      const slots = [
+        ...manual(count).toReversed(),
+        save(40, { careerId: "career-a", automatic: true }),
+        save(41, { careerId: "career-a", imported: true }),
+      ];
+      const plain = savesReplacedByManualSave(slots, "career-a");
+      expect(plain).toEqual(serverDeletes(slots, "career-a"));
+      for (const loaded of slots) {
+        const replaced = savesReplacedByManualSave(
+          slots,
+          "career-a",
+          loaded.file,
+        );
+        expect(replaced).toEqual(serverDeletes(slots, "career-a", loaded.file));
+        expect(replaced).not.toContain(loaded);
+        expect(replaced).toHaveLength(plain.length);
+        if (!plain.includes(loaded)) expect(replaced).toEqual(plain);
+      }
+    }
+  });
+});

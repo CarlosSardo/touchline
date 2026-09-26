@@ -1,9 +1,37 @@
 import express from "express";
-import { Store } from "./db.ts";
+import { openOnFirstUse, Store } from "./db.ts";
 import { Accounts } from "./accounts.ts";
 import { stateOf } from "./systems.ts";
-import { createApp, readApiConfiguration } from "./app.ts";
+import { createApp, readApiConfiguration, type AppDatabase } from "./app.ts";
 import { describeSqlError } from "./sql-config.ts";
+
+/** A startup check failed after SQL connected; waiting for the database to resume would not fix it. */
+class StartupCheckError extends Error {}
+
+/** Opens SQL and runs the startup checks; called on the first request that needs the database. */
+async function openDatabase(requireAuth: boolean): Promise<AppDatabase> {
+  let phase = "SQL connection";
+  let store: Store | undefined;
+  try {
+    store = await Store.open();
+    if (requireAuth) {
+      phase = "account registry validation";
+      const accounts = new Accounts(store);
+      await accounts.assertReady();
+      return { store, accounts };
+    }
+    phase = "career state loading";
+    const state = await stateOf(store);
+    if (!state?.date) throw new Error("Uninitialized career");
+    return { store };
+  } catch (error) {
+    console.error(
+      `Touchline: SQL is unavailable (${phase}). ${describeSqlError(error).join(" | ")} Touchline never initializes or reseeds a career here.`,
+    );
+    await store?.close().catch(() => undefined);
+    throw store ? new StartupCheckError(phase, { cause: error }) : error;
+  }
+}
 
 async function start() {
   let configuration: ReturnType<typeof readApiConfiguration>;
@@ -17,8 +45,7 @@ async function start() {
     return;
   }
   const { host, port } = configuration;
-  let store: Store | undefined;
-  let phase = "SQL connection";
+  let database: ReturnType<typeof openOnFirstUse<AppDatabase>> | undefined;
   try {
     let app: ReturnType<typeof express>;
     if (process.env.TOUCHLINE_MAINTENANCE === "true") {
@@ -34,29 +61,22 @@ async function start() {
       });
       console.log("Touchline maintenance mode: SQL is not opened; game access is disabled.");
     } else {
-      store = await Store.open();
-      let accounts: Accounts | undefined;
-      if (configuration.requireAuth) {
-        phase = "account registry validation";
-        accounts = new Accounts(store);
-        await accounts.assertReady();
-      } else {
-        phase = "career state loading";
-        const state = await stateOf(store);
-        if (!state?.date) throw new Error("Uninitialized career");
-      }
-      phase = "HTTP application initialization";
-      app = createApp(store, accounts);
+      // Opening SQL at boot would resume the serverless database for every stray request that starts a replica.
+      database = openOnFirstUse(() => openDatabase(configuration.requireAuth), {
+        retryable: (error) => !(error instanceof StartupCheckError),
+      });
+      app = createApp(database.get);
     }
     const server = app.listen(port, host, () => {
-      console.log(`Touchline API listening on ${host}:${port}.`);
+      console.log(`Touchline API listening on ${host}:${port}; SQL opens on the first request that needs it.`);
     });
+    const closeDatabase = () => database?.close((opened) => opened.store.close()) ?? Promise.resolve();
     let closing = false;
     const shutdown = () => {
       if (closing) return;
       closing = true;
       server.close(() => {
-        void (store?.close() ?? Promise.resolve()).then(
+        void closeDatabase().then(
           () => {
             process.exitCode = 0;
           },
@@ -74,7 +94,7 @@ async function start() {
       console.error(
         "Touchline: unable to start the API listener. Check API_HOST and PORT/API_PORT.",
       );
-      void (store?.close() ?? Promise.resolve()).then(
+      void closeDatabase().then(
         () => {
           process.exitCode = 1;
         },
@@ -85,9 +105,8 @@ async function start() {
     });
   } catch (error) {
     console.error(
-      `Touchline: startup failed during ${phase}. ${describeSqlError(error).join(" | ")} Startup never initializes or reseeds a career.`,
+      `Touchline: startup failed during HTTP application initialization. ${describeSqlError(error).join(" | ")}`,
     );
-    await store?.close().catch(() => undefined);
     process.exitCode = 1;
   }
 }

@@ -688,6 +688,8 @@ export interface PyramidTier {
 export interface PyramidClub {
   clubId: number;
   reserve?: ReserveCeiling;
+  /** League a parked B-team was withdrawn from; it has no league place until its parent's division allows it back. */
+  parkedLeagueId?: number;
 }
 
 export interface BoundaryPlayoffPlan {
@@ -723,11 +725,14 @@ export interface MovementInput {
 
 export interface Move {
   clubId: number;
-  from: number;
-  /** Destination league id, or null when a B-team has no legal modeled tier and its parent cannot stay up. */
+  /** Origin league id, or null when a parked B-team is re-admitted. */
+  from: number | null;
+  /** Destination league id, or null when a B-team with no legal modeled tier is parked for the season. */
   to: number | null;
+  /** League whose place a parked B-team gives up (the league it is re-admitted to). */
+  parkedIn?: number;
   promoted: boolean;
-  reason: "automatic" | "playoff" | "reserve-ceiling" | "replacement";
+  reason: "automatic" | "playoff" | "reserve-ceiling" | "replacement" | "parked" | "readmitted";
 }
 
 export const boundaryKey = (upper: number, index: number, conference?: number) =>
@@ -899,9 +904,10 @@ export function planBoundaries(input: Pick<MovementInput, "tiers" | "clubs">): B
 
 /**
  * Promotion and relegation for one national pyramid. Every boundary moves the same number of clubs each way, so
- * league sizes stay constant; closed tiers never move; B-teams stay below their parent (pushed down with a
- * replacement moving up when the parent drops onto or below them). With no lower modeled tier for the B-team,
- * the parent keeps its place and the weakest promotion out of the tier it would have joined is cancelled.
+ * league sizes stay constant; closed tiers never move. Parents always move on merit and B-teams stay below them:
+ * a B-team whose parent drops onto its tier goes down one tier and the best-placed club relegated from that tier is
+ * reprieved (RFEF); with no legal open tier below, the B-team is parked (no league place, that tier one club short)
+ * and re-admitted to the same league once its parent's division allows it again.
  * `shortfalls` receives, per upper league id, the places each way below the boundary's fixed moves.
  */
 export function planMovement(input: MovementInput, shortfalls?: Map<number, number>): Move[] {
@@ -963,64 +969,61 @@ export function planMovement(input: MovementInput, shortfalls?: Map<number, numb
       reason.set(clubId, viaPlayoff.has(clubId) ? "playoff" : "automatic");
     }
   }
-  // Reserve ceilings after all boundaries: push B-teams below their parent, replacing them with a first team.
-  const leaving = new Set<number>();
+  // Reserve ceilings after all boundaries: B-teams go below their parent, one tier at a time.
+  const parked = new Set<number>();
   const reserves = [...input.clubs.values()]
     .filter((club) => club.reserve && destination.has(club.clubId))
     .sort((left, right) => destination.get(left.clubId)! - destination.get(right.clubId)!);
+  const allowedIn = (clubId: number, tier: number) => {
+    const reserve = input.clubs.get(clubId)?.reserve;
+    return !reserve || reserveTierAllowed(reserve, tier, tierOf(reserve.parentId));
+  };
   for (const club of reserves) {
-    const reserve = club.reserve!;
     let current = destination.get(club.clubId)!;
-    while (!reserveTierAllowed(reserve, current, tierOf(reserve.parentId))) {
-      const lower = byTier.get(current + 1);
-      const candidates = lower
-        ? [...destination.keys()].filter(
-            (clubId) => destination.get(clubId) === lower.tier && !input.clubs.get(clubId)?.reserve,
-          )
-        : [];
-      const rank = (clubId: number) => {
-        const from = origin.get(clubId)!;
-        // Clubs that stayed in the lower tier (the nearest misses) come first, then relegated clubs.
-        return (from.tier === lower!.tier ? 0 : 100_000) + from.tier * 1000 + from.table.indexOf(clubId);
-      };
-      const replacement = candidates.sort((left, right) => rank(left) - rank(right))[0];
-      if (!lower || replacement === undefined) {
-        const from = origin.get(reserve.parentId)?.tier;
-        const to = tierOf(reserve.parentId);
-        const promotedOut =
-          from !== undefined && to !== undefined && from < to && reserveTierAllowed(reserve, current, from)
-            ? [...destination.keys()].filter(
-                (clubId) =>
-                  origin.get(clubId)!.tier === to &&
-                  destination.get(clubId) === from &&
-                  !input.clubs.get(clubId)?.reserve,
-              )
-            : [];
-        const weakest = promotedOut.sort(
-          (left, right) => origin.get(right)!.table.indexOf(right) - origin.get(left)!.table.indexOf(left),
-        )[0];
-        if (weakest === undefined) {
-          leaving.add(club.clubId);
-          break;
-        }
-        destination.set(reserve.parentId, from!);
-        destination.set(weakest, to!);
-        const upperLeague = byTier.get(from!)!.leagueId;
-        shortfalls?.set(upperLeague, (shortfalls.get(upperLeague) ?? 0) + 1);
-        continue;
+    if (allowedIn(club.clubId, current)) continue;
+    let target: number | undefined;
+    for (let tier = current + 1; byTier.has(tier) && !byTier.get(tier)!.closed; tier++)
+      if (allowedIn(club.clubId, tier)) {
+        target = tier;
+        break;
       }
-      destination.set(replacement, current);
+    while (target !== undefined && current < target) {
+      const lower = byTier.get(current + 1)!;
+      const from = current;
+      // Relegated clubs of this tier come first (the best placed is reprieved), then the lower tier's nearest misses.
+      const rank = (clubId: number) =>
+        (origin.get(clubId)!.tier === from ? 0 : 100_000) + origin.get(clubId)!.table.indexOf(clubId);
+      const replacement = [...destination.keys()]
+        .filter(
+          (clubId) =>
+            destination.get(clubId) === lower.tier &&
+            (origin.get(clubId)!.tier === from || origin.get(clubId)!.tier === lower.tier) &&
+            clubId !== club.reserve!.parentId &&
+            reason.get(clubId) !== "reserve-ceiling" &&
+            allowedIn(clubId, from),
+        )
+        .sort((left, right) => rank(left) - rank(right))[0];
+      if (replacement === undefined) break;
+      destination.set(replacement, from);
       reason.set(replacement, "replacement");
       destination.set(club.clubId, lower.tier);
       reason.set(club.clubId, "reserve-ceiling");
       current = lower.tier;
     }
+    if (!allowedIn(club.clubId, current)) parked.add(club.clubId);
   }
   const moves: Move[] = [];
+  for (const club of input.clubs.values()) {
+    if (club.parkedLeagueId === undefined || destination.has(club.clubId)) continue;
+    const league = tiers.find((tier) => tier.leagueId === club.parkedLeagueId);
+    if (league && !league.closed && allowedIn(club.clubId, league.tier))
+      moves.push({ clubId: club.clubId, from: null, to: league.leagueId, promoted: false, reason: "readmitted" });
+  }
   for (const [clubId, tier] of destination) {
     const from = origin.get(clubId)!;
-    if (leaving.has(clubId)) {
-      moves.push({ clubId, from: from.leagueId, to: null, promoted: false, reason: "reserve-ceiling" });
+    if (parked.has(clubId)) {
+      const parkedIn = byTier.get(tier)!.leagueId;
+      moves.push({ clubId, from: from.leagueId, to: null, parkedIn, promoted: false, reason: "parked" });
       continue;
     }
     if (tier === from.tier) continue;

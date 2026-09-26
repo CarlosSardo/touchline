@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { bindSql, runSql, sqlPoolConfig, Store } from "./db.ts";
+import { bindSql, DatabaseUnavailableError, openOnFirstUse, runSql, sqlPoolConfig, Store } from "./db.ts";
 import { readSqlSettings, type SqlSettings } from "./sql-config.ts";
 import { provisionAccounts, LEGACY_EMAIL, LEGACY_OBJECT_ID, type AccountProvisioningPlan } from "../scripts/accounts-migrate.ts";
 import type { AccountRecord } from "./accounts.ts";
@@ -18,6 +18,69 @@ import {
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
+});
+
+describe("SQL opened on first use (no database)", () => {
+  it("shares one attempt between concurrent callers and keeps the opened resource", async () => {
+    let finish: (value: { id: number }) => void = () => {};
+    const open = vi.fn(() => new Promise<{ id: number }>((resolve) => { finish = resolve; }));
+    const database = openOnFirstUse(open);
+    expect(open).not.toHaveBeenCalled();
+    const callers = [database.get(), database.get(), database.get()];
+    expect(open).toHaveBeenCalledOnce();
+    finish({ id: 1 });
+    const opened = await Promise.all(callers);
+    expect(new Set(opened).size).toBe(1);
+    expect(await database.get()).toBe(opened[0]);
+    expect(open).toHaveBeenCalledOnce();
+  });
+
+  it("retries a failed connection inside the window, then gives up and lets the next call try again", async () => {
+    const resumed = { id: 2 };
+    const open = vi.fn<() => Promise<typeof resumed>>()
+      .mockRejectedValueOnce(new Error("Database is not currently available (40613)"))
+      .mockResolvedValueOnce(resumed);
+    expect(await openOnFirstUse(open, { retryFor: 1_000, retryDelay: 1 }).get()).toBe(resumed);
+    expect(open).toHaveBeenCalledTimes(2);
+
+    const outage = new Error("ECONNREFUSED");
+    const unavailable = vi.fn(async () => { throw outage; });
+    const database = openOnFirstUse(unavailable, { retryFor: 30, retryDelay: 5 });
+    const failure = await database.get().catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(DatabaseUnavailableError);
+    expect(failure).toMatchObject({ status: 503, code: "database_unavailable", cause: outage });
+    const attempts = unavailable.mock.calls.length;
+    expect(attempts).toBeGreaterThan(1);
+    await expect(database.get()).rejects.toBeInstanceOf(DatabaseUnavailableError);
+    expect(unavailable.mock.calls.length).toBeGreaterThan(attempts);
+  });
+
+  it("does not retry failures that waiting cannot fix", async () => {
+    const invalid = new Error("The account registry is missing its identity or schema uniqueness constraints.");
+    const open = vi.fn(async () => { throw invalid; });
+    const database = openOnFirstUse(open, { retryFor: 60_000, retryDelay: 60_000, retryable: (error) => error !== invalid });
+    await expect(database.get()).rejects.toMatchObject({ code: "database_unavailable", cause: invalid });
+    expect(open).toHaveBeenCalledOnce();
+  });
+
+  it("closes the opened resource, including one still opening, and refuses new calls", async () => {
+    let finish: (value: { id: number }) => void = () => {};
+    const database = openOnFirstUse(() => new Promise<{ id: number }>((resolve) => { finish = resolve; }));
+    const caller = database.get();
+    const dispose = vi.fn(async () => {});
+    const closing = database.close(dispose);
+    finish({ id: 3 });
+    await closing;
+    expect(dispose).toHaveBeenCalledWith({ id: 3 });
+    expect(await caller).toEqual({ id: 3 });
+    await expect(database.get()).rejects.toBeInstanceOf(DatabaseUnavailableError);
+
+    const never = vi.fn(async () => ({ id: 4 }));
+    const unused = openOnFirstUse(never);
+    await unused.close(dispose);
+    expect(never).not.toHaveBeenCalled();
+    expect(dispose).toHaveBeenCalledOnce();
+  });
 });
 
 describe("SQL binding (no database)", () => {

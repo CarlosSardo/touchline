@@ -212,8 +212,9 @@ describe("youth recruitment registration", () => {
         clubId: buyer.id,
       });
       player = (await store.get<Player>(
-        "SELECT TOP (1) * FROM players WHERE club_id = ? AND age_group != 'Senior'",
+        "SELECT TOP (1) * FROM players WHERE club_id = ? AND country_id = ? AND age_group != 'Senior' ORDER BY id",
         clubs[0].id,
+        clubs[0].country_id,
       ))!;
       const profile = JSON.parse(player.profile) as PlayerProfile;
       profile.contract = {
@@ -222,6 +223,10 @@ describe("youth recruitment registration", () => {
         trainingStartAge: 12,
       };
       delete profile.familyMove;
+      // A second passport of the buyer's nation would change every Article 19 route below.
+      profile.identity.nationalities = profile.identity.nationalities?.filter(
+        (entry) => entry.countryId !== buyer.country_id,
+      );
       await store.run(
         "UPDATE players SET age = 17,birth_date='2009-01-01',profile = ? WHERE id = ?",
         JSON.stringify(profile),
