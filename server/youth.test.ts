@@ -2,6 +2,7 @@ import seedrandom from "seedrandom";
 import { describe, expect, it } from "vitest";
 import {
   ageGroupFor,
+  competitionGroup,
   freeAgentChance,
   INTAKE,
   intakeSize,
@@ -11,8 +12,10 @@ import {
   retirementChance,
   selectSquad,
   SQUAD_CAPS,
+  youthBirthCutoff,
   youthRatings,
 } from "./youth.ts";
+import { birthDateForAge } from "./people.ts";
 import { SQUAD_MINIMUMS } from "../shared/world-rules.ts";
 import type { Position } from "../shared/types.ts";
 
@@ -103,6 +106,55 @@ describe("squad planning", () => {
     expect(ageGroupFor("2009-07-01", "2026-07-01")).toBe("U19");
     expect(ageGroupFor("2007-07-02", "2026-07-01")).toBe("U19");
     expect(ageGroupFor("2007-07-01", "2026-07-01")).toBe("Senior");
+  });
+
+  it("admits youth competitions by birth year, as simulation lineups do", () => {
+    // simulation.ts lineups: born on or after 1 January of season - limit + 1, limit 17 or 19.
+    for (const season of [2026, 2031]) {
+      expect(youthBirthCutoff("U17", season)).toBe(`${season - 17 + 1}-01-01`);
+      expect(youthBirthCutoff("U19", season)).toBe(`${season - 19 + 1}-01-01`);
+    }
+    expect(competitionGroup("2010-01-01", 2026)).toBe("U17");
+    expect(competitionGroup("2009-12-31", 2026)).toBe("U19");
+    expect(competitionGroup("2008-01-01", 2026)).toBe("U19");
+    expect(competitionGroup("2007-12-31", 2026)).toBe("Senior");
+  });
+
+  it("keeps 20 competition-eligible players and two eligible goalkeepers once over-age youths move up", () => {
+    // World-generation ages at 1 July (U19 16-18, U17 14-16): about a fifth of each squad is born before its cutoff.
+    const random = seedrandom("eligible-squads");
+    const date = "2026-07-01";
+    const season = 2026;
+    type Youth = { position: Position; birthDate: string };
+    const ages = { U19: () => (random() < 0.1 ? 16 : 17 + Math.floor(random() * 2)), U17: () => (random() < 0.1 ? 14 : 15 + Math.floor(random() * 2)) };
+    let thin = 0;
+    for (let club = 0; club < 300; club++) {
+      const squads: Record<"U17" | "U19" | "Senior", Youth[]> = { U17: [], U19: [], Senior: [] };
+      for (const group of ["U19", "U17"] as const)
+        for (let index = 0; index < 20 + Math.floor(random() * 5); index++)
+          squads[group].push({ position: index % 11 === 0 ? "GK" : "CM", birthDate: birthDateForAge(random, ages[group](), date) });
+      const eligible = (group: "U17" | "U19") => squads[group].filter((youth) => youth.birthDate >= youthBirthCutoff(group, season));
+      if (eligible("U19").length < SQUAD_MINIMUMS.U19 || eligible("U17").length < SQUAD_MINIMUMS.U17) thin++;
+      // Over-age youths move up (U17 first, so they are checked against the U19 cutoff too).
+      for (const group of ["U17", "U19"] as const)
+        for (const youth of [...squads[group]])
+          if (youth.birthDate < youthBirthCutoff(group, season)) {
+            squads[group].splice(squads[group].indexOf(youth), 1);
+            squads[competitionGroup(youth.birthDate, season) as "U19" | "Senior"].push(youth);
+          }
+      for (const group of ["U19", "U17"] as const) {
+        const counts = new Map<Position, number>();
+        for (const youth of eligible(group)) counts.set(youth.position, (counts.get(youth.position) ?? 0) + 1);
+        for (const position of missingPositions(counts, SQUAD_MINIMUMS[group])) {
+          const born = birthDateForAge(random, group === "U17" ? 14 + Math.floor(random() * 2) : 16 + Math.floor(random() * 2), date);
+          squads[group].push({ position, birthDate: born < youthBirthCutoff(group, season) ? youthBirthCutoff(group, season) : born });
+        }
+        expect(eligible(group).length).toBe(squads[group].length);
+        expect(eligible(group).length).toBeGreaterThanOrEqual(SQUAD_MINIMUMS[group]);
+        expect(eligible(group).filter((youth) => youth.position === "GK").length).toBeGreaterThanOrEqual(2);
+      }
+    }
+    expect(thin).toBeGreaterThan(0);
   });
 
   it("retires contracted players only from 33 and everyone by 40", () => {

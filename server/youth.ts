@@ -28,7 +28,7 @@ import {
   type ClubRegistration,
 } from "./registration.ts";
 import { news } from "./systems.ts";
-import { ageOn, clamp } from "../shared/rules.ts";
+import { ageOn, clamp, daysBetween } from "../shared/rules.ts";
 import { MIN_GOALKEEPERS, SQUAD_MINIMUMS } from "../shared/world-rules.ts";
 import { hasOwnLeague, nationByCode } from "../shared/world-catalog/index.ts";
 import type {
@@ -178,6 +178,16 @@ export function ageGroupFor(birthDate: string, date: string): AgeGroup {
   return age < 17 ? "U17" : age < 19 ? "U19" : "Senior";
 }
 
+/** Youth competitions of `season` admit players born on or after this date (simulation lineups: 1 January, season − 16 or − 18). */
+export function youthBirthCutoff(group: "U17" | "U19", season: number) {
+  return `${season - (group === "U17" ? 16 : 18)}-01-01`;
+}
+
+/** Youngest age group whose competitions a player born on `birthDate` may enter in `season`. */
+export function competitionGroup(birthDate: string, season: number): AgeGroup {
+  return birthDate >= youthBirthCutoff("U17", season) ? "U17" : birthDate >= youthBirthCutoff("U19", season) ? "U19" : "Senior";
+}
+
 const pickPosition = (random: Rng) =>
   INTAKE_POSITIONS[weightedIndex(INTAKE_POSITIONS.map(([, weight]) => weight), random())][0];
 
@@ -212,6 +222,8 @@ interface Member {
   wage: number;
   role: string;
   contract_status: string | null;
+  /** profile.identity.nationalities (JSON), for quota and passport checks. */
+  citizenships?: string | null;
   age: number;
   locked: boolean;
 }
@@ -237,6 +249,85 @@ async function updatePlayers(
       `UPDATE target SET ${assignments} FROM players AS target JOIN OPENJSON(?) WITH (${columns}) AS changes ON changes.id = target.id`,
       JSON.stringify(rows.slice(offset, offset + 1000)),
     );
+}
+
+const CLUB_ROWS =
+  "SELECT clubs.id,clubs.name,clubs.type,clubs.parent_id,clubs.country_id,clubs.league_id,clubs.reputation,clubs.academy,clubs.facilities,clubs.balance,clubs.wage_budget,clubs.philosophy,clubs.data,countries.code,countries.reputation AS nation_level,leagues.tier,(SELECT code FROM countries AS league_country WHERE league_country.id = leagues.country_id) AS league_code,coalesce(leagues.reputation,countries.reputation) AS league_reputation,coalesce((SELECT max(ability) FROM staff WHERE staff.club_id = clubs.id AND staff.role = 'Head of youth'),50) AS head_of_youth,coalesce((SELECT avg(CONVERT(float,ability)) FROM staff WHERE staff.club_id = clubs.id AND staff.role = 'Scout'),50) AS recruitment FROM clubs JOIN countries ON countries.id = clubs.country_id LEFT JOIN leagues ON leagues.id = clubs.league_id";
+
+interface CreateContext {
+  people: PeopleContext;
+  registrations: Map<number, ClubRegistration>;
+  date: string;
+  season: number;
+  style: string;
+}
+
+type NewPlayerSpec = Omit<PlayerSpec, "club" | "contextCode" | "date" | "leagueReputation" | "representCode"> & { representCode?: string };
+
+function newPlayer(context: CreateContext, club: ClubRow, spec: NewPlayerSpec, random: Rng) {
+  const row = createPlayer(random, context.people, {
+    ...spec,
+    club,
+    representCode: spec.representCode ?? club.code,
+    contextCode: club.code,
+    marketCode: club.league_code ?? club.code,
+    date: context.date,
+    leagueReputation: club.league_reputation,
+  });
+  if (ageOn(spec.birthDate, context.date) < 18)
+    legalizeMinor(row, club, context.registrations.get(club.id) ?? clubRegistration(club.code, club.data), context.people, context.date, random);
+  return row;
+}
+
+/** An amateur youth of `age` for a club's U17 or U19 squad, born late enough for the group's competitions this season. */
+function youthPlayer(context: CreateContext, club: ClubRow, group: "U17" | "U19", age: number, source: "academy" | "grassroots", random: Rng, position: Position) {
+  const ratings = youthRatings(random, {
+    reputation: club.reputation,
+    academy: club.academy,
+    headOfYouth: club.head_of_youth,
+    age,
+    wonderkids: context.style === "wonderkids",
+    grassroots: source === "grassroots",
+  });
+  const imports = (nationByCode(club.code)?.football?.importSources ?? []).filter((entry) => context.people.byCode.has(entry.code));
+  const foreign = imports.length && random() < foreignYouthShare(club, context.style) * (source === "grassroots" ? 0.5 : 1);
+  const representCode = foreign ? imports[weightedIndex(imports.map((entry) => entry.weight), random())].code : club.code;
+  const born = birthDateForAge(random, age, context.date);
+  const cutoff = youthBirthCutoff(group, context.season);
+  return newPlayer(context, club, {
+    representCode,
+    ageGroup: group,
+    position,
+    birthDate: born < cutoff ? cutoff : born,
+    ability: ratings.ability,
+    potential: ratings.potential,
+    contract: "amateur",
+    intake: { season: context.season, source },
+  }, random);
+}
+
+/**
+ * Over-age youths (born before their group's competition cutoff for `season`) move up: U17 to U19, U19 to the
+ * first team. Loanees keep their squad; the user's club family only with `includeUser`. Returns all and the user's moves.
+ */
+async function moveOverageYouth(store: Store, season: number, userClubId: number, includeUser: boolean) {
+  const u17 = youthBirthCutoff("U17", season);
+  const u19 = youthBirthCutoff("U19", season);
+  const family = "club_id IN (SELECT id FROM clubs WHERE id = ? OR parent_id = ?)";
+  const where =
+    "club_id IS NOT NULL AND parent_club_id IS NULL AND role != 'Retired' AND ((age_group = 'U17' AND birth_date < ?) OR (age_group = 'U19' AND birth_date < ?))";
+  const user = includeUser
+    ? ((await store.get<{ count: number }>(`SELECT count(*) AS count FROM players WHERE ${where} AND ${family}`, u17, u19, userClubId, userClubId))?.count ?? 0)
+    : 0;
+  const moved = await store.run(
+    `UPDATE players SET age_group = CASE WHEN birth_date >= ? THEN 'U19' ELSE 'Senior' END, squad_club_id = CASE WHEN birth_date >= ? THEN squad_club_id ELSE NULL END WHERE ${where}${includeUser ? "" : ` AND NOT ${family}`}`,
+    u19,
+    u19,
+    u17,
+    u19,
+    ...(includeUser ? [] : [userClubId, userClubId]),
+  );
+  return { moved: moved.changes, user };
 }
 
 const reservePolicyOf = (club: ClubRow) =>
@@ -291,9 +382,7 @@ export async function runYouthIntake(
   const rng = (key: string) => seedrandom(`${base}:${key}`);
   const countries = await store.all<Country>("SELECT * FROM countries ORDER BY id");
   const people = peopleContext(countries);
-  const clubs = await store.all<ClubRow>(
-    `SELECT clubs.id,clubs.name,clubs.type,clubs.parent_id,clubs.country_id,clubs.league_id,clubs.reputation,clubs.academy,clubs.facilities,clubs.balance,clubs.wage_budget,clubs.philosophy,clubs.data,countries.code,countries.reputation AS nation_level,leagues.tier,(SELECT code FROM countries AS league_country WHERE league_country.id = leagues.country_id) AS league_code,coalesce(leagues.reputation,countries.reputation) AS league_reputation,coalesce((SELECT max(ability) FROM staff WHERE staff.club_id = clubs.id AND staff.role = 'Head of youth'),50) AS head_of_youth,coalesce((SELECT avg(CONVERT(float,ability)) FROM staff WHERE staff.club_id = clubs.id AND staff.role = 'Scout'),50) AS recruitment FROM clubs JOIN countries ON countries.id = clubs.country_id LEFT JOIN leagues ON leagues.id = clubs.league_id WHERE clubs.type IN ('club','bteam') ORDER BY clubs.id`,
-  );
+  const clubs = await store.all<ClubRow>(`${CLUB_ROWS} WHERE clubs.type IN ('club','bteam') ORDER BY clubs.id`);
   const clubById = new Map(clubs.map((club) => [club.id, club]));
   const firstTeams = clubs.filter((club) => club.type === "club");
   const bTeamsOf = new Map<number, ClubRow[]>();
@@ -320,6 +409,7 @@ export async function runYouthIntake(
     state.clubId,
     state.clubId,
   );
+  const overage = await moveOverageYouth(store, season, state.clubId, true);
   const locked = new Set(
     (
       await store.all<{ player_id: number }>(
@@ -329,7 +419,7 @@ export async function runYouthIntake(
   );
   const members = (
     await store.all<Member>(
-      "SELECT id,club_id,squad_club_id,parent_club_id,country_id,age_group,position,ability,potential,birth_date,contract_end,wage,role,JSON_VALUE(profile,'$.contract.status') AS contract_status FROM players WHERE club_id IS NOT NULL AND role != 'Retired'",
+      "SELECT id,club_id,squad_club_id,parent_club_id,country_id,age_group,position,ability,potential,birth_date,contract_end,wage,role,JSON_VALUE(profile,'$.contract.status') AS contract_status,JSON_QUERY(profile,'$.identity.nationalities') AS citizenships FROM players WHERE club_id IS NOT NULL AND role != 'Retired'",
     )
   ).map((member) => ({
     ...member,
@@ -362,7 +452,19 @@ export async function runYouthIntake(
   const leavers = new Map<number, Reason>();
   const transfers: { id: number; from: number | null; to: number }[] = [];
   const available: Available[] = [];
+  const userNotes: string[] = [];
+  if (overage.user) userNotes.push(`moved ${overage.user} over-age youth player${overage.user === 1 ? "" : "s"} up an age group`);
   const touched = (member: Member) => changed.set(member.id, member);
+  const heldBy = new Map<number, string[]>();
+  const nationalitiesOf = (member: Member) => {
+    let held = heldBy.get(member.id);
+    if (!held) {
+      const extra = JSON.parse(member.citizenships || "[]") as { code: string }[];
+      held = heldNationalities(people.byId.get(member.country_id)?.code ?? "", { identity: { nationalities: extra } } as Pick<PlayerProfile, "identity">).filter(Boolean);
+      heldBy.set(member.id, held);
+    }
+    return held;
+  };
   const scales = await wageScales(store);
   const payroll = new Map<number, { professionals: number; allowances: number }>();
   for (const member of members) {
@@ -400,7 +502,7 @@ export async function runYouthIntake(
     available.push({
       ...member,
       association: association ?? member.country_id,
-      nationalities: [people.byId.get(member.country_id)?.code ?? ""].filter(Boolean),
+      nationalities: nationalitiesOf(member),
     });
   };
   const leave = (member: Member, reason: Reason) => {
@@ -464,9 +566,8 @@ export async function runYouthIntake(
     ]),
   );
   for (const club of firstTeams) {
-    if (userClubs.has(club.id)) continue;
-    const random = rng(`squad:${club.id}`);
     const bTeams = bTeamsOf.get(club.id) ?? [];
+    // Reserve-team age rules bind every club, the user's included: surplus over-age players join the first team.
     for (const bTeam of bTeams) {
       const rule = reservePolicyOf(bTeam).ageRule;
       if (!rule) continue;
@@ -480,7 +581,12 @@ export async function runYouthIntake(
         attach(member);
         touched(member);
       }
+      const moved = Math.max(0, over.length - rule.overage);
+      if (moved && userClubs.has(club.id))
+        userNotes.push(`moved ${moved} over-age player${moved === 1 ? "" : "s"} (over ${rule.maxAge}, ${rule.overage} allowed) from the reserve team to the first team`);
     }
+    if (userClubs.has(club.id)) continue;
+    const random = rng(`squad:${club.id}`);
     const seniors = squad(club.id, "Senior");
     const fixed = seniors.filter((member) => member.locked || member.club_id !== club.id);
     const own = seniors.filter((member) => !fixed.includes(member));
@@ -525,7 +631,8 @@ export async function runYouthIntake(
     for (const group of ["U17", "U19"] as const) {
       const all = squad(club.id, group);
       const youth = all.filter((member) => !member.locked);
-      const keeperGap = Math.max(0, MIN_GOALKEEPERS - all.filter((member) => member.position === "GK").length);
+      const cutoff = youthBirthCutoff(group, season);
+      const keeperGap = Math.max(0, MIN_GOALKEEPERS - all.filter((member) => member.position === "GK" && member.birth_date >= cutoff).length);
       const cap = SQUAD_CAPS.youth - keeperGap - (group === "U17" ? (intakeSizes.get(club.id) ?? 0) : 0);
       if (all.length <= cap) continue;
       const room = cap - (all.length - youth.length);
@@ -553,46 +660,18 @@ export async function runYouthIntake(
   const createdPositions = new Map<string, Position[]>();
   const createdFor = new Map<number, number>();
   let academy = 0;
-  const makePlayer = (club: ClubRow, spec: Omit<PlayerSpec, "club" | "contextCode" | "date" | "leagueReputation" | "representCode"> & { representCode?: string }, random: Rng) => {
-    const row = createPlayer(random, people, {
-      ...spec,
-      club,
-      representCode: spec.representCode ?? club.code,
-      contextCode: club.code,
-      marketCode: club.league_code ?? club.code,
-      date,
-      leagueReputation: club.league_reputation,
-    });
-    const age = ageOn(spec.birthDate, date);
-    if (age < 18) legalizeMinor(row, club, registrations.get(club.id)!, people, date, random);
+  const context: CreateContext = { people, registrations, date, season, style };
+  const record = (club: ClubRow, group: AgeGroup, position: Position, row: PlayerRow) => {
     created.push(row);
-    const key = `${club.id}:${spec.ageGroup}`;
-    createdPositions.set(key, [...(createdPositions.get(key) ?? []), spec.position]);
+    const key = `${club.id}:${group}`;
+    createdPositions.set(key, [...(createdPositions.get(key) ?? []), position]);
     createdFor.set(club.id, (createdFor.get(club.id) ?? 0) + 1);
     return row;
   };
-  const youthRow = (club: ClubRow, group: "U17" | "U19", age: number, source: "academy" | "grassroots", random: Rng, position = pickPosition(random)) => {
-    const ratings = youthRatings(random, {
-      reputation: club.reputation,
-      academy: club.academy,
-      headOfYouth: club.head_of_youth,
-      age,
-      wonderkids: style === "wonderkids",
-      grassroots: source === "grassroots",
-    });
-    const imports = (nationByCode(club.code)?.football?.importSources ?? []).filter((entry) => people.byCode.has(entry.code));
-    const foreign = imports.length && random() < foreignYouthShare(club, style) * (source === "grassroots" ? 0.5 : 1);
-    return makePlayer(club, {
-      representCode: foreign ? imports[weightedIndex(imports.map((entry) => entry.weight), random())].code : club.code,
-      ageGroup: group,
-      position,
-      birthDate: birthDateForAge(random, age, date),
-      ability: ratings.ability,
-      potential: ratings.potential,
-      contract: "amateur",
-      intake: { season, source },
-    }, random);
-  };
+  const makePlayer = (club: ClubRow, spec: NewPlayerSpec, random: Rng) =>
+    record(club, spec.ageGroup, spec.position, newPlayer(context, club, spec, random));
+  const youthRow = (club: ClubRow, group: "U17" | "U19", age: number, source: "academy" | "grassroots", random: Rng, position = pickPosition(random)) =>
+    record(club, group, position, youthPlayer(context, club, group, age, source, random, position));
   for (const club of firstTeams) {
     const random = intakeRandom.get(club.id)!;
     const count = intakeSizes.get(club.id)!;
@@ -609,17 +688,21 @@ export async function runYouthIntake(
   };
   // advance() releases every expired non-loan contract at the end of this day, negotiations included.
   const staying = (list: Member[]) => list.filter((member) => member.contract_end >= date || member.parent_club_id !== null);
-  const quotaUse = new Map<number, number>();
   // Club-less players registered in the club's association (or its home nation) first; seniors may also come from abroad.
-  const take = (club: ClubRow, need: Position, test: (candidate: Available) => boolean, abroad = false) => {
+  const take = (club: ClubRow, need: Position, test: (candidate: Available) => boolean, abroad = false, group: AgeGroup = "Senior") => {
     const registration = registrations.get(club.id)!;
+    // Foreign-player quotas bind senior registrations: count every registered senior on all his nationalities.
+    const quota = group === "Senior" && club.tier ? foreignQuota(registration.association, club.tier, registration.home) : undefined;
+    const quotaFull = !!quota &&
+      squad(club.id, "Senior").filter((member) => countsTowardQuota(quota, nationalitiesOf(member), registration.home)).length >= quota.limit;
     const rank = (candidate: Available) => (candidate.position === need ? 1000 : 0) + candidate.ability;
     let best: Available | undefined;
     const consider = (candidate: Available) => {
       if (gone.has(candidate) || candidate.locked || !test(candidate)) return;
       if (candidate.position !== need && (need === "GK" || candidate.position === "GK")) return;
       if (best && rank(candidate) <= rank(best)) return;
-      if (canJoin(candidate, club, registration, people, date, quotaUse)) best = candidate;
+      if (quotaFull && usesQuota(candidate, club, registration)) return;
+      if (canJoin(candidate, club, registration, people, date)) best = candidate;
     };
     const local = new Set([associationId(club.id), club.country_id]);
     for (const id of local) for (const candidate of byAssociation.get(id ?? -1) ?? []) consider(candidate);
@@ -632,7 +715,7 @@ export async function runYouthIntake(
     }
     if (!best) return undefined;
     gone.add(best);
-    if (usesQuota(best, club, registration)) quotaUse.set(club.id, (quotaUse.get(club.id) ?? 0) + 1);
+    heldBy.set(best.id, best.nationalities);
     return best;
   };
   const sign = (candidate: Available, club: ClubRow, group: AgeGroup, contractedTo: number, random: Rng) => {
@@ -663,7 +746,6 @@ export async function runYouthIntake(
       bTeamOf: clubById.get(club.parent_id!)!,
     })),
   ];
-  const userNotes: string[] = [];
   for (const { club, target, bTeamOf } of seniorNeeds) {
     const random = rng(`senior:${club.id}`);
     const current = staying(squad(club.id, "Senior"));
@@ -719,20 +801,25 @@ export async function runYouthIntake(
       const youth = squad(club.id, group);
       if (youth.length <= 22) continue;
       const key = `${registrations.get(club.id)!.association}:${group}`;
+      const cutoff = youthBirthCutoff(group, season);
       surplus.set(key, [
         ...(surplus.get(key) ?? []),
-        ...selectSquad(youth.filter((member) => !member.locked), 22 - youth.filter((member) => member.locked).length, MIN_GOALKEEPERS).rest,
+        ...selectSquad(youth.filter((member) => !member.locked), 22 - youth.filter((member) => member.locked).length, MIN_GOALKEEPERS).rest
+          .filter((member) => member.birth_date >= cutoff && member.contract_end >= date),
       ]);
     }
   }
+  // Youth squads count only players eligible for the group's competitions this season.
   for (const group of ["U19", "U17"] as const) {
     const minimum = SQUAD_MINIMUMS[group];
+    const cutoff = youthBirthCutoff(group, season);
     for (const club of firstTeams) {
       const random = rng(`${group}:${club.id}`);
       const extra: Position[] = [];
-      const needs = missingPositions(present(staying(squad(club.id, group)), createdPositions.get(`${club.id}:${group}`)), minimum);
+      const eligible = staying(squad(club.id, group)).filter((member) => member.birth_date >= cutoff);
+      const needs = missingPositions(present(eligible, createdPositions.get(`${club.id}:${group}`)), minimum);
       for (const need of needs) {
-        const agent = take(club, need, (candidate) => ageGroupFor(candidate.birth_date, date) === group && candidate.age >= (group === "U17" ? 14 : 16));
+        const agent = take(club, need, (candidate) => competitionGroup(candidate.birth_date, season) === group && candidate.age >= (group === "U17" ? 14 : 16), false, group);
         if (agent) {
           sign(agent, club, group, club.id, random);
           topUps++;
@@ -871,7 +958,7 @@ export async function runYouthIntake(
       `${season}/${String(season + 1).slice(-2)} academy intake`,
       [
         userIntake ? `${userIntake} new players aged 14-15 have joined the U17 squad from the academy.` : "",
-        userNotes.length ? `Minimum squad sizes: ${[...new Set(userNotes)].join("; ")}.` : "",
+        userNotes.length ? `Squad registration: ${[...new Set(userNotes)].join("; ")}.` : "",
         retiredNames.length ? `${retiredNames.length} senior player${retiredNames.length === 1 ? " has" : "s have"} retired.` : "",
       ].filter(Boolean).join(" "),
       "success",
@@ -909,14 +996,13 @@ function legalizeMinor(row: PlayerRow, club: ClubRow, registration: ClubRegistra
   row.profile = JSON.stringify(profile);
 }
 
-/** Registration check for automatic squad top-ups: Article 19 for minors, FA endorsement proxy and quotas for adults. */
+/** Registration check for automatic squad top-ups: Article 19 for minors, FA endorsement proxy for adults (quotas: `take`). */
 function canJoin(
   candidate: Available,
   club: ClubRow,
   registration: ClubRegistration,
   people: PeopleContext,
   date: string,
-  quotaUse: Map<number, number>,
 ) {
   const source = people.byId.get(candidate.association)?.code;
   const sameAssociation = source === registration.association || source === registration.home;
@@ -931,10 +1017,7 @@ function canJoin(
     });
     return route.route === "domestic" || route.route === "first-registration";
   }
-  if (!sameAssociation && passportGroup(registration.association) === "GB" && !candidate.nationalities.some((code) => ["GB", "IE"].includes(passportGroup(code))))
-    return false;
-  // One quota place per club and rollover for automatic signings; the club's own foreigners are not recounted here.
-  return !usesQuota(candidate, club, registration) || (quotaUse.get(club.id) ?? 0) < 1;
+  return sameAssociation || passportGroup(registration.association) !== "GB" || candidate.nationalities.some((code) => ["GB", "IE"].includes(passportGroup(code)));
 }
 
 function usesQuota(candidate: Pick<Available, "age" | "nationalities">, club: ClubRow, registration: ClubRegistration) {
@@ -943,9 +1026,68 @@ function usesQuota(candidate: Pick<Available, "age" | "nationalities">, club: Cl
 }
 
 /**
+ * In-season youth registrations of AI clubs, at most weekly: over-age youths move up, and U17/U19 squads with fewer
+ * than 20 competition-eligible players or two eligible goalkeepers register grassroots trialists (amateur, no window
+ * needed). The user's squads are left to the user until the rollover.
+ */
+export async function maintainYouthSquads(store: Store, state: Pick<GameState, "date" | "season" | "clubId">) {
+  const last = await store.get<{ value: string }>("SELECT [value] FROM meta WHERE [key] = 'youthSquadCheck'");
+  const previous = last ? (JSON.parse(last.value) as { date: string; season: number }) : undefined;
+  if (previous && previous.season === state.season && daysBetween(previous.date, state.date) < 7) return { moved: 0, registered: 0 };
+  await store.setMeta("youthSquadCheck", { date: state.date, season: state.season });
+  const overage = await moveOverageYouth(store, state.season, state.clubId, false);
+  const counts = await store.all<{ club_id: number; age_group: "U17" | "U19"; position: Position; count: number }>(
+    "SELECT coalesce(squad_club_id,club_id) AS club_id,age_group,position,count(*) AS count FROM players WHERE club_id IS NOT NULL AND role != 'Retired' AND (contract_end >= ? OR parent_club_id IS NOT NULL) AND ((age_group = 'U17' AND birth_date >= ?) OR (age_group = 'U19' AND birth_date >= ?)) GROUP BY coalesce(squad_club_id,club_id),age_group,position",
+    state.date,
+    youthBirthCutoff("U17", state.season),
+    youthBirthCutoff("U19", state.season),
+  );
+  const present = new Map<string, Map<Position, number>>();
+  for (const row of counts) {
+    const key = `${row.club_id}:${row.age_group}`;
+    present.set(key, (present.get(key) ?? new Map()).set(row.position, row.count));
+  }
+  const short: { clubId: number; group: "U17" | "U19"; needs: Position[] }[] = [];
+  for (const { id } of await store.all<{ id: number }>("SELECT id FROM clubs WHERE type = 'club' AND id != ? ORDER BY id", state.clubId))
+    for (const group of ["U19", "U17"] as const) {
+      const needs = missingPositions(present.get(`${id}:${group}`) ?? new Map(), SQUAD_MINIMUMS[group]);
+      if (needs.length) short.push({ clubId: id, group, needs });
+    }
+  let registered = 0;
+  if (short.length) {
+    const people = peopleContext(await store.all<Country>("SELECT * FROM countries ORDER BY id"));
+    const settings = await store.meta<Settings>("settings");
+    const clubs = new Map(
+      (await store.all<ClubRow>(
+        `${CLUB_ROWS} WHERE clubs.id IN (SELECT CAST([value] AS int) FROM OPENJSON(?)) ORDER BY clubs.id`,
+        JSON.stringify([...new Set(short.map((entry) => entry.clubId))]),
+      )).map((club) => [club.id, club]),
+    );
+    const context: CreateContext = {
+      people,
+      registrations: new Map([...clubs.values()].map((club) => [club.id, clubRegistration(club.code, club.data)])),
+      date: state.date,
+      season: state.season,
+      style: String(settings.regenStyle ?? "balanced"),
+    };
+    const created: PlayerRow[] = [];
+    for (const { clubId, group, needs } of short) {
+      const club = clubs.get(clubId);
+      if (!club) continue;
+      const random = seedrandom(`youth-squads:${state.date}:${clubId}:${group}`);
+      for (const need of needs)
+        created.push(youthPlayer(context, club, group, group === "U17" ? (random() < 0.5 ? 14 : 15) : random() < 0.7 ? 17 : 16, "grassroots", random, need));
+    }
+    await insertPlayers(store, created);
+    registered = created.length;
+  }
+  return { moved: overage.moved, registered };
+}
+
+/**
  * Fee-free AI signings of club-less adults in a transfer window: free agents and home-based pool players join
  * clubs at their level that are short of seniors or cover in their position, with wage room and a valid
- * registration. Returns the number of signings.
+ * registration. Returns the number of signings. Youth squads are checked first (`maintainYouthSquads`).
  */
 export async function signClublessPlayers(
   store: Store,
@@ -953,6 +1095,7 @@ export async function signClublessPlayers(
   limit: number,
   random: Rng,
 ): Promise<number> {
+  await maintainYouthSquads(store, state);
   const maxId = (await store.get<{ id: number }>("SELECT max(id) AS id FROM players"))?.id ?? 0;
   const candidates = await store.all<Player>(
     `SELECT TOP (${Math.max(1, Math.round(limit) * 4)}) * FROM players WHERE club_id IS NULL AND role != 'Retired' AND age_group = 'Senior' AND age BETWEEN 18 AND 33 AND id >= ? AND (injury_until IS NULL OR injury_until <= ?) AND NOT EXISTS (SELECT 1 FROM negotiations WHERE negotiations.player_id = players.id AND stage NOT IN ${TERMINAL_STAGES}) ORDER BY id`,

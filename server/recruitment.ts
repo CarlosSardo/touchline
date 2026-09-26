@@ -27,6 +27,15 @@ import {
 } from "./registration.ts";
 import { baseWage, wageScale } from "./finance.ts";
 
+/**
+ * Weekly wage a club-less player expects: the buyer's going rate for his level, but at least a share of what
+ * comparable seniors earn in the buyer's league nation (75%; 60% at 20 or younger and from 33) and never below 50.
+ */
+export function clublessWageExpectation(goingRate: number, comparableWage: number | null | undefined, age: number) {
+  const share = age <= 20 || age >= 33 ? 0.6 : 0.75;
+  return Math.max(50, Math.round(goingRate / 10) * 10, Math.round(((comparableWage ?? 0) * share) / 10) * 10);
+}
+
 export const YOUTH_TRANSFER_SOURCE =
   "FIFA RSTP January 2025, articles 2, 18, 19 and 20, Annexe 4; simplified game implementation";
 export const YOUTH_TRANSFER_URL =
@@ -269,10 +278,20 @@ export async function assessPlayerInterest(
       : settings.negotiationDifficulty === "ruthless"
         ? 0.07
         : 0;
-  // Club-less players have no wage to defend and expect the destination's going rate for their level.
+  // Club-less players have no wage to defend: the destination's going rate, floored by what their level earns there.
   const expectedBase =
     player.club_id === null
-      ? Math.max(50, Math.round((baseWage(player.ability) * (await wageScale(store, buyer.id))) / 10) * 10)
+      ? clublessWageExpectation(
+          baseWage(player.ability) * (await wageScale(store, buyer.id)),
+          (await store.get<{ wage: number | null }>(
+            "SELECT avg(CONVERT(float,players.wage)) AS wage FROM clubs JOIN leagues ON leagues.id = clubs.league_id JOIN players ON players.club_id = clubs.id WHERE leagues.country_id = coalesce((SELECT country_id FROM leagues WHERE id = ?),?) AND clubs.type != 'national' AND players.parent_club_id IS NULL AND players.age_group = 'Senior' AND players.role != 'Retired' AND players.ability BETWEEN ? AND ? AND coalesce(JSON_VALUE(players.profile,'$.contract.status'),'professional') = 'professional'",
+            buyer.league_id ?? -1,
+            buyer.country_id,
+            player.ability - 2,
+            player.ability + 2,
+          ))?.wage,
+          player.age,
+        )
       : Math.max(player.wage, baseWage(player.ability));
   const expectedWage = Math.round(
     expectedBase *
