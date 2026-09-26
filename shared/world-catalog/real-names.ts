@@ -189,7 +189,16 @@ export const REAL_PERSON_NAMES: Readonly<Record<string, readonly string[]>> = {
   MT: list(`Michael Mifsud|Andrè Schembri|Teddy Teuma|Carmel Busuttil|Robert Abela`),
   SM: list(`Andy Selva|Aldo Simoncini|Massimo Bonini|Nicola Nanni`),
   AD: list(`Ildefons Lima|Marc Vales|Koldo Álvarez|Óscar Sonejee`),
-  GI: list(`Lee Casciaro|Roy Chipolina|Liam Walker|Joseph Chipolina|Fabian Picardo`),
+  GI: list(`Lee Casciaro|Roy Chipolina|Liam Walker|Joseph Chipolina|Fabian Picardo|Kyle Casciaro|Ryan Casciaro|
+    Jayce Olivero|Louie Annesley|Tjay De Barr|Julian Valarino|Graeme Torrilla|Ethan Britto|Dayle Coleing|Kyle Goldwin|
+    Scott Wiseman|Jack Sergeant|Nicholas Pozo|Jaylan Hankins|Kian Ronan|Evan De Haro|James Scanlon|Aidan Barlow|
+    Adam Priestley|Jamie Bosio|Anthony Bardon|Bernardo Lopes|Reece Styche|Jordan Perez|Jake Gosling|Anthony Hernandez|
+    Jamie Coombes|Kelvin Morgan|Jean Carlos Garcia|Alain Pons|Erin Barnett|Robert Guiling|Liam Jessop|Ayoub El Hmidi|
+    Jaiden Bartolo|Bradley Banda|Dylan Borge|Ethan Jolley|Aaron Payas|Ethan Santos|Jamie Robba|Carlos Richards|
+    Mohamed Badr Hassan|Jeremy Lopez|Aymen Mouelhi|Christian Lopez|Brian Perez|Danny Higginbotham|David Artell|
+    Julio Ribas|Allen Bula|Jeff Wood|Joe Bossano|Peter Caruana|Joshua Hassan|Keith Azopardi|Joseph Garcia|
+    Albert Isola|John Cortes|Nigel Feetham|Damon Bossino|Adolfo Canepa|Peter Montegriffo|Maurice Xiberras|
+    Gilbert Licudi|Vijay Daryanani|Samantha Sacramento|Marlene Hassan-Nahon|John Galliano`),
   BR: list(`Pelé|Neymar|Neymar Júnior|Ronaldinho|Ronaldo Nazário|Kaká|Rivaldo|Romário|Zico|Garrincha|Cafu|Roberto Carlos|
     Vinícius Júnior|Rodrygo|Raphinha|Endrick|Casemiro|Richarlison|Alisson Becker|Ederson Moraes|Marquinhos|
     Thiago Silva|Dani Alves|Gabriel Jesus|Gabriel Martinelli|Gabriel Magalhães|Lucas Paquetá|Bruno Guimarães|
@@ -270,7 +279,10 @@ export const REAL_PERSON_NAMES: Readonly<Record<string, readonly string[]>> = {
     Bertrand Kaï|Roy Kayara|Jekob Jeno|Kiam Wanesse|Joël Wakanumuné|Cédric Sansot|Rocky Nyikeine|Emile Béaruné|
     César Zeoula|Jacques Gope-Iwate|Pierre Wajoka|Yohann Mercier|Antoine Kombouaré|Jacques Zimako|
     Jean-Philippe Saïko|Brice Dahité|Wassissi Hnalaine|Éloi Machoro|Yeiwéné Yeiwéné|Alphonse Dianou|Nidoish Naisseline|
-    Rock Pidjot|Raphaël Pidjot|Jacques Lafleur`),
+    Rock Pidjot|Raphaël Pidjot|Jacques Lafleur|Christian Tein|Daniel Goa|Victor Tutugoro|Gilbert Tyuienon|
+    Charles Pidjot|Pascal Naouna|Nicolas Metzdorf|Philippe Dunoyer|Olivier Dokunengo|Paul Gope-Iwate|Marius Bako|
+    Iamel Kabeu|Raphaël Oiremoin|Dick Kauma|Michel Hmae|Joseph Athale|Loïc Wakanumuné|André Sinedo|Judikaël Ixoée|
+    Geordy Gony|Steeve Ixoée|Jean-Patrick Wakanumuné|Jacques Haeko`),
   NZ: list(`Chris Wood|Winston Reid|Ryan Nelsen|Wynton Rufer|Ricki Herbert|Danny Hay|Darren Bazeley|Marco Rojas|
     Liberato Cacace|Matt Garbett|Joe Bell|Christopher Luxon|Jacinda Ardern`),
   FJ: list(`Roy Krishna|Esala Masi|Sitiveni Rabuka`),
@@ -396,7 +408,18 @@ export const REAL_PERSON_NAMES: Readonly<Record<string, readonly string[]>> = {
   PS: list(`Oday Dabbagh|Mahmoud Abbas`),
   KP: list(`Jong Tae-se|Han Kwang-song|Pak Kwang-ryong|Jong Il-gwan|Ri Myong-guk|An Yong-hak|Pak Nam-chol|Mun In-guk|
     Hong Yong-jo|Kim Kyong-il|Pak Chol-jin|Ri Kwang-chon|Cha Jong-hyok|Nam Song-chol|Ji Yun-nam|Kim Yong-jun|
-    Kim Jong-un|Kim Il-sung|Kim Jong-il`),
+    Kim Jong-un|Kim Il-sung|Kim Jong-il|Ri Jun-il|Ri Kwang-hyok|An Chol-hyok|Kim Kum-il|Choe Kum-chol|
+    Kim Myong-gil|Ri Chol-myong|Kim Myong-won|Pak Sung-hyok|Ryang Yong-gi|Jang Song-hyok|Ri Yong-jik|Jon Kwang-ik|
+    Pak Song-chol|So Hyon-uk|Ri Hyok-chol|Jang Kuk-chol|Ro Hak-su|Sim Hyon-jin|Kim Kuk-jin|Ri Se-gwang|Choe Myong-ho|
+    Kim Chol-bom|Kang Kuk-chol|Ri Il-jin|Kim Yu-song|An Byong-jun|Ri Un-chol|Kim Kuk-bom|Choe Song-hyok|
+    Kim Pom-hyok|Jong Kwang-sok|Ri Hyong-jin|An Tae-song|Kim Jin-hyok|Kang Ju-hyok|Kwon Chung-hyok|Ri Kang-guk|
+    Kye Tam|Paek Kwang-min|Ri Jo-guk|Choe Ok-chol|Pak Kwang-chon|Ri Il-song|Sin Tae-song|Kim Kyong-hun|Jo Jin-hyok|
+    Kim Hyon-hyok|Choe Ju-song|Kim Ju-song|Ri Hyok-jin|Kim Won-ho|An Chol-ryong|Kim Kwang-hyok|Kim Tae-yong|
+    Ri Chung-gyu|Ju Kwang-min|An Il-bom|Kim Song-gi|Kim Chol-ho|Ri Hung-ryong|Yun Yong-il|Pak Chol-min|Kim Song-chol|
+    Kim Myong-chol|Ri Myong-jun|Pak Myong-song|Ri Kwang-il|Kim Il-bong|Kim Chung-song|Choe Won-jin|Hong Ryong-jo|
+    Pak Doo-ik|Pak Tu-ik|Kim Jong-hun|Jo Tong-sop|Yun Jong-su|Sin Yong-nam|Kim Yong-su|Choe Ryong-hae|Kim Yong-nam|
+    Pak Pong-ju|Kim Tok-hun|Kim Jong-nam|Kim Yong-chol|Kim Yo-jong|Ri Sol-ju|Ri Yong-ho|Ri Pyong-chol|Kim Song-nam|
+    Ri Chang-ho|Pak Thae-song|Kim Jae-ryong|Hyon Yong-chol|Choe Son-hui`),
   HK: list(`Chan Siu-ki|Michael Luk|Jørn Andersen|John Lee Ka-chiu`),
   TW: list(`Chen Po-liang|Lai Ching-te`),
   KG: list(`Vitalij Lux|Sadyr Japarov`),

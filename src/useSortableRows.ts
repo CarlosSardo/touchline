@@ -12,7 +12,8 @@ export interface SortableOptions<Row, Key extends string> {
   /** Controlled sort, e.g. a paginated table sorted by the server. */
   sort?: SortState<Key> | null;
   onSortChange?: (sort: SortState<Key>) => void;
-  tieBreakers?: readonly Pick<SortColumn<Row>, "value" | "defaultDirection">[];
+  /** Required so ties never fall back to input order; end with a unique key such as id. */
+  tieBreakers: readonly Pick<SortColumn<Row>, "value" | "defaultDirection">[];
   /** Rows already arrive in the requested order (server-side sorting). */
   presorted?: boolean;
 }
@@ -20,7 +21,7 @@ export interface SortableOptions<Row, Key extends string> {
 export function useSortableRows<Row, Key extends string>(
   rows: readonly Row[],
   columns: readonly SortColumn<Row, Key>[],
-  options: SortableOptions<Row, Key> = {},
+  options: SortableOptions<Row, Key>,
 ) {
   const [local, setLocal] = useState<SortState<Key> | null>(
     options.initial ?? null,

@@ -2872,7 +2872,7 @@ const KANAK = pool(
    Raphaël Lionel Yann Richard Brice Jean-Philippe Michel Mathieu Nicolas Julien Olivier Laurent Thierry André Joseph
    Samuel Daniel Éric Sébastien`,
   `Wetewea Hnepeune Goprou Gope Luepack Qaeze Gorohouna Waheo Kaloi Hnamuko Wadriako Poatinda Kecine Trolue
-   Xowie Kakue Haocas Tidjite Tein Waia Kayara Wanesse Sele Jeno Hmae Ihage Kaudre Poiwi
+   Xowie Kakue Haocas Tidjite Hnawia Waia Kayara Wanesse Sele Jeno Wahetra Ihage Kaudre Poiwi
    Wahnawe Waiwa Watrone Hnaweo Kutrue Pouroudi`,
 );
 const COOK_ISLANDS = pool(

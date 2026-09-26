@@ -49,8 +49,9 @@ describe("real person names", () => {
   });
 
   it("cannot be drawn from the pools Rai found built from real rosters", () => {
-    for (const id of ["concacaf-ofc/surinamese-creole", "concacaf-ofc/papiamento", "concacaf-ofc/kanak"])
-      expect(producible(lookup.namePool(id)!), id).toEqual([]);
+    const rosterPools = ["concacaf-ofc/surinamese-creole", "concacaf-ofc/papiamento", "concacaf-ofc/kanak", "afc/korean-dprk", "uefa-west/gibraltarian"];
+    for (const id of rosterPools) expect(producible(lookup.namePool(id)!), id).toEqual([]);
+    for (const name of ["Kim Kum-il", "Kyle Casciaro", "Christian Tein"]) expect(isRealPersonName(name), name).toBe(true);
   });
 
   it("stay rare in every pool, so re-rolling a real name converges and never returns one", () => {

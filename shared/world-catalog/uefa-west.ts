@@ -775,10 +775,11 @@ Inter {city}|1.5
 
 // ---------------------------------------------------------------- Gibraltar
 
+// Common local given names and old Genoese, Maltese, Sephardic and Spanish family lines, not the national-team roster.
 const GIBRALTARIAN = pool(
   "gibraltarian",
-  "Liam|Lee|Kyle|Roy|Joseph|Jayce|Louie|Tjay|Julian|Graeme|Ethan|Dayle|Scott|Jack|Nicholas|Jaylan|Kian|Carlos|Evan|James|Aidan|Ryan|Dylan|Mark|Adam|Jamie|Daniel|Jesse|Kaiden|Ayoub",
-  "Chipolina|Casciaro|Walker|Olivero|Annesley|De Barr|Valarino|Torrilla|Britto|Coleing|Wiseman|Pozo|Hankins|Ronan|Richards|Jessop|De Haro|Scanlon|Bosio|Bosano|Ferrary|Bado|Sacarello|Robba|Cassar|Benady|Levy|Borge|Buhagiar|Caruana|Danino|Figueras|Imossi|Linares|Montegriffo|Netto|Picardo|Reyes|Soiza|Stagnetto|Teuma|Triay|Vinet|Zammitt|Hernandez|Garcia|Santos|Perez|Gomez",
+  "Francis|Nathan|Luke|Samuel|Matthew|Thomas|Stephen|Paul|Richard|Oliver|Harry|Alexander|Gabriel|Adrian|Leon|Marcus|Martin|Victor|Lewis|Owen|Joel|Ivan|Mario|Manuel|Antonio|Luis|Isaac|Elliot|Callum|Tyler|Kevin|Neil|Ian|Colin|Philip|George|Edward|Conor|Leo|Jacob|Moses|Solomon",
+  "Chipolina|Casciaro|Olivero|Valarino|Torrilla|Britto|Bosio|Sacarello|Robba|Bado|Cassar|Benady|Borge|Buhagiar|Caruana|Danino|Figueras|Ferrary|Imossi|Linares|Montegriffo|Netto|Soiza|Stagnetto|Teuma|Triay|Vinet|Zammitt|Isola|Xiberras|Balban|Canepa|Cortes|Bruzon|Rocca|Parody|Rugeroni|Baglietto|Pitto|Pisarello|Ramagge|Galliano|Durante|Anahory|Serruya|Abudarham|Bensadon|Attias|Benzaquen|Azopardi|Mifsud|Farrugia|Grech|Vella|Bonello|Sciacaluga|Porral|Victory|Feetham|Payas|Lavarello|Dalmedo|Recagno|Viagas|Origo|Poggio|Dellipiani|Bossino",
 );
 
 const GIBRALTAR: NationSpec = {

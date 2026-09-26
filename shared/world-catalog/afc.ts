@@ -149,13 +149,12 @@ const KOREAN = pool(
    Yook In Maeng Je Mo Tak Guk Yeom Bong Kyung Sa Bu Hwangbo Namgung Jegal Seonwoo Dokgo Tae Pi Gong Eun Yong
    Gam Il Dong Seol Beom Jeong Yun Rhee Gu Jo Yu Gwak`,
 );
-// DPRK romanization (Ri, Pak, Choe, Jong...).
+// DPRK romanization (Ri, Pak, Choe, Jong...). Given names are common name forms, none held by a listed international.
 const KOREAN_DPRK = pool(
   "korean-dprk",
-  `Il-gwan Kwang-song Kwang-ryong Myong-guk Kuk-chol Yu-song Hyok-chol Ju-song Chol-hyok Kum-il Jin-hyok
-   Song-hyok Kwang-hyok Un-chol Nam-chol Yong-jik Tae-se Yong-hak Chol-jin Kyong-il Hyon-jin Il-bong Jong-hyok
-   Song-chol Chung-song Kuk-jin Myong-il Pom-hyok Yong-il Kwang-min Chol-min Won-jin Hyon-il Son-hyok Ryong-jo
-   Kang-guk`,
+  `Chol-su Kwang-chol Myong-su Song-il Chol-nam Kwang-nam Tong-chol Tong-il Hak-chol Sung-chol Sang-chol Hyon-chol
+   Hyon-su Un-song In-chol In-su Kyong-chol Kyong-su Chang-su Chang-il Sang-ho Sang-il Se-hyok Tae-hyok Tae-ho
+   Won-chol Chung-il Pong-chol Hong-il Mun-chol Ki-chol Kil-su Man-su Chun-il Sok-chol Hui-chol Ung-chol`,
   `Kim Ri Pak Choe Jong Kang Jang Han Yun Rim O Sin Hwang An Song Jon Hong Ryu Mun Ro Ju Kye Pyon Jo Cha Ryang
    Sim Son Ho Pae Paek Chon Kwon Kil Yang Chae Ok Kwak Um Sok Myong Ha`,
 );

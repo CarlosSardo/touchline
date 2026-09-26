@@ -1,8 +1,17 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Store } from "./db.ts";
 import { hasMinorRoute, verifyWorld } from "./check-world.ts";
-import { assertPlanStandings, generateWorld, planWorld, worldPlayers, worldStaff, type WorldPlan } from "./world.ts";
-import { clubNameKey, looseClubNameKey, worldCatalog } from "../shared/world-catalog/index.ts";
+import {
+  assertPlanStandings,
+  avoidedClubKeys,
+  generateWorld,
+  isAvoidedClubKey,
+  planWorld,
+  worldPlayers,
+  worldStaff,
+  type WorldPlan,
+} from "./world.ts";
+import { clubNameKey, worldCatalog } from "../shared/world-catalog/index.ts";
 import { MIN_GOALKEEPERS, SQUAD_MINIMUMS, WORLD_VERSION } from "../shared/world-rules.ts";
 import type { GameState, PlayerProfile } from "../shared/types.ts";
 import type { PlayerRow } from "./people.ts";
@@ -102,15 +111,15 @@ describe("world plan (pure)", () => {
   });
 
   it("never reproduces a real club name, or a near-copy of one, and keeps names unique per nation", () => {
-    // Italian and Lusophone templates can render near-copies (La Spezia Calcio, Académica de Praia).
-    const nearCopies = planWorld({ nations: ["IT", "CV", "AO", "MZ", "TN", "EC"].filter((code) => lookup.nationByCode(code)), structureOnly: true });
+    // Italian and Lusophone templates can render near-copies (La Spezia Calcio, Académica de Praia); German and
+    // Croatian ones add years (FC Augsburg 36, NK Zagreb 1943).
+    const nearCopies = planWorld({ nations: ["IT", "CV", "AO", "MZ", "TN", "EC", "DE", "HR"].filter((code) => lookup.nationByCode(code)), structureOnly: true });
     for (const [world, codes] of [[plan, NATIONS], [nearCopies, nearCopies.nations.map((nation) => nation.code)]] as const)
       for (const code of codes) {
         const keys = world.clubs.filter((club) => club.code === code && club.type === "club").map((club) => clubNameKey(String(club.row.name)));
         expect(new Set(keys).size, code).toBe(keys.length);
-        const avoided = lookup.avoidedClubNames(code);
-        const loose = new Set([...avoided].map(looseClubNameKey));
-        expect(keys.filter((key) => avoided.has(key) || loose.has(looseClubNameKey(key))), code).toEqual([]);
+        const avoided = avoidedClubKeys(lookup.avoidedClubNames(code));
+        expect(keys.filter((key) => isAvoidedClubKey(key, avoided)), code).toEqual([]);
       }
     expect(lookup.avoidedClubNames("EN").size).toBeGreaterThan(0);
   });
@@ -232,6 +241,13 @@ describe("world plan (pure)", () => {
 });
 
 describe("club-name tokens (pure)", () => {
+  it("refuse a real club with a year or number added, dropped or swapped", () => {
+    const avoided = avoidedClubKeys(["FC Augsburg", "NK Zagreb", "1. FSV Mainz 05", "FC Schalke 04", "1. FC Köln", "AC Milan"].map(clubNameKey));
+    const refused = ["FC Augsburg 36", "Augsburg 1907", "NK Zagreb 1943", "FSV Mainz 12", "1. FSV Mainz 05", "Schalke 1904", "FC Köln", "AC Milano 1899"];
+    for (const name of refused) expect(isAvoidedClubKey(clubNameKey(name), avoided), name).toBe(true);
+    for (const name of ["FC Augsburg-Hochzoll 36", "NK Zagorje 1943", "SV Mainz-Kastel 05", "TSV Köln-Mülheim 1920"])
+      expect(isAvoidedClubKey(clubNameKey(name), avoided), name).toBe(false);
+  });
   it.skipIf(!lookup.nationByCode("PT") || !lookup.nationByCode("HU"))(
     "applies city prepositions ({of}) and adjectival city forms ({cityAdj})",
     () => {

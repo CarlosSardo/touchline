@@ -274,10 +274,8 @@ interface NationState {
   extraIndex: number;
   /** clubNameKey()s already used in this nation. */
   names: Set<string>;
-  /** clubNameKey()s of real clubs (catalog avoid lists). */
+  /** avoidedClubKeys() of the real clubs in the catalog avoid lists. */
   avoid: ReadonlySet<string>;
-  /** looseClubNameKey()s of the avoided names, so near-copies (AC Milano, Stade Reims) are refused too. */
-  avoidLoose: ReadonlySet<string>;
 }
 
 /**
@@ -334,6 +332,21 @@ function renderName(pattern: string, tokens: Record<string, string>) {
     .trim();
 }
 
+/** A clubNameKey() without its numbers (years, "04", the "1." of "1. FC Köln"), re-keyed so a freed club affix drops too. */
+export function numberlessClubNameKey(key: string): string {
+  return clubNameKey(key.split(" ").filter((word) => !/^\d+$/.test(word)).join(" ")) || key;
+}
+
+/** Loose keys of real clubs with and without their numbers, so "1. FSV Mainz 05" also refuses "FSV Mainz 12". */
+export function avoidedClubKeys(keys: Iterable<string>): Set<string> {
+  return new Set([...keys].flatMap((key) => [looseClubNameKey(key), looseClubNameKey(numberlessClubNameKey(key))]));
+}
+
+/** A real club, a near-copy (AC Milano) or either with a number added, dropped or swapped (FC Augsburg 36). */
+export function isAvoidedClubKey(key: string, avoided: ReadonlySet<string>): boolean {
+  return avoided.has(looseClubNameKey(key)) || avoided.has(looseClubNameKey(numberlessClubNameKey(key)));
+}
+
 /** Unique per nation, never a real club name: weighted templates, every template, the city's districts, then a year suffix. */
 function uniqueClubName(
   state: NationState,
@@ -368,7 +381,7 @@ function uniqueClubName(
   const tokens = tokensFor(token);
   const taken = (name: string) => {
     const key = clubNameKey(name);
-    return !key || state.names.has(key) || state.avoid.has(key) || state.avoidLoose.has(looseClubNameKey(key));
+    return !key || state.names.has(key) || isAvoidedClubKey(key, state.avoid);
   };
   const accept = (name: string, used = token) => {
     state.names.add(clubNameKey(name));
@@ -391,11 +404,15 @@ function uniqueClubName(
       if (name && !taken(name)) return accept(name, district);
     }
   }
-  const base = renderName(templates[0]?.pattern ?? "{city}", tokens) || token;
+  // A number never clears a real club, so the base must be clear on its own; then only uniqueness can fail.
+  const base =
+    [...templates.map((template) => renderName(template.pattern, tokens)), token, `${token} ${region}`].find(
+      (name) => name && !isAvoidedClubKey(clubNameKey(name), state.avoid),
+    ) ?? `${token} ${region}`;
   for (const suffix of [tokens.founded, tokens.founded2])
     if (!taken(`${base} ${suffix}`)) return accept(`${base} ${suffix}`);
   let counter = 2;
-  while (taken(`${base} ${counter}`)) counter++;
+  while (state.names.has(clubNameKey(`${base} ${counter}`))) counter++;
   return accept(`${base} ${counter}`);
 }
 
@@ -685,8 +702,7 @@ export function planWorld(
         extra: places.extra,
         extraIndex: 0,
         names: new Set(),
-        avoid: lookup.avoidedClubNames(nation.code),
-        avoidLoose: new Set([...lookup.avoidedClubNames(nation.code)].map(looseClubNameKey)),
+        avoid: avoidedClubKeys(lookup.avoidedClubNames(nation.code)),
       };
       states.set(nation.code, state);
     }

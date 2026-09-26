@@ -90,7 +90,7 @@ function MatchPlayerStats({
       .filter((player) => (result.players[player.id]?.minutes ?? 0) > 0)
       .map((player) => ({ ...player, performance: result.players[player.id] })),
     MATCH_STAT_COLUMNS,
-    { tieBreakers: [{ value: (row) => row.name }] },
+    { tieBreakers: [{ value: (row) => row.name }, { value: (row) => row.id }] },
   );
   return (
     <div className="table-scroll" role="region" aria-label={`${team.name} player statistics`} tabIndex={0}>

@@ -72,7 +72,7 @@ describe("table sorting", () => {
     expect(ageValue(17, null)).toEqual([17, null]);
   });
 
-  it("uses name then id as stable tie-breakers", () => {
+  it("breaks ties by name then id whatever the input order", () => {
     const rows = [
       player(4, { name: "Bruno", ability: 70 }),
       player(2, { name: "Ana", ability: 70 }),
@@ -80,6 +80,7 @@ describe("table sorting", () => {
       player(1, { name: "Carla", ability: 80 }),
     ];
     expect(sortPlayers(rows, "ability").map((entry) => entry.id)).toEqual([1, 2, 3, 4]);
+    expect(sortPlayers([...rows].reverse(), "ability").map((entry) => entry.id)).toEqual([1, 2, 3, 4]);
     expect(sortPlayers(rows, "ability", "asc").map((entry) => entry.id)).toEqual([2, 3, 4, 1]);
   });
 

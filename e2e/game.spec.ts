@@ -9,6 +9,7 @@ import {
   DEFAULT_ASSISTANT_DUTIES,
   money,
 } from "../shared/rules.ts";
+import { sortPlayers } from "../src/sort.ts";
 
 test.describe.configure({ mode: "serial" });
 
@@ -1415,14 +1416,16 @@ test("academy cohort controls filter and sort the stored roster on desktop and m
     });
     await radio.check();
     await expect(radio).toBeChecked();
-    const players = academy.players
-      .filter((player) => group === "all" || player.age_group === group)
-      .sort((first, second) => second.potential - first.potential);
+    // The UI's comparator: column default direction, then the name/id tie rule.
+    const players = sortPlayers(
+      academy.players.filter((player) => group === "all" || player.age_group === group),
+      "potential",
+    );
     await expectProspects(players, players.length);
   }
   const sort = page.getByRole("combobox", { name: "Sort academy players", exact: true });
   await sort.selectOption("name");
-  const byName = [...academy.players].sort((first, second) => first.name.localeCompare(second.name));
+  const byName = sortPlayers(academy.players, "name");
   await expectProspects(byName, academy.players.length);
   const target = byName[0];
   const position = page.getByRole("combobox", { name: "Academy position", exact: true });
@@ -1470,12 +1473,9 @@ test("academy cohort controls filter and sort the stored roster on desktop and m
   await expect(review).toHaveValue("");
   await expect(sort).toHaveValue("name");
   await expectProspects(byName, academy.players.length);
-  for (const order of ["ability", "age"]) {
+  for (const order of ["ability", "age"] as const) {
     await sort.selectOption(order);
-    const expected = [...academy.players].sort((first, second) =>
-      order === "age" ? second.age - first.age : second.ability - first.ability,
-    );
-    await expectProspects(expected, academy.players.length);
+    await expectProspects(sortPlayers(academy.players, order), academy.players.length);
   }
   await noOverflow(page);
   await page.screenshot({ path: "test-results/academy-cohort-controls-desktop.png", fullPage: true });
@@ -1526,7 +1526,7 @@ test("squad cohort controls filter readiness and sort within position groups", a
     }
   }
 
-  const byAbility = [...senior.players].sort((first, second) => second.ability - first.ability);
+  const byAbility = sortPlayers(senior.players, "ability");
   await expectSquad(byAbility, senior.players.length);
   await expect(page.getByRole("combobox", { name: "Club squad", exact: true })).toHaveValue(String(senior.selectedClubId));
   const ageGroup = page.getByRole("combobox", { name: "Squad age group", exact: true });
@@ -1534,16 +1534,13 @@ test("squad cohort controls filter readiness and sort within position groups", a
     const squad: SquadData = await (await request.get(`/api/squad?ageGroup=${group}`)).json();
     await ageGroup.selectOption(group);
     await expect(ageGroup).toHaveValue(group);
-    await expectSquad(
-      [...squad.players].sort((first, second) => second.ability - first.ability),
-      squad.players.length,
-    );
+    await expectSquad(sortPlayers(squad.players, "ability"), squad.players.length);
   }
   await ageGroup.selectOption("Senior");
   await expectSquad(byAbility, senior.players.length);
   const sort = page.getByRole("combobox", { name: "Sort squad players", exact: true });
   await sort.selectOption("name");
-  const byName = [...senior.players].sort((first, second) => first.name.localeCompare(second.name));
+  const byName = sortPlayers(senior.players, "name");
   await expectSquad(byName, senior.players.length);
   const target = byName[0];
   const position = page.getByRole("combobox", { name: "Squad position", exact: true });
@@ -1584,14 +1581,9 @@ test("squad cohort controls filter readiness and sort within position groups", a
   await expect(readiness).toHaveValue("");
   await expect(sort).toHaveValue("name");
   await expectSquad(byName, senior.players.length);
-  for (const order of ["potential", "fitness", "age"]) {
+  for (const order of ["potential", "fitness", "age"] as const) {
     await sort.selectOption(order);
-    const expected = [...senior.players].sort((first, second) =>
-      order === "age" ? first.age - second.age
-        : order === "fitness" ? second.fitness - first.fitness
-          : second.potential - first.potential,
-    );
-    await expectSquad(expected, senior.players.length);
+    await expectSquad(sortPlayers(senior.players, order), senior.players.length);
   }
   await noOverflow(page);
   await page.screenshot({ path: "test-results/squad-cohort-controls-desktop.png", fullPage: true });

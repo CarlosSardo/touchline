@@ -64,7 +64,11 @@ export function compareSortValues(
   return 0;
 }
 
-/** Returns a sorted copy. Ties use the tie-breakers in their own direction, then input order. */
+/**
+ * Returns a sorted copy. Tie rule for every table: the column's own secondary key (tuple values such
+ * as age then birth date), then the table's tie-breakers in their own direction, ending with a unique
+ * key (players: name A-Z, then id) so the result never depends on the input order.
+ */
 export function sortRows<Row>(
   rows: readonly Row[],
   column: Pick<SortColumn<Row>, "value"> | null | undefined,
@@ -136,6 +140,7 @@ export function rankOf(order: readonly string[], value: string | null | undefine
   return index < 0 ? null : index;
 }
 
+/** Every player table: name A-Z, then id, whatever the direction of the sorted column. */
 export const PLAYER_TIE_BREAKERS: SortColumn<Pick<Player, "id" | "name">>[] = [
   { key: "name", value: (player) => player.name },
   { key: "id", value: (player) => player.id },
