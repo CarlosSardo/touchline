@@ -724,7 +724,7 @@ export interface MovementInput {
 export interface Move {
   clubId: number;
   from: number;
-  /** Destination league id, or null when a B-team has no legal modeled tier (it leaves the pyramid). */
+  /** Destination league id, or null when a B-team has no legal modeled tier and its parent cannot stay up. */
   to: number | null;
   promoted: boolean;
   reason: "automatic" | "playoff" | "reserve-ceiling" | "replacement";
@@ -732,6 +732,21 @@ export interface Move {
 
 export const boundaryKey = (upper: number, index: number, conference?: number) =>
   conference === undefined ? `${upper}:${index}` : `${upper}:${index}:${conference}`;
+
+/** Moves a boundary always makes each way, plus the cross-tier ties that may add up to `cross` more. */
+export function boundaryMoves(boundary: TierBoundarySpec) {
+  const playoffs = boundary.playoffs ?? [];
+  const places = (type: "promotion" | "relegation") =>
+    playoffs.reduce((total, playoff) => total + (playoff.type === type ? playoff.places : 0), 0);
+  return {
+    up: boundary.promoted + places("promotion"),
+    down: boundary.relegated + places("relegation"),
+    cross: playoffs.reduce(
+      (total, playoff) => total + (playoff.type === "cross-tier" ? playoff.upperPositions.length : 0),
+      0,
+    ),
+  };
+}
 
 /** Ranked groups a boundary counts in: each conference when perConference applies, else the combined table. */
 const movementGroups = (tier: PyramidTier, perConference: boolean | undefined) =>
@@ -885,9 +900,11 @@ export function planBoundaries(input: Pick<MovementInput, "tiers" | "clubs">): B
 /**
  * Promotion and relegation for one national pyramid. Every boundary moves the same number of clubs each way, so
  * league sizes stay constant; closed tiers never move; B-teams stay below their parent (pushed down with a
- * replacement moving up when the parent drops onto or below them).
+ * replacement moving up when the parent drops onto or below them). With no lower modeled tier for the B-team,
+ * the parent keeps its place and the weakest promotion out of the tier it would have joined is cancelled.
+ * `shortfalls` receives, per upper league id, the places each way below the boundary's fixed moves.
  */
-export function planMovement(input: MovementInput): Move[] {
+export function planMovement(input: MovementInput, shortfalls?: Map<number, number>): Move[] {
   const { tiers, byTier } = pyramidContext(input);
   const destination = new Map<number, number>();
   const origin = new Map<number, PyramidTier>();
@@ -932,6 +949,11 @@ export function planMovement(input: MovementInput): Move[] {
     // Keep sizes constant: reprieve the best-placed relegated clubs, or cancel the weakest promotions.
     while (movingDown.length > movingUp.length) movingDown.shift();
     while (movingUp.length > movingDown.length) movingUp.pop();
+    if (upper.movementDown) {
+      const fixed = boundaryMoves(upper.movementDown);
+      const short = Math.max(fixed.up, fixed.down) - movingUp.length;
+      if (short > 0) shortfalls?.set(upper.leagueId, short);
+    }
     for (const clubId of movingUp) {
       destination.set(clubId, upper.tier);
       reason.set(clubId, viaPlayoff.has(clubId) ? "playoff" : "automatic");
@@ -963,8 +985,29 @@ export function planMovement(input: MovementInput): Move[] {
       };
       const replacement = candidates.sort((left, right) => rank(left) - rank(right))[0];
       if (!lower || replacement === undefined) {
-        leaving.add(club.clubId);
-        break;
+        const from = origin.get(reserve.parentId)?.tier;
+        const to = tierOf(reserve.parentId);
+        const promotedOut =
+          from !== undefined && to !== undefined && from < to && reserveTierAllowed(reserve, current, from)
+            ? [...destination.keys()].filter(
+                (clubId) =>
+                  origin.get(clubId)!.tier === to &&
+                  destination.get(clubId) === from &&
+                  !input.clubs.get(clubId)?.reserve,
+              )
+            : [];
+        const weakest = promotedOut.sort(
+          (left, right) => origin.get(right)!.table.indexOf(right) - origin.get(left)!.table.indexOf(left),
+        )[0];
+        if (weakest === undefined) {
+          leaving.add(club.clubId);
+          break;
+        }
+        destination.set(reserve.parentId, from!);
+        destination.set(weakest, to!);
+        const upperLeague = byTier.get(from!)!.leagueId;
+        shortfalls?.set(upperLeague, (shortfalls.get(upperLeague) ?? 0) + 1);
+        continue;
       }
       destination.set(replacement, current);
       reason.set(replacement, "replacement");

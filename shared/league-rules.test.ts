@@ -5,6 +5,7 @@ import {
   baseMatchdays,
   baseSchedule,
   boundaryKey,
+  boundaryMoves,
   createPlayoff,
   halvedPoints,
   lastStageTies,
@@ -347,7 +348,7 @@ describe("promotion and relegation", () => {
     expect(sizes(tiers, moves)).toEqual([10, 10, 10]);
   });
 
-  it("caps B-teams per tier and withdraws a B-team without a legal modeled tier", () => {
+  it("caps B-teams per tier", () => {
     const tiers = [
       tier(1, 1, ids(100, 8), { upper: 1, promoted: 1, relegated: 1 }),
       tier(2, 2, [901, ...ids(200, 6), 902], { upper: 2, promoted: 2, relegated: 2 }),
@@ -362,12 +363,62 @@ describe("promotion and relegation", () => {
     ]);
     const plans = planBoundaries({ tiers, clubs });
     expect(plans[1].promoted).toEqual([903, 300]);
+  });
+
+  it("keeps a relegated parent up when its B-team has no lower modeled tier, cancelling the weakest promotion", () => {
+    const reserve = { clubId: 905, reserve: { parentId: 103, highestTier: 2, minGapBelowParent: 1 } };
     const bottom = [tier(1, 1, ids(100, 4), { upper: 1, promoted: 1, relegated: 1 }), tier(2, 2, [905, ...ids(200, 3)], null)];
-    const moves = planMovement({
-      tiers: bottom,
-      clubs: new Map([[905, { clubId: 905, reserve: { parentId: 103, highestTier: 2, minGapBelowParent: 1 } }]]),
-    });
-    expect(moves.find((move) => move.clubId === 905)).toMatchObject({ to: null });
+    const shortfalls = new Map<number, number>();
+    const moves = planMovement({ tiers: bottom, clubs: new Map([[905, reserve]]) }, shortfalls);
+    expect(moves).toEqual([]);
+    expect(sizes(bottom, moves)).toEqual([4, 4]);
+    expect(shortfalls).toEqual(new Map([[1, 1]]));
+    // Two places each way: the other relegated club still goes down, the best promoted club still goes up.
+    const wider = [
+      tier(1, 1, ids(100, 6), { upper: 1, promoted: 2, relegated: 2 }),
+      tier(2, 2, [905, ...ids(200, 5)], null),
+    ];
+    const widerShort = new Map<number, number>();
+    const widerMoves = planMovement(
+      { tiers: wider, clubs: new Map([[905, { clubId: 905, reserve: { ...reserve.reserve, parentId: 105 } }]]) },
+      widerShort,
+    );
+    expect(widerMoves.map((move) => [move.clubId, move.to])).toEqual([[104, 2], [200, 1]]);
+    expect(sizes(wider, widerMoves)).toEqual([6, 6]);
+    expect(widerShort).toEqual(new Map([[1, 1]]));
+    // A lower modeled tier still takes the B-team down, with that tier's best non-promoted club moving up.
+    const deeper = [...wider.slice(0, 1), tier(2, 2, [905, ...ids(200, 5)], { upper: 2, promoted: 1, relegated: 1 }), tier(3, 3, ids(300, 6), null)];
+    const deeperMoves = planMovement({ tiers: deeper, clubs: new Map([[905, { clubId: 905, reserve: { ...reserve.reserve, parentId: 105 } }]]) });
+    expect(deeperMoves.find((move) => move.clubId === 905)).toMatchObject({ to: 3, reason: "reserve-ceiling" });
+    expect(deeperMoves.find((move) => move.clubId === 301)).toMatchObject({ to: 2, reason: "replacement" });
+    expect(sizes(deeper, deeperMoves)).toEqual([6, 6, 6]);
+  });
+
+  it("reports the fixed moves of a boundary and the shortfall of an unstaged play-off", () => {
+    expect(
+      boundaryMoves({
+        upper: 1,
+        promoted: 2,
+        relegated: 2,
+        playoffs: [
+          { type: "cross-tier", upperPositions: [16], lowerPositions: [3], legs: 2 },
+          { type: "promotion", positions: [3, 6], places: 1, legs: 2 },
+          { type: "relegation", positions: [15, 16], places: 1, legs: 2 },
+        ],
+      }),
+    ).toEqual({ up: 3, down: 3, cross: 1 });
+    const shortfalls = new Map<number, number>();
+    planMovement(
+      {
+        tiers: [
+          tier(1, 1, ids(100, 10), { upper: 1, promoted: 1, relegated: 2, playoffs: [{ type: "promotion", positions: [2, 5], places: 1, legs: 1 }] }),
+          tier(2, 2, [200, 201], null),
+        ],
+        clubs: new Map(),
+      },
+      shortfalls,
+    );
+    expect(shortfalls).toEqual(new Map([[1, 1]]));
   });
 
   it("reprieves relegated clubs when a play-off cannot be staged", () => {

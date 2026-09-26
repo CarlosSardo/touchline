@@ -2717,15 +2717,21 @@ export async function seasonRollover(store: Store) {
     }));
     for (let offset = 0; offset < archives.length; offset += 1000)
       await store.bulkInsert("history", archives.slice(offset, offset + 1000));
+    const shortfalls: Record<number, number> = {};
     for (const country of await store.all<Country>(
       "SELECT * FROM countries ORDER BY id",
     )) {
       const pyramid = await countryPyramid(store, country.id, oldSeason);
-      const planned = planMovement({
-        ...pyramid,
-        results: playoffResults.get(country.id),
-      });
-      // A B-team with no legal modeled tier (to === null) leaves the senior pyramid rather than share its parent's league.
+      const countryShortfalls = new Map<number, number>();
+      const planned = planMovement(
+        {
+          ...pyramid,
+          results: playoffResults.get(country.id),
+        },
+        countryShortfalls,
+      );
+      for (const [leagueId, short] of countryShortfalls) shortfalls[leagueId] = short;
+      // Only when a relegated parent cannot stay up either: the B-team leaves the senior pyramid (to === null).
       for (const move of planned.filter((item) => item.to === null)) {
         await store.run("DELETE FROM standings WHERE league_id = ? AND club_id = ?", move.from, move.clubId);
         await store.run("UPDATE clubs SET league_id = NULL WHERE id = ?", move.clubId);
@@ -2779,6 +2785,8 @@ export async function seasonRollover(store: Store) {
         country.id,
       );
     }
+    // Read by the simulation check: boundaries that moved fewer clubs than their spec, per upper league.
+    await store.setMeta("movementAudit", { season: oldSeason + 1, shortfalls });
     await store.run(
       "UPDATE standings SET played = 0, wins = 0, draws = 0, losses = 0, gf = 0, ga = 0, points = 0, xg = 0, xga = 0, xpts = 0, form = '', home_record = '0-0-0', away_record = '0-0-0', deducted = 0",
     );
