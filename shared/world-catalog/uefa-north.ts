@@ -1632,48 +1632,48 @@ const SWEDEN: NationSpec = {
 Stockholm|large|Stockholm|4|Södermalm,Kungsholmen,Östermalm,Vasastan,Bromma,Hägersten,Skärholmen,Farsta,Vällingby,Enskede,Spånga,Rinkeby
 Göteborg|large|Västra Götaland|4|Hisingen,Majorna,Gamlestaden,Lundby,Frölunda,Angered,Kortedala,Backa,Biskopsgården
 Malmö|large|Skåne|2|Limhamn,Rosengård,Husie,Kirseberg,Fosie
-Uppsala|medium|Uppsala|1
-Västerås|medium|Västmanland|1
-Örebro|medium|Örebro|1
-Linköping|medium|Östergötland|1
-Helsingborg|medium|Skåne|1
-Jönköping|medium|Småland|1
-Norrköping|medium|Östergötland|1
-Lund|small|Skåne|1
-Umeå|small|Västerbotten|1
-Gävle|small|Gävleborg|1
-Borås|small|Västra Götaland|1
-Södertälje|small|Stockholm|1
-Eskilstuna|small|Södermanland|1
-Halmstad|small|Halland|1
-Växjö|small|Småland|1
-Karlstad|small|Värmland|1
-Sundsvall|small|Västernorrland|1
-Solna|small|Stockholm|1
-Täby|small|Stockholm|1
-Östersund|small|Jämtland|1
-Trollhättan|small|Västra Götaland|1
-Luleå|small|Norrbotten|1
-Borlänge|small|Dalarna|1
-Kristianstad|small|Skåne|1
-Kalmar|small|Småland|1
-Falun|small|Dalarna|1
-Skövde|small|Västra Götaland|1
-Uddevalla|small|Västra Götaland|1
-Karlskrona|small|Blekinge|1
-Skellefteå|small|Västerbotten|1
+Uppsala|medium|Uppsala|1|Gottsunda,Sävja,Luthagen,Svartbäcken,Gränby,Eriksberg
+Västerås|medium|Västmanland|1|Råby,Bäckby,Vallby,Önsta,Viksäng
+Örebro|medium|Örebro|1|Adolfsberg,Vivalla,Brickebacken,Varberga,Almby,Hovsta
+Linköping|medium|Östergötland|1|Ryd,Skäggetorp,Lambohov,Tannefors,Ekholmen
+Helsingborg|medium|Skåne|1|Råå,Ödåkra,Drottninghög,Rydebäck,Påarp
+Jönköping|medium|Småland|1|Råslätt,Österängen,Tenhult,Bankeryd
+Norrköping|medium|Östergötland|1|Hageby,Navestad,Smedby,Eneby,Lindö
+Lund|small|Skåne|1|Norra Fäladen,Klostergården,Linero,Dalby
+Umeå|small|Västerbotten|1|Ålidhem,Teg,Holmsund,Sävar
+Gävle|small|Gävleborg|1|Sätra,Strömsbro,Bomhus,Brynnäs
+Borås|small|Västra Götaland|1|Hässleholmen,Sjöbo,Hulta,Byttorp
+Södertälje|small|Stockholm|1|Ronna,Hovsjö,Geneta,Järna
+Eskilstuna|small|Södermanland|1|Årby,Fröslunda,Skiftinge
+Halmstad|small|Halland|1|Vallås,Söndrum,Fyllinge,Oskarström
+Växjö|small|Småland|1|Teleborg,Araby,Hovshaga,Sandsbro
+Karlstad|small|Värmland|1|Våxnäs,Kronoparken,Skåre,Råtorp
+Sundsvall|small|Västernorrland|1|Skönsberg,Nacksta,Kovland
+Solna|small|Stockholm|1|Hagalund,Bergshamra
+Täby|small|Stockholm|1|Näsby,Gribbylund,Ensta
+Östersund|small|Jämtland|1|Torvalla,Lugnvik,Odenskog
+Trollhättan|small|Västra Götaland|1|Kronogården,Lextorp,Sylte
+Luleå|small|Norrbotten|1|Porsön,Hertsön,Gammelstad
+Borlänge|small|Dalarna|1|Tjärna Ängar,Domnarvet,Islingby
+Kristianstad|small|Skåne|1|Vilan,Gamlegården,Åhus
+Kalmar|small|Småland|1|Oxhagen,Funkabo,Norrliden
+Falun|small|Dalarna|1|Slätta,Hälsinggården
+Skövde|small|Västra Götaland|1|Käpplunda,Hentorp
+Uddevalla|small|Västra Götaland|1|Tureborg,Dalaberg
+Karlskrona|small|Blekinge|1|Lyckeby,Rödeby
+Skellefteå|small|Västerbotten|1|Anderstorp,Ursviken
 Landskrona|town|Skåne|1
 Trelleborg|town|Skåne|1
 Varberg|town|Halland|1
-Falkenberg|town|Halland|1
-Värnamo|town|Småland|1
-Degerfors|town|Örebro|1
+Falkenberg|town|Halland|1|Skrea,Ullared
+Värnamo|town|Småland|1|Bor,Rydaholm
+Degerfors|town|Örebro|1|Svartå,Strömtorp
 Sandviken|town|Gävleborg|1
 Sölvesborg|town|Blekinge|1
 Ängelholm|town|Skåne|1
-Hässleholm|town|Skåne|1
-Motala|town|Östergötland|1
-Nyköping|town|Södermanland|1
+Hässleholm|town|Skåne|1|Tyringe,Sjörup
+Motala|town|Östergötland|1|Borensberg,Charlottenborg
+Nyköping|town|Södermanland|1|Oppeby,Brandkärr
 Enköping|town|Uppsala|1
 Visby|town|Gotland|1
 Piteå|town|Norrbotten|1
@@ -1683,7 +1683,7 @@ Alingsås|town|Västra Götaland|1
 Kungsbacka|town|Halland|1
 Ystad|town|Skåne|1
 Åtvidaberg|town|Östergötland|1
-Oskarshamn|town|Småland|1
+Oskarshamn|town|Småland|1|Påskallavik,Kristdala
 Kiruna|town|Norrbotten|1
 Norrtälje|town|Stockholm|1
 Katrineholm|town|Södermanland|1
@@ -1755,10 +1755,14 @@ IFK {city}|3
 {city} IK|3
 {city} SK|2.5
 {city} FC|2
+{city} AIK|1.2
 FC {city}|1
 {city} AIF|1
+{city} BoIS|0.8
 GIF {city}|0.6
-{city} BoIS|0.6
+{city} GIF|0.4
+{city} Södra IF|0.3
+Syrianska {city}|0.15
 `),
       founded: { top: [1885, 1925], bottom: [1895, 2005] },
       shortName: "city",
@@ -1804,25 +1808,25 @@ const DENMARK: NationSpec = {
     major: cityRows(`
 København|large|Hovedstaden|3|Vesterbro,Nørrebro,Østerbro,Amager,Valby,Vanløse,Bispebjerg,Sundby,Nordhavn
 Aarhus|medium|Østjylland|2|Viby,Risskov,Brabrand,Højbjerg,Åbyhøj
-Odense|medium|Fyn|1
-Aalborg|medium|Nordjylland|1
-Esbjerg|small|Sydjylland|1
-Randers|small|Østjylland|1
-Kolding|small|Sydjylland|1
-Horsens|small|Østjylland|1
-Vejle|small|Sydjylland|1
-Roskilde|small|Sjælland|1
-Herning|small|Midtjylland|1
-Silkeborg|small|Midtjylland|1
-Næstved|small|Sjælland|1
-Fredericia|small|Sydjylland|1
-Viborg|small|Midtjylland|1
-Køge|small|Sjælland|1
-Holstebro|small|Midtjylland|1
-Taastrup|small|Hovedstaden|1
-Slagelse|small|Vestsjælland|1
-Hillerød|small|Nordsjælland|1
-Sønderborg|small|Sønderjylland|1
+Odense|medium|Fyn|1|Bolbro,Tarup,Hjallese,Vollsmose,Korup,Bellinge
+Aalborg|medium|Nordjylland|1|Hasseris,Gug,Svenstrup,Vestbyen,Vodskov
+Esbjerg|small|Sydjylland|1|Sædding,Tjæreborg,Guldager,Hjerting
+Randers|small|Østjylland|1|Kristrup,Dronningborg,Romalt,Paderup
+Kolding|small|Sydjylland|1|Seest,Bramdrupdam,Sønder Bjert
+Horsens|small|Østjylland|1|Stensballe,Torsted
+Vejle|small|Sydjylland|1|Bredballe,Nørremarken,Søndermarken
+Roskilde|small|Sjælland|1|Himmelev,Svogerslev,Trekroner
+Herning|small|Midtjylland|1|Gullestrup,Tjørring,Snejbjerg
+Silkeborg|small|Midtjylland|1|Virklund,Gødvad,Funder
+Næstved|small|Sjælland|1|Kalbyris,Holme-Olstrup
+Fredericia|small|Sydjylland|1|Taulov,Snoghøj
+Viborg|small|Midtjylland|1|Overlund,Arnbjerg
+Køge|small|Sjælland|1|Ølby,Ejby
+Holstebro|small|Midtjylland|1|Tvis,Mejrup
+Taastrup|small|Hovedstaden|1|Hedehusene,Sengeløse
+Slagelse|small|Vestsjælland|1|Kvislemark,Vårby
+Hillerød|small|Nordsjælland|1|Ullerød,Nødebo
+Sønderborg|small|Sønderjylland|1|Ulkebøl,Nørre Hav
 Svendborg|town|Fyn|1
 Hjørring|town|Nordjylland|1
 Holbæk|town|Vestsjælland|1
@@ -1899,11 +1903,37 @@ FC {city}|5
 {city} IF|4
 {city} Boldklub|1.5
 {city} FF|1.5
-FC {region}|1.2
-BK {city}|1
+{city} FC|1.2
 {city} IK|1
+{city} fB|0.8
 {city} GF|0.8
+BK {city}|0.6
+{city} Fodbold|0.6
+B {founded} {city}|0.5
+FC {region}|0.8
+{city} Fremad|0.3
 `),
+      // Merged regional clubs (FC Midtjylland, FC Nordsjælland) never take the administrative Capital Region's name.
+      regional: [
+        {
+          regions: ["Hovedstaden"],
+          templates: templates(`
+FC {city}|5
+{city} BK|5
+{city} IF|4
+{city} Boldklub|1.5
+{city} FF|1.5
+{city} FC|1.2
+{city} IK|1
+{city} fB|0.8
+{city} GF|0.8
+BK {city}|0.6
+{city} Fodbold|0.6
+B {founded} {city}|0.5
+{city} Fremad|0.3
+`),
+        },
+      ],
       founded: { top: [1876, 1920], bottom: [1880, 2005] },
       shortName: "city",
       colors: ["#C8102E", "#FFFFFF", "#1B458F", "#FDB913", "#000000", "#00843D", "#6CABDD"],
@@ -2494,10 +2524,10 @@ export const UEFA_NORTH_REAL_CLUB_NAMES: Readonly<Record<string, readonly string
     "Molde FK|Rosenborg BK|SK Brann|Viking FK|FK Bodø/Glimt|Tromsø IL|Lillestrøm SK|Vålerenga Fotball|Strømsgodset IF|Sarpsborg 08 FF|Fredrikstad FK|Sandefjord Fotball|Kristiansund BK|FK Haugesund|Odds BK|Stabæk Fotball|Aalesunds FK|Hamarkameratene|Bryne FK|KFUM Oslo|IK Start|Mjøndalen IF|Sogndal Fotball|Ranheim Fotball|Raufoss IL|Kongsvinger IL|Åsane Fotball|Egersunds IK|FC Lyn Oslo|Moss FK|Levanger FK|Skeid Fotball|IL Hødd|Tromsdalen UIL|Florø SK|Kjelsås Fotball|Notodden FK|FK Jerv|Alta IF|Arendal Fotball|Grorud IL|Strømmen IF|Sandnes Ulf|Nest-Sotra|Stjørdals-Blink|Hønefoss BK|Bærum SK|Asker Fotball|Brattvåg IL|Follo FK|Lørenskog IF|Eidsvold Turn|Nardo FK|Frigg Oslo FK|Ullern IF|Fana IL|Byåsen IL|Tiller IL|Strindheim IL",
   ),
   SE: list(
-    "Malmö FF|IFK Göteborg|IFK Norrköping|Kalmar FF|Västerås SK|Örebro SK|Umeå FC|Degerfors IF|Sandvikens IF|Östersunds FK|IFK Värnamo|Norrby IF|Hammarby IF|Djurgårdens IF|AIK|BK Häcken|IF Elfsborg|GAIS|Örgryte IS|IK Sirius|Halmstads BK|Helsingborgs IF|Trelleborgs FF|Falkenbergs FF|Varbergs BoIS|Landskrona BoIS|GIF Sundsvall|Utsiktens BK|IK Oddevold|IK Brage|Gefle IF|Jönköpings Södra IF|Mjällby AIF|IF Brommapojkarna|Östers IF|Åtvidabergs FF|Syrianska FC|Assyriska FF|Dalkurd FF|AFC Eskilstuna|IFK Eskilstuna|Skövde AIK|Ljungskile SK|Qviding FIF|Enköpings SK|IFK Luleå|IFK Uddevalla|IFK Malmö|IFK Hässleholm|IFK Kristianstad|IFK Timrå|Motala AIF|Karlstad BK|Västerås IK|Linköpings FC|Linköping City|Nyköpings BIS|Piteå IF|Lunds BK|Ängelholms FF|Kristianstads FF|Täby FK|Södertälje FK|Alingsås IF|Lidköpings FK|FC Trollhättan|Falu FK|Kungsbacka IF|Ystads IF|Oskarshamns AIK|Hudiksvalls FF|Karlskrona AIF",
+    "Malmö FF|IFK Göteborg|IFK Norrköping|Kalmar FF|Västerås SK|Örebro SK|Umeå FC|Degerfors IF|Sandvikens IF|Östersunds FK|IFK Värnamo|Norrby IF|Hammarby IF|Djurgårdens IF|AIK|BK Häcken|IF Elfsborg|GAIS|Örgryte IS|IK Sirius|Halmstads BK|Helsingborgs IF|Trelleborgs FF|Falkenbergs FF|Varbergs BoIS|Landskrona BoIS|GIF Sundsvall|Utsiktens BK|IK Oddevold|IK Brage|Gefle IF|Jönköpings Södra IF|Mjällby AIF|IF Brommapojkarna|Östers IF|Åtvidabergs FF|Syrianska FC|Assyriska FF|Dalkurd FF|AFC Eskilstuna|IFK Eskilstuna|Skövde AIK|Ljungskile SK|Qviding FIF|Enköpings SK|IFK Luleå|IFK Uddevalla|IFK Malmö|IFK Hässleholm|IFK Kristianstad|IFK Timrå|Motala AIF|Karlstad BK|Västerås IK|Linköpings FC|Linköping City|Nyköpings BIS|Piteå IF|Lunds BK|Ängelholms FF|Kristianstads FF|Täby FK|Södertälje FK|Alingsås IF|Lidköpings FK|FC Trollhättan|Falu FK|Kungsbacka IF|Ystads IF|Oskarshamns AIK|Hudiksvalls FF|Karlskrona AIF|FC Rosengård|Carlstad United|Hässleholms IF|Torslanda IK|Vasalunds IF|Enskede IK|Husqvarna FF|Gamla Upsala SK|IF Vesta|Upsala IF|Skiljebo SK|Rynninge IK|Karlslunds IF|BK Forward|IK Tord|IK Sleipner|IK Frej|Morön BK|Lindsdals IF|Bergnäsets AIK|Frösö IF|Nättraby GoIF|Sölvesborgs GoIF|IS Halmia|Friska Viljor FC|Syrianska Kerburan|Assyriska BK|Brynäs IF|Sandvikens AIK|Kungsbacka BI|Holmsunds IK|Åhus IF|Lyckeby GoIF|Råslätts SK|Gottsunda IK|IFK Umeå|Umeå IK|Tenhults IF|Bankeryds SK|Dalby GIF|Linero IF",
   ),
   DK: list(
-    "FC København|Brøndby IF|Aarhus GF|Odense BK|Aalborg BK|Randers FC|Vejle BK|Viborg FF|Silkeborg IF|Lyngby BK|Esbjerg fB|Hobro IK|AC Horsens|FC Nordsjælland|FC Midtjylland|SønderjyskE|FC Fredericia|Hvidovre IF|Kolding IF|HB Køge|Næstved BK|B.93|Akademisk Boldklub|Hillerød Fodbold|FC Roskilde|FC Helsingør|Fremad Amager|Vendsyssel FF|Skive IK|Nykøbing FC|Thisted FC|Holbæk B&I|Middelfart Boldklub|FC Fyn|Kolding FC|Brønshøj BK|Boldklubben Frem|Køge BK|Herfølge BK|FC Vestsjælland|Slagelse B&I|Frederiksberg Boldklub|Glostrup FK|Taastrup FC|Nørresundby FB|Brabrand IF|Viby IF|Haderslev FK|Varde IF|Svendborg fB|Aarhus Fremad|Ikast FS|Herning Fremad|Avarta|Ishøj IF|Holstebro BK|Hjørring IF|Frederikshavn fI",
+    "FC København|Brøndby IF|Aarhus GF|Odense BK|Aalborg BK|Randers FC|Vejle BK|Viborg FF|Silkeborg IF|Lyngby BK|Esbjerg fB|Hobro IK|AC Horsens|FC Nordsjælland|FC Midtjylland|SønderjyskE|FC Fredericia|Hvidovre IF|Kolding IF|HB Køge|Næstved BK|B.93|Akademisk Boldklub|Hillerød Fodbold|FC Roskilde|FC Helsingør|Fremad Amager|Vendsyssel FF|Skive IK|Nykøbing FC|Thisted FC|Holbæk B&I|Middelfart Boldklub|FC Fyn|Kolding FC|Brønshøj BK|Boldklubben Frem|Køge BK|Herfølge BK|FC Vestsjælland|Slagelse B&I|Frederiksberg Boldklub|Glostrup FK|Taastrup FC|Nørresundby FB|Brabrand IF|Viby IF|Haderslev FK|Varde IF|Svendborg fB|Aarhus Fremad|Ikast FS|Herning Fremad|Avarta|Ishøj IF|Holstebro BK|Hjørring IF|Frederikshavn fI|Dalum IF|Vejgaard B|Jerne IF|Vorup FB|Erritsø GIF|Aalborg Freja|Randers Freja|KFUM Roskilde|Odense KFUM|AB Tårnby|Fremad Valby|Fremad Amager|Nørrebro United|Kjøbenhavns Boldklub|BK Skjold|Tarup-Paarup IF|Hasseris IF|Spættrup IF|Tjæreborg IF|Kristrup BK|Seest IF|Stensballe IK|Bredballe IF|Himmelev-Veddelev BK|Gullestrup IF|Virklund IF|Taulov IF|Overlund GIF|Ølby IF|Tvis IF|Hedehusene IK|Vanløse IF|Valby BK|Amager FF|Østerbro IF|Frederiksberg IF|Sundby BK|Aarhus FF|Brabrand IF|Viby IF|Højbjerg IF|Risskov IF",
   ),
   FI: list(
     "HJK|KuPS|FC Inter Turku|FC Honka|Ilves|FC Ilves|SJK|FC Haka|VPS|IFK Mariehamn|AC Oulu|FC Oulu|FF Jaro|KTP|FC KTP|FC Lahti|RoPS|JJK|TPS|MyPa|FC Jazz|IF Gnistan|Ekenäs IF|PK-35|SalPa|KPV|TPV|FC Espoo|FC Hämeenlinna|FC Kuusankoski|FC Vaasa|FC Kiffen|Tampere United|IFK Vasa|FC Kajaani|AC Kajaani|Klubi 04|HIFK|KäPa",

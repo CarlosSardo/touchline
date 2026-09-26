@@ -1024,7 +1024,12 @@ const CO: NationSpec = {
             `Antioquia Tolima Huila Quindío Caldas Boyacá Santander Cesar Meta Magdalena Córdoba Nariño Cauca Sucre Chocó
              Casanare Cundinamarca Risaralda Atlántico Bolívar`,
           ),
-          templates: templates("Deportes {region}:0.5; Atlético {region}:0.4; Unión {region}:0.3; Real {region}:0.3; Once {region}:0.15"),
+          // Regional lists replace the national one, so they repeat its city forms next to the department forms.
+          templates: templates(
+            `Deportivo {city}:2; Atlético {city}:2; {city} FC:1.5; Club Deportivo {city}:1; Real {city}:1;
+             Independiente {city}:0.8; Unión {city}:0.8; Alianza {city}:0.4; Internacional de {city}:0.3; Leones de {city}:0.3;
+             Deportes {region}:0.5; Atlético {region}:0.4; Unión {region}:0.3; Real {region}:0.3; Once {region}:0.15`,
+          ),
         },
       ],
       founded: { top: [1912, 2012], bottom: [1950, 2019] },
