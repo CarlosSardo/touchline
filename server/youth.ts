@@ -670,8 +670,9 @@ export async function runYouthIntake(
     const needs = missingPositions(present(current), target, !bTeamOf);
     const academyClub = bTeamOf ?? club;
     for (const need of needs) {
+      // The user's prospects keep their own contracts, so an expired one leaves tonight and cannot fill a place.
       const prospect = squad(academyClub.id, "U19")
-        .filter((member) => !member.locked && member.age >= 17 && (member.position === need || (need !== "GK" && member.position !== "GK")))
+        .filter((member) => !member.locked && member.contract_end >= date && member.age >= 17 && (member.position === need || (need !== "GK" && member.position !== "GK")))
         .sort((left, right) => (right.position === need ? 1 : 0) - (left.position === need ? 1 : 0) || keepScore(right) - keepScore(left))[0];
       if (prospect && (!userClubs.has(academyClub.id) || !bTeamOf)) {
         detach(prospect);
