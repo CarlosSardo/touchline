@@ -257,7 +257,7 @@ export async function verifyWorld(
   const bTeamIds = clubs.filter((club) => club.type === "bteam").map((club) => club.id);
   if (bTeamIds.length) {
     const ages = await store.all<{ club_id: number; age: number }>(
-      "SELECT club_id, age FROM players WHERE club_id IN (SELECT id FROM clubs WHERE type = 'bteam')",
+      "SELECT coalesce(squad_club_id, club_id) AS club_id, age FROM players WHERE coalesce(squad_club_id, club_id) IN (SELECT id FROM clubs WHERE type = 'bteam')",
     );
     for (const club of clubs.filter((entry) => entry.type === "bteam")) {
       const rule = (clubData.get(club.id)!.reservePolicy as ReservePolicySpec | undefined)?.ageRule;

@@ -24,13 +24,13 @@ import {
 import {
   CATALOG_VERSION,
   assertValidCatalog,
+  clubCoreKey,
   clubKey,
   clubNameKey,
   hasOwnLeague,
   hostedClubKey,
   isClubNation,
   leagueKey,
-  looseClubNameKey,
   reserveClubKey,
   reserveLeagueKey,
   tierMatchdays,
@@ -139,6 +139,20 @@ const STADIUM_FORMS: Record<string, string[]> = {
   de: ["Stadion {city}", "{city} Arena", "Sportpark {city}"],
   nl: ["Stadion {city}", "Sportpark {city}"],
   tr: ["{city} Stadyumu"],
+};
+// Identity words a city falls back on when its catalog templates all name real clubs (Granada, Stoke), so it keeps a
+// realistic club name instead of a region or year suffix.
+const DISTINCT_FORMS: Record<string, string[]> = {
+  en: ["{city} Harriers", "{city} Corinthians", "{city} Swifts", "{city} Victoria", "{city} Rangers"],
+  es: ["Juventud {city}", "Arenas {of} {city}", "Estrella {of} {city}"],
+  pt: ["Juventude {of} {city}", "Estrela {of} {city}", "Operário {of} {city}"],
+  fr: ["Étoile {city}", "Avenir {city}", "Espoir {city}"],
+  it: ["Libertas {city}", "Aurora {city}", "Fulgor {city}"],
+  de: ["Grün-Weiß {city}", "Blau-Weiß {city}", "Schwarz-Weiß {city}"],
+  nl: ["Blauw-Wit {city}", "Quick {city}", "Velocitas {city}"],
+  tr: ["{city} Gençlikspor", "{city} İdmanyurdu", "{city} Gücü"],
+  ar: ["Nahda {city}", "Amal {city}", "Najma {city}"],
+  ...Object.fromEntries(["sr", "cnr", "hr", "bs", "sl", "mk"].map((code) => [code, ["Mladost {city}", "Polet {city}", "Omladinac {city}"]])),
 };
 
 const integer = (random: Rng, min: number, max: number) =>
@@ -269,13 +283,17 @@ interface CityState {
 interface NationState {
   nation: NationSpec;
   random: Rng;
+  /** Club-name draws only, so refused names never shift cities, tiers or economics. */
+  nameRandom: Rng;
   cities: CityState[];
   extra: Place[];
   extraIndex: number;
   /** clubNameKey()s already used in this nation. */
   names: Set<string>;
-  /** avoidedClubKeys() of the real clubs in the catalog avoid lists. */
-  avoid: ReadonlySet<string>;
+  /** lookup.copiesRealClub() for this nation. */
+  copiesRealClub: (name: string) => boolean;
+  /** Unlisted towns already lent to a club of a city whose own forms are real clubs. */
+  lent: Set<string>;
 }
 
 /**
@@ -332,22 +350,17 @@ function renderName(pattern: string, tokens: Record<string, string>) {
     .trim();
 }
 
-/** A clubNameKey() without its numbers (years, "04", the "1." of "1. FC Köln"), re-keyed so a freed club affix drops too. */
-export function numberlessClubNameKey(key: string): string {
-  return clubNameKey(key.split(" ").filter((word) => !/^\d+$/.test(word)).join(" ")) || key;
-}
-
-/** Loose keys of real clubs with and without their numbers, so "1. FSV Mainz 05" also refuses "FSV Mainz 12". */
+/** clubCoreKey()s of real clubs, so another club-type word or number (CD for FC, Calcio for AS, FC Augsburg 36) is refused. */
 export function avoidedClubKeys(keys: Iterable<string>): Set<string> {
-  return new Set([...keys].flatMap((key) => [looseClubNameKey(key), looseClubNameKey(numberlessClubNameKey(key))]));
+  return new Set([...keys].map((key) => clubCoreKey(key)));
 }
 
-/** A real club, a near-copy (AC Milano) or either with a number added, dropped or swapped (FC Augsburg 36). */
+/** A real club under another prefix, suffix, number or word ending (SV Utrecht, Roma Calcio, AC Milano 1899). */
 export function isAvoidedClubKey(key: string, avoided: ReadonlySet<string>): boolean {
-  return avoided.has(looseClubNameKey(key)) || avoided.has(looseClubNameKey(numberlessClubNameKey(key)));
+  return avoided.has(clubCoreKey(key));
 }
 
-/** Unique per nation, never a real club name: weighted templates, every template, the city's districts, then a year suffix. */
+/** Unique per nation, never a real club: weighted templates, all templates and identity words, districts, a nearby town, then a year. */
 function uniqueClubName(
   state: NationState,
   naming: ClubNamingSpec,
@@ -381,7 +394,7 @@ function uniqueClubName(
   const tokens = tokensFor(token);
   const taken = (name: string) => {
     const key = clubNameKey(name);
-    return !key || state.names.has(key) || isAvoidedClubKey(key, state.avoid);
+    return !key || state.names.has(key) || state.copiesRealClub(name);
   };
   const accept = (name: string, used = token) => {
     state.names.add(clubNameKey(name));
@@ -389,11 +402,16 @@ function uniqueClubName(
   };
   const weights = templates.map((template) => template.weight);
   for (let attempt = 0; attempt < templates.length * 3; attempt++) {
-    const name = renderName(templates[weightedIndex(weights, state.random())].pattern, tokens);
+    const name = renderName(templates[weightedIndex(weights, state.nameRandom())].pattern, tokens);
     if (name && !taken(name)) return accept(name);
   }
-  for (const template of templates) {
-    const name = renderName(template.pattern, tokens);
+  // In random order, so a city whose usual forms are real clubs spreads over the rarer templates and identity words.
+  const patterns = shuffle(state.nameRandom, [
+    ...templates.map((template) => template.pattern),
+    ...(DISTINCT_FORMS[state.nation.languages[0]?.code ?? ""] ?? []),
+  ]);
+  for (const pattern of patterns) {
+    const name = renderName(pattern, tokens);
     if (name && !taken(name)) return accept(name);
   }
   while (city?.districts.length) {
@@ -404,10 +422,23 @@ function uniqueClubName(
       if (name && !taken(name)) return accept(name, district);
     }
   }
+  // Every form of the city is a real club (Ipswich, Valencia): name the club after a town of its region, like a district.
+  for (let index = state.extra.length - 1; index >= state.extraIndex; index--) {
+    const place = state.extra[index];
+    if (place.region !== region || state.lent.has(place.name)) continue;
+    for (const template of templates) {
+      if (/\{(cityAdj|demonym)\}/.test(template.pattern)) continue;
+      const name = renderName(template.pattern, tokensFor(place.name));
+      if (name && !taken(name)) {
+        state.lent.add(place.name);
+        return accept(name, place.name);
+      }
+    }
+  }
   // A number never clears a real club, so the base must be clear on its own; then only uniqueness can fail.
   const base =
     [...templates.map((template) => renderName(template.pattern, tokens)), token, `${token} ${region}`].find(
-      (name) => name && !isAvoidedClubKey(clubNameKey(name), state.avoid),
+      (name) => name && !state.copiesRealClub(name),
     ) ?? `${token} ${region}`;
   for (const suffix of [tokens.founded, tokens.founded2])
     if (!taken(`${base} ${suffix}`)) return accept(`${base} ${suffix}`);
@@ -691,6 +722,7 @@ export function planWorld(
       state = {
         nation,
         random: seedrandom(`touchline-world:v${WORLD_VERSION}:${CATALOG_VERSION}:${nation.code}`),
+        nameRandom: seedrandom(`touchline-world:v${WORLD_VERSION}:${CATALOG_VERSION}:${nation.code}:names`),
         cities: nation.cities.major.map((spec, index) => ({
           spec,
           place: places.curated[index] ?? { name: spec.name, region: spec.region, size: spec.size },
@@ -703,7 +735,8 @@ export function planWorld(
         extra: places.extra,
         extraIndex: 0,
         names: new Set(),
-        avoid: avoidedClubKeys(lookup.avoidedClubNames(nation.code)),
+        copiesRealClub: (name) => lookup.copiesRealClub(nation.code, name),
+        lent: new Set(),
       };
       states.set(nation.code, state);
     }

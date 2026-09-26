@@ -61,6 +61,8 @@ export interface CatalogLookup {
   isSuspended(code: string, scope: "club" | "national"): boolean;
   /** clubNameKey()s of real clubs the generator must not reproduce for this nation. */
   avoidedClubNames(code: string): ReadonlySet<string>;
+  /** True when `name` has the identity core of one of this nation's real clubs (CD Valencia, Roma Calcio, SV Utrecht). */
+  copiesRealClub(code: string, name: string): boolean;
 }
 
 const CLUB_AFFIX = "(?:a?fc|cf|sc|ac|fk|sk|if|ff|bk|ik)";
@@ -80,14 +82,60 @@ export function clubNameKey(name: string): string {
   return bare || words;
 }
 
-const CONNECTORS = new Set(["de", "da", "do", "das", "dos", "di", "del", "della", "du", "des", "la", "le", "el", "the", "of"]);
-/** Near-copy key of a clubNameKey: connectors dropped, a final "o" trimmed (AC Milano ~ AC Milan, Stade Reims ~ Stade de Reims). */
-export function looseClubNameKey(key: string): string {
-  return key
+const CONNECTORS = ["de", "da", "do", "das", "dos", "di", "del", "della", "du", "des", "la", "le", "el", "the", "of"];
+const CORE_CONNECTORS = new Set([...CONNECTORS, "al", "las", "los", "les", "lo", "il", "den", "het", "der", "am", "an", "im", "and", "et", "und", "upon", "on", "sur", "en"]);
+// Words that name the kind of club, not the club: legal forms and their initials, club/sport/football/royal/union in
+// the catalog languages, sports societies (Dinamo, Lokomotiv, Borussia) and the English town suffixes.
+const GENERIC_CLUB_WORDS = new Set(
+  [
+    "ac acd acf acs ad ae afc aif aik aj ak ao as asc asd asv bfc bk bsc bv ca cd cdf ce cf cfc cp cpd cr crb cs csd csm css",
+    "ea ec es ess esv fa fb fbc fc fcv fk ff fsv fv gd gf gfc gif gks hnk ib if ifk ik il is jk js kaa kf kfc kks krc ks ksc",
+    "kse ksv kv kvc lks mc mfc mfk mks mte nk ofk ogc oks pfc ps rc rcd rfc rkc rks rsc sad sc sco sd se sfc sg sk sks sl sm",
+    "sp spvgg ss ssc ssd ssv sv te tj ts tsg tsv tus ud ue umf us usd usm usv vfb vfl vfr vsc vse vv wks",
+    "club clube clubul klub kulubu nadi sport sports sportif sportive sportiva sportivo sportiv sportowy sportski sportclub",
+    "sportklub sportverein sportfreunde deportivo deportiva deportes deportiu desportivo desportiva esporte esportivo",
+    "esportiva esportiu polideportivo athletic athletico atletico atletica atletic athletik football futbol futebol fussball",
+    "voetbal fotball fotboll fodbold fotbal futbal fudbal fudbalski nogomet nogometni labdarugo pilkarski calcio balompie",
+    "foot soccer real royal royale reale koninklijke sporting racing olympique olympic olympia olimpija olimpik stade union",
+    "unione uniao unio unia associazione associacao asociacion association asociatia societa sociedad sociedade societe",
+    "grupo entente social spor belediye buyuksehir",
+    "dinamo dynamo spartak lokomotiv lokomotiva lokomotive locomotive torpedo cska metallurg metalurh metalurg khimik",
+    "chemik shakhtar shakhter banik rudar gornik banyasz zeljeznicar radnik radnicki traktor energetik neftchi stal dukla",
+    "sokol slavia slovan sloga jedinstvo buducnost sloboda borac iskra hutnik borussia eintracht fortuna viktoria kickers",
+    "alemannia germania teutonia preussen arminia concordia wacker",
+    "united city town county borough rovers wanderers albion",
+  ].join(" ").split(" "),
+);
+const looseWord = (word: string) => {
+  const singular = word.length >= 6 ? word.replace(/s$/, "") : word;
+  return singular.length >= 5 ? singular.replace(/o$/, "") : singular;
+};
+
+/**
+ * Identity core of a club name: generic club words, numbers, initials and connectors dropped, a glued Turkish "spor"
+ * split off, endings loosened (Milano ~ Milan, Helsingborgs ~ Helsingborg), words sorted, so CD Valencia ~ Valencia CF,
+ * Roma Calcio ~ AS Roma, 1. FC Stuttgart ~ VfB Stuttgart. `aliases` maps a city demonym to the city (rennais → rennes).
+ * A name made only of generic words keeps them (Athletic Club, Racing Club).
+ */
+export function clubCoreKey(name: string, aliases?: ReadonlyMap<string, string>): string {
+  const words = clubNameKey(name)
     .split(" ")
-    .filter((word) => !CONNECTORS.has(word))
-    .map((word) => (word.length >= 5 ? word.replace(/o$/, "") : word))
-    .join(" ");
+    .flatMap((word) => (aliases?.get(word) ?? word).split(" "))
+    .map((word) => (word.length > 6 && word.endsWith("spor") ? word.slice(0, -4) : word))
+    .filter((word) => word.length > 1 && !/^\d+$/.test(word) && !CORE_CONNECTORS.has(word));
+  const core = words.filter((word) => !GENERIC_CLUB_WORDS.has(word));
+  return (core.length ? core : words).map(looseWord).sort().join(" ");
+}
+
+/** Single-word city demonyms and adjectives of a nation's curated cities, keyed like clubNameKey(). */
+function clubNameAliases(nation: NationSpec | undefined): Map<string, string> {
+  const aliases = new Map<string, string>();
+  for (const city of nation?.cities.major ?? [])
+    for (const form of [city.demonym, city.adjective]) {
+      const key = form ? clubNameKey(form) : "";
+      if (key && !key.includes(" ")) aliases.set(key, clubNameKey(city.name));
+    }
+  return aliases;
 }
 
 export function catalogLookup(catalog: WorldCatalog): CatalogLookup {
@@ -101,8 +149,20 @@ export function catalogLookup(catalog: WorldCatalog): CatalogLookup {
       fileNames.set(code, [...(fileNames.get(code) ?? []), ...names]);
   }
   const avoided = new Map<string, ReadonlySet<string>>();
+  const realCores = new Map<string, { aliases: Map<string, string>; cores: Set<string> }>();
   const citizenshipGroup = (code: string): string =>
     nationIndex.get(code)?.nationality.citizenship.group ?? code;
+  const avoidedClubNames = (code: string): ReadonlySet<string> => {
+    let keys = avoided.get(code);
+    if (!keys) {
+      const names = [
+        ...(nationIndex.get(code)?.football?.clubNaming.avoid ?? []),
+        ...(fileNames.get(code) ?? []),
+      ];
+      avoided.set(code, (keys = new Set(names.map(clubNameKey).filter(Boolean))));
+    }
+    return keys;
+  };
   return {
     catalog,
     allNations: () => [...nationIndex.values()],
@@ -137,16 +197,15 @@ export function catalogLookup(catalog: WorldCatalog): CatalogLookup {
       [...codes].some((code) => nationIndex.get(code)?.euEea === true),
     isSuspended: (code, scope) =>
       Boolean(nationIndex.get(code)?.suspended?.[scope]),
-    avoidedClubNames(code) {
-      let keys = avoided.get(code);
-      if (!keys) {
-        const names = [
-          ...(nationIndex.get(code)?.football?.clubNaming.avoid ?? []),
-          ...(fileNames.get(code) ?? []),
-        ];
-        avoided.set(code, (keys = new Set(names.map(clubNameKey).filter(Boolean))));
+    avoidedClubNames,
+    copiesRealClub(code, name) {
+      let real = realCores.get(code);
+      if (!real) {
+        const aliases = clubNameAliases(nationIndex.get(code));
+        const cores = new Set([...avoidedClubNames(code)].map((key) => clubCoreKey(key, aliases)));
+        realCores.set(code, (real = { aliases, cores }));
       }
-      return keys;
+      return real.cores.has(clubCoreKey(name, real.aliases));
     },
   };
 }
