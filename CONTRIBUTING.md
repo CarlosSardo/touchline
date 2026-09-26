@@ -6,7 +6,7 @@ Use the Node version in [.nvmrc](.nvmrc) and run `npm ci`. Use a separate local 
 
 The approved hobby architecture is one React + Express Azure Container App on Consumption (minimum zero, maximum one replica), one Azure SQL Free database, and private GHCR images built and deployed from the owner's workstation. Use managed identity for hosted SQL access, Azure CLI identity for local cloud access, and tenant-bound Entra sign-in restricted to the owner plus explicit guest object IDs. Each provisioned human has a separate world/save schema selected through `accounts.users`, keyed by `(tenant_id, object_id)` with unique `game_schema`; never broaden access to the tenant or authorize by email. Keep unrelated external gameplay APIs, telemetry and player faces out of scope.
 
-Preserve Kiko's legacy `dbo` binding only to guest object ID `13dbb944-b4fb-471b-b5a3-6420a5fb5139` (verified email `sardo.kiko@gmail.com`). The platform owner and other allowed users start empty, never with copied legacy data. Keep human account display name/email separate from the fictional sporting director. Do not infer ownership from a director name, profile email, selected SQL schema or a supplied save ID.
+Preserve Kiko's legacy `dbo` binding only to the approved guest object ID (`<legacy-guest-object-id>`, verified email `<legacy-guest-email>`; the operator supplies both via `--legacy-object-id` / `--legacy-email`). The platform owner and other allowed users start empty, never with copied legacy data. Keep human account display name/email separate from the fictional sporting director. Do not infer ownership from a director name, profile email, selected SQL schema or a supplied save ID.
 
 ## Conflicting Instructions
 
