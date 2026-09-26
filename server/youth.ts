@@ -856,7 +856,10 @@ export async function runYouthIntake(
           continue;
         }
         const pool = surplus.get(`${registrations.get(club.id)!.association}:${group}`) ?? [];
-        const index = pool.findIndex((member) => member.club_id !== club.id && (member.position === need || (need !== "GK" && member.position !== "GK")));
+        const index = pool.findIndex((member) =>
+          member.club_id !== club.id &&
+          (member.position === need || (need !== "GK" && member.position !== "GK")) &&
+          minorMayJoin(member, undefined, nationalitiesOf(member), registrations.get(club.id)!, people, date));
         if (index >= 0) {
           const [member] = pool.splice(index, 1);
           transfers.push({ id: member.id, from: member.club_id, to: club.id });
@@ -1026,6 +1029,27 @@ function legalizeMinor(row: PlayerRow, club: ClubRow, registration: ClubRegistra
   row.profile = JSON.stringify(profile);
 }
 
+/**
+ * A minor moved by the rollover must be lawfully present at the new club without the move history, as the soak
+ * checks: one registration association is not enough (a Derry youth, FAI-registered, at a Republic club).
+ */
+function minorMayJoin(
+  member: Member,
+  profile: PlayerProfile | undefined,
+  nationalities: readonly string[],
+  registration: ClubRegistration,
+  people: PeopleContext,
+  date: string,
+) {
+  if (member.age >= 18) return true;
+  const family = profile ?? {
+    identity: { birthCountryId: member.birth_country_id ?? undefined },
+    ...(member.family_move ? { familyMove: JSON.parse(member.family_move) as PlayerProfile["familyMove"] } : {}),
+  };
+  const residence = familyResidence(family, member.birth_date, date, (id) => people.byId.get(id)?.code);
+  return minorPresenceLegal({ age: member.age, nationalities, destination: registration, residence });
+}
+
 /** Registration check for automatic squad top-ups: Article 19 for minors, FA endorsement proxy for adults (quotas: `take`). */
 function canJoin(
   candidate: Available,
@@ -1036,15 +1060,7 @@ function canJoin(
 ) {
   const source = people.byId.get(candidate.association)?.code;
   const sameAssociation = source === registration.association || source === registration.home;
-  // The same association is not enough for a minor (a Derry youth, FAI-registered, at a Republic club): he must be lawfully present too.
-  if (candidate.age < 18) {
-    const family = candidate.profile ?? {
-      identity: { birthCountryId: candidate.birth_country_id ?? undefined },
-      ...(candidate.family_move ? { familyMove: JSON.parse(candidate.family_move) as PlayerProfile["familyMove"] } : {}),
-    };
-    const residence = familyResidence(family, candidate.birth_date, date, (id) => people.byId.get(id)?.code);
-    if (!minorPresenceLegal({ age: candidate.age, nationalities: candidate.nationalities, destination: registration, residence })) return false;
-  }
+  if (!minorMayJoin(candidate, candidate.profile, candidate.nationalities, registration, people, date)) return false;
   if (!candidate.profile) return sameAssociation;
   if (candidate.age < 18) {
     const route = minorRoute({
