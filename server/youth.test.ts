@@ -271,7 +271,14 @@ function projectPopulation(seed: string, seasonCount: number) {
     let left = 0;
     for (let week = 1; week <= 44; week++) {
       for (const id of crisis) {
-        const youth = people.filter((person) => person.club === id && person.group !== "Senior" && person.age >= 16).sort((a, b) => b.ability - a.ability)[0];
+        // Only a youth his squad can spare (the minimum and two goalkeepers stay).
+        const youth = people
+          .filter((person) => person.club === id && person.group !== "Senior" && person.age >= 16)
+          .sort((a, b) => b.ability - a.ability)
+          .find((person) => {
+            const mates = squad(id, person.group);
+            return mates.length > IN_SEASON_MINIMUM && (person.position !== "GK" || keepers(mates) > 2);
+          });
         if (youth && week >= 10 && week < 30) youth.group = "Senior";
       }
       if (week === 9 || week === 31)

@@ -44,11 +44,11 @@ import {
   weeklyOperatingCosts,
 } from "./finance.ts";
 import { personName } from "./people.ts";
-import { maintainSquads, runYouthIntake, signClublessPlayers } from "./youth.ts";
+import { maintainSquads, runYouthIntake, signClublessPlayers, youthBirthCutoff } from "./youth.ts";
 import { developBody } from "./growth.ts";
 import { nationByCode } from "../shared/world-catalog/index.ts";
 import { marketValueFactor } from "../shared/world-catalog/market.ts";
-import { SQUAD_MINIMUMS } from "../shared/world-rules.ts";
+import { MIN_GOALKEEPERS, SQUAD_MINIMUMS } from "../shared/world-rules.ts";
 import {
   clubOf,
   closeNegotiation,
@@ -2124,19 +2124,47 @@ async function weeklyStaffAndPolitics(store: Store, random: seedrandom.PRNG) {
       );
     }
   }
-  for (const troubled of await store.all<Club>(
+  const troubledClubs = await store.all<Club>(
     "SELECT TOP (100) * FROM clubs WHERE type = 'club' AND crisis > 60 AND id != ? ORDER BY id",
     state.clubId,
-  )) {
-    const youth = await store.get<Player>(
-      "SELECT TOP (1) * FROM players WHERE club_id = ? AND age_group != 'Senior' AND age >= 16 ORDER BY ability DESC,id",
-      troubled.id,
+  );
+  if (troubledClubs.length) {
+    // Only a youth his squad can spare: the weekly squad check refills youth squads to the minimum, not above it.
+    const ids = JSON.stringify(troubledClubs.map((troubled) => troubled.id));
+    const squads = new Map(
+      (
+        await store.all<{ club_id: number; age_group: string; players: number; keepers: number }>(
+          "SELECT coalesce(squad_club_id,club_id) AS club_id,age_group,count(*) AS players,sum(CASE WHEN position = 'GK' THEN 1 ELSE 0 END) AS keepers FROM players WHERE coalesce(squad_club_id,club_id) IN (SELECT CAST([value] AS int) FROM OPENJSON(?)) AND club_id IS NOT NULL AND age_group IN ('U17','U19') AND role != 'Retired' AND (contract_end >= ? OR parent_club_id IS NOT NULL) AND birth_date >= CASE age_group WHEN 'U17' THEN ? ELSE ? END GROUP BY coalesce(squad_club_id,club_id),age_group",
+          ids,
+          state.date,
+          youthBirthCutoff("U17", state.season),
+          youthBirthCutoff("U19", state.season),
+        )
+      ).map((row) => [`${row.club_id}:${row.age_group}`, row]),
     );
-    if (youth)
+    const candidates = await store.all<{ id: number; club_id: number; squad_club_id: number | null; age_group: string; position: string }>(
+      "SELECT id,club_id,squad_club_id,age_group,position FROM players WHERE club_id IN (SELECT CAST([value] AS int) FROM OPENJSON(?)) AND age_group != 'Senior' AND age >= 16 ORDER BY club_id,ability DESC,id",
+      ids,
+    );
+    const squadOf = (player: (typeof candidates)[number]) => squads.get(`${player.squad_club_id ?? player.club_id}:${player.age_group}`);
+    for (const troubled of troubledClubs) {
+      const youth = candidates.find((player) => {
+        const squad = player.club_id === troubled.id ? squadOf(player) : undefined;
+        return (
+          !!squad &&
+          squad.players > SQUAD_MINIMUMS[player.age_group as "U17" | "U19"] &&
+          (player.position !== "GK" || squad.keepers > MIN_GOALKEEPERS)
+        );
+      });
+      if (!youth) continue;
+      const squad = squadOf(youth)!;
+      squad.players--;
+      if (youth.position === "GK") squad.keepers--;
       await store.run(
         "UPDATE players SET age_group = 'Senior', role = 'Prospect', morale = LEAST(99,morale + 5) WHERE id = ?",
         youth.id,
       );
+    }
   }
   if (
     club.crisis > 50 &&
