@@ -622,6 +622,7 @@ export interface SquadData {
 }
 export interface LoanDesk {
   loans: Loan[];
+  loanOffers: Negotiation[];
   partnerships: {
     id: number;
     partner_id: number;

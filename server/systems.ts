@@ -22,6 +22,7 @@ import {
   publishPressReaction,
   publishTransferStory,
 } from "./media.ts";
+import { startOnwardLoan } from "./affiliates.ts";
 import {
   addDays,
   addMonths,
@@ -33,10 +34,16 @@ import {
   daysBetween,
   DEFAULT_TRANSFER_TERMS,
   label,
+  LOAN_BACK_LABELS,
+  loanBackBuyerCeilingPenalty,
+  loanBackEndDate,
+  loanBackSellerFloorDiscount,
+  loanBackValidationIssue,
   loanScore,
   LOAN_TYPES,
   money,
   PARTNERSHIP_TYPES,
+  preContractValidationIssue,
   round,
   tacticalFit,
   transferPaymentPlan,
@@ -47,6 +54,7 @@ import type {
   BuyBackClause,
   GameState,
   Loan,
+  LoanBackOption,
   LoanTerms,
   Negotiation,
   NegotiationData,
@@ -76,6 +84,7 @@ export const transferTermsSchema = z
     buyBackFee: z.number().finite().min(0).max(1_000_000_000),
     buyBackYears: z.number().int().min(1).max(5),
     sellOnPercent: z.number().min(0).max(50),
+    loanBack: z.enum(["none", "season", "year", "two-seasons"]).optional(),
   })
   .refine(
     (terms) =>
@@ -92,8 +101,13 @@ export const transferTermsSchema = z
 function checkedTransferTerms(terms: TransferTerms | undefined) {
   const parsed = transferTermsSchema.safeParse(terms ?? DEFAULT_TRANSFER_TERMS);
   if (!parsed.success) throw new GameError(parsed.error.issues[0].message);
-  return parsed.data;
+  return parsed.data as TransferTerms;
 }
+
+const loanBackSummary = (terms: TransferTerms) =>
+  terms.loanBack && terms.loanBack !== "none"
+    ? ` including ${LOAN_BACK_LABELS[terms.loanBack].toLowerCase()}`
+    : "";
 
 export const stateOf = async (store: Store) =>
   await store.meta<GameState>("state");
@@ -659,6 +673,8 @@ export function loanTermsIssue(
   const optionFloor = minimumOptionFee(pricing.type, pricing.value);
   if (optionFloor && terms.optionFee < optionFloor)
     return `The parent club will not agree a purchase clause below ${money(optionFloor)}.`;
+  if (optionFloor && terms.optionFee > pricing.value * 3)
+    return `The purchase clause cannot exceed ${money(Math.round(pricing.value * 3))}.`;
   const bonusCap = maxLoanBonus(pricing.value, pricing.days, terms.mandatoryMinutes);
   if (terms.bonus > bonusCap)
     return bonusCap
@@ -690,8 +706,63 @@ async function isInternationalMove(store: Store, from: Club, to: Club) {
   return (await registrationAssociationId(store, from)) !== (await registrationAssociationId(store, to));
 }
 
+async function registrationAssociationCode(store: Store, club: Club) {
+  const id = await registrationAssociationId(store, club);
+  return (await store.get<{ code: string }>("SELECT code FROM countries WHERE id = ?", id))?.code ?? String(id);
+}
+
+function nextRegistrationWindowDate(date: string) {
+  let cursor = date;
+  for (let days = 0; days < 370; days++) {
+    if (transferWindow(cursor)) return cursor;
+    cursor = addDays(cursor, 1);
+  }
+  return date;
+}
+
+async function transferTermsIssue(
+  store: Store,
+  {
+    terms,
+    type,
+    date,
+    player,
+    buyer,
+    seller,
+    contractEnd,
+    onwardLoan,
+  }: {
+    terms: TransferTerms;
+    type: string;
+    date: string;
+    player: Player;
+    buyer: Club;
+    seller: Club | null;
+    contractEnd: string;
+    onwardLoan?: boolean;
+  },
+) {
+  if (!seller) return null;
+  const international = await isInternationalMove(store, seller, buyer);
+  const issue = loanBackValidationIssue({
+    loanBack: terms.loanBack,
+    type,
+    date,
+    contractEnd,
+    international,
+    age: ageOn(player.birth_date, date),
+    onwardLoan,
+  });
+  if (issue) return issue;
+  if (international && terms.loanBack && terms.loanBack !== "none") {
+    const limit = await internationalLoanIssue(store, player, buyer, seller, date);
+    if (limit) return limit;
+  }
+  return null;
+}
+
 /** The FIFA international loan limit a new loan of `player` from `parent` to `borrower` would breach, or null. */
-async function internationalLoanIssue(store: Store, player: Player, parent: Club, borrower: Club, date: string) {
+export async function internationalLoanIssue(store: Store, player: Player, parent: Club, borrower: Club, date: string) {
   const profile = JSON.parse(player.profile) as PlayerProfile;
   if (ageOn(player.birth_date, date) < 22 || profile.contract?.trainingClubId === parent.id) return null;
   const loans = await store.all<{ parent_id: number; destination_id: number; birth_date: string; profile: string }>(
@@ -726,7 +797,7 @@ async function internationalLoanIssue(store: Store, player: Player, parent: Club
   return null;
 }
 
-function loanEndDate(type: string, date: string, duration: number) {
+export function loanEndDate(type: string, date: string, duration: number) {
   if (type === "Short loan") return addDays(date, 182);
   if (type === "Emergency loan") return addDays(date, 90);
   const seasonEndYear =
@@ -1084,6 +1155,7 @@ export async function enquire(
   const renewal = type === "Contract renewal";
   const youthApproach = type === "Youth approach";
   const future = type === "Future transfer";
+  const preContract = type === "Pre-contract agreement";
   if (
     future &&
     (ageOn(player.birth_date, state.date) < 14 ||
@@ -1105,6 +1177,22 @@ export async function enquire(
     throw new GameError("Use a contract renewal for your own player.");
   if (renewal && player.club_id !== state.clubId)
     throw new GameError("You cannot renew another club's player.");
+  let preContractArrival: string | undefined;
+  if (preContract) {
+    if (!sellingClub)
+      throw new GameError("Free agents can be signed directly without a pre-contract.");
+    const arrival = nextRegistrationWindowDate(addDays(player.contract_end, 1));
+    const issue = preContractValidationIssue({
+      date: state.date,
+      contractEnd: player.contract_end,
+      ageAtArrival: ageOn(player.birth_date, arrival),
+      sourceAssociation: await registrationAssociationCode(store, sellingClub),
+      destinationAssociation: await registrationAssociationCode(store, buyingClub),
+      onLoan: !!player.parent_club_id,
+    });
+    if (issue) throw new GameError(issue);
+    preContractArrival = arrival;
+  }
   const existing = await store.get<Negotiation>(
     "SELECT * FROM negotiations WHERE player_id = ? AND stage NOT IN ('Completed','Withdrawn','Rejected','Expired','Hijacked')",
     player.id,
@@ -1121,7 +1209,7 @@ export async function enquire(
     );
   if (loan && player.age < 16)
     throw new GameError("Players must be at least 16 for a domestic loan.");
-  if (!renewal && !future && !youth.eligibleToApply)
+  if (!renewal && !future && !preContract && !youth.eligibleToApply)
     throw new GameError(youth.reasons.join(" "));
   if (
     type === "Cross-border loan" &&
@@ -1196,7 +1284,7 @@ export async function enquire(
     );
   }
   const asking =
-    renewal || youthApproach || !sellingClub
+    renewal || youthApproach || preContract || !sellingClub
       ? 0
       : loan
         ? terms.fee
@@ -1213,6 +1301,12 @@ export async function enquire(
           guardianConsent,
         }
       : {}),
+    ...(preContract
+      ? {
+          futureArrivalDate: preContractArrival,
+          originalContractEnd: player.contract_end,
+        }
+      : {}),
     interestDetails,
     ...(youthApproach
       ? {
@@ -1225,6 +1319,8 @@ export async function enquire(
         date: state.date,
         message: interestDetails.refuses
           ? `${player.name} will not negotiate with ${buyingClub.name}. ${interestDetails.concerns.slice(0, 2).join(" ")}`
+          : preContract
+            ? `${sellingClub?.name ?? "The current club"} has been informed of a FIFA RSTP art. 18.3 pre-contract approach. No transfer fee is due if the contract expires before registration.`
           : interest < PERSONAL_TERMS_THRESHOLD
             ? `${sellingClub?.name ?? "The agent"} is open to a formal proposal. The player is willing to talk but needs a stronger role, promises or wages before he agrees terms.`
             : `${sellingClub?.name ?? "The agent"} is open to a formal proposal. No agreement has been reached.`,
@@ -1344,13 +1440,137 @@ export function buyerFeeCeiling(
   terms: TransferTerms,
 ) {
   const clausePremium =
-    (terms.sellOnPercent / 100) * 0.4 + (terms.buyBackFee ? 0.05 : 0);
+    (terms.sellOnPercent / 100) * 0.4 +
+    (terms.buyBackFee ? 0.05 : 0) +
+    loanBackBuyerCeilingPenalty(terms.loanBack);
   return Math.floor(Math.max(askingPrice, bid) * (1.06 - clausePremium));
 }
 
 /** A selling club's counter to a bid below its floor: one it would accept, never eroding the asking price. */
 export function clubCounter(askingPrice: number, floor: number) {
   return Math.ceil(Math.max(floor, askingPrice * 0.96));
+}
+
+export interface LoanBorrowerWillingnessInput {
+  type: string;
+  playerValue: number;
+  playerWage: number;
+  playerAbility: number;
+  playerAge: number;
+  borrowerReputation: number;
+  borrowerTransferBudget: number;
+  borrowerWageBudget: number;
+  borrowerCurrentWages: number;
+  seniorSquadSize: number;
+  positionCount: number;
+  days: number;
+  fee: number;
+  terms: Pick<LoanTerms, "salarySplit" | "playingTime" | "role" | "mandatoryMinutes" | "optionFee" | "recall" | "injuryRecall">;
+}
+
+export interface LoanBorrowerWillingness {
+  willing: boolean;
+  maximumFee: number;
+  maximumOptionFee: number;
+  maximumSalarySplit: number;
+  reasons: string[];
+}
+
+export function loanBorrowerWillingness(input: LoanBorrowerWillingnessInput): LoanBorrowerWillingness {
+  const reasons: string[] = [];
+  const seasons = clamp(input.days / 365, 0.25, 2);
+  const abilityGap = input.playerAbility - input.borrowerReputation;
+  const need = clamp(
+    34 - input.positionCount * 9 + Math.max(0, 24 - input.seniorSquadSize) * 1.4 + clamp(abilityGap, -12, 18),
+    0,
+    65,
+  );
+  const wageRoom = Math.max(0, input.borrowerWageBudget - input.borrowerCurrentWages);
+  const maximumSalarySplit = input.playerWage <= 0 ? 100 : Math.floor(clamp((wageRoom / input.playerWage) * 100, 0, 100));
+  const optionPremium =
+    input.type === "Loan with option"
+      ? input.playerValue * 0.012
+      : input.type === "Loan with obligation"
+        ? input.playerValue * 0.006
+        : 0;
+  const ageDiscount = input.playerAge <= 20 ? 1.08 : input.playerAge >= 28 ? 0.82 : 1;
+  const maximumFee = Math.max(
+    0,
+    Math.floor(
+      Math.min(
+        input.borrowerTransferBudget,
+        input.playerValue * 0.025 * seasons * (0.65 + need / 70) * ageDiscount + optionPremium,
+      ) / 1000,
+    ) * 1000,
+  );
+  const maximumOptionFee =
+    input.type === "Loan with obligation"
+      ? Math.floor(Math.min(input.playerValue * 1.1, input.borrowerTransferBudget) / 1000) * 1000
+      : input.type === "Loan with option"
+        ? Math.floor((input.playerValue * 1.25) / 1000) * 1000
+        : 0;
+  if (input.seniorSquadSize >= 28)
+    reasons.push("The borrowing club already has a full senior squad.");
+  if (need < 10)
+    reasons.push("The borrowing club does not have a clear squad need for this position.");
+  if (abilityGap < -18 && input.positionCount >= 2)
+    reasons.push("The player is too far below the borrowing club's level to justify a loan place.");
+  if (maximumSalarySplit < MIN_LOAN_SALARY_SPLIT)
+    reasons.push("The borrowing club cannot fit the wage share into its wage budget.");
+  if (input.terms.salarySplit > maximumSalarySplit)
+    reasons.push(`The borrowing club can only cover ${maximumSalarySplit}% of the wage.`);
+  if (input.fee > maximumFee)
+    reasons.push(`The borrowing club values the loan package at ${money(maximumFee)}.`);
+  if (maximumOptionFee && input.terms.optionFee > maximumOptionFee)
+    reasons.push(`The borrowing club will not accept a purchase clause above ${money(maximumOptionFee)}.`);
+  if (input.terms.playingTime > 75 && abilityGap < 5)
+    reasons.push("The borrowing club will not guarantee starter minutes to a player below its current level.");
+  if (["Captain", "Key player"].includes(input.terms.role) && abilityGap < 8)
+    reasons.push("The requested squad role is not credible for the borrowing club.");
+  return {
+    willing: reasons.length === 0,
+    maximumFee,
+    maximumOptionFee,
+    maximumSalarySplit,
+    reasons,
+  };
+}
+
+async function assessLoanBorrowerPackage(
+  store: Store,
+  negotiation: Negotiation,
+  player: Player,
+  buyer: Club,
+  fee: number,
+  terms: LoanTerms,
+) {
+  const state = await stateOf(store);
+  const days = daysBetween(state.date, loanEndDate(negotiation.type, state.date, terms.duration));
+  const seniorSquadSize = (await store.get<{ total: number }>(
+    "SELECT count(*) AS total FROM players WHERE club_id = ? AND age_group = 'Senior' AND role != 'Retired'",
+    buyer.id,
+  ))!.total;
+  const positionCount = (await store.get<{ total: number }>(
+    "SELECT count(*) AS total FROM players WHERE club_id = ? AND age_group = 'Senior' AND role != 'Retired' AND position = ?",
+    buyer.id,
+    player.position,
+  ))!.total;
+  return loanBorrowerWillingness({
+    type: negotiation.type,
+    playerValue: player.value,
+    playerWage: player.wage,
+    playerAbility: player.ability,
+    playerAge: player.age,
+    borrowerReputation: buyer.reputation,
+    borrowerTransferBudget: buyer.transfer_budget,
+    borrowerWageBudget: buyer.wage_budget,
+    borrowerCurrentWages: await weeklyWages(store, buyer.id),
+    seniorSquadSize,
+    positionCount,
+    days,
+    fee,
+    terms,
+  });
 }
 
 export async function counterIncomingOffer(
@@ -1381,6 +1601,19 @@ export async function counterIncomingOffer(
       "The buy-back price cannot be below the agreed transfer fee.",
     );
   const buyer = await clubOf(store, negotiation.buying_club_id);
+  const seller = await clubOf(store, state.clubId);
+  const player = await playerOf(store, negotiation.player_id);
+  const issue = await transferTermsIssue(store, {
+    terms: proposed,
+    type: negotiation.type,
+    date: state.date,
+    player,
+    buyer,
+    seller,
+    contractEnd: contractEndDate(state.date, player.age < 18 ? 3 : 4, player.age),
+    onwardLoan: !!(JSON.parse(negotiation.data) as NegotiationData).onwardLoan,
+  });
+  if (issue) throw new GameError(issue);
   if (!Number.isFinite(fee) || fee < 0 || fee > buyer.transfer_budget)
     throw new GameError("The counteroffer exceeds the buying club's budget.");
   const data = JSON.parse(negotiation.data) as NegotiationData;
@@ -1407,10 +1640,77 @@ export async function counterIncomingOffer(
   data.log.push({
     date: state.date,
     type: "Club talks",
-    message: `The buyer accepted your fee of ${money(fee)}, payment schedule and future-transfer clauses.`,
+    message: `The buyer accepted your fee of ${money(fee)}, payment schedule and transfer clauses${loanBackSummary(proposed)}.`,
   });
   await store.run(
     "UPDATE negotiations SET offer = ?, data = ? WHERE id = ?",
+    fee,
+    JSON.stringify(data),
+    id,
+  );
+  return { id, ...(await negotiationStep(store, id, "accept")) };
+}
+
+export async function counterIncomingLoan(
+  store: Store,
+  id: number,
+  fee: number,
+  terms: LoanTerms,
+) {
+  const negotiation = await store.get<Negotiation>(
+    "SELECT * FROM negotiations WHERE id = ?",
+    id,
+  );
+  const state = await stateOf(store);
+  if (
+    !negotiation ||
+    negotiation.stage !== "Offer received" ||
+    negotiation.selling_club_id !== state.clubId ||
+    !LOAN_TYPES.includes(negotiation.type)
+  )
+    throw new GameError("Only an incoming loan offer can be countered here.");
+  if (state.date > negotiation.deadline)
+    throw new GameError("The negotiation deadline has passed.");
+  const player = await playerOf(store, negotiation.player_id);
+  const buyer = await clubOf(store, negotiation.buying_club_id);
+  const data = JSON.parse(negotiation.data) as NegotiationData;
+  const endDate = loanEndDate(negotiation.type, state.date, terms.duration);
+  if (endDate > player.contract_end)
+    throw new GameError("The proposed loan outlasts the parent contract.");
+  const issue = loanTermsIssue(
+    {
+      type: negotiation.type,
+      value: player.value,
+      days: daysBetween(state.date, endDate),
+      international: await isInternationalMove(store, await clubOf(store, state.clubId), buyer),
+    },
+    terms,
+  );
+  if (issue) throw new GameError(issue);
+  const willingness = await assessLoanBorrowerPackage(store, negotiation, player, buyer, fee, terms);
+  if (!willingness.willing) {
+    data.counter = willingness.maximumFee;
+    data.log.push({
+      date: state.date,
+      type: "Counteroffer",
+      message: `The borrower declines the loan package. ${willingness.reasons.slice(0, 2).join(" ")} Their maximum is ${money(willingness.maximumFee)}, ${willingness.maximumSalarySplit}% of the wage${willingness.maximumOptionFee ? ` and a ${money(willingness.maximumOptionFee)} purchase clause` : ""}.`,
+    });
+    await store.run(
+      "UPDATE negotiations SET tension = LEAST(99,tension + 8), data = ? WHERE id = ?",
+      JSON.stringify(data),
+      id,
+    );
+    return { id, stage: "Offer received", message: data.log.at(-1)!.message };
+  }
+  data.terms = terms;
+  data.log.push({
+    date: state.date,
+    type: "Club talks",
+    message: `The borrower accepted your loan fee of ${money(fee)} and wage-share guarantees.`,
+  });
+  await store.run(
+    "UPDATE negotiations SET offer = ?, asking_price = ?, data = ? WHERE id = ?",
+    fee,
     fee,
     JSON.stringify(data),
     id,
@@ -1476,6 +1776,7 @@ export async function negotiationStep(
   const data = JSON.parse(negotiation.data) as NegotiationData;
   let stage: string;
   let message: string;
+  let deadline = negotiation.deadline;
   if (
     data.buyerManaged &&
     negotiation.buying_club_id !== state.clubId &&
@@ -1492,6 +1793,7 @@ export async function negotiationStep(
     data.workflowVersion = 2;
     data.buyerManaged = true;
     data.nextStageDate = addDays(state.date, 1);
+    deadline = addDays(state.date, 28);
     data.log.push({
       date: state.date,
       type: "Club talks",
@@ -1525,6 +1827,7 @@ export async function negotiationStep(
         ? "Rejected"
         : negotiation.type === "Contract renewal" ||
             negotiation.type === "Youth approach" ||
+            negotiation.type === "Pre-contract agreement" ||
             negotiation.selling_club_id === null
           ? "Agent talks"
           : "Club talks";
@@ -1532,7 +1835,9 @@ export async function negotiationStep(
       stage === "Rejected"
         ? `${player.name} will not negotiate: the move does not interest him (interest ${Math.max(1, Math.round(moveScore))}%, at least ${MOVE_REFUSAL_THRESHOLD}% is needed). ${data.interestDetails.concerns.slice(0, 2).join(" ")}`.trim()
         : stage === "Agent talks"
-          ? "Permission to discuss personal terms confirmed. No club transfer fee is required."
+          ? negotiation.type === "Pre-contract agreement"
+            ? "Current club informed under FIFA RSTP art. 18.3. Discuss a free transfer for after the current contract expires."
+            : "Permission to discuss personal terms confirmed. No club transfer fee is required."
           : "The selling club has authorized formal discussions. Submit a fee and any loan guarantees.";
   } else if (action === "revise") {
     if (negotiation.stage !== "Contract review")
@@ -1551,7 +1856,7 @@ export async function negotiationStep(
     data.medicalDate = addDays(state.date, 2);
     message = `Conditional agreement signed. Medical scheduled for ${data.medicalDate}; registration and payment follow only after clearance.`;
     if (data.futureArrivalDate) {
-      if (!data.guardianConsent)
+      if (negotiation.type === "Future transfer" && !data.guardianConsent)
         throw new GameError(
           "Guardian consent is required for this future agreement.",
         );
@@ -1575,17 +1880,37 @@ export async function negotiationStep(
       );
       stage = "Scheduled";
       data.medicalDate = addDays(data.futureArrivalDate, -2);
-      message = `Future agreement signed. Earliest arrival: ${data.futureArrivalDate}. ${money(reserved)} is reserved, not paid. The player remains at the current club; medical and registration clearance still apply.`;
+      message =
+        negotiation.type === "Pre-contract agreement"
+          ? `Pre-contract signed. Joins on a free transfer on ${data.futureArrivalDate} if his current contract expires as planned. ${money(reserved)} is reserved for signing costs.`
+          : `Future agreement signed. Earliest arrival: ${data.futureArrivalDate}. ${money(reserved)} is reserved, not paid. The player remains at the current club; medical and registration clearance still apply.`;
     }
   }
   data.log.push({ date: state.date, type: stage, message });
   await store.run(
-    "UPDATE negotiations SET stage = ?, tension = LEAST(99,tension + ?), data = ? WHERE id = ?",
+    "UPDATE negotiations SET stage = ?, tension = LEAST(99,tension + ?), deadline = ?, data = ? WHERE id = ?",
     stage,
     action === "revise" ? 4 : 0,
+    deadline,
     JSON.stringify(data),
     id,
   );
+  if (
+    action === "formalize" &&
+    negotiation.type === "Pre-contract agreement" &&
+    stage === "Agent talks"
+  ) {
+    const player = await playerOf(store, negotiation.player_id);
+    await news(
+      store,
+      "Transfers",
+      `${player.name}: pre-contract approach`,
+      "The current club has been informed. Talks may proceed for a free transfer after the player's contract expires.",
+      "important",
+      "transfers",
+      { playerId: player.id, clubId: negotiation.buying_club_id },
+    );
+  }
   if (action === "sign" && negotiation.type !== "Contract renewal")
     await publishTransferStory(store, {
       key: `negotiation:${id}:agreement`,
@@ -1665,6 +1990,12 @@ export async function progressDealMilestones(
     ["Agent talks", "Contract review"].includes(negotiation.stage)
   ) {
     if (data.nextStageDate && state.date < data.nextStageDate) return true;
+    if (state.date > negotiation.deadline)
+      await store.run(
+        "UPDATE negotiations SET deadline = ? WHERE id = ?",
+        addDays(state.date, 21),
+        negotiation.id,
+      );
     data.nextStageDate = addDays(state.date, 1);
     await store.run(
       "UPDATE negotiations SET data = ? WHERE id = ?",
@@ -1895,6 +2226,18 @@ export async function negotiate(
       throw new GameError(
         "The buy-back price cannot be below the agreed transfer fee.",
       );
+    const seller = await clubOf(store, negotiation.selling_club_id);
+    const issue = await transferTermsIssue(store, {
+      terms: proposed,
+      type: negotiation.type,
+      date: state.date,
+      player,
+      buyer,
+      seller,
+      contractEnd: contractEndDate(state.date, input.years, player.age),
+      onwardLoan: !!data.onwardLoan,
+    });
+    if (issue) throw new GameError(issue);
     data.transferTerms = proposed;
   }
   const difficulty =
@@ -1998,47 +2341,78 @@ export async function negotiate(
       "The receiving manager does not meet the requested trust threshold.",
     );
   if (stage === "Club talks") {
-    const guaranteeDiscount = loan
-      ? (data.terms.playingTime - 50) / 500 + (actualRelationship - 50) / 1000
-      : 0;
-    const seller =
-      !loan && negotiation.type === "Permanent transfer" && negotiation.selling_club_id
-        ? await clubOf(store, negotiation.selling_club_id)
-        : undefined;
-    // A selling club does not let a starter go far below his value, and asks a premium for deferred payment.
-    const valueFloor = seller
-      ? player.value * Math.max(0, sellerValueFloor(player, seller, state.date) + difficulty - skill)
-      : 0;
-    const floor =
-      Math.max(
-        askingPrice *
-          (0.88 +
-            difficulty -
-            skill -
-            guaranteeDiscount +
-            (data.agent.personality === "Combative" ? 0.04 : 0)),
-        valueFloor,
-      ) * (1 + (loan ? 0 : deferralPremium(checkedTransferTerms(data.transferTerms))));
-    const finalOffers =
-      data.battle?.status === "final-offers" &&
-      state.date <= data.battle.finalOffersDeadline!;
-    if (negotiation.interest < MOVE_REFUSAL_THRESHOLD) {
-      stage = "Rejected";
-      message =
-        "The player has declined: the proposed club and career pathway do not fit their ambitions.";
-    } else if (input.fee >= floor && finalOffers) {
-      // Best-and-final round: the selling club decides between all bidders on the deadline.
-      data.battle!.userFinalOffer = input.fee;
-      message = `Final offer of ${money(input.fee)} lodged. The selling club decides on ${data.battle!.finalOffersDeadline}; bids within 5% of the best stand and the player then chooses.`;
-    } else if (input.fee >= floor) {
-      fee = input.fee;
-      stage = "Agent talks";
-      tension = Math.max(5, tension - 8);
-      message = `Club terms agreed at ${money(fee)}. Personal terms and the medical remain outstanding.`;
+    if (loan && negotiation.selling_club_id === state.clubId && buyer.id !== state.clubId) {
+      const willingness = await assessLoanBorrowerPackage(store, negotiation, player, buyer, input.fee, data.terms);
+      const fatalReasons = willingness.reasons.filter((reason) =>
+        reason.includes("full senior squad") ||
+        reason.includes("does not have a clear squad need") ||
+        reason.includes("below the borrowing club"),
+      );
+      if (fatalReasons.length) {
+        stage = "Rejected";
+        message = `The borrower has declined the loan. ${fatalReasons.slice(0, 2).join(" ")}`;
+      } else if (willingness.willing) {
+        fee = input.fee;
+        stage = "Agent talks";
+        tension = Math.max(5, tension - 8);
+        data.buyerManaged = true;
+        data.nextStageDate = addDays(state.date, 1);
+        message = `Borrower's terms agreed at ${money(fee)} with ${data.terms.salarySplit}% of the wage covered. The player keeps his parent-club contract while the borrower completes acceptance.`;
+      } else {
+        tension += input.fee > willingness.maximumFee * 1.35 ? 18 : 10;
+        data.counter = willingness.maximumFee;
+        message = `Loan proposal rejected. The borrower counters at ${money(willingness.maximumFee)}, can cover up to ${willingness.maximumSalarySplit}% of the wage${willingness.maximumOptionFee ? ` and will only accept a purchase clause up to ${money(willingness.maximumOptionFee)}` : ""}. ${willingness.reasons.slice(0, 2).join(" ")}`;
+      }
     } else {
-      tension += input.fee < floor * 0.65 ? 24 : 12;
-      data.counter = clubCounter(askingPrice, floor);
-      message = `Offer rejected. The club counters at ${money(data.counter)}.`;
+      const guaranteeDiscount = loan
+        ? (data.terms.playingTime - 50) / 500 + (actualRelationship - 50) / 1000
+        : 0;
+      const seller =
+        !loan && negotiation.type === "Permanent transfer" && negotiation.selling_club_id
+          ? await clubOf(store, negotiation.selling_club_id)
+          : undefined;
+      const sellerFloorRatio = seller
+        ? sellerValueFloor(player, seller, state.date)
+        : 0;
+      const loanBackDiscount = seller
+        ? loanBackSellerFloorDiscount(data.transferTerms?.loanBack, sellerFloorRatio)
+        : 0;
+      // A selling club does not let a starter go far below his value, and asks a premium for deferred payment.
+      const valueFloor = seller
+        ? player.value * Math.max(0, sellerFloorRatio + difficulty - skill - loanBackDiscount)
+        : 0;
+      const floor =
+        Math.max(
+          askingPrice *
+            (0.88 +
+              difficulty -
+              skill -
+              loanBackDiscount -
+              guaranteeDiscount +
+              (data.agent.personality === "Combative" ? 0.04 : 0)),
+          valueFloor,
+        ) * (1 + (loan ? 0 : deferralPremium(checkedTransferTerms(data.transferTerms))));
+      const finalOffers =
+        data.battle?.status === "final-offers" &&
+        state.date <= data.battle.finalOffersDeadline!;
+      if (negotiation.interest < MOVE_REFUSAL_THRESHOLD) {
+        stage = "Rejected";
+        message =
+          "The player has declined: the proposed club and career pathway do not fit their ambitions.";
+      } else if (input.fee >= floor && finalOffers) {
+        // Best-and-final round: the selling club decides between all bidders on the deadline.
+        data.battle!.userFinalOffer = input.fee;
+        message = `Final offer of ${money(input.fee)} lodged. The selling club decides on ${data.battle!.finalOffersDeadline}; bids within 5% of the best stand and the player then chooses.`;
+      } else if (input.fee >= floor) {
+        fee = input.fee;
+        stage = "Agent talks";
+        tension = Math.max(5, tension - 8);
+        message = `Club terms agreed at ${money(fee)}${loanBackSummary(checkedTransferTerms(data.transferTerms))}. Personal terms and the medical remain outstanding.`;
+      } else {
+        tension += input.fee < floor * 0.65 ? 24 : 12;
+        data.counter = clubCounter(askingPrice, floor);
+        message = `Offer rejected. The club counters at ${money(data.counter)}.`;
+      }
     }
   } else {
     data.interestDetails = await assessPlayerInterest(store, player, buyer, {
@@ -2137,6 +2511,129 @@ export async function negotiate(
   return { message, stage };
 }
 
+/**
+ * Records a loan spell and moves the player's registration to the borrower (the parent keeps ownership in
+ * parent_club_id). Used by loan agreements and by loans agreed as part of another deal (loan-backs, onward
+ * placements at affiliates). `player` must be the parent club's current, non-loaned registration.
+ */
+export async function startLoanSpell(
+  store: Store,
+  spell: {
+    player: Player;
+    parentId: number;
+    borrower: Club;
+    type: string;
+    startDate: string;
+    endDate: string;
+    terms: LoanTerms;
+  },
+) {
+  const { player, terms } = spell;
+  const profile = JSON.parse(player.profile) as PlayerProfile;
+  const loanId = Number(
+    (
+      await store.run(
+        "INSERT INTO loans(player_id, parent_id, destination_id, type, start_date, end_date, fit, relationship, terms, data) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        player.id,
+        spell.parentId,
+        spell.borrower.id,
+        spell.type,
+        spell.startDate,
+        spell.endDate,
+        tacticalFit(player, spell.borrower),
+        terms.relationship,
+        JSON.stringify(terms),
+        JSON.stringify({
+          startingAbility: player.ability,
+          startingPotential: player.potential,
+          startingMinutes: player.minutes,
+          startingMorale: player.morale,
+          parentRole: player.role,
+          parentTraining: player.training,
+          startingPersonality: profile.personality.professionalism,
+          weeks: 0,
+          failures: 0,
+          injuryWeeks: 0,
+          factors: {},
+          history: [],
+          bonusPaid: false,
+        }),
+      )
+    ).lastInsertRowid,
+  );
+  await store.run(
+    "UPDATE players SET parent_club_id = ?, club_id = ?, squad_club_id = NULL, role = ?, training = ?, listed = 0, available_loan = 0, morale = LEAST(99, morale + 3), loan_progress = 0 WHERE id = ?",
+    spell.parentId,
+    spell.borrower.id,
+    terms.role,
+    terms.developmentPlan,
+    player.id,
+  );
+  return loanId;
+}
+
+async function startLoanBack(
+  store: Store,
+  {
+    negotiation,
+    player,
+    buyer,
+    seller,
+    terms,
+    role,
+    contractEnd,
+  }: {
+    negotiation: Negotiation;
+    player: Player;
+    buyer: Club;
+    seller: Club;
+    terms: TransferTerms;
+    role: string;
+    contractEnd: string;
+  },
+) {
+  const loanBack = (terms.loanBack ?? "none") as LoanBackOption;
+  if (loanBack === "none") return;
+  const state = await stateOf(store);
+  const endDate = loanBackEndDate(loanBack, state.date);
+  const loanTerms = {
+    ...defaultLoanTerms({ ...player, club_id: buyer.id, parent_club_id: null, contract_end: contractEnd, role }, seller),
+    role: player.role,
+    recall: false,
+    salarySplit: 100,
+    fee: 0,
+    bonus: 0,
+    optionFee: 0,
+    sellOn: 0,
+    duration: daysBetween(state.date, endDate),
+  };
+  await startLoanSpell(store, {
+    player: { ...player, club_id: buyer.id, parent_club_id: null, contract_end: contractEnd, wage: negotiation.wage, role },
+    parentId: buyer.id,
+    borrower: seller,
+    type: "Loan-back",
+    startDate: state.date,
+    endDate,
+    terms: loanTerms,
+  });
+  await store.run(
+    "INSERT INTO history(season,entity_type,entity_id,date,data) VALUES (?,'loan',?,?,?)",
+    state.season,
+    player.id,
+    state.date,
+    JSON.stringify({ name: player.name, from: buyer.id, to: seller.id, club: seller.name, fee: 0, type: "Loan-back" }),
+  );
+  await news(
+    store,
+    "Transfers",
+    `${player.name}: loan-back started`,
+    `${buyer.name} completed the transfer and loaned him back to ${seller.name} until ${endDate}. ${seller.name} covers 100% of the wage.`,
+    "success",
+    "loans",
+    { playerId: player.id, clubId: seller.id },
+  );
+}
+
 export async function completeNegotiation(
   store: Store,
   negotiation: Negotiation,
@@ -2182,6 +2679,20 @@ export async function completeNegotiation(
     throw new GameError(
       "A signed agreement and passed medical are required before registration.",
     );
+  if (!loan && !renewal && negotiation.selling_club_id && !data.affiliatePlacement) {
+    const seller = await clubOf(store, negotiation.selling_club_id);
+    const issue = await transferTermsIssue(store, {
+      terms: transferTerms,
+      type: negotiation.type,
+      date: state.date,
+      player,
+      buyer,
+      seller,
+      contractEnd: contractEndDate(state.date, data.years, ageOn(player.birth_date, state.date)),
+      onwardLoan: !!data.onwardLoan,
+    });
+    if (issue) throw new GameError(issue);
+  }
   if (data.registrationDate && state.date < data.registrationDate) return;
   if (data.futureArrivalDate) {
     if (
@@ -2217,6 +2728,7 @@ export async function completeNegotiation(
     !loan &&
     !renewal &&
     !!negotiation.selling_club_id &&
+    !data.affiliatePlacement &&
     transferTerms.installments > 0;
   const youth = await assessYouthTransfer(store, player, buyer);
   if (!renewal && !youth.approved) {
@@ -2470,37 +2982,15 @@ export async function completeNegotiation(
           : negotiation.type === "Emergency loan"
             ? 90
             : terms.duration;
-    const loanId = Number(
-      (
-        await store.run(
-          "INSERT INTO loans(player_id, parent_id, destination_id, type, start_date, end_date, fit, relationship, terms, data) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-          player.id,
-          negotiation.selling_club_id,
-          buyer.id,
-          negotiation.type,
-          state.date,
-          loanEndDate(negotiation.type, state.date, duration),
-          tacticalFit(player, buyer),
-          terms.relationship,
-          JSON.stringify(terms),
-          JSON.stringify({
-            startingAbility: player.ability,
-            startingPotential: player.potential,
-            startingMinutes: player.minutes,
-            startingMorale: player.morale,
-            parentRole: player.role,
-            parentTraining: player.training,
-            startingPersonality: playerProfile.personality.professionalism,
-            weeks: 0,
-            failures: 0,
-            injuryWeeks: 0,
-            factors: {},
-            history: [],
-            bonusPaid: false,
-          }),
-        )
-      ).lastInsertRowid,
-    );
+    const loanId = await startLoanSpell(store, {
+      player,
+      parentId: negotiation.selling_club_id!,
+      borrower: buyer,
+      type: negotiation.type,
+      startDate: state.date,
+      endDate: loanEndDate(negotiation.type, state.date, duration),
+      terms,
+    });
     await acquirePlayerAsset(
       store,
       buyer.id,
@@ -2508,13 +2998,6 @@ export async function completeNegotiation(
       negotiation.offer,
       state.date,
       loanEndDate(negotiation.type, state.date, duration),
-    );
-    await store.run(
-      "UPDATE players SET parent_club_id = club_id, club_id = ?, squad_club_id = NULL, role = ?, training = ?, morale = LEAST(99, morale + 3), loan_progress = 0 WHERE id = ?",
-      buyer.id,
-      terms.role,
-      terms.developmentPlan,
-      player.id,
     );
     if (negotiation.type === "Loan with sell-on" && terms.sellOn > 0)
       await store.run(
@@ -2532,7 +3015,9 @@ export async function completeNegotiation(
         store,
         buyer.id,
         player.id,
-        negotiation.offer + trainingCompensation,
+        (data.affiliatePlacement?.fee ?? 0) +
+          negotiation.offer +
+          trainingCompensation,
         state.date,
         contractEnd,
       );
@@ -2563,7 +3048,9 @@ export async function completeNegotiation(
       player.id,
     );
   }
-  if (!loan && !renewal && negotiation.selling_club_id) {
+  const transferClauseBeneficiaryId =
+    data.affiliatePlacement?.originalSellerId ?? negotiation.selling_club_id;
+  if (!loan && !renewal && transferClauseBeneficiaryId) {
     if (data.buyBackClauseId)
       await store.run(
         "UPDATE buy_back_clauses SET status = 'exercised' WHERE id = ?",
@@ -2573,7 +3060,7 @@ export async function completeNegotiation(
       await store.run(
         "INSERT INTO sell_on_clauses(player_id,beneficiary_id,owner_id,percentage) VALUES (?,?,?,?)",
         player.id,
-        negotiation.selling_club_id,
+        transferClauseBeneficiaryId,
         buyer.id,
         transferTerms.sellOnPercent,
       );
@@ -2582,11 +3069,22 @@ export async function completeNegotiation(
         "INSERT INTO buy_back_clauses(negotiation_id,player_id,beneficiary_id,owner_id,fee,expires) VALUES (?,?,?,?,?,?)",
         negotiation.id,
         player.id,
-        negotiation.selling_club_id,
+        transferClauseBeneficiaryId,
         buyer.id,
         transferTerms.buyBackFee,
         addMonths(state.date, transferTerms.buyBackYears * 12),
       );
+  }
+  if (!loan && !renewal && negotiation.selling_club_id && !data.affiliatePlacement) {
+    await startLoanBack(store, {
+      negotiation,
+      player,
+      buyer,
+      seller: await clubOf(store, negotiation.selling_club_id),
+      terms: transferTerms,
+      role: data.role,
+      contractEnd: contractEndDate(state.date, data.years, player.age),
+    });
   }
   for (const promise of data.promises)
     await store.run(
@@ -2601,6 +3099,7 @@ export async function completeNegotiation(
       addDays(state.date, 180),
       JSON.stringify({ startMinutes: player.minutes, clubId: buyer.id }),
     );
+  await startOnwardLoan(store, negotiation, data);
   data.log.push({
     date: state.date,
     type: "Completed",

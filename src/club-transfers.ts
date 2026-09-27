@@ -5,6 +5,7 @@ import type {
   PlayerMoveKind,
 } from "../shared/api.ts";
 import type { TransferTerms } from "../shared/types.ts";
+import { LOAN_BACK_LABELS } from "../shared/rules.ts";
 import { MOVE_KIND_LABELS } from "./player-history.ts";
 
 export type TransferDirection = "all" | "in" | "out";
@@ -102,6 +103,8 @@ export function transferClauses(terms: TransferTerms | null, money: (value: numb
       `Buy-back ${money(terms.buyBackFee)}` +
         (terms.buyBackYears > 0 ? ` for ${terms.buyBackYears} year${terms.buyBackYears === 1 ? "" : "s"}` : ""),
     );
+  if (terms.loanBack && terms.loanBack !== "none")
+    clauses.push(LOAN_BACK_LABELS[terms.loanBack]);
   return clauses;
 }
 
@@ -112,6 +115,7 @@ export function clauseBadges(terms: TransferTerms | null): string[] {
     terms.installments > 0 ? "Instalments" : null,
     terms.sellOnPercent > 0 ? `Sell-on ${terms.sellOnPercent}%` : null,
     terms.buyBackFee > 0 ? "Buy-back" : null,
+    terms.loanBack && terms.loanBack !== "none" ? "Loan-back" : null,
   ].filter((value): value is string => value !== null);
 }
 
