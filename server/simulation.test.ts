@@ -15,7 +15,7 @@ import {
   seasonRollover,
   worldTransfers,
 } from "./simulation.ts";
-import { stateOf } from "./systems.ts";
+import { clubOf, enquire, negotiate, negotiationStep, stateOf } from "./systems.ts";
 import { playerCareer } from "./queries.ts";
 import { MATCH_RULES_VERSION, simulateMatch } from "./match.ts";
 import { estimateClubRevenue } from "./finance.ts";
@@ -31,6 +31,8 @@ import {
 import type {
   Fixture,
   MatchSnapshot,
+  Negotiation,
+  NegotiationData,
   Player,
   PlayerProfile,
   Standing,
@@ -599,6 +601,62 @@ describe("daily transfer market", () => {
             offer.player_id,
           ))!.club_id,
         ).toBe(1);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it("releases pre-contracted players at expiry without the market grabbing them", async () => {
+    const store = await marketWorld();
+    try {
+      const buyer = await clubOf(store, 1);
+      await store.run("UPDATE clubs SET reputation = 99 WHERE id = ?", buyer.id);
+      const seller = (await store.get<{ id: number }>(
+        "SELECT TOP (1) id FROM clubs WHERE type = 'club' AND country_id != ? ORDER BY id",
+        buyer.country_id,
+      ))!;
+      const player = (await store.get<Player>(
+        "SELECT TOP (1) * FROM players WHERE club_id = ? AND age >= 18 AND parent_club_id IS NULL ORDER BY id",
+        seller.id,
+      ))!;
+      const contractEnd = (await stateOf(store)).date;
+      await store.run(
+        "UPDATE players SET contract_end = ?, listed = 1 WHERE id = ?",
+        contractEnd,
+        player.id,
+      );
+      const enquiry = await enquire(store, player.id, "Pre-contract agreement");
+      await negotiationStep(store, enquiry.id, "formalize");
+      await negotiate(store, enquiry.id, {
+        fee: 0,
+        wage: enquiry.wage * 2,
+        years: 3,
+        role: "Squad player",
+        promises: [],
+      });
+      await negotiationStep(store, enquiry.id, "sign");
+      const scheduled = (await store.get<Negotiation>("SELECT * FROM negotiations WHERE id = ?", enquiry.id))!;
+      const details = JSON.parse(scheduled.data) as NegotiationData;
+      details.futureArrivalDate = "2027-01-01";
+      details.medicalDate = "2026-12-30";
+      await store.run(
+        "UPDATE negotiations SET data = ? WHERE id = ?",
+        JSON.stringify(details),
+        enquiry.id,
+      );
+
+      await advance(store, 1);
+      const released = (await store.get<Player>("SELECT * FROM players WHERE id = ?", player.id))!;
+      expect(released.club_id).toBeNull();
+      expect(released.role).toBe("Free agent");
+      expect(
+        (await store.get<{ stage: string }>("SELECT stage FROM negotiations WHERE id = ?", enquiry.id))!.stage,
+      ).toBe("Scheduled");
+      await worldTransfers(store, seedrandom("pre-contract-protected"));
+      expect((await store.get<Player>("SELECT * FROM players WHERE id = ?", player.id))!.club_id).toBeNull();
+      expect(
+        (await store.get<{ stage: string }>("SELECT stage FROM negotiations WHERE id = ?", enquiry.id))!.stage,
+      ).toBe("Scheduled");
     } finally {
       await store.close();
     }

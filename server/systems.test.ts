@@ -14,6 +14,7 @@ import {
   assignScout,
   clubOf,
   completeNegotiation,
+  counterIncomingLoan,
   counterIncomingOffer,
   defaultLoanTerms,
   enquire,
@@ -558,6 +559,7 @@ describe("director decisions and ownership boundaries", () => {
     const before = {
       buyer: await clubOf(store, 1),
       seller: await clubOf(store, 2),
+      buyerWages: await weeklyWages(store, 1),
     };
     const enquiry = await enquire(store, player.id, "Permanent transfer");
     const input = {
@@ -596,6 +598,83 @@ describe("director decisions and ownership boundaries", () => {
     expect((await deal()).stage).toBe("Completed");
     return { player, negotiation: await deal(), before };
   }
+
+  it("starts a seller loan-back after a permanent transfer completes", async () => {
+    const { player, negotiation, before } = await agreedTransfer({
+      ...DEFAULT_TRANSFER_TERMS,
+      loanBack: "year",
+    });
+    const moved = (await playerOf(store, player.id))!;
+    expect(moved.parent_club_id).toBe(negotiation.buying_club_id);
+    expect(moved.club_id).toBe(negotiation.selling_club_id);
+    const loan = (await store.get<Loan>(
+      "SELECT * FROM loans WHERE player_id = ? AND type = 'Loan-back'",
+      player.id,
+    ))!;
+    expect(loan.parent_id).toBe(negotiation.buying_club_id);
+    expect(loan.destination_id).toBe(negotiation.selling_club_id);
+    expect(JSON.parse(loan.terms).salarySplit).toBe(100);
+    expect(await weeklyWages(store, negotiation.buying_club_id)).toBeCloseTo(
+      before.buyerWages,
+      2,
+    );
+  });
+
+  it("schedules a pre-contract as a free transfer after expiry", async () => {
+    const buyer = await clubOf(store, 1);
+    const seller = (await store.get<{ id: number }>(
+      "SELECT TOP (1) id FROM clubs WHERE type = 'club' AND country_id != ? ORDER BY id",
+      buyer.country_id,
+    ))!;
+    const player = (await store.get<Player>(
+      "SELECT TOP (1) * FROM players WHERE club_id = ? AND age >= 18 AND parent_club_id IS NULL ORDER BY value",
+      seller.id,
+    ))!;
+    const contractEnd = addDays((await stateOf(store)).date, 100);
+    await store.run(
+      "UPDATE players SET contract_end = ?, country_id = ? WHERE id = ?",
+      contractEnd,
+      buyer.country_id,
+      player.id,
+    );
+    await keenToJoin(player.id, 1);
+    const enquiry = await enquire(store, player.id, "Pre-contract agreement");
+    expect(enquiry.asking_price).toBe(0);
+    expect((await negotiationStep(store, enquiry.id, "formalize")).stage).toBe("Agent talks");
+    await negotiate(store, enquiry.id, {
+      fee: 0,
+      wage: enquiry.wage * 2,
+      years: 3,
+      role: "Squad player",
+      promises: [],
+    });
+    const signed = await negotiationStep(store, enquiry.id, "sign");
+    expect(signed.stage).toBe("Scheduled");
+    const scheduled = (await store.get<Negotiation>("SELECT * FROM negotiations WHERE id = ?", enquiry.id))!;
+    const details = JSON.parse(scheduled.data) as NegotiationData;
+    expect(details.futureArrivalDate! > contractEnd).toBe(true);
+    expect(scheduled.offer).toBe(0);
+    await store.run(
+      "UPDATE players SET club_id = NULL, wage = 0, role = 'Free agent' WHERE id = ?",
+      player.id,
+    );
+    await store.setMeta("state", {
+      ...(await stateOf(store)),
+      date: details.futureArrivalDate,
+    });
+    await progressDealMilestones(store, scheduled);
+    const registration = (await store.get<Negotiation>("SELECT * FROM negotiations WHERE id = ?", enquiry.id))!;
+    await store.setMeta("state", {
+      ...(await stateOf(store)),
+      date: addDays(details.futureArrivalDate!, 1),
+    });
+    await progressDealMilestones(store, registration);
+    const completed = (await store.get<Negotiation>("SELECT * FROM negotiations WHERE id = ?", enquiry.id))!;
+    expect(completed.stage).toBe("Completed");
+    expect(completed.offer).toBe(0);
+    expect(completed.selling_club_id).toBeNull();
+    expect((await playerOf(store, player.id)).club_id).toBe(buyer.id);
+  });
 
   it("reserves the full fee but pays instalments once on their due dates without duplicate sale profit", async () => {
     const terms = {
@@ -890,33 +969,119 @@ describe("director decisions and ownership boundaries", () => {
     ).rejects.toThrow("Only a permanent incoming");
   });
 
+  it("can counter incoming loan offers with borrower wage-share ceilings", async () => {
+    const player = (await store.get<Player>(
+      "SELECT TOP (1) * FROM players WHERE club_id = 1 AND age_group = 'Senior'",
+    ))!;
+    await store.run(
+      "UPDATE players SET available_loan = 1,value = 5000000,wage = 10000,ability = 70,position = 'CM',contract_end = '2028-06-30' WHERE id = ?",
+      player.id,
+    );
+    await store.run("UPDATE players SET position = 'GK' WHERE club_id = 2 AND position = 'CM'");
+    await store.run("UPDATE TOP (5) players SET age_group = 'U19' WHERE club_id = 2 AND age_group = 'Senior'");
+    await store.run(
+      "UPDATE clubs SET reputation = 60,transfer_budget = 2000000,wage_budget = 10000000,balance = 200000000 WHERE id = 2",
+    );
+    const updated = (await playerOf(store, player.id))!;
+    const terms = { ...defaultLoanTerms(updated, await clubOf(store, 2)), salarySplit: 60, fee: 100000 };
+    const data: NegotiationData = {
+      workflowVersion: 2,
+      log: [],
+      agent: JSON.parse(updated.profile).agent,
+      terms,
+      loanReferenceSplit: terms.salarySplit,
+      years: 3,
+      role: terms.role,
+      promises: [],
+    };
+    const id = Number(
+      (
+        await store.run(
+          "INSERT INTO negotiations(player_id,buying_club_id,selling_club_id,type,stage,asking_price,offer,wage,interest,created,deadline,data) VALUES (?,2,1,'Standard loan','Offer received',100000,100000,?,85,'2026-07-01','2026-07-08',?)",
+          updated.id,
+          updated.wage,
+          JSON.stringify(data),
+        )
+      ).lastInsertRowid,
+    );
+    expect((await counterIncomingLoan(store, id, 900000, { ...terms, salarySplit: 95 })).stage).toBe("Offer received");
+    const accepted = await counterIncomingLoan(store, id, 100000, terms);
+    expect(accepted.stage).toBe("Agent talks");
+    const details = JSON.parse(
+      (await store.get<Negotiation>(
+        "SELECT * FROM negotiations WHERE id = ?",
+        id,
+      ))!.data,
+    ) as NegotiationData;
+    expect(details.buyerManaged).toBe(true);
+    expect(details.terms.salarySplit).toBe(60);
+  });
+
+  it("extends accepted incoming-offer deadlines for buyer-managed automation", async () => {
+    const player = (await store.get<Player>(
+      "SELECT TOP (1) * FROM players WHERE club_id = 1 AND age_group = 'Senior'",
+    ))!;
+    const data: NegotiationData = {
+      workflowVersion: 2,
+      log: [],
+      agent: JSON.parse(player.profile).agent,
+      terms: defaultLoanTerms(player, await clubOf(store, 2)),
+      years: 3,
+      role: "Regular starter",
+      promises: [],
+    };
+    const id = Number(
+      (
+        await store.run(
+          "INSERT INTO negotiations(player_id,buying_club_id,selling_club_id,type,stage,asking_price,offer,wage,interest,created,deadline,data) VALUES (?,2,1,'Permanent transfer','Offer received',100000,100000,?,75,'2026-07-01','2026-07-08',?)",
+          player.id,
+          player.wage * 2,
+          JSON.stringify(data),
+        )
+      ).lastInsertRowid,
+    );
+    await store.setMeta("state", { ...(await stateOf(store)), date: "2026-07-08" });
+    await negotiationStep(store, id, "accept");
+    expect(
+      (await store.get<Negotiation>(
+        "SELECT * FROM negotiations WHERE id = ?",
+        id,
+      ))!.deadline,
+    ).toBe("2026-08-05");
+  });
+
   async function agreedLoan(recall: boolean, type = "Development loan") {
     const player = (await store.get<Player>(
       "SELECT TOP (1) * FROM players WHERE club_id = 1 AND age_group = ?",
       "Senior",
     ))!;
     await store.run(
-      "UPDATE players SET age = 20, ability = 70, potential = 85, contract_end = ? WHERE id = ?",
+      "UPDATE players SET age = 20, ability = 70, potential = 85, position = 'CM', contract_end = ? WHERE id = ?",
       "2030-06-30",
       player.id,
     );
     await keenToJoin(player.id, 2);
+    await store.run("UPDATE clubs SET reputation = 70 WHERE id = 2");
+    await store.run("UPDATE players SET position = 'GK' WHERE club_id = 2 AND position = 'CM'");
+    await store.run("UPDATE TOP (5) players SET age_group = 'U19' WHERE club_id = 2 AND age_group = 'Senior'");
     const negotiation = await enquire(store, player.id, type, 2);
     await negotiationStep(store, negotiation.id, "formalize");
+    const loanPlayer = await playerOf(store, player.id);
     const terms = {
       ...defaultLoanTerms(
-        await playerOf(store, player.id),
+        loanPlayer,
         await clubOf(store, 2),
       ),
       recall,
       duration: 365,
+      ...(type === "Loan with obligation" ? { optionFee: Math.round(loanPlayer.value * 0.95) } : {}),
       // Above the parent's 70% reference: no wage subsidy to price (transfer-finance.test covers the subsidy).
       salarySplit: 75,
       // A two-season loan's minutes bonus needs at least half of two seasons' league minutes.
       ...(type === "Two-year loan" ? { mandatoryMinutes: 3600 } : {}),
     };
     const input = {
-      fee: Math.round(negotiation.asking_price * 2),
+      fee: 0,
       wage: player.wage * 2,
       years: 3,
       role: "Regular starter",
@@ -924,17 +1089,25 @@ describe("director decisions and ownership boundaries", () => {
       terms,
     };
     await negotiate(store, negotiation.id, input);
-    await negotiate(store, negotiation.id, input);
+    for (const date of ["2026-07-02", "2026-07-03"]) {
+      await store.setMeta("state", { ...(await stateOf(store)), date });
+      await progressDealMilestones(
+        store,
+        (await store.get<Negotiation>(
+          "SELECT * FROM negotiations WHERE id = ?",
+          negotiation.id,
+        ))!,
+      );
+    }
     expect(
       (await store.get<Negotiation>(
         "SELECT * FROM negotiations WHERE id = ?",
         negotiation.id,
       ))!.stage,
-    ).toBe("Contract review");
-    await negotiationStep(store, negotiation.id, "sign");
+    ).toBe("Medical");
     await store.setMeta("state", {
       ...(await stateOf(store)),
-      date: "2026-07-03",
+      date: "2026-07-05",
     });
     await progressDealMilestones(
       store,
@@ -951,7 +1124,7 @@ describe("director decisions and ownership boundaries", () => {
     ).toBe("Registration");
     await store.setMeta("state", {
       ...(await stateOf(store)),
-      date: "2026-07-04",
+      date: "2026-07-06",
     });
     await store.transaction(
       async () =>
@@ -992,7 +1165,7 @@ describe("director decisions and ownership boundaries", () => {
         "SELECT count(*) AS count FROM promises WHERE player_id = ?",
         player.id,
       ))!.count,
-    ).toBe(1);
+    ).toBe(0);
   });
 
   it("honors recall clauses and returns registration to the parent club", async () => {

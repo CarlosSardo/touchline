@@ -2752,35 +2752,74 @@ test("an outgoing loan honors its terms and can be recalled", async ({
   const candidates = roster.players.filter(
     (player: { contract_end: string; parent_club_id: number | null }) =>
       !player.parent_club_id && player.contract_end >= "2028-06-30",
-  ) as { id: number; name: string }[];
+  ) as { id: number; name: string; position: string; ability: number }[];
+  const worldClubs = await (
+    await request.get(
+      `/api/world/clubs?type=club&country=${bootstrap.club.country_id}&pageSize=100`,
+    )
+  ).json();
+  const borrowerNeeds = new Map<number, number[]>();
+  for (const club of worldClubs.clubs as { id: number; reputation: number }[]) {
+    if (club.id === bootstrap.club.id) continue;
+    const squad = await (
+      await request.get(
+        `/api/players?club=${club.id}&ageGroup=Senior&pageSize=100`,
+      )
+    ).json();
+    if (squad.players.length >= 28) continue;
+    const positions = new Map<string, number>();
+    for (const player of squad.players as { position: string }[])
+      positions.set(player.position, (positions.get(player.position) ?? 0) + 1);
+    for (const candidate of candidates) {
+      const positionCount = positions.get(candidate.position) ?? 0;
+      const abilityGap = candidate.ability - club.reputation;
+      const need =
+        34 -
+        positionCount * 9 +
+        Math.max(0, 24 - squad.players.length) * 1.4 +
+        Math.max(-12, Math.min(18, abilityGap));
+      if (need >= 10) {
+        const list = borrowerNeeds.get(candidate.id) ?? [];
+        list.push(club.id);
+        borrowerNeeds.set(candidate.id, list);
+      }
+    }
+  }
   // Interest in the borrowing club is only known once talks exist: open them, keep the first willing player.
   let found: { target: (typeof candidates)[number]; negotiation: { id: number; asking_price: number } } | undefined;
   for (const candidate of candidates) {
-    const enquiry = await request.post("/api/action", {
-      data: {
-        type: "enquiry",
-        playerId: candidate.id,
-        dealType: "Development loan",
-        destinationId: 2,
-      },
-    });
-    if (enquiry.status() !== 200) continue;
-    const opened = await enquiry.json();
-    if (opened.stage === "Rejected") continue;
-    const interest = await interestOf(request, candidate.id, {
-      negotiationId: String(opened.id),
-    });
-    if (opened.interest >= 50 && willingToTalk(interest)) {
-      found = { target: candidate, negotiation: opened };
-      break;
+    for (const destinationId of borrowerNeeds.get(candidate.id) ?? []) {
+      const enquiry = await request.post("/api/action", {
+        data: {
+          type: "enquiry",
+          playerId: candidate.id,
+          dealType: "Development loan",
+          destinationId,
+        },
+      });
+      if (enquiry.status() !== 200) continue;
+      const opened = await enquiry.json();
+      if (opened.stage === "Rejected") continue;
+      const interest = await interestOf(request, candidate.id, {
+        negotiationId: String(opened.id),
+      });
+      if (
+        opened.interest >= 50 &&
+        willingToTalk(interest) &&
+        interest.wageToAgree! <= interest.expectedWage * 1.5
+      ) {
+        found = { target: candidate, negotiation: opened };
+        break;
+      }
+      expect(
+        (
+          await request.post("/api/action", {
+            data: { type: "negotiation", id: opened.id, action: "withdraw" },
+          })
+        ).status(),
+      ).toBe(200);
     }
-    expect(
-      (
-        await request.post("/api/action", {
-          data: { type: "negotiation", id: opened.id, action: "withdraw" },
-        })
-      ).status(),
-    ).toBe(200);
+    if (found) break;
   }
   expect(found).toBeTruthy();
   const { target, negotiation } = found!;
@@ -2791,9 +2830,7 @@ test("an outgoing loan honors its terms and can be recalled", async ({
   await card.getByRole("button", { name: "Open negotiations" }).click();
   const dialog = page.locator(".offer-negotiation");
   await dialog.getByRole("button", { name: "Request formal talks" }).click();
-  await dialog
-    .getByLabel("Proposed transfer fee")
-    .fill(String(Math.round(negotiation.asking_price)));
+  await dialog.getByLabel("Proposed transfer fee").fill("0");
   await dialog
     .getByRole("slider", { name: /Borrowing club salary share/ })
     .focus();
@@ -2801,31 +2838,17 @@ test("an outgoing loan honors its terms and can be recalled", async ({
   await dialog
     .getByRole("slider", { name: /Borrowing club salary share/ })
     .press("ArrowRight");
-  await dialog.getByRole("button", { name: "Submit club offer" }).click();
+  await dialog.getByRole("button", { name: "Send loan proposal" }).click();
   await expect(page).toHaveURL(new RegExp(`#contract/${target.id}$`));
   await expect(
     dialog.getByRole("slider", { name: /Borrowing club salary share/ }),
   ).toHaveCount(0);
-  await dialog
-    .getByLabel("Proposed weekly wage")
-    .fill(
-      await agreeableWage(
-        request,
-        negotiation.id,
-        target.id,
-        currencyCode(bootstrap.settings.currency),
-      ),
-    );
-  await dialog.getByRole("button", { name: "Submit personal terms" }).click();
-  await dialog
-    .getByRole("button", { name: "Sign conditional agreement" })
-    .click();
-  await expect(dialog.locator(".negotiation-sheet-top .badge")).toHaveText(
-    "Medical",
+  await expect(dialog).toContainText(
+    "The buying club is negotiating personal terms with the agent",
   );
   expect(
     (
-      await request.post("/api/advance", { data: { days: 3 }, timeout: 180000 })
+      await request.post("/api/advance", { data: { days: 6 }, timeout: 180000 })
     ).status(),
   ).toBe(200);
   const desk = await (await request.get("/api/loans")).json();

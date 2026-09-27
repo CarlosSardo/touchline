@@ -52,7 +52,7 @@ import {
 } from "../../shared/rules.ts";
 import { AffiliateInterest } from "./ClubSupport.tsx";
 import type { LoanDesk } from "../../shared/api.ts";
-import type { Club, Loan, LoanTerms, Player } from "../../shared/types.ts";
+import type { Club, Loan, LoanTerms, Negotiation, NegotiationData, Player } from "../../shared/types.ts";
 import { dateValue, type SortColumn } from "../sort.ts";
 import { useSortableRows } from "../useSortableRows.ts";
 
@@ -460,7 +460,7 @@ function LoanReport({ loan, close }: { loan: Loan; close: () => void }) {
 
 export default function Loans() {
   const { data, error } = useResource<LoanDesk>("loans");
-  const { navigate, bootstrap } = useGame();
+  const { navigate, bootstrap, openOffer } = useGame();
   const { money } = useCurrency();
   const [tab, setTab] = useState("active");
   const [network, setNetwork] = useState(false);
@@ -476,6 +476,7 @@ export default function Loans() {
   if (error) return <ErrorState message={error} />;
   if (!data || !bootstrap) return <Loading />;
   const active = data.loans.filter((loan) => loan.status === "active");
+  const loanOffers = data.loanOffers ?? [];
   const average = active.length
     ? Math.round(
         active.reduce((sum, loan) => sum + loan.score, 0) / active.length,
@@ -517,16 +518,21 @@ export default function Loans() {
           detail="Your development network"
         />
         <Stat
-          label="Loans under pressure"
-          value={active.filter((loan) => loan.pressure > 60).length}
+          label="Loan offers"
+          value={loanOffers.length}
           icon={ShieldCheck}
-          detail="Agreements requiring attention"
+          detail="Incoming offers and outgoing talks"
         />
       </div>
       <Panel>
         <Tabs
           items={[
             { id: "active", label: "Loan tracker", count: active.length },
+            {
+              id: "offers",
+              label: "Loan offers",
+              count: loanOffers.length,
+            },
             {
               id: "candidates",
               label: "Loan candidates",
@@ -643,6 +649,84 @@ export default function Loans() {
                 onClick={() => setTab("candidates")}
               >
                 Review loan candidates
+              </Button>
+            </Empty>
+          ))}
+        {tab === "offers" &&
+          (loanOffers.length ? (
+            <div className="table-scroll" role="region" aria-label="Loan offers" tabIndex={0}>
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th>Player</th>
+                    <th>Direction</th>
+                    <th>Club</th>
+                    <th>Type</th>
+                    <th>Terms</th>
+                    <th>Status</th>
+                    <th>Open</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {loanOffers.map((negotiation: Negotiation) => {
+                    const details = JSON.parse(negotiation.data) as NegotiationData;
+                    const outgoing = negotiation.selling_club_id === bootstrap.club.id;
+                    const otherClub = outgoing
+                      ? negotiation.buyer_name
+                      : negotiation.seller_name;
+                    return (
+                      <tr key={negotiation.id}>
+                        <td>
+                          <strong>
+                            <PlayerLink
+                              id={negotiation.player_id}
+                              name={negotiation.player_name ?? "Player"}
+                            />
+                          </strong>
+                          <small>
+                            {negotiation.position} / {negotiation.age}
+                          </small>
+                        </td>
+                        <td>{outgoing ? "Loaning out" : "Loaning in"}</td>
+                        <td>{otherClub ?? "Club"}</td>
+                        <td>
+                          <Badge>{negotiation.type}</Badge>
+                        </td>
+                        <td>
+                          {money(negotiation.offer)} / {details.terms.salarySplit}% wage share
+                        </td>
+                        <td>
+                          <Badge tone={negotiation.stage === "Offer received" ? "green" : "amber"}>
+                            {negotiation.stage}
+                          </Badge>
+                        </td>
+                        <td>
+                          <Button
+                            variant="secondary"
+                            icon={ArrowUpRight}
+                            onClick={() => openOffer(negotiation.player_id)}
+                          >
+                            Open
+                          </Button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <Empty
+              icon={ArrowLeftRight}
+              title="No active loan offers"
+              detail="Incoming loan offers and outgoing loan proposals will appear here."
+            >
+              <Button
+                icon={Search}
+                variant="secondary"
+                onClick={() => setTab("candidates")}
+              >
+                Find a club for a player
               </Button>
             </Empty>
           ))}
