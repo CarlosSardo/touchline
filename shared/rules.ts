@@ -6,6 +6,7 @@ import type {
   TransferTerms,
   Club,
   AffiliateWillingness,
+  LoanBackOption,
 } from "./types.ts";
 import type { SaveSlot } from "./api.ts";
 
@@ -67,7 +68,108 @@ export const DEFAULT_TRANSFER_TERMS: TransferTerms = {
   buyBackFee: 0,
   buyBackYears: 2,
   sellOnPercent: 0,
+  loanBack: "none",
 };
+export const LOAN_BACK_LABELS: Record<LoanBackOption, string> = {
+  none: "No loan-back",
+  season: "Loan back until 30 June",
+  year: "One-year loan-back",
+  "two-seasons": "Two-season loan-back",
+};
+const LOAN_BACK_BASE_DISCOUNTS: Record<LoanBackOption, number> = {
+  none: 0,
+  season: 0.03,
+  year: 0.05,
+  "two-seasons": 0.07,
+};
+export const normalizeLoanBack = (loanBack?: LoanBackOption) =>
+  loanBack && loanBack !== "none" ? loanBack : "none";
+export function loanBackEndDate(loanBack: LoanBackOption | undefined, date: string) {
+  const option = normalizeLoanBack(loanBack);
+  const seasonEndYear =
+    Number(date.slice(0, 4)) + (date.slice(5) >= "06-30" ? 1 : 0);
+  if (option === "season") return `${seasonEndYear}-06-30`;
+  if (option === "year") return addMonths(date, 12);
+  if (option === "two-seasons") return `${seasonEndYear + 1}-06-30`;
+  return date;
+}
+/**
+ * Loan-backs make the seller more flexible because they keep sporting value. Base floor discounts are
+ * season/year/two-seasons = 3/5/7%; important players add up to another 3pp.
+ */
+export function loanBackSellerFloorDiscount(loanBack: LoanBackOption | undefined, importance = 0.8) {
+  const base = LOAN_BACK_BASE_DISCOUNTS[normalizeLoanBack(loanBack)];
+  return Math.min(0.1, base + Math.max(0, importance - 0.85) * 0.2);
+}
+/** The buyer's maximum fee drops by the same 3/5/7% because it waits for the player. */
+export function loanBackBuyerCeilingPenalty(loanBack: LoanBackOption | undefined) {
+  return LOAN_BACK_BASE_DISCOUNTS[normalizeLoanBack(loanBack)];
+}
+export function loanBackValidationIssue({
+  loanBack,
+  type,
+  date,
+  contractEnd,
+  international,
+  age,
+  onwardLoan,
+}: {
+  loanBack?: LoanBackOption;
+  type: string;
+  date: string;
+  contractEnd: string;
+  international: boolean;
+  age: number;
+  onwardLoan?: boolean;
+}) {
+  const option = normalizeLoanBack(loanBack);
+  if (option === "none") return null;
+  if (type !== "Permanent transfer")
+    return "Loan-backs are only available on immediate permanent transfers.";
+  if (onwardLoan)
+    return "Choose either a seller loan-back or an onward affiliate loan, not both.";
+  if (age < 18 && international)
+    return "Minor loan-backs must stay within the same association.";
+  if (option === "two-seasons" && international)
+    return "FIFA rules cap international loan-backs at one year; choose a shorter option.";
+  if (loanBackEndDate(option, date) > contractEnd)
+    return "The loan-back must end before the buyer's new contract ends.";
+  return null;
+}
+export const PRE_CONTRACT_WINDOW_DAYS = 183;
+export const PRE_CONTRACT_DOMESTIC_RESTRICTED_ASSOCIATIONS = ["EN", "SCO", "WAL", "NIR"] as const;
+export function preContractValidationIssue({
+  date,
+  contractEnd,
+  ageAtArrival,
+  sourceAssociation,
+  destinationAssociation,
+  onLoan,
+}: {
+  date: string;
+  contractEnd: string;
+  ageAtArrival: number;
+  sourceAssociation: string;
+  destinationAssociation: string;
+  onLoan?: boolean;
+}) {
+  if (onLoan)
+    return "Pre-contracts cannot be signed while the player is on loan.";
+  const days = daysBetween(date, contractEnd);
+  if (days < 0) return "This contract has already expired.";
+  if (days > PRE_CONTRACT_WINDOW_DAYS)
+    return "Pre-contracts are only available in the final six months of the current contract.";
+  if (ageAtArrival < 18)
+    return "The player must be 18 or older when a pre-contract takes effect.";
+  if (
+    sourceAssociation === destinationAssociation &&
+    PRE_CONTRACT_DOMESTIC_RESTRICTED_ASSOCIATIONS.includes(
+      sourceAssociation as (typeof PRE_CONTRACT_DOMESTIC_RESTRICTED_ASSOCIATIONS)[number],
+    )
+  )
+    return "Domestic pre-contract approaches are not modelled for UK associations; wait until the contract expires.";
+  return null;
+}
 export const TRANSFER_STAGES = [
   "Enquiry",
   "Club talks",

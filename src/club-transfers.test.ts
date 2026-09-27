@@ -92,7 +92,7 @@ describe("transfer clauses", () => {
     expect(transferClauses(terms({}), fakeMoney)).toEqual([]);
     expect(clauseBadges(null)).toEqual([]);
   });
-  it("describes instalments, sell-on and buy-back", () => {
+  it("describes instalments, sell-on, buy-back and loan-back", () => {
     const deal = terms({
       upfrontPercent: 40,
       installments: 3,
@@ -100,13 +100,15 @@ describe("transfer clauses", () => {
       sellOnPercent: 15,
       buyBackFee: 9_000_000,
       buyBackYears: 2,
+      loanBack: "year",
     });
     expect(transferClauses(deal, fakeMoney)).toEqual([
       "40% upfront, then 3 instalments every 6 months",
       "15% sell-on",
       "Buy-back £9000000 for 2 years",
+      "One-year loan-back",
     ]);
-    expect(clauseBadges(deal)).toEqual(["Instalments", "Sell-on 15%", "Buy-back"]);
+    expect(clauseBadges(deal)).toEqual(["Instalments", "Sell-on 15%", "Buy-back", "Loan-back"]);
     expect(transferClauses(terms({ installments: 1, intervalMonths: 1 }), fakeMoney)).toEqual([
       "100% upfront, then 1 instalment every 1 month",
     ]);

@@ -562,6 +562,8 @@ export interface Negotiation {
   /** Transfer desk only: rivals for this player as the director knows them (data.rivals is removed). */
   rivals?: RivalInterest[];
   battle?: TransferBattleView | null;
+  affiliatePlacementOptions?: AffiliateOption[];
+  onwardLoanOptions?: AffiliateOption[];
 }
 
 export interface TransferTerms {
@@ -571,6 +573,38 @@ export interface TransferTerms {
   buyBackFee: number;
   buyBackYears: number;
   sellOnPercent: number;
+  /** The selling club keeps the player on loan after the sale ("none"/absent: he joins the buyer at once). */
+  loanBack?: LoanBackOption;
+}
+
+export type LoanBackOption = "none" | "season" | "year" | "two-seasons";
+
+/** An onward loan the buying club arranged to one of its affiliates, started as the signing registers. */
+export interface OnwardLoanPlan {
+  clubId: number;
+  clubName: string;
+  until: "season" | "year";
+  setOn: string;
+}
+
+/** A future signing already registered at one of the buyer's affiliates in the player's own association. */
+export interface AffiliatePlacement {
+  clubId: number;
+  clubName: string;
+  date: string;
+  originalSellerId: number;
+  originalSellerName: string;
+  fee: number;
+}
+
+export interface AffiliateOption {
+  clubId: number;
+  clubName: string;
+  eligible: boolean;
+  reasons: string[];
+  strength: number;
+  squadCount: number;
+  adjustedArrival?: string;
 }
 
 export interface TransferPayment {
@@ -764,4 +798,8 @@ export interface NegotiationData {
   signingBonus?: number;
   rivals?: RivalBid[];
   battle?: TransferBattle;
+  /** Affiliate loan the buyer starts when this signing registers (not with a loan-back). */
+  onwardLoan?: OnwardLoanPlan;
+  /** Future transfers only: the minor already moved domestically to the buyer's affiliate. */
+  affiliatePlacement?: AffiliatePlacement;
 }

@@ -13,8 +13,13 @@ import {
   weeklyWages,
 } from "./systems.ts";
 import {
+  affiliateOptionsForNegotiation,
+  affiliateSquadCounts,
+} from "./affiliates.ts";
+import {
   addDays,
   ATTRIBUTE_GROUPS,
+  LOAN_TYPES,
   PERSONALITY_KEYS,
   POSITIONS,
   potentialInfluences,
@@ -51,6 +56,7 @@ import type {
   Loan,
   MatchSnapshot,
   Negotiation,
+  NegotiationData,
   Player,
   PlayerProfile,
   ScoutReport,
@@ -1174,6 +1180,36 @@ export async function scouting(store: Store): Promise<ScoutingData> {
 
 export async function transfers(store: Store): Promise<TransferDesk> {
   const id = (await stateOf(store)).clubId;
+  const negotiations = await withBattleViews(
+    store,
+    await store.all<Negotiation>(
+      "SELECT negotiations.*, players.name AS player_name, players.position, players.age, players.ability, players.potential, buyer.name AS buyer_name, seller.name AS seller_name FROM negotiations JOIN players ON players.id = negotiations.player_id JOIN clubs AS buyer ON buyer.id = negotiations.buying_club_id LEFT JOIN clubs AS seller ON seller.id = negotiations.selling_club_id WHERE buying_club_id = ? OR selling_club_id = ? ORDER BY negotiations.id DESC",
+      id,
+      id,
+    ),
+  );
+  const affiliateStages = ["Contract review", "Scheduled", "Medical", "Registration"];
+  const needsAffiliateOptions = negotiations.some((negotiation) => {
+    if (negotiation.buying_club_id !== id) return false;
+    const data = JSON.parse(negotiation.data) as NegotiationData;
+    return (
+      (negotiation.type === "Future transfer" &&
+        negotiation.stage === "Scheduled" &&
+        !!data.futureArrivalDate &&
+        !data.affiliatePlacement) ||
+      (affiliateStages.includes(negotiation.stage) &&
+        !["Contract renewal", "Youth approach"].includes(negotiation.type))
+    );
+  });
+  const squadCounts = needsAffiliateOptions
+    ? await affiliateSquadCounts(store)
+    : undefined;
+  for (const negotiation of negotiations) {
+    const { placementOptions, onwardLoanOptions } =
+      await affiliateOptionsForNegotiation(store, negotiation, squadCounts);
+    negotiation.affiliatePlacementOptions = placementOptions;
+    negotiation.onwardLoanOptions = onwardLoanOptions;
+  }
   return {
     payments: await transferPayments(store, id),
     buyBackClauses: await store.all(
@@ -1187,14 +1223,7 @@ export async function transfers(store: Store): Promise<TransferDesk> {
       id,
       id,
     ),
-    negotiations: await withBattleViews(
-      store,
-      await store.all<Negotiation>(
-        "SELECT negotiations.*, players.name AS player_name, players.position, players.age, players.ability, players.potential, buyer.name AS buyer_name, seller.name AS seller_name FROM negotiations JOIN players ON players.id = negotiations.player_id JOIN clubs AS buyer ON buyer.id = negotiations.buying_club_id LEFT JOIN clubs AS seller ON seller.id = negotiations.selling_club_id WHERE buying_club_id = ? OR selling_club_id = ? ORDER BY negotiations.id DESC",
-        id,
-        id,
-      ),
-    ),
+    negotiations,
     targets: (
       await store.all<Player>(
         `${playerSelect} WHERE shortlisted = 1 AND players.club_id != ? ORDER BY potential DESC,players.id OFFSET 0 ROWS FETCH NEXT 20 ROWS ONLY`,
@@ -1209,11 +1238,21 @@ export async function transfers(store: Store): Promise<TransferDesk> {
 
 export async function loans(store: Store): Promise<LoanDesk> {
   const id = (await stateOf(store)).clubId;
+  const loanTypeList = LOAN_TYPES.map(() => "?").join(",");
   return {
     loans: await store.all<Loan>(
       "SELECT loans.*, players.name AS player_name, players.position, players.age, players.ability, players.potential, parent.name AS parent_name, destination.name AS destination_name, destination.color AS destination_color FROM loans JOIN players ON players.id = loans.player_id JOIN clubs AS parent ON parent.id = loans.parent_id JOIN clubs AS destination ON destination.id = loans.destination_id WHERE loans.parent_id = ? OR loans.destination_id = ? ORDER BY loans.id DESC",
       id,
       id,
+    ),
+    loanOffers: await withBattleViews(
+      store,
+      await store.all<Negotiation>(
+        `SELECT negotiations.*, players.name AS player_name, players.position, players.age, players.ability, players.potential, buyer.name AS buyer_name, seller.name AS seller_name FROM negotiations JOIN players ON players.id = negotiations.player_id JOIN clubs AS buyer ON buyer.id = negotiations.buying_club_id LEFT JOIN clubs AS seller ON seller.id = negotiations.selling_club_id WHERE (negotiations.buying_club_id = ? OR negotiations.selling_club_id = ?) AND negotiations.type IN (${loanTypeList}) AND negotiations.stage IN ('Enquiry','Club talks','Agent talks','Contract review','Scheduled','Medical','Registration','Offer received') ORDER BY negotiations.id DESC`,
+        id,
+        id,
+        ...LOAN_TYPES,
+      ),
     ),
     partnerships: await store.all(
       "SELECT partnerships.*,clubs.id AS partner_id,clubs.name,clubs.color,clubs.reputation FROM partnerships JOIN clubs ON clubs.id = CASE WHEN partnerships.club_id = ? THEN partnerships.partner_id ELSE partnerships.club_id END WHERE partnerships.club_id = ? OR partnerships.partner_id = ? ORDER BY strength DESC",

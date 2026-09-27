@@ -99,6 +99,12 @@ import {
   expireLoans,
   finishScouting,
   GameError,
+  internationalLoanIssue,
+  loanAskingFee,
+  loanEndDate,
+  loanTermsIssue,
+  maxLoanBonus,
+  minimumOptionFee,
   news,
   playerOf,
   reviewLoans,
@@ -117,6 +123,7 @@ import {
   disciplineScope,
   internationalBreak,
   LEGACY_DISCIPLINE_SCOPE,
+  LOAN_TYPES,
   potentialInfluences,
   round,
   tacticalFit,
@@ -2788,9 +2795,19 @@ export async function worldTransfers(store: Store, random: seedrandom.PRNG) {
     state.clubId,
     addDays(state.date, -6),
   ))!.total;
-  if (recentOffers >= (deadlineWeek ? 5 : 3)) return activity;
+  const loanTypeList = LOAN_TYPES.map(() => "?").join(",");
+  const recentLoanOffers = (await store.get<{ total: number }>(
+    `SELECT count(*) AS total FROM negotiations WHERE selling_club_id = ? AND buying_club_id != ? AND type IN (${loanTypeList}) AND created >= ?`,
+    state.clubId,
+    state.clubId,
+    ...LOAN_TYPES,
+    addDays(state.date, -6),
+  ))!.total;
+  const offerCap = deadlineWeek ? 5 : 3;
+  const loanOfferCap = deadlineWeek ? 2 : 1;
+  if (recentOffers >= offerCap && recentLoanOffers >= loanOfferCap) return activity;
   const prospects = await store.all<Player>(
-    "SELECT TOP (12) * FROM players WHERE club_id = ? AND parent_club_id IS NULL AND age >= 18 AND age_group = 'Senior' AND role != 'Retired' AND contract_end > ? AND (listed = 1 OR available_loan = 1 OR form >= 7.2 OR (age <= 23 AND potential - ability >= 8) OR contract_end <= ?) AND NOT EXISTS (SELECT 1 FROM negotiations WHERE negotiations.player_id = players.id AND (stage NOT IN ('Completed','Rejected','Withdrawn','Expired','Hijacked') OR created >= ?)) AND (listed = 1 OR available_loan = 1 OR NOT EXISTS (SELECT 1 FROM history WHERE history.entity_type = 'transfer' AND history.entity_id = players.id AND history.date >= ?)) ORDER BY listed DESC,available_loan DESC,form DESC,potential DESC,id",
+    "SELECT TOP (16) * FROM players WHERE club_id = ? AND parent_club_id IS NULL AND age >= 16 AND role != 'Retired' AND contract_end > ? AND ((available_loan = 1) OR (age >= 18 AND age_group = 'Senior' AND (listed = 1 OR form >= 7.2 OR (age <= 23 AND potential - ability >= 8) OR contract_end <= ?))) AND NOT EXISTS (SELECT 1 FROM negotiations WHERE negotiations.player_id = players.id AND (stage NOT IN ('Completed','Rejected','Withdrawn','Expired','Hijacked') OR created >= ?)) AND (listed = 1 OR available_loan = 1 OR NOT EXISTS (SELECT 1 FROM history WHERE history.entity_type = 'transfer' AND history.entity_id = players.id AND history.date >= ?)) ORDER BY listed DESC,available_loan DESC,form DESC,potential DESC,id",
     state.clubId,
     state.date,
     addDays(state.date, 365),
@@ -2806,52 +2823,103 @@ export async function worldTransfers(store: Store, random: seedrandom.PRNG) {
     )
       continue;
     const isLoan = !listed.listed && !!listed.available_loan;
-    if (isLoan && listed.contract_end < addDays(state.date, 365)) continue;
-    const fee = Math.round(
-      listed.value *
-        (isLoan
-          ? 0.03
-          : listed.listed
-            ? 0.88 + random() * 0.16
-            : 1 + random() * 0.1),
+    if (isLoan && recentLoanOffers >= loanOfferCap) continue;
+    if (!isLoan && recentOffers >= offerCap) continue;
+    if (!isLoan && (listed.age < 18 || listed.age_group !== "Senior")) continue;
+    const roughFee = Math.round(
+      listed.value * (isLoan ? 0.03 : listed.listed ? 0.88 + random() * 0.16 : 1 + random() * 0.1),
     );
+    const familyIds = [...userFamily];
     const interested = await store.all<Club>(
-      "SELECT TOP (10) * FROM clubs WHERE id != ? AND type = 'club' AND transfer_budget > ? AND balance > ? AND reputation BETWEEN ? AND ? AND (SELECT count(*) FROM players WHERE players.club_id = clubs.id AND age_group = 'Senior' AND role != 'Retired') < 28 ORDER BY abs(reputation - ?),id",
-      state.clubId,
-      fee,
-      fee,
+      `SELECT TOP (10) * FROM clubs WHERE id NOT IN (${familyIds.map(() => "?").join(",")}) AND type = 'club' AND transfer_budget > ? AND balance > ? AND reputation BETWEEN ? AND ? AND (SELECT count(*) FROM players WHERE players.club_id = clubs.id AND age_group = 'Senior' AND role != 'Retired') < 28 ORDER BY abs(reputation - ?),id`,
+      ...familyIds,
+      roughFee,
+      roughFee,
       Math.max(1, listed.ability - 20),
       listed.ability + 20,
       listed.ability + (isLoan ? -5 : 3),
     );
     let buyer: Club | undefined;
     let offeredWage = 0;
+    let fee = roughFee;
+    let dealType = "Permanent transfer";
+    let terms = defaultLoanTerms(listed, await clubOf(store, state.clubId));
+    let interestDetails;
     for (const candidate of interested) {
+      let candidateFee = roughFee;
+      let candidateTerms = terms;
+      let candidateType = dealType;
+      if (isLoan) {
+        const parent = await clubOf(store, state.clubId);
+        const january = state.date.slice(5, 7) === "01";
+        candidateType =
+          listed.age >= 22 && random() < 0.14
+            ? "Loan with option"
+            : january && random() < 0.45
+              ? "Short loan"
+              : random() < 0.62
+                ? "Development loan"
+                : "Standard loan";
+        candidateTerms = defaultLoanTerms(listed, candidate);
+        if (candidateType === "Short loan") {
+          candidateTerms.duration = 182;
+          candidateTerms.mandatoryMinutes = 900;
+        }
+        const abilityGap = listed.ability - candidate.reputation;
+        candidateTerms.playingTime = abilityGap >= 8 ? 78 : abilityGap >= 0 ? 65 : 52;
+        candidateTerms.role = abilityGap >= 8 ? "Regular starter" : abilityGap >= 0 ? "Squad player" : "Fringe player";
+        candidateTerms.salarySplit = Math.round(clamp(58 + abilityGap / 2 + random() * 20, 35, 90));
+        if (candidateType === "Loan with option")
+          candidateTerms.optionFee = Math.max(minimumOptionFee(candidateType, listed.value), Math.round(listed.value * (1.05 + random() * 0.2)));
+        const international = parent.country_id !== candidate.country_id;
+        if (listed.age < 18 && international) continue;
+        const limit = international ? await internationalLoanIssue(store, listed, parent, candidate, state.date) : null;
+        if (limit) continue;
+        const endDate = loanEndDate(candidateType, state.date, candidateTerms.duration);
+        if (endDate > listed.contract_end) continue;
+        const days = daysBetween(state.date, endDate);
+        candidateTerms.bonus = Math.min(candidateTerms.bonus, maxLoanBonus(listed.value, days, candidateTerms.mandatoryMinutes));
+        const issue = loanTermsIssue(
+          { type: candidateType, value: listed.value, days, international },
+          candidateTerms,
+        );
+        if (issue) continue;
+        candidateFee = loanAskingFee(
+          { type: candidateType, value: listed.value, wage: listed.wage, days, referenceSplit: candidateTerms.salarySplit },
+          candidateTerms,
+        );
+        candidateTerms.fee = candidateFee;
+      }
       // A permanent bidder offers a raise or its own going rate for the player's level, whichever is higher.
       const wage = isLoan
         ? listed.wage
         : Math.max(Math.round(listed.wage * 1.15), await buyerGoingRate(store, listed, candidate));
+      const assessment = await assessPlayerInterest(store, listed, candidate, {
+        loan: isLoan,
+        role: isLoan ? candidateTerms.role : "Regular starter",
+        wage,
+        playingTime: isLoan ? candidateTerms.playingTime : undefined,
+      });
+      if (assessment.refuses || (assessment.moveScore ?? assessment.score) < MOVE_REFUSAL_THRESHOLD) continue;
       if (
+        candidate.transfer_budget >= candidateFee &&
+        candidate.balance >= candidateFee &&
         (await weeklyWages(store, candidate.id)) +
-          (isLoan ? listed.wage * 0.7 : wage) <=
+          (isLoan ? (listed.wage * candidateTerms.salarySplit) / 100 : wage) <=
           candidate.wage_budget &&
         (await assessRegistration(store, listed, candidate)).allowed
       ) {
         buyer = candidate;
         offeredWage = wage;
+        fee = candidateFee;
+        dealType = candidateType;
+        terms = candidateTerms;
+        interestDetails = assessment;
         break;
       }
     }
     if (buyer) {
       const profile = JSON.parse(listed.profile) as PlayerProfile;
-      const terms = defaultLoanTerms(listed, buyer);
-      // The player's real view of the move, so the director knows before accepting whether he may refuse terms.
-      const interestDetails = await assessPlayerInterest(store, listed, buyer, {
-        loan: isLoan,
-        role: "Regular starter",
-        wage: offeredWage,
-        playingTime: isLoan ? terms.playingTime : undefined,
-      });
       const data = {
         workflowVersion: 2,
         interestDetails,
@@ -2864,21 +2932,22 @@ export async function worldTransfers(store: Store, random: seedrandom.PRNG) {
         ],
         agent: profile.agent,
         years: listed.age < 18 ? 3 : 4,
-        role: "Regular starter",
+        role: isLoan ? terms.role : "Regular starter",
         promises: [],
         terms,
+        ...(isLoan ? { loanReferenceSplit: terms.salarySplit } : {}),
       };
       const inserted = await store.run(
         "INSERT INTO negotiations(player_id, buying_club_id, selling_club_id, type, stage, asking_price, offer, wage, interest, created, deadline, data) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         listed.id,
         buyer.id,
         state.clubId,
-        isLoan ? "Development loan" : "Permanent transfer",
+        dealType,
         "Offer received",
         isLoan ? fee : listed.value,
         fee,
         offeredWage,
-        interestDetails.score,
+        interestDetails!.score,
         state.date,
         addDays(state.date, 7),
         JSON.stringify(data),
@@ -2887,7 +2956,9 @@ export async function worldTransfers(store: Store, random: seedrandom.PRNG) {
         store,
         "Transfers",
         `An offer for ${listed.name}`,
-        `${buyer.name} have made a proposal. The decision is yours.`,
+        isLoan
+          ? `${buyer.name} want ${listed.name} on ${dealType.toLowerCase()} until ${loanEndDate(dealType, state.date, terms.duration)}. The decision is yours.`
+          : `${buyer.name} have made a proposal. The decision is yours.`,
         "important",
         "transfers",
         {

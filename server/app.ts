@@ -43,6 +43,7 @@ import {
   clubOf,
   closeNegotiation,
   createPartnership,
+  counterIncomingLoan,
   counterIncomingOffer,
   declareInterest,
   enquire,
@@ -71,6 +72,10 @@ import {
   MAX_LOAN_SELL_ON,
   MIN_LOAN_SALARY_SPLIT,
 } from "./systems.ts";
+import {
+  placeFutureTransferAtAffiliate,
+  setOnwardLoanPlan,
+} from "./affiliates.ts";
 import {
   addDays,
   clamp,
@@ -572,6 +577,7 @@ export async function dispatchAction(
             "Contract renewal",
             "Youth approach",
             "Future transfer",
+            "Pre-contract agreement",
             ...LOAN_TYPES,
           ]),
           destinationId: idSchema.optional(),
@@ -648,6 +654,32 @@ export async function dispatchAction(
         })
         .parse(body);
       return counterIncomingOffer(store, data.id, data.fee, data.transferTerms);
+    }
+    case "counter-loan": {
+      const data = z
+        .object({
+          id: idSchema,
+          fee: positive.max(1_000_000_000),
+          terms: loanTerms,
+        })
+        .parse(body);
+      return counterIncomingLoan(store, data.id, data.fee, data.terms);
+    }
+    case "affiliate-placement": {
+      const data = z
+        .object({ id: idSchema, clubId: idSchema })
+        .parse(body);
+      return placeFutureTransferAtAffiliate(store, data.id, data.clubId);
+    }
+    case "onward-loan": {
+      const data = z
+        .object({
+          id: idSchema,
+          clubId: idSchema.nullable(),
+          until: z.enum(["season", "year"]).default("season"),
+        })
+        .parse(body);
+      return setOnwardLoanPlan(store, data.id, data.clubId, data.until);
     }
     case "negotiation": {
       const data = z

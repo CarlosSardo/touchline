@@ -40,11 +40,15 @@ import {
 } from "../ui.tsx";
 import {
   dateLabel,
+  addDays,
   adultTransferArrival,
   ageOn,
+  daysBetween,
   DEFAULT_TRANSFER_TERMS,
+  LOAN_BACK_LABELS,
   LOAN_TYPES,
   POSITIONS,
+  PRE_CONTRACT_WINDOW_DAYS,
   TRAINING_TYPES,
   transferWindow,
   TRANSFER_STAGES,
@@ -55,6 +59,7 @@ import type { PlayerDetail, TransferDesk } from "../../shared/api.ts";
 import type {
   BuyBackClause,
   LoanTerms,
+  LoanBackOption,
   Negotiation,
   NegotiationData,
   Position,
@@ -180,14 +185,28 @@ function OfferPage() {
   const canLoan = !own && player.club_id !== null && !player.parent_club_id;
   const age = ageOn(player.birth_date, bootstrap.state.date);
   const futureAvailable = !own && age >= 14 && age < 18;
+  const preContractAvailable =
+    !own &&
+    player.club_id !== null &&
+    !player.parent_club_id &&
+    daysBetween(bootstrap.state.date, player.contract_end) >= 0 &&
+    daysBetween(bootstrap.state.date, player.contract_end) <=
+      PRE_CONTRACT_WINDOW_DAYS &&
+    ageOn(player.birth_date, addDays(player.contract_end, 1)) >= 18;
   const future =
     category === "transfer" && transferType === "future" && futureAvailable;
+  const preContract =
+    category === "transfer" &&
+    transferType === "pre-contract" &&
+    preContractAvailable;
   const dealType = own
     ? "Contract renewal"
     : category === "loan" && canLoan
       ? loanType
       : future
         ? "Future transfer"
+        : preContract
+          ? "Pre-contract agreement"
         : transferType === "youth" && data.youthTransfer.canApproachWithoutFee
           ? "Youth approach"
           : "Permanent transfer";
@@ -225,6 +244,8 @@ function OfferPage() {
     ? (JSON.parse(negotiation.data) as NegotiationData).futureArrivalDate
     : future
       ? adultTransferArrival(player.birth_date)
+      : preContract
+        ? addDays(player.contract_end, 1)
       : undefined;
   async function begin() {
     setPending(true);
@@ -318,9 +339,9 @@ function OfferPage() {
         <div className="information-note section-space">
           <Clock3 size={16} />
           <span>
-            Future arrival: {dateLabel(futureArrival)}. The player cannot join
-            before turning 18. Medical, registration and work-permission checks
-            still apply on arrival.
+            {preContract
+              ? `Pre-contract arrival: ${dateLabel(futureArrival)}. The current club is informed and no transfer fee is due if the contract expires.`
+              : `Future arrival: ${dateLabel(futureArrival)}. The player cannot join before turning 18. Medical, registration and work-permission checks still apply on arrival.`}
           </span>
         </div>
       ) : (
@@ -415,6 +436,9 @@ function OfferPage() {
                   )}
                   {futureAvailable && (
                     <option value="future">Future transfer at 18</option>
+                  )}
+                  {preContractAvailable && (
+                    <option value="pre-contract">Pre-contract agreement</option>
                   )}
                 </>
               )}
@@ -599,10 +623,12 @@ function TransferTermsForm({
   terms,
   setTerms,
   fee,
+  loanBack = true,
 }: {
   terms: TransferTerms;
   setTerms: (terms: TransferTerms) => void;
   fee: number;
+  loanBack?: boolean;
 }) {
   return (
     <>
@@ -678,6 +704,27 @@ function TransferTermsForm({
             }
           />
         </Field>
+        {loanBack && (
+          <Field label="Seller loan-back">
+            <select
+              value={terms.loanBack ?? "none"}
+              onChange={(event) =>
+                setTerms({
+                  ...terms,
+                  loanBack: event.target.value as LoanBackOption,
+                })
+              }
+            >
+              {(["none", "season", "year", "two-seasons"] as LoanBackOption[]).map(
+                (option) => (
+                  <option key={option} value={option}>
+                    {LOAN_BACK_LABELS[option]}
+                  </option>
+                ),
+              )}
+            </select>
+          </Field>
+        )}
         <label className="checkbox-field">
           <input
             type="checkbox"
@@ -816,6 +863,17 @@ function withLoanLimits(terms: LoanTerms): LoanTerms {
       ? Math.min(MAX_LOAN_SELL_ON, Math.max(0, sellOn))
       : 0,
   };
+}
+
+function loanEndDateLabel(type: string, startDate: string, duration: number) {
+  if (type === "Short loan") return dateLabel(addDays(startDate, 182));
+  if (type === "Emergency loan") return dateLabel(addDays(startDate, 90));
+  const seasonEndYear =
+    Number(startDate.slice(0, 4)) + (startDate.slice(5) >= "06-01" ? 1 : 0);
+  if (type === "Two-year loan") return dateLabel(`${seasonEndYear + 1}-06-30`);
+  if (type === "Standard loan" || duration === 365)
+    return dateLabel(`${seasonEndYear}-06-30`);
+  return dateLabel(addDays(startDate, duration));
 }
 
 export function LoanTermsForm({
@@ -1036,9 +1094,11 @@ export function LoanTermsForm({
 function DealProgress({
   stage,
   future = false,
+  preContract = false,
 }: {
   stage: string;
   future?: boolean;
+  preContract?: boolean;
 }) {
   const stages = future
     ? [...TRANSFER_STAGES.slice(0, 4), "Scheduled", ...TRANSFER_STAGES.slice(4)]
@@ -1061,10 +1121,193 @@ function DealProgress({
           aria-current={index === current ? "step" : undefined}
         >
           <span>{index < current ? <Check size={11} /> : index + 1}</span>
-          <small>{name}</small>
+          <small>{preContract && name === "Scheduled" ? "Pre-contract" : name}</small>
         </li>
       ))}
     </ol>
+  );
+}
+
+function AffiliateControls({
+  negotiation,
+  details,
+  compact = false,
+  onDone,
+}: {
+  negotiation: Negotiation;
+  details: NegotiationData;
+  compact?: boolean;
+  onDone?: () => void;
+}) {
+  const { act, bootstrap, confirm } = useGame();
+  const { money } = useCurrency();
+  const placementOptions = negotiation.affiliatePlacementOptions ?? [];
+  const loanOptions = negotiation.onwardLoanOptions ?? [];
+  const eligiblePlacements = placementOptions.filter((option) => option.eligible);
+  const eligibleLoans = loanOptions.filter((option) => option.eligible);
+  const [placementClub, setPlacementClub] = useState(
+    String(eligiblePlacements[0]?.clubId ?? ""),
+  );
+  const [loanClub, setLoanClub] = useState(
+    String(details.onwardLoan?.clubId ?? eligibleLoans[0]?.clubId ?? ""),
+  );
+  const [loanUntil, setLoanUntil] = useState<"season" | "year">(
+    details.onwardLoan?.until ?? "season",
+  );
+  if (!bootstrap || negotiation.buying_club_id !== bootstrap.club.id)
+    return null;
+  const hasLoanBack =
+    !!details.transferTerms?.loanBack && details.transferTerms.loanBack !== "none";
+  const canPlace =
+    !!details.futureArrivalDate &&
+    negotiation.type === "Future transfer" &&
+    negotiation.stage === "Scheduled" &&
+    !details.affiliatePlacement &&
+    !hasLoanBack &&
+    eligiblePlacements.length > 0;
+  const canPlanLoan =
+    ["Contract review", "Scheduled", "Medical", "Registration"].includes(
+      negotiation.stage,
+    ) &&
+    !LOAN_TYPES.includes(negotiation.type) &&
+    !["Contract renewal", "Youth approach"].includes(negotiation.type) &&
+    !hasLoanBack;
+  return (
+    <div className={compact ? "affiliate-controls compact" : "affiliate-controls"}>
+      {details.affiliatePlacement ? (
+        <p>
+          Placed at <strong>{details.affiliatePlacement.clubName}</strong>; fee{" "}
+          {money(details.affiliatePlacement.fee)} already settled.
+        </p>
+      ) : details.futureArrivalDate &&
+        negotiation.type === "Future transfer" &&
+        negotiation.stage === "Scheduled" &&
+        !hasLoanBack ? (
+        <div className="inline-controls">
+          <Field label="Place at affiliate now">
+            <select
+              aria-label="Affiliate placement club"
+              value={placementClub}
+              onChange={(event) => setPlacementClub(event.target.value)}
+            >
+              {eligiblePlacements.length === 0 && (
+                <option value="">No eligible affiliate</option>
+              )}
+              {placementOptions.map((option) => (
+                <option
+                  key={option.clubId}
+                  value={option.clubId}
+                  disabled={!option.eligible}
+                >
+                  {option.clubName}
+                  {option.eligible ? "" : ` — ${option.reasons[0]}`}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Button
+            variant="secondary"
+            icon={ArrowLeftRight}
+            disabled={!canPlace || !placementClub}
+            onClick={() => {
+              const option = placementOptions.find(
+                (entry) => entry.clubId === Number(placementClub),
+              );
+              if (!option) return;
+              confirm(
+                "Place at affiliate now?",
+                `This registers the player domestically at ${option.clubName}, settles the current fee from the reserved allocation now, and keeps only the future move to your club. FIFA bridge-transfer rules require at least 16 weeks before the onward registration${option.adjustedArrival ? `, so arrival becomes ${dateLabel(option.adjustedArrival)}` : ""}.`,
+                () => {
+                  void act({
+                    type: "affiliate-placement",
+                    id: negotiation.id,
+                    clubId: option.clubId,
+                  }).then((result) => {
+                    if (result) onDone?.();
+                  });
+                },
+              );
+            }}
+          >
+            Place now
+          </Button>
+        </div>
+      ) : null}
+      {canPlanLoan && (
+        <div className="inline-controls">
+          <Field label="On arrival, loan to affiliate">
+            <select
+              aria-label="Onward affiliate loan club"
+              value={loanClub}
+              onChange={(event) => setLoanClub(event.target.value)}
+            >
+              <option value="">No affiliate loan</option>
+              {details.onwardLoan &&
+                !loanOptions.some(
+                  (option) => option.clubId === details.onwardLoan!.clubId,
+                ) && (
+                  <option value={details.onwardLoan.clubId}>
+                    {details.onwardLoan.clubName} (currently ineligible)
+                  </option>
+                )}
+              {loanOptions.map((option) => (
+                <option
+                  key={option.clubId}
+                  value={option.clubId}
+                  disabled={!option.eligible}
+                >
+                  {option.clubName}
+                  {option.eligible ? "" : ` — ${option.reasons[0]}`}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field label="Loan length">
+            <select
+              aria-label="Onward affiliate loan length"
+              value={loanUntil}
+              onChange={(event) =>
+                setLoanUntil(event.target.value as "season" | "year")
+              }
+            >
+              <option value="season">End of season</option>
+              <option value="year">One year</option>
+            </select>
+          </Field>
+          <Button
+            variant="secondary"
+            icon={Handshake}
+            onClick={() =>
+              void act({
+                type: "onward-loan",
+                id: negotiation.id,
+                clubId: loanClub ? Number(loanClub) : null,
+                until: loanUntil,
+              }).then((result) => {
+                if (result) onDone?.();
+              })
+            }
+          >
+            Save loan plan
+          </Button>
+        </div>
+      )}
+      {details.onwardLoan && (
+        <p>
+          Planned affiliate loan: <strong>{details.onwardLoan.clubName}</strong>{" "}
+          ({details.onwardLoan.until === "season" ? "to season end" : "one year"}).
+        </p>
+      )}
+      {!compact &&
+        [...placementOptions, ...loanOptions]
+          .filter((option) => !option.eligible)
+          .slice(0, 3)
+          .map((option) => (
+            <small key={`${option.clubId}-${option.reasons[0]}`}>
+              {option.clubName}: {option.reasons.join(" ")}
+            </small>
+          ))}
+    </div>
   );
 }
 
@@ -1108,6 +1351,7 @@ function NegotiationSheet({
   const [bonus, setBonus] = useState(details.signingBonus ?? 0);
   const [pending, setPending] = useState(false);
   const loan = LOAN_TYPES.includes(negotiation.type);
+  const preContract = negotiation.type === "Pre-contract agreement";
   const buyerManaged =
     !!details.buyerManaged && negotiation.buying_club_id !== bootstrap?.club.id;
   const playerPhase = [
@@ -1128,6 +1372,10 @@ function NegotiationSheet({
   const permanent =
     ["Permanent transfer", "Future transfer"].includes(negotiation.type) &&
     negotiation.selling_club_id !== null;
+  const lenderLoan =
+    loan &&
+    negotiation.selling_club_id === bootstrap?.club.id &&
+    negotiation.buying_club_id !== bootstrap?.club.id;
   const enquiry = !contractPage && negotiation.stage === "Enquiry";
   const review = contractPage && negotiation.stage === "Contract review";
   const agentFee = Math.round(
@@ -1202,10 +1450,10 @@ function NegotiationSheet({
     onAction?.();
     setPending(true);
     const result = await act({
-      type: "counter-transfer",
+      type: loan ? "counter-loan" : "counter-transfer",
       id: negotiation.id,
       fee,
-      transferTerms,
+      ...(loan ? { terms: { ...terms, fee } } : { transferTerms }),
     });
     setPending(false);
     if (result?.stage === "Agent talks") close();
@@ -1242,6 +1490,7 @@ function NegotiationSheet({
         <DealProgress
           stage={negotiation.stage}
           future={!!details.futureArrivalDate}
+          preContract={preContract}
         />
         <RivalPanel
           rivals={negotiation.rivals}
@@ -1252,15 +1501,46 @@ function NegotiationSheet({
           <div className="future-transfer-details">
             <DetailList
               items={[
-                ["Earliest arrival", dateLabel(details.futureArrivalDate)],
+                [
+                  preContract ? "Joins on free transfer" : "Earliest arrival",
+                  dateLabel(details.futureArrivalDate),
+                ],
                 [
                   "Transfer allocation reserved",
                   money(details.reservedBudget ?? 0),
                 ],
+                ...(details.affiliatePlacement
+                  ? ([
+                      [
+                        "Affiliate placement",
+                        `${details.affiliatePlacement.clubName} (${dateLabel(details.affiliatePlacement.date)})`,
+                      ],
+                    ] as [string, string][])
+                  : []),
+                ...(details.onwardLoan
+                  ? ([
+                      [
+                        "On-arrival loan",
+                        `${details.onwardLoan.clubName} / ${details.onwardLoan.until === "season" ? "season" : "one year"}`,
+                      ],
+                    ] as [string, string][])
+                  : []),
                 ["Contract starts", "On registration, not today"],
               ]}
             />
+            <AffiliateControls
+              negotiation={negotiation}
+              details={details}
+              onDone={onAction}
+            />
           </div>
+        )}
+        {!details.futureArrivalDate && (
+          <AffiliateControls
+            negotiation={negotiation}
+            details={details}
+            onDone={onAction}
+          />
         )}
         {(interestPreview ?? details.interestDetails) && (
           <InterestSummary
@@ -1334,6 +1614,7 @@ function NegotiationSheet({
               terms={transferTerms}
               setTerms={setTransferTerms}
               fee={fee}
+              loanBack={negotiation.type === "Permanent transfer"}
             />
           </fieldset>
         )}
@@ -1358,15 +1639,73 @@ function NegotiationSheet({
                     : "None",
                 ],
                 ["Next-sale percentage", `${shownTerms.sellOnPercent}%`],
+                [
+                  "Seller loan-back",
+                  LOAN_BACK_LABELS[shownTerms.loanBack ?? "none"],
+                ],
               ]}
             />
           </details>
+        )}
+        {loan && incoming && (
+          <>
+            <details className="transfer-payment-summary" open>
+              <summary>Loan agreement proposed</summary>
+              <DetailList
+                items={[
+                  ["Loan fee", money(negotiation.offer)],
+                  ["Ends", loanEndDateLabel(negotiation.type, negotiation.created, details.terms.duration)],
+                  ["Playing time", `${details.terms.playingTime}%`],
+                  [
+                    "Role / position",
+                    `${details.terms.role} / ${details.terms.position}`,
+                  ],
+                  ["Borrower wage share", `${details.terms.salarySplit}%`],
+                  ["Training plan", details.terms.developmentPlan],
+                  ["Mandatory minutes", details.terms.mandatoryMinutes],
+                  [
+                    "Recall / injury recall",
+                    `${details.terms.recall ? "Yes" : "No"} / ${details.terms.injuryRecall ? "Yes" : "No"}`,
+                  ],
+                  ["Option / obligation fee", money(details.terms.optionFee)],
+                  ["Minutes bonus", money(details.terms.bonus)],
+                  ["Sell-on", `${details.terms.sellOn}%`],
+                  ...(details.counter !== undefined
+                    ? [
+                        ["Borrower's maximum fee", money(details.counter)] as [
+                          string,
+                          string,
+                        ],
+                      ]
+                    : []),
+                ]}
+              />
+            </details>
+            <fieldset className="agreed-loan-terms" disabled={pending}>
+              <Field label="Counteroffer loan fee">
+                <MoneyInput min={0} value={fee} onChange={setFee} />
+              </Field>
+              <LoanTermsForm
+                terms={terms}
+                setTerms={setTerms}
+                type={negotiation.type}
+              />
+            </fieldset>
+          </>
         )}
         {active && (
           <>
             <div className="form-grid">
               {!contractPage && (
-                <Field label={loan ? "Loan fee" : "Transfer fee"}>
+                <Field
+                  label={
+                    lenderLoan
+                      ? "Loan fee you ask"
+                      : loan
+                        ? "Loan fee"
+                        : "Transfer fee"
+                  }
+                >
                   <MoneyInput
                     aria-label="Proposed transfer fee"
                     min={0}
@@ -1496,16 +1835,20 @@ function NegotiationSheet({
                   {negotiation.stage === "Club talks" &&
                     details.counter !== undefined && (
                       <span>
-                        Club counter-offer{" "}
+                        {lenderLoan ? "Borrower's counter" : "Club counter-offer"}{" "}
                         <strong>{money(details.counter)}</strong>
                       </span>
                     )}
                 </>
               )}
-              <span>
-                Your available budget{" "}
-                <strong>{money(bootstrap?.club.transfer_budget ?? 0)}</strong>
-              </span>
+              {lenderLoan ? (
+                <span>Borrower evaluates the loan fee, wage share and guarantees.</span>
+              ) : (
+                <span>
+                  Your available budget{" "}
+                  <strong>{money(bootstrap?.club.transfer_budget ?? 0)}</strong>
+                </span>
+              )}
             </div>
           </>
         )}
@@ -1515,7 +1858,7 @@ function NegotiationSheet({
               ["Fee", money(negotiation.offer)],
               ...(incoming && details.counter !== undefined
                 ? [
-                    ["Buyer's maximum fee", money(details.counter)] as [
+                    [loan ? "Borrower's maximum fee" : "Buyer's maximum fee", money(details.counter)] as [
                       string,
                       string,
                     ],
@@ -1660,7 +2003,9 @@ function NegotiationSheet({
                 onClick={() =>
                   confirm(
                     "Cancel future agreement?",
-                    `${money(details.reservedBudget ?? 0)} of reserved transfer allocation will be returned. No player registration or cash payment will change.`,
+                    details.affiliatePlacement
+                      ? `${money(details.reservedBudget ?? 0)} of remaining reserved allocation will be returned. The fee already paid to ${details.affiliatePlacement.originalSellerName} is not refunded, and the player stays registered with ${details.affiliatePlacement.clubName}.`
+                      : `${money(details.reservedBudget ?? 0)} of reserved transfer allocation will be returned. No player registration or cash payment will change.`,
                     () => {
                       void act({
                         type: "negotiation",
@@ -1750,7 +2095,9 @@ function NegotiationSheet({
             disabled={pending}
             onClick={() => void submit()}
           >
-            {negotiation.stage === "Club talks"
+            {lenderLoan
+              ? "Send loan proposal"
+              : negotiation.stage === "Club talks"
               ? "Submit club offer"
               : "Submit personal terms"}
           </Button>
@@ -1782,7 +2129,11 @@ function NegotiationSheet({
                       JSON.stringify({
                         ...DEFAULT_TRANSFER_TERMS,
                         ...details.transferTerms,
-                      })))
+                      }))) ||
+                (loan &&
+                  (Math.round(fee) !== Math.round(negotiation.offer) ||
+                    JSON.stringify(terms) !==
+                      JSON.stringify(withLoanLimits(details.terms))))
               }
               onClick={() =>
                 void act({
@@ -1796,7 +2147,7 @@ function NegotiationSheet({
             >
               Accept offer
             </Button>
-            {permanent && (
+            {(permanent || loan) && (
               <Button
                 icon={MessageSquare}
                 variant="secondary"
@@ -2033,10 +2384,34 @@ export default function Transfers() {
                                   "Reserved allocation",
                                   money(details.reservedBudget ?? 0),
                                 ],
+                                ...(details.affiliatePlacement
+                                  ? ([
+                                      [
+                                        "Affiliate",
+                                        details.affiliatePlacement.clubName,
+                                      ],
+                                    ] as [string, string][])
+                                  : []),
+                                ...(details.onwardLoan
+                                  ? ([
+                                      [
+                                        "Arrival loan",
+                                        details.onwardLoan.clubName,
+                                      ],
+                                    ] as [string, string][])
+                                  : []),
                               ] as [string, string][])
                             : []),
                         ]}
                       />
+                      {tab === "future" && (
+                        <AffiliateControls
+                          negotiation={negotiation}
+                          details={details}
+                          compact
+                          onDone={() => setSelected(negotiation.id)}
+                        />
+                      )}
                       <div className="tension-bar">
                         <span>Tension</span>
                         <Meter

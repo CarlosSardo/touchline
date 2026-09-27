@@ -11,8 +11,8 @@ Touchline is a football sporting-director simulation. You take charge of a club'
 - **A large procedural world:** 211 football associations, 107 of them with their own league pyramid of one to six tiers (England six), B teams, U19/U17 leagues, national cups and continental competitions.
 - **Internationals:** Senior, U21, U20, U19 and U17 national teams, UEFA youth qualifying and the main youth tournaments; caps on player dossiers and a club policy for releasing players outside FIFA windows.
 - **Call-ups:** temporary moves between the club's own teams (next match, a number of days, until a date), coach call-ups or proposals, a debut budget per season and up to three development requests.
-- **Scouting and transfers:** uncertain scout reports, shortlists and multi-stage deals with instalments, buy-back and sell-on clauses; rival bids and best-and-final rounds; transfer history per player and per club.
-- **Loans and youth recruitment:** nine loan types, recalls and purchase clauses, and modelled FIFA rules for minors.
+- **Scouting and transfers:** uncertain scout reports, shortlists and multi-stage deals with instalments, buy-back, sell-on, seller loan-back and pre-contract options; rival bids, best-and-final rounds, future arrivals and affiliate placements; transfer history per player and per club.
+- **Loans and youth recruitment:** nine loan types, incoming/outgoing loan offers with borrower counters, recalls, purchase clauses, affiliate development loans and modelled FIFA rules for minors.
 - **Squad and academy:** first team, reserve club, U19 and U17 groups, development plans, mentors and squad roles.
 - **A living club:** staff, facilities, board and press decisions, an affiliate network and unexpected events.
 - **Match analysis:** reproducible simulation with ratings, xG, xA, xPts and interactive pitch maps.
