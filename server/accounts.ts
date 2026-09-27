@@ -212,8 +212,8 @@ export class Accounts {
         // After both one-shot rebinds, db-authorize revokes EXECUTE; a denied call simply means nothing to rebind.
         await this.registry.all(
           `EXEC ${tableName(this.registry.schemaName, "rebind_account")}
-            @from_tenant_id = CONVERT(uniqueidentifier, ?), @from_object_id = CONVERT(uniqueidentifier, ?),
-            @to_tenant_id = CONVERT(uniqueidentifier, ?), @to_object_id = CONVERT(uniqueidentifier, ?), @email = ?`,
+            @from_tenant_id = ?, @from_object_id = ?,
+            @to_tenant_id = ?, @to_object_id = ?, @email = ?`,
           this.homeTenantId,
           fromObjectId,
           tenantId,
@@ -236,8 +236,8 @@ export class Accounts {
       if (invite) {
         const [result] = await this.registry.all<{ outcome: string; reason: string | null }>(
           `EXEC ${tableName(this.registry.schemaName, "claim_invited_account")}
-            @request_id = CONVERT(uniqueidentifier, ?), @tenant_id = CONVERT(uniqueidentifier, ?),
-            @object_id = CONVERT(uniqueidentifier, ?), @email = ?, @display_name = ?`,
+            @request_id = ?, @tenant_id = ?,
+            @object_id = ?, @email = ?, @display_name = ?`,
           invite.id,
           tenantId,
           objectId,

@@ -658,6 +658,7 @@ if (process.env.SQL_INTEGRATION_TESTS === "true") {
         await registry.exec(`CREATE SCHEMA ${quoteIdentifier(accountSchema)};`);
         registryCreated = true;
         await registry.exec(accountsTableSql(accountSchema));
+        await registry.exec(inviteRequestsTableSql(accountSchema));
         const users = tableName(accountSchema, "users");
         for (const [id, objectId, schema] of [
           [legacyAccountId, LEGACY_OBJECT_ID, root.schemaName],
@@ -815,7 +816,7 @@ if (process.env.SQL_INTEGRATION_TESTS === "true" &&
         for (const world of worlds) await assertEmptyWorld(world);
         await assertLegacyUnchanged();
         const tablesBeforeRerun = await tableInventory();
-        expect(tablesBeforeRerun).toHaveLength(STORE_TABLES.size * 3 + 2);
+        expect(tablesBeforeRerun).toHaveLength(STORE_TABLES.size * 3 + 3);
         expect(tablesBeforeRerun.filter((table) => table.schema_name === "accounts").map((table) => table.name))
           .toEqual(["invite_attempts", "invite_requests", "users"]);
         for (const { schema } of provisioned) {

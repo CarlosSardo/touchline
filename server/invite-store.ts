@@ -174,7 +174,7 @@ export class InviteStore {
         if (existing) return { status: "duplicate" as const, request: existing };
         await this.registry.run(
           `EXEC ${tableName(this.registry.schemaName, "create_invite")}
-            @id = CONVERT(uniqueidentifier, ?), @email = ?, @note = ?, @ip_hash = ?`,
+            @id = ?, @email = ?, @note = ?, @ip_hash = ?`,
           id,
           email,
           note,
@@ -243,7 +243,7 @@ export class InviteStore {
     if (request.status !== "pending") return { outcome: "unchanged", request };
     const [decision] = await this.registry.all<{ outcome: "accepted" | "denied" | "unchanged" | "capacity" | "not_found"; reason: string | null }>(
       `EXEC ${tableName(this.registry.schemaName, "decide_invite")}
-        @id = CONVERT(uniqueidentifier, ?), @action = ?, @decided_by = ?`,
+        @id = ?, @action = ?, @decided_by = ?`,
       id,
       action,
       actor,
