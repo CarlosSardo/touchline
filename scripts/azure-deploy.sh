@@ -388,6 +388,12 @@ deployment_deactivate_others() {
   [[ "$active" == "$selected" ]] || fail 'Expected only the selected revision to remain active.'
 }
 
+# ARM rejects app changes (ContainerAppOperationInProgress) until the previous apply finishes provisioning.
+deployment_app_settled() {
+  azure resource wait --ids "$app_id" --api-version 2024-03-01 \
+    --custom "properties.provisioningState=='Succeeded'" --interval 5 --timeout 600 --output none
+}
+
 deployment_wait() {
   local revision="$1"
   printf '%s\n' '[readiness] Waiting up to 300 seconds for selected-revision readiness after HTTP wake-up.'
@@ -711,7 +717,9 @@ NODE
   [[ "$fqdn" == "$AZURE_APP.$public_domain" || "$fqdn" == "$AZURE_APP.internal.$public_domain" ]] || fail 'Unexpected application FQDN.'
   deployment_candidate_check "$revision" "$origin"
   if [[ "$stage_only" != true && "$no_sql" != true ]]; then deployment_schema_check "$schema_version"; fi
+  deployment_app_settled
   azure containerapp ingress traffic set --name "$AZURE_APP" --resource-group "$AZURE_RESOURCE_GROUP" --revision-weight "$revision=100" --output none
+  deployment_app_settled
   deployment_traffic_check "$revision" false
   if [[ "$hold_ingress" == true ]]; then
     DEPLOY_IMAGE="$image" DEPLOY_REVISION="$revision" DEPLOY_ORIGIN="$origin" DEPLOY_INTERNAL_ORIGIN="https://$fqdn" \
