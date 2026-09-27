@@ -1,6 +1,7 @@
 import { parseArgs } from "node:util";
 import { registeredAccountSchemas, validateAccountSchema } from "../server/accounts.ts";
 import { isMain } from "./data-export.ts";
+import { inviteRequestsTableSql } from "../server/sql-schema.ts";
 
 export async function main(args = process.argv.slice(2)) {
   const { values } = parseArgs({
@@ -57,7 +58,17 @@ export async function main(args = process.argv.slice(2)) {
   const { Store } = await import("../server/db.ts");
   const store = await Store.open(values.database);
   try {
-    const schemas = values.registered ? await registeredAccountSchemas(store, accountSchema) : [store.schemaName];
+    if (accountSchema) {
+      const registry = store.forSchema(accountSchema);
+      try {
+        await registry.exec(inviteRequestsTableSql(accountSchema));
+      } finally {
+        await registry.close();
+      }
+    }
+    const schemas = values.registered
+      ? await registeredAccountSchemas(store, accountSchema, { allowLegacyRegistry: false })
+      : [store.schemaName];
     for (const schema of schemas) {
       const scoped = schema === store.schemaName ? store : store.forSchema(schema);
       try {

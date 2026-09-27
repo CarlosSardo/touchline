@@ -43,6 +43,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { GameProvider, useGame, useResource, type Page } from "./game-context.tsx";
+import { accessStateContent } from "./access-state.ts";
 import {
   Button,
   Crest,
@@ -51,6 +52,7 @@ import {
   Loading,
   Modal,
 } from "./ui.tsx";
+import type { AccessIssue } from "./api-error.ts";
 import { compactNumber, dateLabel } from "../shared/rules.ts";
 import type { NewsItem } from "../shared/types.ts";
 import { seasonText, unreadLabel } from "./format.ts";
@@ -245,6 +247,7 @@ function Shell() {
     loading,
     bootstrap,
     error,
+    accessIssue,
     page,
     navigate,
     playerId,
@@ -289,7 +292,7 @@ function Shell() {
     document.addEventListener("keydown", handleKey);
     return () => document.removeEventListener("keydown", handleKey);
   }, [bootstrap]);
-  if (loading || error || !session)
+  if (loading || accessIssue || error || !session)
     return (
       <div className="startup">
         <span className="brand">
@@ -298,7 +301,9 @@ function Shell() {
           </span>
           touchline.
         </span>
-        {error ? (
+        {accessIssue ? (
+          <AccessState issue={accessIssue} onRetry={() => void refresh()} />
+        ) : error ? (
           <>
             <ErrorState message={error} />
             <Button onClick={() => void refresh()}>
@@ -806,6 +811,36 @@ function Shell() {
         </Modal>
       )}
     </>
+  );
+}
+
+function AccessState({
+  issue,
+  onRetry,
+}: {
+  issue: AccessIssue;
+  onRetry: () => void;
+}) {
+  const content = accessStateContent(issue);
+  return (
+    <main className="access-state" aria-labelledby="access-state-title">
+      <span className="eyebrow">{content.eyebrow}</span>
+      <h1 id="access-state-title">{content.heading}</h1>
+      <p>{content.explanation}</p>
+      {content.reminder && <p className="access-reminder">{content.reminder}</p>}
+      <div className="access-actions">
+        {content.primary ? (
+          <a className="button button-primary" href={content.primary.href}>
+            {content.primary.label}
+          </a>
+        ) : (
+          <Button onClick={onRetry}>Try again</Button>
+        )}
+        <a className="button button-secondary" href={content.secondary.href}>
+          {content.secondary.label}
+        </a>
+      </div>
+    </main>
   );
 }
 

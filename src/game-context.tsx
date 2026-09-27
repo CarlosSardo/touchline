@@ -15,7 +15,14 @@ import type {
   WorldActivity,
   WorldBusyResponse,
 } from "../shared/api.ts";
-import { ApiError, isOutcomeUnknown, isWorldBusy } from "./api-error.ts";
+import {
+  ApiError,
+  accessIssueFromFailure,
+  isAccessIssue,
+  isOutcomeUnknown,
+  isWorldBusy,
+  type AccessIssue,
+} from "./api-error.ts";
 import { localizeServerText } from "./money-text.ts";
 import { createLruCache } from "./resource-cache.ts";
 import { plural } from "./format.ts";
@@ -61,6 +68,7 @@ interface GameContextValue {
   accountGeneration: number;
   bootstrap: Bootstrap | null;
   error: string | null;
+  accessIssue: AccessIssue | null;
   worldActivity: WorldActivity | null;
   checkActivity: () => void;
   waitForIdle: () => Promise<Bootstrap | null | undefined>;
@@ -103,6 +111,13 @@ const sessionFailureEvent = "touchline:session-failure";
 const worldBusyEvent = "touchline:world-busy";
 let requestGeneration = 0;
 let mutationsInFlight = 0;
+
+function isSessionFailure(failure: unknown): failure is ApiError {
+  return (
+    failure instanceof ApiError &&
+    (failure.status === 401 || failure.status === 403 || isAccessIssue(failure))
+  );
+}
 
 export async function api<Data>(
   path: string,
@@ -164,7 +179,7 @@ async function request<Data>(
           : undefined,
       },
     );
-    if (failure.status === 401 || failure.status === 403)
+    if (isSessionFailure(failure))
       window.dispatchEvent(
         new CustomEvent(sessionFailureEvent, { detail: failure }),
       );
@@ -359,6 +374,7 @@ export function GameProvider({ children }: { children: ReactNode }) {
   const [accountGeneration, setAccountGeneration] = useState(requestGeneration);
   const [bootstrap, setBootstrap] = useState<Bootstrap | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [accessIssue, setAccessIssue] = useState<AccessIssue | null>(null);
   const [revision, setRevision] = useState(0);
   const [page, setPage] = useState<Page>(() =>
     pages.includes(location.hash.slice(1).split("/")[0] as Page)
@@ -469,11 +485,7 @@ export function GameProvider({ children }: { children: ReactNode }) {
         return;
       }
       settleWaiters({ failure });
-      if (
-        failure instanceof ApiError &&
-        (failure.status === 401 || failure.status === 403)
-      )
-        return;
+      if (isSessionFailure(failure)) return;
       resetAccount();
       setLoading(false);
       setError(
@@ -510,6 +522,7 @@ export function GameProvider({ children }: { children: ReactNode }) {
     setSession(null);
     setBootstrap(null);
     bootstrapRef.current = null;
+    setAccessIssue(null);
     setRevision(0);
     setBusy(false);
     setToast(null);
@@ -560,6 +573,7 @@ export function GameProvider({ children }: { children: ReactNode }) {
       const busy = (activity: WorldActivity, retryAfter?: number) => {
         setSession(nextSession);
         setError(null);
+        setAccessIssue(null);
         setLoading(false);
         enterBusy(activity, retryAfter);
         return bootstrapRef.current;
@@ -581,6 +595,7 @@ export function GameProvider({ children }: { children: ReactNode }) {
       setBootstrap(result);
       bootstrapRef.current = result;
       setError(null);
+      setAccessIssue(null);
       setLoading(false);
       setRevision((value) => value + 1);
       if (!result) {
@@ -593,13 +608,19 @@ export function GameProvider({ children }: { children: ReactNode }) {
       if (signal?.aborted || request !== sessionRequest.current) return;
       // 401/403 still sign out through the session failure event.
       if (keepAccountOnFailure && accountIdentity.current) throw failure;
+      const access = accessIssueFromFailure(failure);
       resetAccount();
       setLoading(false);
-      setError(
-        failure instanceof Error
-          ? failure.message
-          : "Unable to load your account.",
-      );
+      if (access) {
+        setAccessIssue(access);
+        setError(null);
+      } else {
+        setError(
+          failure instanceof Error
+            ? failure.message
+            : "Unable to load your account.",
+        );
+      }
       throw failure;
     } finally {
       if (request === sessionRequest.current) sessionPending.current = false;
@@ -635,8 +656,7 @@ export function GameProvider({ children }: { children: ReactNode }) {
         if (
           controller.signal.aborted ||
           failure.name === "AbortError" ||
-          (failure instanceof ApiError &&
-            (failure.status === 401 || failure.status === 403))
+          isSessionFailure(failure)
         )
           return;
         attempts++;
@@ -663,13 +683,20 @@ export function GameProvider({ children }: { children: ReactNode }) {
         enterBusy(failure.activity, failure.retryAfter);
     };
     const authenticationFailed = (event: Event) => {
+      const failure = (event as CustomEvent<ApiError>).detail;
+      const access = accessIssueFromFailure(failure);
       sessionRequest.current++;
       sessionPending.current = false;
       if (retryTimer !== undefined) clearTimeout(retryTimer);
-      settleWaiters({ failure: (event as CustomEvent<ApiError>).detail });
+      settleWaiters({ failure });
       resetAccount();
       setLoading(false);
-      setError((event as CustomEvent<ApiError>).detail.message);
+      if (access) {
+        setAccessIssue(access);
+        setError(null);
+      } else {
+        setError(failure.message);
+      }
     };
     window.addEventListener(sessionFailureEvent, authenticationFailed);
     window.addEventListener(worldBusyEvent, worldBusy);
@@ -921,6 +948,7 @@ export function GameProvider({ children }: { children: ReactNode }) {
         accountGeneration,
         bootstrap,
         error,
+        accessIssue,
         worldActivity,
         checkActivity,
         waitForIdle,

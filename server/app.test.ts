@@ -8,6 +8,8 @@ import { processCompetitionNotifications } from "./notifications.ts";
 import { generateWorld } from "./world.ts";
 import { createCalendar } from "./calendar.ts";
 import { createApp, isCalendarDate, loanDurationError, MAX_LOAN_DAYS, readApiConfiguration } from "./app.ts";
+import { CONSUMER_TENANT_ID } from "./invite-store.ts";
+import { OWNER_EMAIL_DEFAULT } from "./legacy-account.ts";
 import { playerSearchChanged } from "./queries.ts";
 import { initialInbox, stateOf } from "./systems.ts";
 import { Saves } from "./saves.ts";
@@ -30,11 +32,15 @@ const configuration = {
   ALLOWED_USER_OBJECT_IDS: `${guest}, ${secondGuest}`,
   AZURE_TENANT_ID: tenant,
   APP_ORIGIN: "https://touchline.example.com",
+  INVITE_SIGNING_SECRET: "12345678901234567890123456789012",
+  EMAIL_TRANSPORT: "gmail",
+  OWNER_EMAIL: OWNER_EMAIL_DEFAULT,
 };
 const principal = (objectId: string, tenantId = tenant, additional: { typ: string; val: string }[] = []) =>
   Buffer.from(JSON.stringify({ auth_typ: "aad", claims: [
     { typ: "oid", val: objectId }, { typ: "tid", val: tenantId }, ...additional,
   ] })).toString("base64");
+const sqlIntegration = process.env.SQL_INTEGRATION_TESTS === "true";
 
 describe("action input validation (no database)", () => {
   it("accepts only real calendar dates for a call-up end", () => {
@@ -77,12 +83,57 @@ describe("hosted invitation access (no database)", () => {
     expect(response.body.error).toBe("API route not found.");
   });
 
-  it("rejects anonymous, unlisted and wrong-tenant accounts", async () => {
+  it("rejects anonymous and unlisted home-tenant accounts", async () => {
     const application = app();
     expect((await request(application).get("/api/access-probe")).status).toBe(401);
-    for (const identity of [principal("44444444-4444-4444-4444-444444444444"), principal(guest, owner)])
-      expect((await request(application).get("/api/access-probe")
-        .set("x-ms-client-principal", identity)).status).toBe(403);
+    const response = await request(application).get("/api/access-probe")
+      .set("x-ms-client-principal", principal("44444444-4444-4444-4444-444444444444"));
+    expect(response.status).toBe(403);
+    expect(response.body.code).toBe("not_authorized");
+  });
+
+  it("passes consumers-tenant identities to account resolution with lowercased email", async () => {
+    const resolve = vi.fn(async (identity: AuthenticatedIdentity) => {
+      return { user: { id: identity.objectId, displayName: identity.displayName, email: identity.email }, store: Object.create(Store.prototype) as Store };
+    });
+    const response = await request(app("", { resolve })).get("/api/access-probe")
+      .set("x-ms-client-principal", principal(guest, CONSUMER_TENANT_ID, [
+        { typ: "preferred_username", val: "Player@Example.TEST" },
+      ]));
+    expect(response.status).toBe(404);
+    expect(resolve).toHaveBeenCalledWith(expect.objectContaining({
+      tenantId: CONSUMER_TENANT_ID,
+      objectId: guest,
+      email: "player@example.test",
+    }));
+  });
+
+  it("passes the MSA owner identity to account resolution", async () => {
+    const resolve = vi.fn(async (identity: AuthenticatedIdentity) => {
+      return { user: { id: "owner-account", displayName: identity.displayName, email: identity.email }, store: Object.create(Store.prototype) as Store };
+    });
+    const response = await request(app("", { resolve })).get("/api/access-probe")
+      .set("x-ms-client-principal", principal(guest, CONSUMER_TENANT_ID, [
+        { typ: "email", val: OWNER_EMAIL_DEFAULT.toUpperCase() },
+        { typ: "name", val: "Owner Director" },
+      ]));
+    expect(response.status).toBe(404);
+    expect(resolve).toHaveBeenCalledWith(expect.objectContaining({
+      tenantId: CONSUMER_TENANT_ID,
+      objectId: guest,
+      email: OWNER_EMAIL_DEFAULT,
+    }));
+  });
+
+  it("rejects other tenants even when the email is the approver", async () => {
+    const resolve = vi.fn(async () => { throw new Error("Must not resolve unauthorized tenants"); });
+    const response = await request(app("", { resolve })).get("/api/access-probe")
+      .set("x-ms-client-principal", principal(guest, owner, [
+        { typ: "email", val: "sardo.kiko@gmail.com" },
+      ]));
+    expect(response.status).toBe(403);
+    expect(response.body.code).toBe("not_authorized");
+    expect(resolve).not.toHaveBeenCalled();
   });
 
   it("rejects conflicting identity claims even when both accounts are allowed", async () => {
@@ -135,6 +186,27 @@ describe("hosted invitation access (no database)", () => {
       .toThrow("Entra object UUIDs");
     expect(() => readApiConfiguration({ ...configuration, ALLOWED_USER_OBJECT_IDS: "not-an-id" }))
       .toThrow("Entra object UUIDs");
+  });
+
+  it("validates invite and mail configuration", () => {
+    expect(readApiConfiguration(configuration)).toEqual(expect.objectContaining({
+      approverEmail: "sardo.kiko@gmail.com",
+      ownerEmail: OWNER_EMAIL_DEFAULT,
+      maxPlayers: 10,
+      inviteDbSizeLimitGb: 24,
+      emailTransport: "gmail",
+    }));
+    expect(readApiConfiguration({ ...configuration, EMAIL_TRANSPORT: "disabled" }).emailTransport).toBe("disabled");
+    expect(() => readApiConfiguration({ ...configuration, INVITE_SIGNING_SECRET: "short" }))
+      .toThrow("INVITE_SIGNING_SECRET");
+    expect(() => readApiConfiguration({ ...configuration, EMAIL_TRANSPORT: "log" }))
+      .toThrow("EMAIL_TRANSPORT must be gmail or disabled when hosted");
+    expect(() => readApiConfiguration({ ...configuration, MAX_PLAYERS: "0" }))
+      .toThrow("MAX_PLAYERS");
+    expect(() => readApiConfiguration({ ...configuration, APPROVER_EMAIL: "not-an-email" }))
+      .toThrow("APPROVER_EMAIL");
+    expect(() => readApiConfiguration({ ...configuration, OWNER_EMAIL: "not-an-email" }))
+      .toThrow("OWNER_EMAIL");
   });
 
   it("preserves same-origin referrers for hosted cookie CSRF validation", async () => {
@@ -222,7 +294,7 @@ describe("SQL opened on the first request that needs it (no database)", () => {
   });
 });
 
-describe("per-user HTTP isolation (two isolated SQL schemas)", () => {
+describe.skipIf(!sqlIntegration)("per-user HTTP isolation (two isolated SQL schemas)", () => {
   const fixture = { nations: ["SCO"], squads: "minimum" as const };
   let root: Store;
   let schemaOwner: Store;
@@ -729,7 +801,7 @@ async function expectSchemaIntegrity(store: Store) {
   }
 }
 
-describe("game HTTP API and SQL saves", () => {
+describe.skipIf(!sqlIntegration)("game HTTP API and SQL saves", () => {
   let store: Store;
   let app: Awaited<ReturnType<typeof createApp>>;
   beforeAll(async () => {

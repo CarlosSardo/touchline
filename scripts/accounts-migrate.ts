@@ -8,12 +8,13 @@ import {
   type AccountRecord,
 } from "../server/accounts.ts";
 import { Store } from "../server/db.ts";
+import { CONSUMER_TENANT_ID } from "../server/invite-store.ts";
+import { LEGACY_EMAIL, LEGACY_OBJECT_ID, OWNER_EMAIL_DEFAULT } from "../server/legacy-account.ts";
 import { readSqlSettings } from "../server/sql-config.ts";
-import { accountsTableSql, quoteIdentifier, schemaMigrations, sqlLiteral, STORE_TABLES, tableName } from "../server/sql-schema.ts";
+import { accountsTableSql, inviteRequestsTableSql, quoteIdentifier, schemaMigrations, sqlLiteral, STORE_TABLES, tableName } from "../server/sql-schema.ts";
 import { isMain } from "./data-export.ts";
 
-export const LEGACY_OBJECT_ID = "13dbb944-b4fb-471b-b5a3-6420a5fb5139";
-export const LEGACY_EMAIL = "sardo.kiko@gmail.com";
+export { LEGACY_EMAIL, LEGACY_OBJECT_ID } from "../server/legacy-account.ts";
 
 export interface AccountProvisioningPlan {
   database: string;
@@ -21,6 +22,8 @@ export interface AccountProvisioningPlan {
   tenantId: string;
   legacyObjectId: string;
   legacyEmail: string;
+  ownerObjectId: string;
+  ownerEmail: string;
   objectIds: string[];
 }
 
@@ -45,6 +48,9 @@ export function accountProvisioningPlan(
   const owner = accountUuid(environment.OWNER_OBJECT_ID ?? "", "OWNER_OBJECT_ID");
   if (owner === legacyObjectId)
     throw new Error("The configured platform owner must not inherit the legacy dbo game.");
+  const ownerEmail = (environment.OWNER_EMAIL ?? OWNER_EMAIL_DEFAULT).trim().toLowerCase();
+  if (!ownerEmail || ownerEmail.length > 320)
+    throw new Error("OWNER_EMAIL is invalid.");
   const invited = (environment.ALLOWED_USER_OBJECT_IDS ?? "").split(",").map((value) => value.trim()).filter(Boolean);
   if (invited.length > 100) throw new Error("ALLOWED_USER_OBJECT_IDS may contain at most 100 object IDs.");
   const objectIds = [...new Set([owner, ...invited.map((value) => accountUuid(value, "ALLOWED_USER_OBJECT_IDS"))])];
@@ -56,15 +62,56 @@ export function accountProvisioningPlan(
     tenantId,
     legacyObjectId,
     legacyEmail,
+    ownerObjectId: owner,
+    ownerEmail,
     objectIds: [legacyObjectId, ...objectIds.filter((objectId) => objectId !== legacyObjectId)],
   };
 }
 
-function mappedSchema(account: AccountRecord, plan: AccountProvisioningPlan): string {
+function normalizedAccount(account: AccountRecord) {
+  return {
+    tenantId: accountUuid(account.tenant_id, "Registered tenant ID"),
+    objectId: accountUuid(account.object_id, "Registered object ID"),
+    email: account.email?.trim().toLowerCase() ?? null,
+    schema: account.game_schema.toLowerCase(),
+  };
+}
+
+function isLegacyMapping(account: AccountRecord, plan: AccountProvisioningPlan): boolean {
+  const normalized = normalizedAccount(account);
+  return normalized.schema === "dbo" &&
+    normalized.email === plan.legacyEmail &&
+    (
+      (normalized.tenantId === plan.tenantId && normalized.objectId === plan.legacyObjectId) ||
+      normalized.tenantId === CONSUMER_TENANT_ID
+    );
+}
+
+function isOwnerMapping(account: AccountRecord, plan: AccountProvisioningPlan): boolean {
+  const normalized = normalizedAccount(account);
+  return normalized.email === plan.ownerEmail &&
+    (
+      (normalized.tenantId === plan.tenantId && normalized.objectId === plan.ownerObjectId) ||
+      normalized.tenantId === CONSUMER_TENANT_ID
+    );
+}
+
+function matchesPlannedIdentity(account: AccountRecord, objectId: string, plan: AccountProvisioningPlan): boolean {
+  const normalized = normalizedAccount(account);
+  if (normalized.tenantId === plan.tenantId && normalized.objectId === objectId) return true;
+  if (objectId === plan.legacyObjectId) return isLegacyMapping(account, plan);
+  if (objectId === plan.ownerObjectId) return isOwnerMapping(account, plan);
+  return false;
+}
+
+export function existingAccountForObject(accounts: AccountRecord[], objectId: string, plan: AccountProvisioningPlan) {
+  return accounts.find((account) => matchesPlannedIdentity(account, objectId, plan));
+}
+
+export function mappedSchema(account: AccountRecord, plan: AccountProvisioningPlan): string {
   const id = accountUuid(account.id, "Registered account ID");
   const schema = validateAccountWorldSchema(account.game_schema, plan.accountSchema);
-  const legacy = accountUuid(account.tenant_id, "Registered tenant ID") === plan.tenantId &&
-    accountUuid(account.object_id, "Registered object ID") === plan.legacyObjectId;
+  const legacy = isLegacyMapping(account, plan);
   const expected = legacy ? "dbo" : `touchline_user_${id.replaceAll("-", "")}`;
   if (schema !== expected)
     throw new Error("Existing account mapping would reassign a world; no reassignment is permitted.");
@@ -102,18 +149,18 @@ export async function provisionAccounts(root: Store, plan: AccountProvisioningPl
       const existing = await registry.all<{ name: string }>(
         "SELECT [name] FROM sys.tables WHERE [schema_id] = SCHEMA_ID(?)", plan.accountSchema,
       );
-      if (existing.some((table) => table.name !== "users"))
+      if (existing.some((table) => table.name !== "users" && table.name !== "invite_requests" && table.name !== "invite_attempts"))
         throw new Error("The account schema collides with existing non-account tables.");
       await registry.exec(`IF SCHEMA_ID(${sqlLiteral(plan.accountSchema)}) IS NULL
         EXEC(${sqlLiteral(`CREATE SCHEMA ${quoteIdentifier(plan.accountSchema)} AUTHORIZATION [dbo];`)});`);
       await registry.exec(accountsTableSql(plan.accountSchema));
+      await registry.exec(inviteRequestsTableSql(plan.accountSchema));
       await assertAccountRegistry(registry);
     });
     const existingAccounts = await registry.all<AccountRecord>(`SELECT * FROM ${users}`);
     for (const account of existingAccounts) mappedSchema(account, plan);
     for (const objectId of plan.objectIds) {
-      const existing = existingAccounts.find((account) =>
-        account.tenant_id.toLowerCase() === plan.tenantId && account.object_id.toLowerCase() === objectId);
+      const existing = existingAccountForObject(existingAccounts, objectId, plan);
       const id = existing ? accountUuid(existing.id, "Registered account ID") : randomUUID();
       const schema = existing ? mappedSchema(existing, plan) :
         objectId === plan.legacyObjectId ? "dbo" : `touchline_user_${id.replaceAll("-", "")}`;
@@ -134,7 +181,7 @@ export async function provisionAccounts(root: Store, plan: AccountProvisioningPl
             const account = collisions[0];
             if (
               collisions.length !== 1 || account.id.toLowerCase() !== id ||
-              account.tenant_id.toLowerCase() !== plan.tenantId || account.object_id.toLowerCase() !== objectId ||
+              !matchesPlannedIdentity(account, objectId, plan) ||
               mappedSchema(account, plan) !== schema
             )
               throw new Error("Account identity/schema collision or concurrent reassignment; rerun the reviewed plan.");

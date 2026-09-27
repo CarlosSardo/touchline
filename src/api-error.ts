@@ -1,5 +1,18 @@
 import type { WorldActivity } from "../shared/api.ts";
 
+export type AccessIssueCode =
+  | "invite_required"
+  | "account_not_provisioned"
+  | "not_authorized"
+  | "capacity_unavailable";
+
+export interface AccessIssue {
+  code: AccessIssueCode;
+  status: number;
+  message: string;
+  retryAfter?: number;
+}
+
 export class ApiError extends Error {
   readonly status: number;
   readonly code?: string;
@@ -17,6 +30,38 @@ export class ApiError extends Error {
     this.retryAfter = details.retryAfter;
     this.activity = details.activity;
   }
+}
+
+const accessIssueCodes = new Set<string>([
+  "invite_required",
+  "account_not_provisioned",
+  "not_authorized",
+  "capacity_unavailable",
+]);
+
+export function isAccessIssueCode(code: string | undefined): code is AccessIssueCode {
+  return typeof code === "string" && accessIssueCodes.has(code);
+}
+
+export function isAccessIssue(failure: unknown): failure is ApiError & {
+  code: AccessIssueCode;
+} {
+  return (
+    failure instanceof ApiError &&
+    isAccessIssueCode(failure.code) &&
+    ((failure.status === 403 && failure.code !== "capacity_unavailable") ||
+      (failure.status === 503 && failure.code === "capacity_unavailable"))
+  );
+}
+
+export function accessIssueFromFailure(failure: unknown): AccessIssue | null {
+  if (!isAccessIssue(failure)) return null;
+  return {
+    code: failure.code,
+    status: failure.status,
+    message: failure.message,
+    retryAfter: failure.retryAfter,
+  };
 }
 
 /** Only 409 world_busy is transient: the account's world is busy and the request was refused. */

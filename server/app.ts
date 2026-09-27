@@ -9,7 +9,10 @@ import { rm } from "node:fs/promises";
 import { pipeline } from "node:stream/promises";
 import { z } from "zod";
 import { DatabaseUnavailableError, Store } from "./db.ts";
-import { AccountNotProvisionedError, Accounts, type AuthenticatedIdentity } from "./accounts.ts";
+import { Accounts, type AuthenticatedIdentity } from "./accounts.ts";
+import { createInviteRouter, type InviteRouteOptions } from "./invite-routes.ts";
+import { CONSUMER_TENANT_ID } from "./invite-store.ts";
+import { OWNER_EMAIL_DEFAULT } from "./legacy-account.ts";
 import {
   affiliateDesk,
   affiliateInterest,
@@ -114,23 +117,97 @@ const principalSchema = z.object({
     )
     .max(256),
 });
+const identifier =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const defaultApproverEmail = "sardo.kiko@gmail.com";
+const emailAddressSchema = z.string().trim().toLowerCase().max(320).email();
+
+export class AuthenticationRequiredError extends Error {
+  readonly status = 401;
+
+  constructor() {
+    super("Authentication required.");
+    this.name = "AuthenticationRequiredError";
+  }
+}
+
+export class NotAuthorizedError extends Error {
+  readonly status = 403;
+  readonly code = "not_authorized";
+
+  constructor() {
+    super("This account is not authorized.");
+    this.name = "NotAuthorizedError";
+  }
+}
+
+export interface ApiConfiguration {
+  host: string;
+  port: number;
+  hosted: boolean;
+  requireAuth: boolean;
+  ownerObjectId: string;
+  allowedUserObjectIds: Set<string>;
+  tenantId: string;
+  appOrigin: string | undefined;
+  approverEmail: string;
+  ownerEmail: string;
+  maxPlayers: number;
+  inviteDbSizeLimitGb: number;
+  inviteSigningSecret: string;
+  emailTransport: "gmail" | "log" | "disabled";
+}
+
+const parsePositiveInteger = (value: string | undefined, fallback: number, name: string) => {
+  const parsed = Number(value ?? fallback);
+  if (!Number.isInteger(parsed) || parsed < 1)
+    throw new Error(`${name} must be a positive integer.`);
+  return parsed;
+};
+
+const parsePositiveNumber = (value: string | undefined, fallback: number, name: string) => {
+  const parsed = Number(value ?? fallback);
+  if (!Number.isFinite(parsed) || parsed <= 0)
+    throw new Error(`${name} must be a positive number.`);
+  return parsed;
+};
 
 export function readApiConfiguration(
   environment: NodeJS.ProcessEnv = process.env,
-) {
+): ApiConfiguration {
   const hosted = Boolean(environment.CONTAINER_APP_NAME?.trim());
   const host = environment.API_HOST ?? (hosted ? "0.0.0.0" : "127.0.0.1");
   const port = Number(environment.PORT ?? environment.API_PORT ?? 3001);
   const requireAuth = environment.REQUIRE_AUTH === "true";
   const ownerObjectId = (environment.OWNER_OBJECT_ID ?? "").toLowerCase();
   const tenantId = (environment.AZURE_TENANT_ID ?? "").toLowerCase();
+  const approverEmailResult = emailAddressSchema.safeParse(environment.APPROVER_EMAIL ?? defaultApproverEmail);
+  if (!approverEmailResult.success)
+    throw new Error("APPROVER_EMAIL must be a valid email address up to 320 characters.");
+  const approverEmail = approverEmailResult.data;
+  const ownerEmailResult = emailAddressSchema.safeParse(environment.OWNER_EMAIL ?? OWNER_EMAIL_DEFAULT);
+  if (!ownerEmailResult.success)
+    throw new Error("OWNER_EMAIL must be a valid email address up to 320 characters.");
+  const ownerEmail = ownerEmailResult.data;
+  const maxPlayers = parsePositiveInteger(environment.MAX_PLAYERS, 10, "MAX_PLAYERS");
+  const inviteDbSizeLimitGb = parsePositiveNumber(environment.INVITE_DB_SIZE_LIMIT_GB, 24, "INVITE_DB_SIZE_LIMIT_GB");
+  const inviteSigningSecret =
+    environment.INVITE_SIGNING_SECRET ??
+    (requireAuth ? "" : "local-development-invite-signing-secret");
+  if (requireAuth && inviteSigningSecret.length < 32)
+    throw new Error("INVITE_SIGNING_SECRET is required and must be at least 32 characters when REQUIRE_AUTH=true.");
+  if (!requireAuth && inviteSigningSecret.length < 32)
+    throw new Error("INVITE_SIGNING_SECRET must be at least 32 characters when set.");
+  const emailTransport = (environment.EMAIL_TRANSPORT ?? (hosted ? "gmail" : "log")).toLowerCase();
+  if (emailTransport !== "gmail" && emailTransport !== "log" && emailTransport !== "disabled")
+    throw new Error("EMAIL_TRANSPORT must be gmail, log or disabled.");
+  if (hosted && emailTransport === "log")
+    throw new Error("EMAIL_TRANSPORT must be gmail or disabled when hosted.");
   const invitedObjectIds = (environment.ALLOWED_USER_OBJECT_IDS ?? "")
     .split(",")
     .map((value) => value.trim().toLowerCase())
     .filter(Boolean);
   const appOrigin = environment.APP_ORIGIN;
-  const identifier =
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   if (invitedObjectIds.length > 100 || invitedObjectIds.some((value) => !identifier.test(value)))
     throw new Error("ALLOWED_USER_OBJECT_IDS must contain at most 100 comma-separated Entra object UUIDs.");
   const allowedUserObjectIds = new Set([ownerObjectId, ...invitedObjectIds]);
@@ -185,7 +262,72 @@ export function readApiConfiguration(
     allowedUserObjectIds,
     tenantId,
     appOrigin,
+    approverEmail,
+    ownerEmail,
+    maxPlayers,
+    inviteDbSizeLimitGb,
+    inviteSigningSecret,
+    emailTransport,
   };
+}
+
+export function parseClientPrincipal(
+  encoded: unknown,
+  configuration: Pick<ApiConfiguration, "allowedUserObjectIds" | "ownerObjectId" | "tenantId">,
+): AuthenticatedIdentity {
+  if (
+    typeof encoded !== "string" ||
+    encoded.length > 65536 ||
+    !/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)
+  )
+    throw new AuthenticationRequiredError();
+  try {
+    const principal = principalSchema.parse(
+      JSON.parse(Buffer.from(encoded, "base64").toString("utf8")),
+    );
+    const claims = (...types: string[]) =>
+      principal.claims.filter((claim) => types.includes(claim.typ));
+    const singleTrustedClaim = (...types: string[]) => {
+      const values = claims(...types).map((claim) => claim.val.trim()).filter(Boolean);
+      const first = values[0]?.toLowerCase();
+      if (!first || !values.every((value) => value.toLowerCase() === first))
+        throw new NotAuthorizedError();
+      return first;
+    };
+    const tenantId = singleTrustedClaim("tid", "http://schemas.microsoft.com/identity/claims/tenantid");
+    const objectId = singleTrustedClaim("oid", "http://schemas.microsoft.com/identity/claims/objectidentifier");
+    const homeTenant = tenantId === configuration.tenantId;
+    const consumersTenant = tenantId === CONSUMER_TENANT_ID;
+    if (
+      (!homeTenant && !consumersTenant) ||
+      (homeTenant && objectId !== configuration.ownerObjectId && !configuration.allowedUserObjectIds.has(objectId))
+    )
+      throw new NotAuthorizedError();
+    const profileClaim = (...types: string[]) => {
+      for (const type of types) {
+        const value = principal.claims.find((claim) => claim.typ === type)?.val.trim();
+        if (value) return value;
+      }
+      return null;
+    };
+    return {
+      tenantId,
+      objectId,
+      displayName: profileClaim(
+        "name",
+        "http://schemas.microsoft.com/identity/claims/displayname",
+        "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name",
+      ) ?? "Sporting director",
+      email: profileClaim(
+        "email",
+        "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress",
+        "preferred_username",
+      )?.toLowerCase() ?? null,
+    };
+  } catch (error) {
+    if (error instanceof NotAuthorizedError) throw error;
+    throw new AuthenticationRequiredError();
+  }
 }
 
 const positive = z.number().finite().min(0);
@@ -981,15 +1123,32 @@ export interface AppDatabase {
 export function createApp(
   database: Store | (() => Promise<AppDatabase>),
   accounts?: Pick<Accounts, "resolve">,
+  options: InviteRouteOptions = {},
 ) {
   const configuration = readApiConfiguration();
   const app = express();
   const connection = (store: Store, resolver?: Pick<Accounts, "resolve">) => ({
     store,
-    resolver: configuration.requireAuth ? resolver ?? new Accounts(store) : undefined,
+    resolver: configuration.requireAuth
+      ? resolver ?? new Accounts(store, "accounts", {
+        limits: {
+          maxPlayers: configuration.maxPlayers,
+          sizeLimitGb: configuration.inviteDbSizeLimitGb,
+          ownerObjectId: configuration.ownerObjectId,
+          ownerEmail: configuration.ownerEmail,
+        },
+      })
+      : undefined,
   });
   const open = typeof database === "function" ? database : undefined;
   let connected = typeof database === "function" ? undefined : connection(database, accounts);
+  const getConnection = async () => {
+    if (!connected) {
+      const opened = await open!();
+      connected ??= connection(opened.store, opened.accounts);
+    }
+    return connected;
+  };
   const worlds = new Map<string, ReturnType<typeof createWorldRouter>>();
   const localUser: AccountUser = { id: "local", displayName: "Local director", email: null };
   app.disable("x-powered-by");
@@ -1015,64 +1174,19 @@ export function createApp(
   app.get("/api/health", (_request, response) =>
     response.json({ status: "ok" } satisfies Health),
   );
+  app.use(createInviteRouter({
+    configuration,
+    getStore: async () => (await getConnection()).store,
+    parsePrincipal: parseClientPrincipal,
+    ...options,
+  }));
   app.use("/api", (request, response, next) => {
     if (configuration.requireAuth) {
-      const encoded = request.headers["x-ms-client-principal"];
-      if (
-        typeof encoded !== "string" ||
-        encoded.length > 65536 ||
-        !/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)
-      )
-        return response.status(401).json({ error: "Authentication required." });
       try {
-        const principal = principalSchema.parse(
-          JSON.parse(Buffer.from(encoded, "base64").toString("utf8")),
-        );
-        const tenants = principal.claims.filter((claim) =>
-          [
-            "tid",
-            "http://schemas.microsoft.com/identity/claims/tenantid",
-          ].includes(claim.typ),
-        );
-        const owners = principal.claims.filter((claim) =>
-          [
-            "oid",
-            "http://schemas.microsoft.com/identity/claims/objectidentifier",
-          ].includes(claim.typ),
-        );
-        const objectId = owners[0]?.val.toLowerCase();
-        if (
-          !tenants.length ||
-          !objectId ||
-          !tenants.every((claim) => claim.val.toLowerCase() === configuration.tenantId) ||
-          !owners.every((claim) => claim.val.toLowerCase() === objectId) ||
-          !configuration.allowedUserObjectIds.has(objectId)
-        )
-          return response
-            .status(403)
-            .json({ error: "This account is not authorized." });
-        const profileClaim = (...types: string[]) => {
-          for (const type of types) {
-            const value = principal.claims.find((claim) => claim.typ === type)?.val.trim();
-            if (value) return value;
-          }
-          return null;
-        };
-        response.locals.identity = {
-          tenantId: configuration.tenantId,
-          objectId,
-          displayName: profileClaim(
-            "name",
-            "http://schemas.microsoft.com/identity/claims/displayname",
-            "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name",
-          ) ?? "Sporting director",
-          email: profileClaim(
-            "email",
-            "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress",
-            "preferred_username",
-          ),
-        } satisfies AuthenticatedIdentity;
-      } catch {
+        response.locals.identity = parseClientPrincipal(request.headers["x-ms-client-principal"], configuration);
+      } catch (error) {
+        if (error instanceof NotAuthorizedError)
+          return response.status(error.status).json({ error: error.message, code: error.code });
         return response.status(401).json({ error: "Authentication required." });
       }
     } else {
@@ -1121,11 +1235,7 @@ export function createApp(
   app.use(async (request, response, next) => {
     if (request.path !== "/api" && !request.path.startsWith("/api/")) return next();
     try {
-      if (!connected) {
-        const opened = await open!();
-        connected ??= connection(opened.store, opened.accounts);
-      }
-      const { store, resolver } = connected;
+      const { store, resolver } = await getConnection();
       const account = resolver
         ? await resolver.resolve(response.locals.identity as AuthenticatedIdentity)
         : { user: localUser, store };
@@ -1161,8 +1271,29 @@ export function createApp(
       _next: NextFunction,
     ) => {
       if (response.headersSent) return response.destroy();
-      if (error instanceof AccountNotProvisionedError)
-        return response.status(error.status).json({ error: error.message, code: error.code });
+      if (
+        error instanceof AuthenticationRequiredError ||
+        error instanceof NotAuthorizedError
+      ) {
+        const body = error instanceof NotAuthorizedError
+          ? { error: error.message, code: error.code }
+          : { error: error.message };
+        return response.status(error.status).json(body);
+      }
+      if (error instanceof Error && "code" in error && "status" in error) {
+        const status = Number(error.status);
+        const code = String(error.code);
+        if (
+          Number.isInteger(status) &&
+          status >= 400 &&
+          status < 600 &&
+          ["account_not_provisioned", "invite_required", "capacity_unavailable"].includes(code)
+        ) {
+          if (code === "capacity_unavailable")
+            response.set("Retry-After", "300");
+          return response.status(status).json({ error: error.message, code });
+        }
+      }
       if (error instanceof DatabaseUnavailableError)
         return response.set("Retry-After", "5").status(error.status).json({ error: error.message, code: error.code });
       if (error instanceof z.ZodError)

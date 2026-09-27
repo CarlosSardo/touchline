@@ -2,7 +2,7 @@
 
 Touchline is a football sporting-director simulation. You take charge of a club's long-term project on **1 July 2026**: recruitment, contracts, squad planning, the academy, staff, facilities and finances. The manager picks the team and plays the matches; your job is to give them the right players and keep the club healthy for years to come.
 
-- Play the hosted game: [Open Touchline](https://touchline.thankfulgrass-3ef59c98.swedencentral.azurecontainerapps.io/) (invite-only, Microsoft Entra sign-in)
+- Play the hosted game: [Open Touchline](https://touchline.thankfulgrass-3ef59c98.swedencentral.azurecontainerapps.io/) is invite-based. [Request an invite](https://touchline.thankfulgrass-3ef59c98.swedencentral.azurecontainerapps.io/invite), then sign in with a personal Microsoft account (Outlook.com, Hotmail, Live.com, MSN or any email registered as a Microsoft account). Work/school, Google and Apple sign-in are not supported.
 - Current status and known gaps: [REQUIREMENTS.md](REQUIREMENTS.md)
 - How to contribute: [CONTRIBUTING.md](CONTRIBUTING.md)
 
@@ -75,7 +75,42 @@ npm run test:local -- npm run verify -- --parallel
 
 ## Hosting and deployment
 
-The hosted game is one Azure Container App (Consumption, 0 to 1 replicas) serving the React UI and Express API behind Entra sign-in, plus one Azure SQL Free database. Each provisioned account (owner or allowlisted guest) gets a separate world schema mapped in `accounts.users`. Images are built with the [Dockerfile](Dockerfile), pushed to private GHCR and deployed from the workstation; there is no CI pipeline.
+The hosted game is one Azure Container App (Consumption, 0 to 1 replicas) serving the React UI and Express API behind EasyAuth, plus one Azure SQL Free database. EasyAuth uses the `https://login.microsoftonline.com/common/v2.0` issuer, and the app registration accepts personal Microsoft accounts. Images are built with the [Dockerfile](Dockerfile), pushed to private GHCR and deployed from the workstation; there is no CI pipeline.
+
+Access is invite-based:
+
+1. A player requests an invite at [`/invite`](https://touchline.thankfulgrass-3ef59c98.swedencentral.azurecontainerapps.io/invite).
+2. The approver gets an email and reviews the request at `/admin/invites` while signed in.
+3. Accepting sends the player an email. Denying is silent.
+4. On first sign-in with the accepted personal Microsoft account, an owner-executed stored procedure creates that player's private world schema. The runtime still has no `CREATE SCHEMA` permission.
+
+The owner/legacy world rebind happens automatically on first personal-account sign-in as `sardo.kiko@gmail.com` or `carlos.sardo@outlook.com`. The app keeps the free-tier guardrails: `MAX_PLAYERS=10` and `INVITE_DB_SIZE_LIMIT_GB=24` for the Azure SQL Free 32 GB database.
+
+Email uses Gmail SMTP with a Google app password. If hosted `SMTP_PASSWORD` is unset, deployment uses `EMAIL_TRANSPORT=disabled`: invite requests still appear in `/admin/invites`, and emails can be resent after SMTP is configured. Local development uses the `log` transport and prints invite links to the API console.
+
+Operator setup:
+
+```sh
+npm run azure:auth -- --yes --allow-personal-accounts
+# Set SMTP_PASSWORD in .env from Google Account > Security > 2-Step Verification > App passwords.
+npm run azure:deploy -- --yes
+```
+
+Invite settings:
+
+| Variable | Purpose |
+| --- | --- |
+| `APPROVER_EMAIL` | Address that receives request review emails and may approve when signed in |
+| `OWNER_EMAIL` | Personal Microsoft account email treated as the owner |
+| `MAX_PLAYERS` | Player cap, excluding the owner |
+| `INVITE_DB_SIZE_LIMIT_GB` | Database-size guard before accepting or claiming invites |
+| `INVITE_SIGNING_SECRET` | HMAC secret for signed review/resend links |
+| `EMAIL_TRANSPORT` | `gmail`, `disabled` when hosted; `log` for local development |
+| `SMTP_USER` | Gmail SMTP account |
+| `SMTP_PASSWORD` | Google app password for Gmail SMTP |
+| `SMTP_FROM` | Optional From header, defaulting to `Touchline <SMTP_USER>` |
+
+Cost: the invite/auth/email setup uses free services only (Gmail SMTP, personal Microsoft account sign-in, Container Apps consumption grant and Azure SQL Free).
 
 Operator commands (each documents itself with `--help`): `azure:provision`, `azure:auth`, `azure:sql`, `azure:deploy`, `azure:rollback`, `accounts:migrate` and `career:delete`. See [scripts/azure-deploy.sh](scripts/azure-deploy.sh), [scripts/azure-provision.sh](scripts/azure-provision.sh) and [scripts/azure-rollback.sh](scripts/azure-rollback.sh).
 
