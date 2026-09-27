@@ -1,5 +1,7 @@
 import type { AccountUser } from "../shared/api.ts";
 import { Store } from "./db.ts";
+import { CONSUMER_TENANT_ID, type InviteLimits } from "./invite-store.ts";
+import { LEGACY_EMAIL, LEGACY_OBJECT_ID, OWNER_EMAIL_DEFAULT } from "./legacy-account.ts";
 import { validateSqlSchema } from "./sql-config.ts";
 import { tableName } from "./sql-schema.ts";
 
@@ -23,6 +25,10 @@ export function accountUuid(value: string, label: string): string {
   if (!/^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i.test(value))
     throw new Error(`${label} must be a UUID.`);
   return value.toLowerCase();
+}
+
+function maybeAccountUuid(value: string | undefined): string | null {
+  return value && /^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i.test(value) ? value.toLowerCase() : null;
 }
 
 export function validateAccountSchema(schema: string, testMode = false): string {
@@ -56,17 +62,52 @@ export class AccountNotProvisionedError extends Error {
   }
 }
 
-export async function assertAccountRegistry(registry: Store): Promise<void> {
+export class InviteRequiredError extends Error {
+  readonly status = 403;
+  readonly code = "invite_required";
+
+  constructor() {
+    super("This personal Microsoft account has not been invited yet.");
+    this.name = "InviteRequiredError";
+  }
+}
+
+export class CapacityUnavailableError extends Error {
+  readonly status = 503;
+  readonly code = "capacity_unavailable";
+
+  constructor(readonly reason: string | null = null) {
+    super("Touchline is at capacity.");
+    this.name = "CapacityUnavailableError";
+  }
+}
+
+export async function assertAccountRegistry(registry: Store, options: { allowLegacy?: boolean } = {}): Promise<void> {
   validateAccountSchema(registry.schemaName, registry.testMode);
   const users = tableName(registry.schemaName, "users");
+  const invites = tableName(registry.schemaName, "invite_requests");
+  const attempts = tableName(registry.schemaName, "invite_attempts");
   await registry.all(`SELECT TOP (0) [id], [tenant_id], [object_id], [display_name],
     [email], [game_schema], [created_at], [updated_at] FROM ${users};`);
   const tables = await registry.all<{ name: string }>(
     "SELECT [name] FROM sys.tables WHERE [schema_id] = SCHEMA_ID(?)",
     registry.schemaName,
   );
-  if (tables.length !== 1 || tables[0].name !== "users")
-    throw new Error("The account registry must contain only its users table, never world or save tables.");
+  const names = tables.map((table) => table.name).sort();
+  const legacyRegistry = options.allowLegacy === true && names.length === 1 && names[0] === "users";
+  if (!legacyRegistry && (
+    names.length !== 3 ||
+    names[0] !== "invite_attempts" ||
+    names[1] !== "invite_requests" ||
+    names[2] !== "users"
+  ))
+    throw new Error("The account registry must contain only users, invite_requests and invite_attempts, never world or save tables.");
+  if (!legacyRegistry) {
+    await registry.all(`SELECT TOP (0) [id], [email], [note], [status], [ip_hash], [requested_at],
+      [decided_at], [decided_by], [account_id], [approval_email_sent], [accepted_email_sent],
+      [updated_at] FROM ${invites};`);
+    await registry.all(`SELECT TOP (0) [id], [ip_hash], [attempted_at] FROM ${attempts};`);
+  }
   const indexes = await registry.all<{ is_primary_key: boolean; columns: string }>(
     `SELECT index_row.[is_primary_key],
        STRING_AGG(CONVERT(nvarchar(max), column_row.[name]), N',')
@@ -89,13 +130,17 @@ export async function assertAccountRegistry(registry: Store): Promise<void> {
     throw new Error("The account registry is missing its identity or schema uniqueness constraints.");
 }
 
-export async function registeredAccountSchemas(root: Store, accountSchema = "accounts"): Promise<string[]> {
+export async function registeredAccountSchemas(
+  root: Store,
+  accountSchema = "accounts",
+  options: { allowLegacyRegistry?: boolean } = { allowLegacyRegistry: true },
+): Promise<string[]> {
   validateAccountSchema(accountSchema, root.testMode);
   if (root.schemaName.toLowerCase() === accountSchema.toLowerCase())
     throw new Error("The account registry cannot share a world schema.");
   const registry = root.forSchema(accountSchema);
   try {
-    await assertAccountRegistry(registry);
+    await assertAccountRegistry(registry, { allowLegacy: options.allowLegacyRegistry ?? true });
     const accounts = await registry.all<{ game_schema: string }>(
       `SELECT [game_schema] FROM ${tableName(accountSchema, "users")} ORDER BY [game_schema]`,
     );
@@ -120,14 +165,30 @@ export async function registeredAccountSchemas(root: Store, accountSchema = "acc
 export class Accounts {
   private readonly registry: Store;
   private readonly usersTable: string;
+  private readonly invitesTable: string;
+  private readonly limits: Required<Pick<InviteLimits, "maxPlayers" | "sizeLimitGb">>;
+  private readonly homeTenantId: string | null;
+  private readonly ownerObjectId: string | null;
+  private readonly ownerEmail: string;
   private readonly stores = new Map<string, Store>();
 
-  constructor(private readonly root: Store, accountSchema = "accounts") {
+  constructor(private readonly root: Store, accountSchema = "accounts", options: { limits?: InviteLimits } = {}) {
     validateAccountSchema(accountSchema, root.testMode);
     if (accountSchema.toLowerCase() === root.schemaName.toLowerCase())
       throw new Error("The account registry cannot share a world schema.");
     this.registry = root.forSchema(accountSchema);
     this.usersTable = tableName(accountSchema, "users");
+    this.invitesTable = tableName(accountSchema, "invite_requests");
+    this.limits = {
+      maxPlayers: options.limits?.maxPlayers ?? Number(process.env.MAX_PLAYERS ?? 10),
+      sizeLimitGb: options.limits?.sizeLimitGb ?? Number(process.env.INVITE_DB_SIZE_LIMIT_GB ?? 24),
+    };
+    this.homeTenantId = maybeAccountUuid(process.env.AZURE_TENANT_ID);
+    this.ownerObjectId = maybeAccountUuid(options.limits?.ownerObjectId ?? process.env.OWNER_OBJECT_ID ?? "");
+    this.ownerEmail = (options.limits?.ownerEmail ?? process.env.OWNER_EMAIL ?? OWNER_EMAIL_DEFAULT).trim().toLowerCase();
+    if (!Number.isFinite(this.limits.maxPlayers) || this.limits.maxPlayers < 1 ||
+        !Number.isFinite(this.limits.sizeLimitGb) || this.limits.sizeLimitGb <= 0)
+      throw new Error("Invalid invite capacity limits.");
   }
 
   async assertReady(): Promise<void> {
@@ -137,19 +198,72 @@ export class Accounts {
   async resolve(identity: AuthenticatedIdentity): Promise<{ user: AccountUser; store: Store }> {
     const tenantId = accountUuid(identity.tenantId, "Tenant ID");
     const objectId = accountUuid(identity.objectId, "Object ID");
+    const email = identity.email === null ? null : identity.email.trim().toLowerCase();
     if (
       !identity.displayName.trim() || identity.displayName.length > 200 ||
-      (identity.email !== null && (!identity.email.trim() || identity.email.length > 320))
+      (email !== null && (!email || email.length > 320))
     )
       throw new Error("Invalid trusted account profile.");
-    const account = await this.registry.get<AccountRecord>(
+    let account = await this.lookup(tenantId, objectId);
+    if (!account && tenantId === CONSUMER_TENANT_ID && email) {
+      const fromObjectId = email === LEGACY_EMAIL ? LEGACY_OBJECT_ID :
+        email === this.ownerEmail ? this.ownerObjectId : null;
+      if (this.homeTenantId && fromObjectId) {
+        await this.registry.all(
+          `EXEC ${tableName(this.registry.schemaName, "rebind_account")}
+            @from_tenant_id = CONVERT(uniqueidentifier, ?), @from_object_id = CONVERT(uniqueidentifier, ?),
+            @to_tenant_id = CONVERT(uniqueidentifier, ?), @to_object_id = CONVERT(uniqueidentifier, ?), @email = ?`,
+          this.homeTenantId,
+          fromObjectId,
+          tenantId,
+          objectId,
+          email,
+        );
+        account = await this.lookup(tenantId, objectId);
+      }
+    }
+    if (!account && tenantId === CONSUMER_TENANT_ID && email) {
+      const invite = await this.registry.get<{ id: string }>(
+        `SELECT TOP (1) [id] FROM ${this.invitesTable}
+         WHERE [email] = ? AND [status] = N'accepted' ORDER BY [decided_at], [requested_at]`,
+        email,
+      );
+      if (invite) {
+        const [result] = await this.registry.all<{ outcome: string; reason: string | null }>(
+          `EXEC ${tableName(this.registry.schemaName, "claim_invited_account")}
+            @request_id = CONVERT(uniqueidentifier, ?), @tenant_id = CONVERT(uniqueidentifier, ?),
+            @object_id = CONVERT(uniqueidentifier, ?), @email = ?, @display_name = ?`,
+          invite.id,
+          tenantId,
+          objectId,
+          email,
+          identity.displayName,
+        );
+        if (result?.outcome === "capacity") throw new CapacityUnavailableError(result.reason);
+        account = await this.lookup(tenantId, objectId);
+      }
+    }
+    if (!account) throw tenantId === CONSUMER_TENANT_ID ? new InviteRequiredError() : new AccountNotProvisionedError();
+    return this.finishResolution(account, tenantId, objectId, identity.displayName, email);
+  }
+
+  private async lookup(tenantId: string, objectId: string): Promise<AccountRecord | undefined> {
+    return this.registry.get<AccountRecord>(
       `SELECT [id], [tenant_id], [object_id], [display_name], [email], [game_schema]
        FROM ${this.usersTable} WHERE [tenant_id] = CONVERT(uniqueidentifier, ?)
          AND [object_id] = CONVERT(uniqueidentifier, ?)`,
       tenantId,
       objectId,
     );
-    if (!account) throw new AccountNotProvisionedError();
+  }
+
+  private async finishResolution(
+    account: AccountRecord,
+    tenantId: string,
+    objectId: string,
+    displayName: string,
+    email: string | null,
+  ): Promise<{ user: AccountUser; store: Store }> {
     const id = accountUuid(account.id, "Account ID");
     if (
       accountUuid(account.tenant_id, "Registered tenant ID") !== tenantId ||
@@ -160,13 +274,13 @@ export class Accounts {
     let store = this.stores.get(id);
     if (store && store.schemaName !== schema)
       throw new Error("Account schema reassignment is not permitted.");
-    if (account.display_name !== identity.displayName || account.email !== identity.email) {
+    if (account.display_name !== displayName || account.email !== email) {
       const result = await this.registry.run(
         `UPDATE ${this.usersTable} SET [display_name] = ?, [email] = ?, [updated_at] = SYSUTCDATETIME()
          WHERE [id] = CONVERT(uniqueidentifier, ?) AND [tenant_id] = CONVERT(uniqueidentifier, ?)
            AND [object_id] = CONVERT(uniqueidentifier, ?) AND [game_schema] = ?`,
-        identity.displayName,
-        identity.email,
+        displayName,
+        email,
         id,
         tenantId,
         objectId,
@@ -181,6 +295,6 @@ export class Accounts {
       store = this.root.forSchema(schema);
       this.stores.set(id, store);
     }
-    return { user: { id, displayName: identity.displayName, email: identity.email }, store };
+    return { user: { id, displayName, email }, store };
   }
 }

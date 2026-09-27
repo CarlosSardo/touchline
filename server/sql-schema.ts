@@ -112,6 +112,58 @@ export function accountsTableSql(schema: string): string {
     );`;
 }
 
+export function inviteRequestsTableSql(schema: string): string {
+  const table = tableName(schema, "invite_requests");
+  const attempts = tableName(schema, "invite_attempts");
+  return `IF OBJECT_ID(${sqlLiteral(table)}, N'U') IS NULL
+    CREATE TABLE ${table} (
+      [id] UNIQUEIDENTIFIER NOT NULL PRIMARY KEY,
+      [email] NVARCHAR(320) COLLATE Latin1_General_100_CI_AS NOT NULL,
+      [note] NVARCHAR(500) NULL,
+      [status] NVARCHAR(16) NOT NULL,
+      [ip_hash] CHAR(64) NULL,
+      [requested_at] DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
+      [decided_at] DATETIME2 NULL,
+      [decided_by] NVARCHAR(320) NULL,
+      [account_id] UNIQUEIDENTIFIER NULL,
+      [approval_email_sent] BIT NOT NULL DEFAULT 0,
+      [accepted_email_sent] BIT NOT NULL DEFAULT 0,
+      [updated_at] DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
+      CONSTRAINT [CK_invite_requests_status] CHECK ([status] IN (N'pending', N'accepted', N'denied', N'claimed'))
+    );
+  IF COL_LENGTH(${sqlLiteral(table)}, N'note') IS NULL ALTER TABLE ${table} ADD [note] NVARCHAR(500) NULL;
+  IF COL_LENGTH(${sqlLiteral(table)}, N'ip_hash') IS NULL ALTER TABLE ${table} ADD [ip_hash] CHAR(64) NULL;
+  IF COL_LENGTH(${sqlLiteral(table)}, N'decided_at') IS NULL ALTER TABLE ${table} ADD [decided_at] DATETIME2 NULL;
+  IF COL_LENGTH(${sqlLiteral(table)}, N'decided_by') IS NULL ALTER TABLE ${table} ADD [decided_by] NVARCHAR(320) NULL;
+  IF COL_LENGTH(${sqlLiteral(table)}, N'account_id') IS NULL ALTER TABLE ${table} ADD [account_id] UNIQUEIDENTIFIER NULL;
+  IF COL_LENGTH(${sqlLiteral(table)}, N'approval_email_sent') IS NULL
+    ALTER TABLE ${table} ADD [approval_email_sent] BIT NOT NULL CONSTRAINT [DF_invite_requests_approval_email_sent] DEFAULT 0;
+  IF COL_LENGTH(${sqlLiteral(table)}, N'accepted_email_sent') IS NULL
+    ALTER TABLE ${table} ADD [accepted_email_sent] BIT NOT NULL CONSTRAINT [DF_invite_requests_accepted_email_sent] DEFAULT 0;
+  IF COL_LENGTH(${sqlLiteral(table)}, N'updated_at') IS NULL
+    ALTER TABLE ${table} ADD [updated_at] DATETIME2 NOT NULL CONSTRAINT [DF_invite_requests_updated_at] DEFAULT SYSUTCDATETIME();
+  IF NOT EXISTS (SELECT 1 FROM sys.check_constraints
+    WHERE [parent_object_id] = OBJECT_ID(${sqlLiteral(table)}) AND [name] = N'CK_invite_requests_status')
+    ALTER TABLE ${table} WITH CHECK ADD CONSTRAINT [CK_invite_requests_status]
+      CHECK ([status] IN (N'pending', N'accepted', N'denied', N'claimed'));
+  IF NOT EXISTS (SELECT 1 FROM sys.indexes
+    WHERE [object_id] = OBJECT_ID(${sqlLiteral(table)}) AND [name] = N'UX_invite_requests_email_active')
+    CREATE UNIQUE INDEX [UX_invite_requests_email_active] ON ${table}([email])
+      WHERE [status] IN (N'pending', N'accepted', N'claimed');
+  IF OBJECT_ID(${sqlLiteral(attempts)}, N'U') IS NULL
+    CREATE TABLE ${attempts} (
+      [id] BIGINT IDENTITY(1,1) NOT NULL PRIMARY KEY,
+      [ip_hash] CHAR(64) NULL,
+      [attempted_at] DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME()
+    );
+  IF NOT EXISTS (SELECT 1 FROM sys.indexes
+    WHERE [object_id] = OBJECT_ID(${sqlLiteral(attempts)}) AND [name] = N'IX_invite_attempts_attempted_at')
+    CREATE INDEX [IX_invite_attempts_attempted_at] ON ${attempts}([attempted_at]);
+  IF NOT EXISTS (SELECT 1 FROM sys.indexes
+    WHERE [object_id] = OBJECT_ID(${sqlLiteral(attempts)}) AND [name] = N'IX_invite_attempts_ip_hash_attempted_at')
+    CREATE INDEX [IX_invite_attempts_ip_hash_attempted_at] ON ${attempts}([ip_hash], [attempted_at]);`;
+}
+
 export function schemaMigrations(schema: string): SqlMigration[] {
   const ref = (table: string) => tableName(schema, table);
   const definitions: Record<(typeof WORLD_TABLES)[number], string> = {

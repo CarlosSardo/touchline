@@ -89,6 +89,17 @@ export interface HealthDetails extends Health {
   date: string;
 }
 
+export type AccessIssueCode =
+  | "invite_required"
+  | "account_not_provisioned"
+  | "not_authorized"
+  | "capacity_unavailable";
+
+export interface AccessIssueResponse {
+  error: string;
+  code: AccessIssueCode;
+}
+
 export interface AssistantAction {
   duty: AssistantDuty;
   message: string;

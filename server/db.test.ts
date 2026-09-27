@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { bindSql, DatabaseUnavailableError, openOnFirstUse, runSql, sqlPoolConfig, Store } from "./db.ts";
 import { readSqlSettings, type SqlSettings } from "./sql-config.ts";
+import { OWNER_EMAIL_DEFAULT } from "./legacy-account.ts";
 import { provisionAccounts, LEGACY_EMAIL, LEGACY_OBJECT_ID, type AccountProvisioningPlan } from "../scripts/accounts-migrate.ts";
 import type { AccountRecord } from "./accounts.ts";
 import {
@@ -982,6 +983,8 @@ describe("Account provisioning transaction scopes (fake driver, no database)", (
     database: "touchline", accountSchema: "accounts",
     tenantId: "11111111-1111-4111-8111-111111111111",
     legacyObjectId: LEGACY_OBJECT_ID, legacyEmail: LEGACY_EMAIL,
+    ownerObjectId: "22222222-2222-4222-8222-222222222222",
+    ownerEmail: OWNER_EMAIL_DEFAULT,
     objectIds: [LEGACY_OBJECT_ID, "22222222-2222-4222-8222-222222222222"],
   };
 
@@ -1000,7 +1003,9 @@ describe("Account provisioning transaction scopes (fake driver, no database)", (
       if (call.sql.includes("AS [__touchline_changes]"))
         return [{ __touchline_changes: 1, __touchline_identity: null }];
       if (call.sql.includes("FROM sys.tables")) {
-        if (parameters[0] === "accounts") return registryCreated ? [{ name: "users" }] : [];
+        if (parameters[0] === "accounts") return registryCreated
+          ? [{ name: "users" }, { name: "invite_requests" }, { name: "invite_attempts" }]
+          : [];
         if (call.sql.includes("[name] = N'users'")) return [];
         return schemas.has(String(parameters[0])) ? [...STORE_TABLES].map((name) => ({ name })) : [];
       }

@@ -2,21 +2,28 @@ import express from "express";
 import { openOnFirstUse, Store } from "./db.ts";
 import { Accounts } from "./accounts.ts";
 import { stateOf } from "./systems.ts";
-import { createApp, readApiConfiguration, type AppDatabase } from "./app.ts";
+import { createApp, readApiConfiguration, type ApiConfiguration, type AppDatabase } from "./app.ts";
 import { describeSqlError } from "./sql-config.ts";
 
 /** A startup check failed after SQL connected; waiting for the database to resume would not fix it. */
 class StartupCheckError extends Error {}
 
 /** Opens SQL and runs the startup checks; called on the first request that needs the database. */
-async function openDatabase(requireAuth: boolean): Promise<AppDatabase> {
+async function openDatabase(configuration: ApiConfiguration): Promise<AppDatabase> {
   let phase = "SQL connection";
   let store: Store | undefined;
   try {
     store = await Store.open();
-    if (requireAuth) {
+    if (configuration.requireAuth) {
       phase = "account registry validation";
-      const accounts = new Accounts(store);
+      const accounts = new Accounts(store, "accounts", {
+        limits: {
+          maxPlayers: configuration.maxPlayers,
+          sizeLimitGb: configuration.inviteDbSizeLimitGb,
+          ownerObjectId: configuration.ownerObjectId,
+          ownerEmail: configuration.ownerEmail,
+        },
+      });
       await accounts.assertReady();
       return { store, accounts };
     }
@@ -37,6 +44,8 @@ async function start() {
   let configuration: ReturnType<typeof readApiConfiguration>;
   try {
     configuration = readApiConfiguration();
+    if (configuration.hosted && configuration.emailTransport === "disabled")
+      console.warn("Touchline: hosted email delivery is disabled; invite email flags will remain unset until SMTP is configured.");
   } catch (error) {
     console.error(
       `Touchline: ${error instanceof Error ? error.message : "Invalid API configuration."}`,
@@ -62,7 +71,7 @@ async function start() {
       console.log("Touchline maintenance mode: SQL is not opened; game access is disabled.");
     } else {
       // Opening SQL at boot would resume the serverless database for every stray request that starts a replica.
-      database = openOnFirstUse(() => openDatabase(configuration.requireAuth), {
+      database = openOnFirstUse(() => openDatabase(configuration), {
         retryable: (error) => !(error instanceof StartupCheckError),
       });
       app = createApp(database.get);

@@ -20,7 +20,9 @@ deploy_usage() {
     '--verification smoke runs a fresh build and read-only live API checks; it does not certify the full regression suite. Default: full.' \
     'Gameplay deployment requires an explicitly provisioned accounts.users registry, the preserved dbo career (or --empty-worlds), UMI and Consumption environment; other worlds may be empty.' \
     'Missing accounts block upgrades: review scripts/accounts-migrate.ts and separately provision with --apply --yes; deployment never binds users or seeds.' \
-    'Required env: GHCR_USER, GHCR_PULL_TOKEN (or GHCR_TOKEN), AUTH_CLIENT_ID, AUTH_CLIENT_SECRET.' \
+    'Required env: GHCR_USER, GHCR_PULL_TOKEN (or GHCR_TOKEN), AUTH_CLIENT_ID, AUTH_CLIENT_SECRET, INVITE_SIGNING_SECRET (created by azure:auth).' \
+    'Optional SMTP_PASSWORD (Google app password for SMTP_USER): unset deploys EMAIL_TRANSPORT=disabled; requests still reach /admin/invites.' \
+    'Invite settings: APPROVER_EMAIL, OWNER_EMAIL, SMTP_USER, MAX_PLAYERS (10), INVITE_DB_SIZE_LIMIT_GB (24); /invite is public.' \
     'Building (no --image) also requires GHCR_TOKEN with read:packages/write:packages and working Docker permissions.' \
     'Prefer a separate read:packages-only GHCR_PULL_TOKEN. Supply secrets locally, never in chat or CLI arguments.' \
     'Optional AUTH_SMOKE_TOKEN: owner access token for the configured app audience; never acquired automatically.' \
@@ -28,7 +30,7 @@ deploy_usage() {
     'With --skip-db-prepare the authenticated account probe is skipped to avoid profile refresh writes.' \
     'Without the probe, the owner /api/me check right after promotion is mandatory.' \
     'Optional ALLOWED_USER_OBJECT_IDS: comma-separated guest object IDs; unset preserves the deployed list, empty removes guests.' \
-    'Register the single-tenant auth app and its HTTPS /.auth/login/aad/callback web redirect yourself.' \
+    'Run npm run azure:auth -- --yes --allow-personal-accounts: the app must accept personal Microsoft accounts (issuer common/v2.0).' \
     'SQL access uses scripts/azure-sql.sh; the dbo export precedes --registered world migrations and runtime authorization.' \
     'Runtime SQL permissions use a constrained identity-reseeding helper; no database-owner role is granted.' \
     'Reconciles exact advertised egress IP rules named touchline-app-<ip>; never enables blanket Azure SQL access.' \
@@ -41,7 +43,7 @@ deploy_usage() {
 deployment_sql() {
   [[ -f scripts/azure-sql.sh ]] || fail 'scripts/azure-sql.sh is required; no direct SQL/firewall fallback is permitted.'
   env -u AZURE_CLIENT_ID -u GHCR_TOKEN -u GHCR_PULL_TOKEN -u AUTH_CLIENT_SECRET -u AUTH_SMOKE_TOKEN \
-    bash scripts/azure-sql.sh "$@"
+    -u SMTP_PASSWORD -u INVITE_SIGNING_SECRET bash scripts/azure-sql.sh "$@"
 }
 
 deployment_readonly_smoke() {
@@ -219,12 +221,12 @@ deployment_auth_check() {
       const enabled=Object.entries(config.identityProviders ?? {}).filter(([,value])=>value?.enabled).map(([name])=>name);
       if(config.platform?.enabled!==true || config.globalValidation?.unauthenticatedClientAction!=="RedirectToLoginPage" ||
         config.globalValidation?.redirectToProvider || enabled.length!==1 || enabled[0]!=="azureActiveDirectory" ||
-        config.globalValidation?.excludedPaths?.length!==1 || config.globalValidation.excludedPaths[0]!=="/api/health" ||
+        JSON.stringify([...(config.globalValidation?.excludedPaths ?? [])].sort())!==JSON.stringify(["/api/health","/invite"]) ||
         provider?.enabled!==true || provider.registration?.clientId!==process.env.AUTH_CLIENT_ID ||
-        provider.registration?.openIdIssuer!==`https://login.microsoftonline.com/${process.env.AZURE_TENANT_ID}/v2.0` ||
+        provider.registration?.openIdIssuer!=="https://login.microsoftonline.com/common/v2.0" ||
         provider.registration?.clientSecretSettingName!=="entra-client-secret" || config.httpSettings?.requireHttps!==true)
         process.exit(1);
-    });' || fail 'EasyAuth configuration did not match the required tenant, client and authenticated sign-in policy.'
+    });' || fail 'EasyAuth configuration did not match the required common/v2.0 issuer, client, public /invite path and authenticated sign-in policy.'
 }
 
 deployment_guest_allowlist() {
@@ -250,14 +252,21 @@ const values=Object.fromEntries(entries.map(item=>[item.name,item.value]));
 const expected={NODE_ENV:'production',API_HOST:'0.0.0.0',API_PORT:'3001',REQUIRE_AUTH:'true',
   AZURE_TENANT_ID:environment.AZURE_TENANT_ID,APP_ORIGIN:environment.DEPLOY_ORIGIN,
   ALLOWED_USER_OBJECT_IDS:environment.ALLOWED_USER_OBJECT_IDS,
+  APPROVER_EMAIL:environment.APPROVER_EMAIL,OWNER_EMAIL:environment.OWNER_EMAIL,SMTP_USER:environment.SMTP_USER,
+  MAX_PLAYERS:environment.MAX_PLAYERS,INVITE_DB_SIZE_LIMIT_GB:environment.INVITE_DB_SIZE_LIMIT_GB,
+  EMAIL_TRANSPORT:environment.EMAIL_TRANSPORT,
   SQL_SERVER:`${environment.AZURE_SQL_SERVER}.database.windows.net`,SQL_DATABASE:environment.AZURE_SQL_DATABASE,
   SQL_SCHEMA:'dbo',SQL_PORT:'1433',SQL_ENCRYPT:'true',SQL_TRUST_SERVER_CERTIFICATE:'false',
   TOUCHLINE_SCHEMA_VERSION:environment.DEPLOY_SCHEMA,TOUCHLINE_MAINTENANCE:environment.DEPLOY_MAINTENANCE};
+const secretRefs=Object.fromEntries(entries.filter(item=>item.secretRef).map(item=>[item.name,item.secretRef]));
+const expectedRefs=environment.EMAIL_TRANSPORT==='gmail' ?
+  {INVITE_SIGNING_SECRET:'invite-signing-secret',SMTP_PASSWORD:'smtp-password'} : {INVITE_SIGNING_SECRET:'invite-signing-secret'};
 const uuid=/^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i;
 if(template?.containers?.length!==1 || container.name!==environment.AZURE_APP ||
    !container.image?.startsWith(`${environment.GHCR_IMAGE}@sha256:`) || !/@sha256:[a-f0-9]{64}$/.test(container.image) ||
    (template.scale?.minReplicas ?? 0)!==0 || template.scale?.maxReplicas!==1 ||
    Object.entries(expected).some(([name,value])=>values[name]!==value) ||
+   JSON.stringify(secretRefs)!==JSON.stringify(expectedRefs) ||
    !uuid.test(values.OWNER_OBJECT_ID ?? '') || !uuid.test(values.AZURE_CLIENT_ID ?? '') ||
    values.SQL_TEST_MODE==='true' || values.SQL_ALLOW_REMOTE_TESTS==='true' ||
    entries.some(item=>['SQL_USER','SQL_PASSWORD','SQL_TEST_DATABASE','TOUCHLINE_E2E_SCHEMA','CONTAINER_APP_NAME'].includes(item.name)))
@@ -271,7 +280,8 @@ deployment_schema_check() {
 import {Store} from './server/db.ts';
 import {registeredAccountSchemas} from './server/accounts.ts';
 import {maskIdentifier,maskSchema} from './scripts/career-delete.ts';
-import {LEGACY_OBJECT_ID} from './scripts/accounts-migrate.ts';
+import {LEGACY_EMAIL,LEGACY_OBJECT_ID} from './server/legacy-account.ts';
+import {CONSUMER_TENANT_ID} from './server/invite-store.ts';
 const expectedVersion=process.argv[2], mode=process.argv[3];
 if(!['registered','legacy-rollback'].includes(mode)) throw new Error('Unknown schema verification mode.');
 const store=await Store.open();
@@ -292,10 +302,14 @@ try {
     }
     const registry=store.forSchema('accounts');
     try {
-      const legacy=await registry.get("SELECT [tenant_id], [object_id] FROM [accounts].[users] WHERE [game_schema] = N'dbo'");
-      if(!schemas.includes('dbo') || legacy?.tenant_id.toLowerCase()!==process.env.AZURE_TENANT_ID?.toLowerCase() ||
-         legacy?.object_id.toLowerCase()!==LEGACY_OBJECT_ID)
-        throw new Error(`Release blocked: dbo must remain bound to the approved legacy guest (object ID ${maskIdentifier(LEGACY_OBJECT_ID)}, see scripts/accounts-migrate.ts) in the configured tenant, never implicitly to the platform owner. Review explicit account provisioning.`);
+      const legacy=await registry.get("SELECT [tenant_id], [object_id], [email] FROM [accounts].[users] WHERE [game_schema] = N'dbo'");
+      // dbo belongs to the legacy guest: either its original home-tenant identity or, after the automatic
+      // first-sign-in rebind, its personal Microsoft account (consumers tenant) with the verified legacy email.
+      const original=legacy?.tenant_id.toLowerCase()===process.env.AZURE_TENANT_ID?.toLowerCase() &&
+        legacy?.object_id.toLowerCase()===LEGACY_OBJECT_ID;
+      const rebound=legacy?.tenant_id.toLowerCase()===CONSUMER_TENANT_ID && legacy?.email?.toLowerCase()===LEGACY_EMAIL;
+      if(!schemas.includes('dbo') || !(original || rebound))
+        throw new Error(`Release blocked: dbo must remain bound to the approved legacy guest (object ID ${maskIdentifier(LEGACY_OBJECT_ID)} or its rebound personal Microsoft account, see server/legacy-account.ts), never implicitly to the platform owner. Review explicit account provisioning.`);
     } finally { await registry.close(); }
   }
   for(const schema of schemas) {
@@ -412,9 +426,12 @@ for(const path of ['/','/api/health/details']) {
   const location=denied.headers.get('location');
   const login=location ? new URL(location,origin) : null;
   const expectedLogin=login && ((login.origin===origin && login.pathname==='/.auth/login/aad') ||
-    (login.origin==='https://login.microsoftonline.com' && login.pathname.startsWith(`/${process.env.AZURE_TENANT_ID}/`)));
+    (login.origin==='https://login.microsoftonline.com' && (login.pathname.startsWith('/common/') || login.pathname.startsWith(`/${process.env.AZURE_TENANT_ID}/`))));
   if(denied.status!==302 || !expectedLogin) throw new Error('Anonymous game/API access must redirect to the configured sign-in provider.');
 }
+const invite=await fetch(`${origin}/invite`, {redirect:'manual', headers:{Accept:'text/html'}, signal:AbortSignal.timeout(60000)});
+if(invite.status!==200 || !invite.headers.get('content-type')?.startsWith('text/html') || !(await invite.text()).includes('Request an invite'))
+  throw new Error('Public /invite must serve the invite request page without sign-in; ingress will close.');
 if(process.env.AUTH_SMOKE_TOKEN) {
   // The first signed-in request opens SQL and checks the registry: up to 90 s of connection retries, then 503.
   let response;
@@ -443,7 +460,7 @@ if(process.env.AUTH_SMOKE_TOKEN) {
      !(session.user.email===null || typeof session.user.email==='string') || !(idle || busy))
     throw new Error('Owner smoke did not return a provisioned human account profile; an empty or busy world is valid.');
 }
-console.log(`PUBLIC_HEALTH_OK SIGN_IN_REQUIRED ownerSmokeVerified=${Boolean(process.env.AUTH_SMOKE_TOKEN)}`);
+console.log(`PUBLIC_HEALTH_OK INVITE_PAGE_PUBLIC SIGN_IN_REQUIRED ownerSmokeVerified=${Boolean(process.env.AUTH_SMOKE_TOKEN)}`);
 NODE
 }
 
@@ -488,13 +505,25 @@ deployment_main() {
   if [[ -n "$image" ]]; then
     [[ "$image" == "$GHCR_IMAGE"@sha256:* && "${image##*@sha256:}" =~ ^[a-f0-9]{64}$ ]] || fail '--image must pin the configured private GHCR repository to a sha256 digest.'
   fi
-  [[ "${AUTH_CLIENT_ID:-}" =~ ^[a-fA-F0-9]{8}(-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12}$ ]] || fail 'Set AUTH_CLIENT_ID for your existing single-tenant Entra application.'
+  [[ "${AUTH_CLIENT_ID:-}" =~ ^[a-fA-F0-9]{8}(-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12}$ ]] || fail 'Set AUTH_CLIENT_ID for your Entra application (npm run azure:auth -- --yes --allow-personal-accounts).'
+  [[ -n "${INVITE_SIGNING_SECRET:-}" && ${#INVITE_SIGNING_SECRET} -ge 32 ]] 2>/dev/null || fail 'Set INVITE_SIGNING_SECRET (at least 32 characters; npm run azure:auth creates one in .env).'
   [[ -n "${AUTH_CLIENT_SECRET:-}" && -n "${GHCR_USER:-}" && -n "${GHCR_PULL_TOKEN:-${GHCR_TOKEN:-}}" ]] || fail 'Supply AUTH_CLIENT_SECRET, GHCR_USER and GHCR_PULL_TOKEN (or GHCR_TOKEN) locally.'
   local pull_token="${GHCR_PULL_TOKEN:-${GHCR_TOKEN:-}}" push_token="${GHCR_TOKEN:-}" auth_secret="$AUTH_CLIENT_SECRET"
-  local smoke_token="${AUTH_SMOKE_TOKEN:-}" app_id
+  local smoke_token="${AUTH_SMOKE_TOKEN:-}" app_id invite_secret="$INVITE_SIGNING_SECRET" smtp_password="${SMTP_PASSWORD:-}"
   declare -g temp_dir='' touched=false completed=false
-  unset GHCR_TOKEN GHCR_PULL_TOKEN AUTH_CLIENT_SECRET AUTH_SMOKE_TOKEN AZURE_CLIENT_ID
-  export AUTH_CLIENT_ID GHCR_USER
+  unset GHCR_TOKEN GHCR_PULL_TOKEN AUTH_CLIENT_SECRET AUTH_SMOKE_TOKEN AZURE_CLIENT_ID INVITE_SIGNING_SECRET SMTP_PASSWORD
+  APPROVER_EMAIL="${APPROVER_EMAIL:-sardo.kiko@gmail.com}" OWNER_EMAIL="${OWNER_EMAIL:-carlos.sardo@outlook.com}"
+  SMTP_USER="${SMTP_USER:-sardo.kiko@gmail.com}" MAX_PLAYERS="${MAX_PLAYERS:-10}" INVITE_DB_SIZE_LIMIT_GB="${INVITE_DB_SIZE_LIMIT_GB:-24}"
+  [[ "$MAX_PLAYERS" =~ ^[1-9][0-9]{0,2}$ && "$INVITE_DB_SIZE_LIMIT_GB" =~ ^[1-9][0-9]?$ ]] || fail 'MAX_PLAYERS and INVITE_DB_SIZE_LIMIT_GB must be small positive integers.'
+  for address in "$APPROVER_EMAIL" "$OWNER_EMAIL" "$SMTP_USER"; do
+    [[ "$address" =~ ^[^[:space:]@\"\']+@[^[:space:]@\"\']+\.[^[:space:]@\"\']+$ ]] || fail 'APPROVER_EMAIL, OWNER_EMAIL and SMTP_USER must be email addresses.'
+  done
+  if [[ -n "$smtp_password" ]]; then EMAIL_TRANSPORT=gmail; else
+    EMAIL_TRANSPORT=disabled
+    printf '%s\n' '[email] WARNING: SMTP_PASSWORD is not set. Deploying with EMAIL_TRANSPORT=disabled: invite requests are stored,' \
+      '        but NO approval or welcome emails are sent until you redeploy with a Google app password. Review /admin/invites.' >&2
+  fi
+  export AUTH_CLIENT_ID GHCR_USER APPROVER_EMAIL OWNER_EMAIL SMTP_USER MAX_PLAYERS INVITE_DB_SIZE_LIMIT_GB EMAIL_TRANSPORT
   [[ -n "$image" || -n "$push_token" ]] || fail 'GHCR_TOKEN with read:packages/write:packages is required to push.'
   need node
   need npm
@@ -593,7 +622,7 @@ NODE
       fi
       printf '%s\n' '[migrate] Applying explicit migrations to every registered world, then constrained world and registry-profile runtime grants.'
       deployment_sql -- node --import tsx scripts/db-migrate.ts --registered --apply --yes
-      deployment_sql -- node --import tsx scripts/db-authorize.ts --registered --client-id "$identity_client" --name "$AZURE_IDENTITY" --apply --yes
+      deployment_sql -- env OWNER_OBJECT_ID="$owner" node --import tsx scripts/db-authorize.ts --registered --client-id "$identity_client" --name "$AZURE_IDENTITY" --apply --yes
     fi
   fi
   if [[ -z "$image" ]]; then
@@ -616,12 +645,16 @@ NODE
   origin="https://$AZURE_APP.$public_domain"
   DEPLOY_IMAGE="$image" DEPLOY_OWNER="$owner" DEPLOY_IDENTITY="$identity_id" DEPLOY_CLIENT="$identity_client" \
     DEPLOY_ENVIRONMENT="$environment_id" DEPLOY_REVISION="$revision_suffix" DEPLOY_SCHEMA="$schema_version" DEPLOY_ORIGIN="$origin" \
-    DEPLOY_PULL_TOKEN="$pull_token" DEPLOY_AUTH_SECRET="$auth_secret" DEPLOY_MAINTENANCE="$stage_only" node --input-type=module - "$temp_dir" <<'NODE'
+    DEPLOY_PULL_TOKEN="$pull_token" DEPLOY_AUTH_SECRET="$auth_secret" DEPLOY_INVITE_SECRET="$invite_secret" DEPLOY_SMTP_PASSWORD="$smtp_password" \
+    DEPLOY_MAINTENANCE="$stage_only" node --input-type=module - "$temp_dir" <<'NODE'
 import {writeFileSync} from 'node:fs';
 const environment=process.env;
 const values={NODE_ENV:'production',API_HOST:'0.0.0.0',API_PORT:'3001',REQUIRE_AUTH:'true',
   OWNER_OBJECT_ID:environment.DEPLOY_OWNER,AZURE_TENANT_ID:environment.AZURE_TENANT_ID,
   ALLOWED_USER_OBJECT_IDS:environment.ALLOWED_USER_OBJECT_IDS,
+  APPROVER_EMAIL:environment.APPROVER_EMAIL,OWNER_EMAIL:environment.OWNER_EMAIL,SMTP_USER:environment.SMTP_USER,
+  MAX_PLAYERS:environment.MAX_PLAYERS,INVITE_DB_SIZE_LIMIT_GB:environment.INVITE_DB_SIZE_LIMIT_GB,
+  EMAIL_TRANSPORT:environment.EMAIL_TRANSPORT,
   APP_ORIGIN:environment.DEPLOY_ORIGIN,AZURE_CLIENT_ID:environment.DEPLOY_CLIENT,
   SQL_SERVER:`${environment.AZURE_SQL_SERVER}.database.windows.net`,SQL_DATABASE:environment.AZURE_SQL_DATABASE,
   SQL_SCHEMA:'dbo',SQL_PORT:'1433',SQL_ENCRYPT:'true',SQL_TRUST_SERVER_CERTIFICATE:'false',
@@ -630,25 +663,29 @@ const body={location:environment.AZURE_LOCATION,tags:{'touchline-tooling':'local
   identity:{type:'UserAssigned',userAssignedIdentities:{[environment.DEPLOY_IDENTITY]:{}}},
   properties:{managedEnvironmentId:environment.DEPLOY_ENVIRONMENT,workloadProfileName:'Consumption',
     configuration:{activeRevisionsMode:'Multiple',
-      secrets:[{name:'ghcr-pull',value:environment.DEPLOY_PULL_TOKEN},{name:'entra-client-secret',value:environment.DEPLOY_AUTH_SECRET}],
+      secrets:[{name:'ghcr-pull',value:environment.DEPLOY_PULL_TOKEN},{name:'entra-client-secret',value:environment.DEPLOY_AUTH_SECRET},
+        {name:'invite-signing-secret',value:environment.DEPLOY_INVITE_SECRET},
+        ...(environment.DEPLOY_SMTP_PASSWORD ? [{name:'smtp-password',value:environment.DEPLOY_SMTP_PASSWORD}] : [])],
       registries:[{server:'ghcr.io',username:environment.GHCR_USER,passwordSecretRef:'ghcr-pull'}],
       ingress:{external:false,targetPort:3001,transport:'auto',allowInsecure:false,traffic:[{latestRevision:true,weight:100}]}},
     template:{revisionSuffix:environment.DEPLOY_REVISION,containers:[{name:environment.AZURE_APP,image:environment.DEPLOY_IMAGE,
-      env:Object.entries(values).map(([name,value])=>({name,value})),resources:{cpu:0.5,memory:'1Gi'},
+      env:[...Object.entries(values).map(([name,value])=>({name,value})),{name:'INVITE_SIGNING_SECRET',secretRef:'invite-signing-secret'},
+        ...(environment.DEPLOY_SMTP_PASSWORD ? [{name:'SMTP_PASSWORD',secretRef:'smtp-password'}] : [])],resources:{cpu:0.5,memory:'1Gi'},
       probes:[{type:'Readiness',httpGet:{path:'/api/health',port:3001},initialDelaySeconds:10,periodSeconds:5,failureThreshold:30}]}],
       scale:{minReplicas:0,maxReplicas:1}}}};
 writeFileSync(`${process.argv[2]}/app.json`,JSON.stringify(body),{mode:0o600});
 const auth={properties:{platform:{enabled:true},httpSettings:{requireHttps:true},
-  globalValidation:{unauthenticatedClientAction:'RedirectToLoginPage',excludedPaths:['/api/health']},
+  globalValidation:{unauthenticatedClientAction:'RedirectToLoginPage',excludedPaths:['/api/health','/invite']},
   identityProviders:{azureActiveDirectory:{enabled:true,registration:{clientId:environment.AUTH_CLIENT_ID,
-    clientSecretSettingName:'entra-client-secret',openIdIssuer:`https://login.microsoftonline.com/${environment.AZURE_TENANT_ID}/v2.0`},
+    clientSecretSettingName:'entra-client-secret',openIdIssuer:'https://login.microsoftonline.com/common/v2.0'},
+    login:{loginParameters:['scope=openid profile email']},
     validation:{allowedAudiences:[environment.AUTH_CLIENT_ID,`api://${environment.AUTH_CLIENT_ID}`]}}}}};
 writeFileSync(`${process.argv[2]}/auth.json`,JSON.stringify(auth),{mode:0o600});
 NODE
   touched=true
   printf '%s\n' '[deploy] Applying the owner-guarded candidate with internal ingress and 0..1 replicas.'
   azure rest --method put --url "https://management.azure.com${app_id}?api-version=2024-03-01" --body "@$temp_dir/app.json" --output none 2>/dev/null || fail 'Container App apply failed; request details suppressed to protect credentials.'
-  unset pull_token auth_secret
+  unset pull_token auth_secret invite_secret smtp_password
   deployment_firewall
   printf '%s\n' '[auth] Applying and verifying tenant-bound EasyAuth before opening ingress.'
   azure rest --method put --url "https://management.azure.com${app_id}/authConfigs/current?api-version=2024-03-01" --body "@$temp_dir/auth.json" --output none

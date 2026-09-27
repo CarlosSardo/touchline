@@ -1,17 +1,20 @@
 import { createHash, randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  AccountNotProvisionedError, Accounts, registeredAccountSchemas,
+  AccountNotProvisionedError, Accounts, CapacityUnavailableError, InviteRequiredError, registeredAccountSchemas,
   type AccountRecord, type AuthenticatedIdentity,
 } from "./accounts.ts";
+import { CONSUMER_TENANT_ID } from "./invite-store.ts";
 import { bindSql, sqlPoolConfig, Store } from "./db.ts";
 import { Saves } from "./saves.ts";
 import { readSqlSettings } from "./sql-config.ts";
-import { accountsTableSql, quoteIdentifier, schemaMigrations, sqlLiteral, STORE_TABLES, tableName, WORLD_TABLES } from "./sql-schema.ts";
+import { accountsTableSql, inviteRequestsTableSql, quoteIdentifier, schemaMigrations, sqlLiteral, STORE_TABLES, tableName, WORLD_TABLES } from "./sql-schema.ts";
 import {
-  accountProvisioningPlan, LEGACY_EMAIL, LEGACY_OBJECT_ID, main as migrateAccounts, provisionAccounts,
+  accountProvisioningPlan, existingAccountForObject, LEGACY_EMAIL, LEGACY_OBJECT_ID, main as migrateAccounts,
+  mappedSchema, provisionAccounts,
 } from "../scripts/accounts-migrate.ts";
-import { runtimeGrants } from "../scripts/db-authorize.ts";
+import { accountProceduresSql, claimWorldMigrationStatements, runtimeGrants } from "../scripts/db-authorize.ts";
+import { OWNER_EMAIL_DEFAULT } from "./legacy-account.ts";
 import { careerDeleteOptions, main as deleteCareerMain, maskEmail, maskIdentifier, maskSchema, selectAccount } from "../scripts/career-delete.ts";
 
 const tenantId = "11111111-1111-4111-8111-111111111111";
@@ -46,7 +49,7 @@ function accountHarness() {
     schemaName: "accounts",
     testMode: false,
     all: vi.fn(async (sql: string): Promise<unknown[]> => {
-      if (sql.includes("FROM sys.tables")) return [{ name: "users" }];
+      if (sql.includes("FROM sys.tables")) return [{ name: "users" }, { name: "invite_requests" }, { name: "invite_attempts" }];
       if (sql.includes("FROM sys.indexes")) return registryIndexes;
       if (sql.includes("SELECT [game_schema]")) return records.map((record) => ({ game_schema: record.game_schema }));
       return [];
@@ -90,10 +93,26 @@ describe("Account resolution (no database)", () => {
     harness.registry.all.mockRejectedValueOnce(new Error("Invalid object name 'accounts.users'"));
     await expect(accounts.assertReady()).rejects.toThrow(/Invalid object/);
     harness.registry.all.mockImplementation(async (sql) => sql.includes("FROM sys.tables")
-      ? [{ name: "users" }, { name: "save_slots" }] : []);
+      ? [{ name: "users" }, { name: "invite_requests" }, { name: "save_slots" }] : []);
     await expect(accounts.assertReady()).rejects.toThrow(/never world or save tables/);
-    harness.registry.all.mockImplementation(async (sql) => sql.includes("FROM sys.tables") ? [{ name: "users" }] : []);
+    harness.registry.all.mockImplementation(async (sql) => sql.includes("FROM sys.tables")
+      ? [{ name: "users" }, { name: "invite_requests" }, { name: "invite_attempts" }] : []);
     await expect(accounts.assertReady()).rejects.toThrow(/uniqueness constraints/);
+  });
+
+  it("allows users-only legacy registries for read-only schema checks but not runtime readiness", async () => {
+    const harness = accountHarness();
+    harness.registry.all.mockImplementation(async (sql: string): Promise<unknown[]> => {
+      if (sql.includes("FROM sys.tables")) return [{ name: "users" }];
+      if (sql.includes("FROM sys.indexes")) return registryIndexes;
+      if (sql.includes("SELECT [game_schema]")) return harness.records.map((record) => ({ game_schema: record.game_schema }));
+      return [];
+    });
+
+    await expect(new Accounts(harness.root).assertReady()).rejects.toThrow(/invite_requests and invite_attempts/);
+    await expect(registeredAccountSchemas(harness.root)).resolves.toEqual(["dbo", ownerSchema]);
+    expect(harness.registry.all.mock.calls.some(([sql]) => String(sql).includes("FROM [accounts].[invite_requests]"))).toBe(false);
+    expect(harness.registry.all.mock.calls.some(([sql]) => String(sql).includes("FROM [accounts].[invite_attempts]"))).toBe(false);
   });
 
   it("returns the fixed legacy mapping and a different empty-world scope for the platform owner", async () => {
@@ -122,6 +141,120 @@ describe("Account resolution (no database)", () => {
       expect(sql).toContain("AND [object_id] = CONVERT(uniqueidentifier, ?)");
       expect(sql).not.toMatch(/WHERE.*email/);
     }
+  });
+
+  it("requires an invite for unregistered consumers-tenant identities", async () => {
+    const harness = accountHarness();
+    await expect(new Accounts(harness.root).resolve({
+      ...identity(otherObjectId),
+      tenantId: CONSUMER_TENANT_ID,
+      email: "new@example.test",
+    })).rejects.toBeInstanceOf(InviteRequiredError);
+  });
+
+  it("rebinds the approved legacy email only in the consumers tenant", async () => {
+    vi.stubEnv("AZURE_TENANT_ID", tenantId);
+    const harness = accountHarness();
+    const accounts = new Accounts(harness.root);
+    harness.registry.get.mockImplementation(async (sql: string, registeredTenant: string, objectIdOrEmail?: string) => {
+      if (sql.includes("FROM [accounts].[invite_requests]")) return undefined;
+      const record = harness.records.find((account) =>
+        account.tenant_id === registeredTenant && account.object_id === objectIdOrEmail);
+      return record ? { ...record } : undefined;
+    });
+    harness.registry.all.mockImplementation(async (sql: string, ...parameters: unknown[]): Promise<unknown[]> => {
+      if (sql.includes("rebind_account")) {
+        harness.records[0].tenant_id = parameters[2] as string;
+        harness.records[0].object_id = parameters[3] as string;
+        harness.records[0].email = parameters[4] as string;
+        return [{ outcome: "rebound" }];
+      }
+      if (sql.includes("FROM sys.tables")) return [{ name: "users" }, { name: "invite_requests" }, { name: "invite_attempts" }];
+      if (sql.includes("FROM sys.indexes")) return registryIndexes;
+      return [];
+    });
+    const resolved = await accounts.resolve({ ...identity(otherObjectId), tenantId: CONSUMER_TENANT_ID, email: LEGACY_EMAIL.toUpperCase() });
+    expect(resolved.user.id).toBe(legacyAccountId);
+    expect(resolved.store.schemaName).toBe("dbo");
+    expect(harness.registry.all.mock.calls.find(([sql]) => sql.includes("rebind_account"))?.slice(1))
+      .toEqual([tenantId, LEGACY_OBJECT_ID, CONSUMER_TENANT_ID, otherObjectId, LEGACY_EMAIL]);
+    expect(harness.records[0]).toMatchObject({ tenant_id: CONSUMER_TENANT_ID, object_id: otherObjectId, email: LEGACY_EMAIL });
+  });
+
+  it("rebinds the owner MSA email from the home-tenant owner row", async () => {
+    vi.stubEnv("AZURE_TENANT_ID", tenantId);
+    const harness = accountHarness();
+    const accounts = new Accounts(harness.root, "accounts", {
+      limits: { maxPlayers: 10, sizeLimitGb: 24, ownerObjectId, ownerEmail: OWNER_EMAIL_DEFAULT },
+    });
+    harness.registry.get.mockImplementation(async (sql: string, registeredTenant: string, objectIdOrEmail?: string) => {
+      if (sql.includes("FROM [accounts].[invite_requests]")) return undefined;
+      const record = harness.records.find((account) =>
+        account.tenant_id === registeredTenant && account.object_id === objectIdOrEmail);
+      return record ? { ...record } : undefined;
+    });
+    harness.registry.all.mockImplementation(async (sql: string, ...parameters: unknown[]): Promise<unknown[]> => {
+      if (sql.includes("rebind_account")) {
+        harness.records[1].tenant_id = parameters[2] as string;
+        harness.records[1].object_id = parameters[3] as string;
+        harness.records[1].email = parameters[4] as string;
+        return [{ outcome: "rebound" }];
+      }
+      return [];
+    });
+    const msaObjectId = "44444444-4444-4444-8444-444444444444";
+    const resolved = await accounts.resolve({
+      tenantId: CONSUMER_TENANT_ID,
+      objectId: msaObjectId,
+      displayName: "Owner MSA",
+      email: OWNER_EMAIL_DEFAULT.toUpperCase(),
+    });
+    expect(resolved.user.id).toBe(ownerAccountId);
+    expect(resolved.store.schemaName).toBe(ownerSchema);
+    expect(harness.registry.all.mock.calls.find(([sql]) => sql.includes("rebind_account"))?.slice(1))
+      .toEqual([tenantId, ownerObjectId, CONSUMER_TENANT_ID, msaObjectId, OWNER_EMAIL_DEFAULT]);
+  });
+
+  it("claims an accepted consumers-tenant invite and reports capacity separately", async () => {
+    const harness = accountHarness();
+    const requestId = randomUUID();
+    const invited = { ...harness.records[1], tenant_id: CONSUMER_TENANT_ID, object_id: otherObjectId, email: "guest@example.test" };
+    harness.records.splice(0, harness.records.length);
+    harness.registry.get.mockImplementation(async (sql: string, first: string, second?: string) => {
+      if (sql.includes("FROM [accounts].[invite_requests]"))
+        return { id: requestId } as never;
+      const record = harness.records.find((account) => account.tenant_id === first && account.object_id === second);
+      return record ? { ...record } : undefined;
+    });
+    harness.registry.all.mockImplementation(async (sql: string): Promise<unknown[]> => {
+      if (sql.includes("claim_invited_account")) {
+        harness.records.push(invited);
+        return [{ outcome: "claimed", reason: null }];
+      }
+      if (sql.includes("FROM sys.tables")) return [{ name: "users" }, { name: "invite_requests" }, { name: "invite_attempts" }];
+      if (sql.includes("FROM sys.indexes")) return registryIndexes;
+      return [];
+    });
+    const accounts = new Accounts(harness.root, "accounts", { limits: { maxPlayers: 10, sizeLimitGb: 24 } });
+    const resolved = await accounts.resolve({
+      tenantId: CONSUMER_TENANT_ID,
+      objectId: otherObjectId,
+      displayName: "Guest",
+      email: "Guest@Example.Test",
+    });
+    expect(resolved.user).toEqual({ id: invited.id, displayName: "Guest", email: "guest@example.test" });
+    expect(harness.registry.all.mock.calls.find(([sql]) => sql.includes("claim_invited_account"))?.slice(1))
+      .toEqual([requestId, CONSUMER_TENANT_ID, otherObjectId, "guest@example.test", "Guest"]);
+
+    harness.records.splice(0, harness.records.length);
+    harness.registry.all.mockImplementation(async (sql: string): Promise<unknown[]> =>
+      sql.includes("claim_invited_account") ? [{ outcome: "capacity", reason: "player_limit" }] : []);
+    await expect(accounts.resolve({
+      tenantId: CONSUMER_TENANT_ID,
+      objectId: ownerObjectId,
+      displayName: "Blocked",
+      email: "guest@example.test",
+    })).rejects.toBeInstanceOf(CapacityUnavailableError);
   });
 
   it("normalizes UUIDs, refreshes trusted profiles, and rechecks mappings before reusing a scoped store", async () => {
@@ -203,6 +336,7 @@ describe("Account provisioning and grants (no database)", () => {
   it("requires verified legacy claims and includes every allowlisted identity, including the distinct owner", () => {
     const plan = accountProvisioningPlan(options, environment);
     expect(plan).toMatchObject({ accountSchema: "accounts", database: "touchline", ...options });
+    expect(plan).toMatchObject({ ownerObjectId, ownerEmail: OWNER_EMAIL_DEFAULT });
     expect(plan.objectIds).toEqual([LEGACY_OBJECT_ID, ownerObjectId, otherObjectId]);
     expect(() => accountProvisioningPlan({ ...options, legacyObjectId: ownerObjectId }, environment)).toThrow(/approved dbo/);
     expect(() => accountProvisioningPlan({ ...options, legacyEmail: "someone@example.com" }, environment)).toThrow(/approved dbo/);
@@ -210,6 +344,32 @@ describe("Account provisioning and grants (no database)", () => {
     expect(() => accountProvisioningPlan(options, { ...environment, OWNER_OBJECT_ID: LEGACY_OBJECT_ID })).toThrow(/must not inherit/);
     expect(() => accountProvisioningPlan(options, { ...environment, ALLOWED_USER_OBJECT_IDS: "" })).toThrow(/explicitly allowlisted/);
     expect(() => accountProvisioningPlan(options, { ...environment, ALLOWED_USER_OBJECT_IDS: LEGACY_EMAIL })).toThrow(/UUID/);
+  });
+
+  it("recognises consumers-tenant rebinds as the existing legacy and owner mappings", () => {
+    const plan = accountProvisioningPlan(options, environment);
+    const legacyRebound: AccountRecord = {
+      id: legacyAccountId,
+      tenant_id: CONSUMER_TENANT_ID,
+      object_id: "44444444-4444-4444-8444-444444444444",
+      display_name: "Legacy rebound",
+      email: LEGACY_EMAIL.toUpperCase(),
+      game_schema: "dbo",
+    };
+    const ownerRebound: AccountRecord = {
+      id: ownerAccountId,
+      tenant_id: CONSUMER_TENANT_ID,
+      object_id: "55555555-5555-4555-8555-555555555555",
+      display_name: "Owner rebound",
+      email: OWNER_EMAIL_DEFAULT.toUpperCase(),
+      game_schema: ownerSchema,
+    };
+    const accounts = [legacyRebound, ownerRebound];
+
+    expect(mappedSchema(legacyRebound, plan)).toBe("dbo");
+    expect(mappedSchema(ownerRebound, plan)).toBe(ownerSchema);
+    expect(existingAccountForObject(accounts, LEGACY_OBJECT_ID, plan)).toBe(legacyRebound);
+    expect(existingAccountForObject(accounts, ownerObjectId, plan)).toBe(ownerRebound);
   });
 
   it.each([
@@ -231,6 +391,16 @@ describe("Account provisioning and grants (no database)", () => {
     expect(WORLD_TABLES).not.toContain("users");
     expect(schemaMigrations("dbo").flatMap((migration) => migration.statements).join("\n")).not.toContain("[users]");
     expect(() => bindSql(sql, [], "accounts")).not.toThrow();
+    const invites = inviteRequestsTableSql("accounts");
+    expect(invites).toContain("CREATE TABLE [accounts].[invite_requests]");
+    expect(invites).toContain("CREATE TABLE [accounts].[invite_attempts]");
+    expect(invites).toContain("[email] NVARCHAR(320)");
+    expect(invites).toContain("CHECK ([status] IN (N'pending', N'accepted', N'denied', N'claimed'))");
+    expect(invites).toContain("CREATE UNIQUE INDEX [UX_invite_requests_email_active]");
+    expect(invites).toContain("IX_invite_attempts_ip_hash_attempted_at");
+    expect(STORE_TABLES.has("invite_requests")).toBe(false);
+    expect(STORE_TABLES.has("invite_attempts")).toBe(false);
+    expect(() => bindSql(invites, [], "accounts")).not.toThrow();
   });
 
   it("grants each world a fixed-schema reseed helper and only profile updates in the registry", () => {
@@ -242,12 +412,46 @@ describe("Account provisioning and grants (no database)", () => {
     }
     expect(grants).toContain("GRANT SELECT, VIEW DEFINITION ON OBJECT::[accounts].[users]");
     expect(grants).toContain("GRANT UPDATE ON OBJECT::[accounts].[users] ([display_name], [email], [updated_at])");
+    expect(grants).toContain("GRANT SELECT ON OBJECT::[accounts].[invite_requests]");
+    expect(grants).toContain("GRANT UPDATE ON OBJECT::[accounts].[invite_requests] ([approval_email_sent], [accepted_email_sent], [updated_at])");
+    expect(grants).toContain("GRANT SELECT, INSERT, DELETE ON OBJECT::[accounts].[invite_attempts]");
+    expect(grants).toContain("GRANT EXECUTE ON OBJECT::[accounts].[create_invite]");
+    expect(grants).toContain("GRANT EXECUTE ON OBJECT::[accounts].[decide_invite]");
+    expect(grants).toContain("GRANT EXECUTE ON OBJECT::[accounts].[purge_expired_invites]");
+    expect(grants).toContain("GRANT EXECUTE ON OBJECT::[accounts].[invite_capacity]");
+    expect(grants).toContain("GRANT EXECUTE ON OBJECT::[accounts].[claim_invited_account]");
+    expect(grants).toContain("GRANT EXECUTE ON OBJECT::[accounts].[rebind_account]");
+    expect(grants).not.toContain("GRANT SELECT, INSERT, UPDATE, DELETE ON OBJECT::[accounts].[invite_requests]");
     expect(grants).not.toMatch(/db_owner|db_ddladmin|CREATE SCHEMA|ON SCHEMA::\[accounts\]|GRANT ALTER ON OBJECT::\[accounts\]/);
     expect(() => bindSql(grants, [], "dbo")).not.toThrow();
     expect(() => runtimeGrants("touchline-app", ["accounts"], "accounts")).toThrow(/schema/);
     expect(() => runtimeGrants("touchline-app", ["dbo", "DBO"])).toThrow(/collision/);
     expect(() => runtimeGrants("dbo", ["dbo"])).toThrow(/principal/);
     expect(runtimeGrants("touchline-app", ["dbo"]).join("\n")).not.toContain("[accounts]");
+  });
+
+  it("generates owner-executed invite procedures from every world migration statement", () => {
+    const ddl = accountProceduresSql("accounts", "touchline-app", ownerObjectId);
+    expect(ddl).toContain("CREATE OR ALTER PROCEDURE [accounts].[claim_invited_account]");
+    expect(ddl).toContain("WITH EXECUTE AS OWNER");
+    expect(ddl).toContain("CREATE OR ALTER PROCEDURE [accounts].[rebind_account]");
+    expect(ddl).toContain("CREATE OR ALTER PROCEDURE [accounts].[invite_capacity]");
+    expect(ddl).toContain("CREATE OR ALTER PROCEDURE [accounts].[create_invite]");
+    expect(ddl).toContain("CREATE OR ALTER PROCEDURE [accounts].[decide_invite]");
+    expect(ddl).toContain("CREATE OR ALTER PROCEDURE [accounts].[purge_expired_invites]");
+    expect(ddl).not.toContain("@max_players");
+    expect(ddl).not.toContain("@size_limit_gb");
+    expect(claimWorldMigrationStatements()).toEqual(schemaMigrations("__touchline_claim_schema__").flatMap((migration) => migration.statements));
+    for (const statement of claimWorldMigrationStatements()) {
+      expect(ddl).toContain(sqlLiteral(statement).replaceAll("'", "''"));
+    }
+    expect(ddl).toContain("GRANT SELECT, INSERT, UPDATE, DELETE, VIEW DEFINITION ON SCHEMA::");
+    expect(ddl).toContain("[touchline-app]");
+    expect(ddl).toContain(LEGACY_OBJECT_ID);
+    expect(ddl).toContain(ownerObjectId);
+    expect(ddl).toContain(OWNER_EMAIL_DEFAULT);
+    expect(ddl).toContain(CONSUMER_TENANT_ID);
+    expect(() => bindSql(ddl, [], "dbo")).not.toThrow();
   });
 
   it("defaults to an offline plan and requires both mutation acknowledgements before opening SQL", async () => {
@@ -281,7 +485,7 @@ describe("Operator career deletion guards (no database)", () => {
     const registry = {
       schemaName: "accounts", testMode: false,
       all: vi.fn(async (sql: string): Promise<unknown[]> => {
-        if (sql.includes("FROM sys.tables")) return [{ name: "users" }];
+        if (sql.includes("FROM sys.tables")) return [{ name: "users" }, { name: "invite_requests" }, { name: "invite_attempts" }];
         if (sql.includes("FROM sys.indexes")) return registryIndexes;
         if (sql.includes("SELECT TOP (0)")) return [];
         if (sql.includes("[game_schema]")) return records.map((record) => ({ ...record }));
@@ -608,9 +812,9 @@ if (process.env.SQL_INTEGRATION_TESTS === "true" &&
         for (const world of worlds) await assertEmptyWorld(world);
         await assertLegacyUnchanged();
         const tablesBeforeRerun = await tableInventory();
-        expect(tablesBeforeRerun).toHaveLength(STORE_TABLES.size * 3 + 1);
+        expect(tablesBeforeRerun).toHaveLength(STORE_TABLES.size * 3 + 2);
         expect(tablesBeforeRerun.filter((table) => table.schema_name === "accounts").map((table) => table.name))
-          .toEqual(["users"]);
+          .toEqual(["invite_attempts", "invite_requests", "users"]);
         for (const { schema } of provisioned) {
           expect(tablesBeforeRerun.filter((table) => table.schema_name === schema).map((table) => table.name).sort())
             .toEqual([...STORE_TABLES].sort());
@@ -646,6 +850,7 @@ if (process.env.SQL_INTEGRATION_TESTS === "true" &&
 
         const principal = "touchline_accounts_runtime";
         await store.exec(`CREATE USER ${quoteIdentifier(principal)} WITHOUT LOGIN;`);
+        await store.exec(accountProceduresSql("accounts", principal, ownerObjectId));
         const registeredSchemas = await registeredAccountSchemas(store);
         expect(registeredSchemas).toEqual(provisioned.map((account) => account.schema).sort());
         for (const grant of runtimeGrants(principal, registeredSchemas, "accounts")) await store.exec(grant);

@@ -39,7 +39,7 @@ confirm_target "$consent"
 [[ -n "${AUTH_CLIENT_ID:-}" ]] || fail 'AUTH_CLIENT_ID is required to verify the existing EasyAuth configuration.'
 export AUTH_CLIENT_ID
 smoke_token="${AUTH_SMOKE_TOKEN:-}"
-unset AUTH_SMOKE_TOKEN AUTH_CLIENT_SECRET GHCR_TOKEN GHCR_PULL_TOKEN AZURE_CLIENT_ID
+unset AUTH_SMOKE_TOKEN AUTH_CLIENT_SECRET GHCR_TOKEN GHCR_PULL_TOKEN AZURE_CLIENT_ID SMTP_PASSWORD INVITE_SIGNING_SECRET
 printf '%s\n' '[rollback] Checking free limits, private registry and candidate schema without changing SQL data.'
 sql_environment
 verify_free_database
