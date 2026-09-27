@@ -123,7 +123,7 @@ describe.skipIf(!localSql)("invite account SQL procedures (local disposable data
           @to_object_id = ${sqlLiteral("55555555-5555-4555-8555-555555555555")},
           @email = ${sqlLiteral(LEGACY_EMAIL)};`,
       )).toEqual([{ outcome: "rebound" }]);
-      expect(await root.get(`SELECT [tenant_id], [object_id] FROM [accounts].[users] WHERE [id] = CONVERT(uniqueidentifier, ?)`, legacyId))
+      expect(await root.get(`SELECT LOWER(CONVERT(nvarchar(36), [tenant_id])) AS [tenant_id], LOWER(CONVERT(nvarchar(36), [object_id])) AS [object_id] FROM [accounts].[users] WHERE [id] = CONVERT(uniqueidentifier, ?)`, legacyId))
         .toMatchObject({ tenant_id: CONSUMER_TENANT_ID, object_id: "55555555-5555-4555-8555-555555555555" });
 
       await root.run(

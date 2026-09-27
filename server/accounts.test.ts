@@ -703,7 +703,8 @@ if (process.env.SQL_INTEGRATION_TESTS === "true") {
       } finally {
         try {
           if (registry && registryCreated) await registry.transaction(async () => {
-            await registry!.exec(`DROP TABLE IF EXISTS ${tableName(registry!.schemaName, "users")};`);
+            for (const table of ["invite_attempts", "invite_requests", "users"])
+              await registry!.exec(`DROP TABLE IF EXISTS ${tableName(registry!.schemaName, table)};`);
             await registry!.exec(`DROP SCHEMA ${quoteIdentifier(registry!.schemaName)};`);
           });
         } finally {

@@ -59,7 +59,8 @@ verify_free_database() {
   [[ "$(printf '%s' "$database" | json_value useFreeLimit)" == "true" ]] || fail "Database is not on the SQL free offer. No changes made to its billing mode."
   [[ "$(printf '%s' "$database" | json_value freeLimitExhaustionBehavior)" == "AutoPause" ]] || fail "Database is configured for paid overage. Refusing to continue."
   [[ "$(printf '%s' "$database" | json_value maxSizeBytes)" -le 34359738368 ]] || fail "SQL storage exceeds the free-offer limit."
-  verify_free_allowance "$(printf '%s' "$database" | json_value status)"
+  # skip-allowance: SQL is never opened (azure-deploy.sh --no-sql), so an exhausted allowance cannot wake or bill it.
+  [[ "${1:-}" == skip-allowance ]] || verify_free_allowance "$(printf '%s' "$database" | json_value status)"
 }
 # Reads the Azure Monitor metric through ARM, so the check never wakes the serverless database.
 verify_free_allowance() {
