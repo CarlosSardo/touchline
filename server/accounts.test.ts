@@ -428,6 +428,9 @@ describe("Account provisioning and grants (no database)", () => {
     expect(() => runtimeGrants("touchline-app", ["dbo", "DBO"])).toThrow(/collision/);
     expect(() => runtimeGrants("dbo", ["dbo"])).toThrow(/principal/);
     expect(runtimeGrants("touchline-app", ["dbo"]).join("\n")).not.toContain("[accounts]");
+    const settled = runtimeGrants("touchline-app", ["dbo"], "accounts", false).join("\n");
+    expect(settled).toContain("REVOKE EXECUTE ON OBJECT::[accounts].[rebind_account] FROM [touchline-app]");
+    expect(settled).not.toContain("GRANT EXECUTE ON OBJECT::[accounts].[rebind_account]");
   });
 
   it("generates owner-executed invite procedures from every world migration statement", () => {

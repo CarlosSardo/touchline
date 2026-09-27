@@ -376,7 +376,9 @@ END;`;
   ].join("\n");
 }
 
-export function runtimeGrants(name: string, schemas: string[], accountSchema?: string): string[] {
+// rebindPending: whether a legacy or owner account still waits for its one-shot personal-account rebind.
+// Once none does, the runtime loses EXECUTE on rebind_account so it can never reassign identities again.
+export function runtimeGrants(name: string, schemas: string[], accountSchema?: string, rebindPending = true): string[] {
   if (!/^[A-Za-z][A-Za-z\d_-]{0,127}$/.test(name) || /^(dbo|guest|sys|public|information_schema)$/i.test(name))
     throw new Error("--name must be a non-reserved SQL principal name.");
   if (accountSchema) validateAccountSchema(accountSchema);
@@ -403,7 +405,9 @@ export function runtimeGrants(name: string, schemas: string[], accountSchema?: s
     `GRANT EXECUTE ON OBJECT::${tableName(accountSchema, "purge_expired_invites")} TO ${user};`,
     `GRANT EXECUTE ON OBJECT::${tableName(accountSchema, "invite_capacity")} TO ${user};`,
     `GRANT EXECUTE ON OBJECT::${tableName(accountSchema, "claim_invited_account")} TO ${user};`,
-    `GRANT EXECUTE ON OBJECT::${tableName(accountSchema, "rebind_account")} TO ${user};`,
+    rebindPending
+      ? `GRANT EXECUTE ON OBJECT::${tableName(accountSchema, "rebind_account")} TO ${user};`
+      : `REVOKE EXECUTE ON OBJECT::${tableName(accountSchema, "rebind_account")} FROM ${user};`,
   );
   return grants;
 }
@@ -499,7 +503,18 @@ export async function main(args = process.argv.slice(2)) {
     const schemas = values.registered
       ? await registeredAccountSchemas(store, accountSchema, { allowLegacyRegistry: false })
       : ["dbo"];
-    const grants = runtimeGrants(name, schemas, accountSchema);
+    let rebindPending = true;
+    if (accountSchema && ownerObjectId) {
+      const homeTenant = accountUuid(process.env.AZURE_TENANT_ID ?? "", "AZURE_TENANT_ID");
+      const pending = await store.get<{ pending: number }>(
+        `SELECT COUNT(*) AS [pending] FROM ${tableName(accountSchema, "users")}
+         WHERE [tenant_id] = CONVERT(uniqueidentifier, ?)
+           AND [object_id] IN (CONVERT(uniqueidentifier, ?), CONVERT(uniqueidentifier, ?))`,
+        homeTenant, LEGACY_OBJECT_ID, ownerObjectId,
+      );
+      rebindPending = (pending?.pending ?? 0) > 0;
+    }
+    const grants = runtimeGrants(name, schemas, accountSchema, rebindPending);
     await store.transaction(async () => {
       await store.exec(`DECLARE @name sysname = ?, @guid uniqueidentifier = CONVERT(uniqueidentifier, ?);
         DECLARE @sid binary(16) = CONVERT(binary(16), @guid);
@@ -580,13 +595,15 @@ export async function main(args = process.argv.slice(2)) {
           OR COALESCE(@inviteUpdateTimestamp, 0) <> 1
           OR COALESCE(@attemptsRead, 0) <> 1 OR COALESCE(@attemptsInsert, 0) <> 1 OR COALESCE(@attemptsDelete, 0) <> 1
           OR COALESCE(@createExec, 0) <> 1 OR COALESCE(@decideExec, 0) <> 1 OR COALESCE(@purgeExec, 0) <> 1
-          OR COALESCE(@capacityExec, 0) <> 1 OR COALESCE(@claimExec, 0) <> 1 OR COALESCE(@rebindExec, 0) <> 1
-          THROW 51000, 'Runtime invite permissions are missing.', 1;
+          OR COALESCE(@capacityExec, 0) <> 1 OR COALESCE(@claimExec, 0) <> 1
+          OR COALESCE(@rebindExec, 0) <> ${rebindPending ? 1 : 0}
+          THROW 51000, 'Runtime invite permissions are missing or rebind access does not match pending rebinds.', 1;
         IF COALESCE(@inviteInsert, 0) <> 0 OR COALESCE(@inviteDelete, 0) <> 0 OR COALESCE(@inviteAlter, 0) <> 0
           OR COALESCE(@inviteUpdateStatus, 0) <> 0 OR COALESCE(@inviteUpdateAccount, 0) <> 0
           THROW 51000, 'Runtime invite permissions are too broad; operator review required.', 1;`);
     });
-    console.log(JSON.stringify({ authorized: true, clientId, name, database: store.database, schemas, accountSchema }));
+    console.log(JSON.stringify({ authorized: true, clientId, name, database: store.database, schemas, accountSchema,
+      rebindAccess: accountSchema ? (rebindPending ? "granted (one-shot rebind pending)" : "revoked (no rebind pending)") : undefined }));
   } finally {
     await store.close();
   }

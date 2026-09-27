@@ -209,6 +209,7 @@ export class Accounts {
       const fromObjectId = email === LEGACY_EMAIL ? LEGACY_OBJECT_ID :
         email === this.ownerEmail ? this.ownerObjectId : null;
       if (this.homeTenantId && fromObjectId) {
+        // After both one-shot rebinds, db-authorize revokes EXECUTE; a denied call simply means nothing to rebind.
         await this.registry.all(
           `EXEC ${tableName(this.registry.schemaName, "rebind_account")}
             @from_tenant_id = CONVERT(uniqueidentifier, ?), @from_object_id = CONVERT(uniqueidentifier, ?),
@@ -218,7 +219,11 @@ export class Accounts {
           tenantId,
           objectId,
           email,
-        );
+        ).catch((error: unknown) => {
+          if ((error as { number?: number; originalError?: { number?: number } })?.number !== 229 &&
+            (error as { originalError?: { info?: { number?: number } } })?.originalError?.info?.number !== 229)
+            throw error;
+        });
         account = await this.lookup(tenantId, objectId);
       }
     }
