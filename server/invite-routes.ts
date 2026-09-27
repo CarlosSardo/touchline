@@ -2,7 +2,7 @@ import express, { type Request, type Response } from "express";
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 import type { AuthenticatedIdentity } from "./accounts.ts";
-import type { Store } from "./db.ts";
+import { DatabaseUnavailableError, type Store } from "./db.ts";
 import { approvalEmail, acceptedEmail } from "./invite-emails.ts";
 import {
   renderAdminListPage,
@@ -292,6 +292,13 @@ export function createInviteRouter(options: InviteRouteOptions) {
       }
       return html(response, 200, renderInvitePage({ state: "submitted" }));
     } catch (error) {
+      if (error instanceof DatabaseUnavailableError) {
+        response.set("Retry-After", "3600");
+        return html(response, 503, renderInvitePage({
+          state: "error",
+          message: "Invite requests are paused for a short while. Please try again in a few days.",
+        }));
+      }
       next(error);
     }
   });

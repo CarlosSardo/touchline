@@ -64,9 +64,9 @@ describe.skipIf(!localSql)("invite account SQL procedures (local disposable data
         END CATCH;`);
       expect(await queryAsRuntime(
         `EXEC [accounts].[claim_invited_account]
-          @request_id = CONVERT(uniqueidentifier, ${sqlLiteral(requestId)}),
-          @tenant_id = CONVERT(uniqueidentifier, ${sqlLiteral(CONSUMER_TENANT_ID)}),
-          @object_id = CONVERT(uniqueidentifier, ${sqlLiteral("33333333-3333-4333-8333-333333333333")}),
+          @request_id = ${sqlLiteral(requestId)},
+          @tenant_id = ${sqlLiteral(CONSUMER_TENANT_ID)},
+          @object_id = ${sqlLiteral("33333333-3333-4333-8333-333333333333")},
           @email = N'guest@example.test', @display_name = N'Guest';`,
       )).toEqual([{ outcome: "claimed", reason: null }]);
       const schema = `touchline_user_${accountId.replaceAll("-", "")}`;
@@ -86,9 +86,9 @@ describe.skipIf(!localSql)("invite account SQL procedures (local disposable data
       );
       expect(await queryAsRuntime(
         `EXEC [accounts].[claim_invited_account]
-          @request_id = CONVERT(uniqueidentifier, ${sqlLiteral(secondId)}),
-          @tenant_id = CONVERT(uniqueidentifier, ${sqlLiteral(CONSUMER_TENANT_ID)}),
-          @object_id = CONVERT(uniqueidentifier, ${sqlLiteral("66666666-6666-4666-8666-666666666666")}),
+          @request_id = ${sqlLiteral(secondId)},
+          @tenant_id = ${sqlLiteral(CONSUMER_TENANT_ID)},
+          @object_id = ${sqlLiteral("66666666-6666-4666-8666-666666666666")},
           @email = N'second@example.test', @display_name = N'Second';`,
       )).toEqual([{ outcome: "claimed", reason: null }]);
 
@@ -100,9 +100,9 @@ describe.skipIf(!localSql)("invite account SQL procedures (local disposable data
       );
       expect(await queryAsRuntime(
         `EXEC [accounts].[claim_invited_account]
-          @request_id = CONVERT(uniqueidentifier, ${sqlLiteral(blockedId)}),
-          @tenant_id = CONVERT(uniqueidentifier, ${sqlLiteral(CONSUMER_TENANT_ID)}),
-          @object_id = CONVERT(uniqueidentifier, ${sqlLiteral("44444444-4444-4444-8444-444444444444")}),
+          @request_id = ${sqlLiteral(blockedId)},
+          @tenant_id = ${sqlLiteral(CONSUMER_TENANT_ID)},
+          @object_id = ${sqlLiteral("44444444-4444-4444-8444-444444444444")},
           @email = N'blocked@example.test', @display_name = N'Blocked';`,
       )).toEqual([{ outcome: "capacity", reason: "player_limit" }]);
 
@@ -117,13 +117,13 @@ describe.skipIf(!localSql)("invite account SQL procedures (local disposable data
       );
       expect(await queryAsRuntime(
         `EXEC [accounts].[rebind_account]
-          @from_tenant_id = CONVERT(uniqueidentifier, ${sqlLiteral("11111111-1111-4111-8111-111111111111")}),
-          @from_object_id = CONVERT(uniqueidentifier, ${sqlLiteral(LEGACY_OBJECT_ID)}),
-          @to_tenant_id = CONVERT(uniqueidentifier, ${sqlLiteral(CONSUMER_TENANT_ID)}),
-          @to_object_id = CONVERT(uniqueidentifier, ${sqlLiteral("55555555-5555-4555-8555-555555555555")}),
+          @from_tenant_id = ${sqlLiteral("11111111-1111-4111-8111-111111111111")},
+          @from_object_id = ${sqlLiteral(LEGACY_OBJECT_ID)},
+          @to_tenant_id = ${sqlLiteral(CONSUMER_TENANT_ID)},
+          @to_object_id = ${sqlLiteral("55555555-5555-4555-8555-555555555555")},
           @email = ${sqlLiteral(LEGACY_EMAIL)};`,
       )).toEqual([{ outcome: "rebound" }]);
-      expect(await root.get(`SELECT [tenant_id], [object_id] FROM [accounts].[users] WHERE [id] = CONVERT(uniqueidentifier, ?)`, legacyId))
+      expect(await root.get(`SELECT LOWER(CONVERT(nvarchar(36), [tenant_id])) AS [tenant_id], LOWER(CONVERT(nvarchar(36), [object_id])) AS [object_id] FROM [accounts].[users] WHERE [id] = CONVERT(uniqueidentifier, ?)`, legacyId))
         .toMatchObject({ tenant_id: CONSUMER_TENANT_ID, object_id: "55555555-5555-4555-8555-555555555555" });
 
       await root.run(

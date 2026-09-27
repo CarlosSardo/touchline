@@ -82,11 +82,13 @@ export async function main(args = process.argv.slice(2)) {
     recorded = { appId: created.appId, id: created.id };
     await writeFile(".azure/auth-app.json", JSON.stringify(recorded), { mode: 0o600, flag: "wx" });
   }
-  let registration = await azure<{ signInAudience: string; web: { redirectUris?: string[] } }>(["ad", "app", "show", "--id", clientId]);
+  let registration = await azure<{ id: string; signInAudience: string; web: { redirectUris?: string[] } }>(["ad", "app", "show", "--id", clientId]);
   if (personal && registration.signInAudience === "AzureADMyOrg") {
-    // Entra only accepts personal accounts on apps issuing v2 access tokens.
-    await azure(["ad", "app", "update", "--id", clientId, "--set", "api.requestedAccessTokenVersion=2"]);
-    await azure(["ad", "app", "update", "--id", clientId, "--sign-in-audience", audience]);
+    if (!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(registration.id)) throw new Error("Invalid application object ID.");
+    // Entra only accepts personal accounts on apps issuing v2 access tokens; both change in one Graph update.
+    await azure(["rest", "--method", "PATCH", "--url", `https://graph.microsoft.com/v1.0/applications/${registration.id}`,
+      "--headers", "Content-Type=application/json",
+      "--body", JSON.stringify({ api: { requestedAccessTokenVersion: 2 }, signInAudience: audience })]);
     registration = await azure(["ad", "app", "show", "--id", clientId]);
   }
   if (registration.signInAudience !== audience)

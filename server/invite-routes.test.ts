@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import request from "supertest";
-import { Store } from "./db.ts";
+import { DatabaseUnavailableError, Store } from "./db.ts";
 import { createApp } from "./app.ts";
 import { CONSUMER_TENANT_ID, type Capacity, type InviteRequest } from "./invite-store.ts";
 import { signInviteToken, type InviteStoreLike } from "./invite-routes.ts";
@@ -179,6 +179,18 @@ describe("invite request routes", () => {
       .type("form").send({ email: "player@example.test" });
     expect(response.status).toBe(429);
     expect(response.text).toContain("Too many");
+  });
+
+  it("shows a friendly paused page while the database is unavailable", async () => {
+    const store = new FakeInviteStore();
+    store.create = async () => { throw new DatabaseUnavailableError(); };
+    const { app } = makeApp(store);
+    const response = await request(app).post("/invite")
+      .set("Origin", appOrigin)
+      .type("form").send({ email: "player@example.test" });
+    expect(response.status).toBe(503);
+    expect(response.headers["content-type"]).toContain("text/html");
+    expect(response.text).toContain("paused");
   });
 
   it("sends only the approver email for new requests and dedupes identical responses", async () => {

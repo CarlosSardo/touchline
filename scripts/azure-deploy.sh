@@ -4,7 +4,10 @@ set +x
 
 deploy_usage() {
   printf '%s\n' \
-    'Usage: bash scripts/azure-deploy.sh --yes [--stage-only | --hold-ingress] [--skip-db-prepare] [--empty-worlds | --current-worlds] [--verification full|smoke] [--image ghcr.io/OWNER/IMAGE@sha256:DIGEST]' \
+    'Usage: bash scripts/azure-deploy.sh --yes [--stage-only | --hold-ingress | --no-sql] [--skip-db-prepare] [--empty-worlds | --current-worlds] [--verification full|smoke] [--image ghcr.io/OWNER/IMAGE@sha256:DIGEST]' \
+    '--no-sql deploys a verified --image with --verification smoke without opening SQL or waking the database (for example while the' \
+    'monthly free allowance is exhausted). Free-offer settings are still checked through ARM; SQL checks, migrations and grants are' \
+    'skipped and the release is recorded as databasePrepared=false. Rerun a normal deploy once SQL is available.' \
     '--stage-only builds/publishes and configures internal-only maintenance mode without opening SQL or enabling gameplay.' \
     '--hold-ingress builds a SQL-configured gameplay candidate but leaves ingress internal, without public probes or promotion.' \
     'Held candidates are recorded in .azure/held-app.json as pendingPromotion; runtime health and human sign-in remain unverified.' \
@@ -397,7 +400,7 @@ deployment_wait() {
 
 deployment_public_check() {
   local account_smoke_token="$smoke_token"
-  if [[ "${skip_db_prepare:-false}" == true ]]; then
+  if [[ "${skip_db_prepare:-false}" == true || "${no_sql:-false}" == true ]]; then
     if [[ -n "$account_smoke_token" ]]; then
       printf '%s\n' '[smoke] Authenticated account probe skipped with --skip-db-prepare to avoid profile refresh writes; manual sign-in verification remains pending.'
     fi
@@ -478,7 +481,7 @@ NODE
 }
 
 deployment_main() {
-  local consent='' image='' stage_only=false hold_ingress=false verification=full skip_db_prepare=false empty_worlds=false current_worlds=false image_verified=false
+  local consent='' image='' stage_only=false hold_ingress=false verification=full skip_db_prepare=false empty_worlds=false current_worlds=false image_verified=false no_sql=false
   while (( $# )); do
     case "$1" in
       --help|-h) deploy_usage; return ;;
@@ -486,6 +489,7 @@ deployment_main() {
       --stage-only) stage_only=true; shift ;;
       --hold-ingress) hold_ingress=true; shift ;;
       --skip-db-prepare) skip_db_prepare=true; shift ;;
+      --no-sql) no_sql=true; shift ;;
       --empty-worlds) empty_worlds=true; shift ;;
       --current-worlds) current_worlds=true; shift ;;
       --verification) [[ $# -ge 2 ]] || { deploy_usage >&2; return 2; }; verification="$2"; shift 2 ;;
@@ -500,6 +504,11 @@ deployment_main() {
   [[ "$empty_worlds" != true || "$stage_only" != true ]] || fail '--empty-worlds applies to gameplay deployments only.'
   [[ "$current_worlds" != true || "$stage_only" != true ]] || fail '--current-worlds applies to gameplay deployments only.'
   [[ "$current_worlds" != true || "$empty_worlds" != true ]] || fail '--empty-worlds and --current-worlds are mutually exclusive.'
+  if [[ "$no_sql" == true ]]; then
+    [[ "$stage_only" != true && "$hold_ingress" != true && "$empty_worlds" != true && "$current_worlds" != true ]] ||
+      fail '--no-sql cannot be combined with --stage-only, --hold-ingress, --empty-worlds or --current-worlds.'
+    [[ -n "$image" && "$verification" == smoke ]] || fail '--no-sql requires a verified --image and --verification smoke.'
+  fi
   [[ "$consent" == --yes ]] || fail 'Deployment requires --yes. Use --help to review prerequisites.'
   [[ "$GHCR_IMAGE" =~ ^ghcr\.io/[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._/-]*$ ]] || fail 'GHCR_IMAGE must be an untagged private ghcr.io repository.'
   if [[ -n "$image" ]]; then
@@ -539,7 +548,12 @@ deployment_main() {
   printf '%s\n' '[deploy] Checking target, SQL free limits, managed identity and private registry.'
   check_target
   confirm_target "$consent"
-  verify_free_database
+  if [[ "$no_sql" == true ]]; then
+    printf '%s\n' '[deploy] --no-sql: checking the free-offer settings through ARM only; SQL is never opened or woken.'
+    verify_free_database skip-allowance
+  else
+    verify_free_database
+  fi
   sql_environment
   local owner identity identity_id identity_client environment environment_id public_domain previous_revision='' schema_version
   owner="$(azure ad signed-in-user show --query id --output tsv)"
@@ -582,6 +596,9 @@ NODE
   fi
   if [[ "$stage_only" == true ]]; then
     printf '%s\n' '[stage] Internal-only maintenance deployment. No career or SQL permission changes; public promotion remains disabled.'
+  elif [[ "$no_sql" == true ]]; then
+    [[ "$image_verified" == true ]] || fail '--no-sql requires a verified --image.'
+    printf '%s\n' '[sql] SKIPPED (--no-sql): no SQL verification, export, migrations or runtime grants. The release needs a normal deploy once SQL is available.'
   else
     if [[ "$skip_db_prepare" == true ]]; then
       deployment_schema_check "$schema_version"
@@ -693,7 +710,7 @@ NODE
   fqdn="$(azure containerapp show --name "$AZURE_APP" --resource-group "$AZURE_RESOURCE_GROUP" --query properties.configuration.ingress.fqdn --output tsv)"
   [[ "$fqdn" == "$AZURE_APP.$public_domain" || "$fqdn" == "$AZURE_APP.internal.$public_domain" ]] || fail 'Unexpected application FQDN.'
   deployment_candidate_check "$revision" "$origin"
-  if [[ "$stage_only" != true ]]; then deployment_schema_check "$schema_version"; fi
+  if [[ "$stage_only" != true && "$no_sql" != true ]]; then deployment_schema_check "$schema_version"; fi
   azure containerapp ingress traffic set --name "$AZURE_APP" --resource-group "$AZURE_RESOURCE_GROUP" --revision-weight "$revision=100" --output none
   deployment_traffic_check "$revision" false
   if [[ "$hold_ingress" == true ]]; then
@@ -748,20 +765,24 @@ NODE
   deployment_wait "$revision"
   deployment_deactivate_others "$revision"
   DEPLOY_IMAGE="$image" DEPLOY_REVISION="$revision" DEPLOY_PREVIOUS="$previous_revision" DEPLOY_ORIGIN="$origin" \
-    DEPLOY_BACKUP="$backup" DEPLOY_SCHEMA="$schema_version" DEPLOY_VERIFICATION="$verification" DEPLOY_DB_PREPARE_SKIPPED="$skip_db_prepare" OWNER_SMOKE_VERIFIED="$([[ -n "$smoke_token" && "$skip_db_prepare" != true ]] && printf true || printf false)" \
+    DEPLOY_BACKUP="$backup" DEPLOY_SCHEMA="$schema_version" DEPLOY_VERIFICATION="$verification" DEPLOY_DB_PREPARE_SKIPPED="$([[ "$skip_db_prepare" == true || "$no_sql" == true ]] && printf true || printf false)" DEPLOY_NO_SQL="$no_sql" OWNER_SMOKE_VERIFIED="$([[ -n "$smoke_token" && "$skip_db_prepare" != true && "$no_sql" != true ]] && printf true || printf false)" \
     node --input-type=module <<'NODE'
 import {writeFileSync,renameSync} from 'node:fs';
 const environment=process.env;
 const state={subscriptionId:environment.AZURE_SUBSCRIPTION_ID,resourceGroup:environment.AZURE_RESOURCE_GROUP,
   app:environment.AZURE_APP,image:environment.DEPLOY_IMAGE,revision:environment.DEPLOY_REVISION,
   previousRevision:environment.DEPLOY_PREVIOUS,origin:environment.DEPLOY_ORIGIN,backup:environment.DEPLOY_BACKUP,
-  schemaVersion:Number(environment.DEPLOY_SCHEMA),verification:environment.DEPLOY_VERIFICATION,databasePreparationSkipped:environment.DEPLOY_DB_PREPARE_SKIPPED==='true',ownerSmokeVerified:environment.OWNER_SMOKE_VERIFIED==='true',recordedAt:new Date().toISOString()};
+  schemaVersion:Number(environment.DEPLOY_SCHEMA),verification:environment.DEPLOY_VERIFICATION,databasePreparationSkipped:environment.DEPLOY_DB_PREPARE_SKIPPED==='true',databasePrepared:environment.DEPLOY_NO_SQL!=='true',ownerSmokeVerified:environment.OWNER_SMOKE_VERIFIED==='true',recordedAt:new Date().toISOString()};
 writeFileSync('.touchline-deployment.json.tmp',JSON.stringify(state,null,2)+'\n',{mode:0o600});
 renameSync('.touchline-deployment.json.tmp','.touchline-deployment.json');
 NODE
   completed=true
   printf 'Deployed %s\nImage: %s\nRevision: %s\nOwner login: %s/.auth/login/aad\nRegister redirect: %s/.auth/login/aad/callback\n' "$origin" "$image" "$revision" "$origin" "$origin"
-  [[ -n "$smoke_token" && "$skip_db_prepare" != true ]] || printf 'Owner smoke NOT verified and REQUIRED now: /api/health is SQL-free, so SQL and the account registry of this revision are unproven.\nSign in, open %s/api/me and allow 120 s (SQL retries for up to 90 s; on 503 database_unavailable reload once after 5 s). Anything but 200: close ingress.\n' "$origin"
+  if [[ "$no_sql" == true ]]; then
+    printf '%s\n' 'DATABASE NOT PREPARED (--no-sql): the game and invite submissions stay unavailable until SQL is reachable.' \
+      'Once the free allowance resets, rerun a normal deploy (e.g. --verification smoke --image <same digest>) to apply migrations and grants.'
+  fi
+  [[ -n "$smoke_token" && "$skip_db_prepare" != true && "$no_sql" != true ]] || printf 'Owner smoke NOT verified and REQUIRED now: /api/health is SQL-free, so SQL and the account registry of this revision are unproven.\nSign in, open %s/api/me and allow 120 s (SQL retries for up to 90 s; on 503 database_unavailable reload once after 5 s). Anything but 200: close ingress.\n' "$origin"
   rm -rf -- "$temp_dir"
   trap - EXIT
 }
