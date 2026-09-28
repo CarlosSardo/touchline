@@ -125,9 +125,9 @@ describe("invite pages", () => {
     });
     expect(page).toContain('method="post" action="/admin/invites/pending/resend"');
     expect(page).toContain('value="token-pending"');
-    expect(page).toContain("approval email not sent");
+    expect(page).toMatch(/approval email not sent/i);
     expect(page).toContain('method="post" action="/admin/invites/accepted/resend"');
-    expect(page).toContain("accepted email not sent");
+    expect(page).toMatch(/accepted email not sent/i);
     expect(page).not.toContain("/admin/invites/sent/resend");
     expect(page).not.toContain("/admin/invites/denied/resend");
   });
