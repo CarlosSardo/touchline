@@ -121,6 +121,7 @@ Release safety rules (full rules in [CONTRIBUTING.md](CONTRIBUTING.md)):
 - Deployment never provisions accounts or seeds careers. Rollback and `--image` releases fail closed once the registry exists; ship a reviewed forward fix instead.
 - Promote a `--hold-ingress` candidate only through the reviewed manual procedure, never by rerunning deploy, rollback or `--image`. It is in `git show 1acda49:README.md`.
 - SQL Free auto-pauses when its monthly allowance runs out. Do not add keep-alive probes or billable extras.
+- While the allowance is spent, `azure:deploy -- --yes --no-sql --verification smoke --image <digest>` ships without waking SQL. The operator scripts refuse a database outside the free offer unless you set `AZURE_SQL_ALLOW_PAID=true` for a deliberate paid run; switch the database back to the free offer (AutoPause) afterwards.
 
 ## Saves and legacy careers
 
