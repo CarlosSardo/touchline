@@ -46,13 +46,18 @@ function htmlCapacity(capacity: InviteCapacityEmail) {
   </div>`;
 }
 
+/** Unstyled notice body; emails wrap it in inline styles, pages in themed classes. */
+export function microsoftAccountNoticeBody(email?: string): string {
+  const htmlApproved = email ? `exactly <strong>${escapeHtml(email)}</strong>` : "exactly the approved email address";
+  return `Sign in with a <strong>personal Microsoft account</strong> (Outlook.com, Hotmail, Live.com, MSN, or any email address registered as a Microsoft account) using ${htmlApproved}. Work/school accounts, Google and Apple sign-in are not supported. No Microsoft account yet? Create one free at <a href="https://signup.live.com">https://signup.live.com</a> with this email.`;
+}
+
 export function microsoftAccountNotice(email?: string): { text: string; html: string } {
   const approved = email ? `exactly ${email}` : "exactly the approved email address";
-  const htmlApproved = email ? `exactly <strong>${escapeHtml(email)}</strong>` : "exactly the approved email address";
   const text = `Sign in with a personal Microsoft account (Outlook.com, Hotmail, Live.com, MSN, or any email address registered as a Microsoft account) using ${approved}. Work/school accounts, Google and Apple sign-in are not supported. No Microsoft account yet? Create one free at https://signup.live.com with this email.`;
   const html = `<div${style("margin:20px 0;padding:18px;border:2px solid #aa3bff;border-radius:18px;background:rgba(170,59,255,.10);color:#171221;")}>
     <strong>Personal Microsoft account required</strong>
-    <p${style("margin:8px 0 0;")}>Sign in with a <strong>personal Microsoft account</strong> (Outlook.com, Hotmail, Live.com, MSN, or any email address registered as a Microsoft account) using ${htmlApproved}. Work/school accounts, Google and Apple sign-in are not supported. No Microsoft account yet? Create one free at <a href="https://signup.live.com">https://signup.live.com</a> with this email.</p>
+    <p${style("margin:8px 0 0;")}>${microsoftAccountNoticeBody(email)}</p>
   </div>`;
   return { text, html };
 }
