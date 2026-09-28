@@ -56,9 +56,16 @@ sql_environment() {
 verify_free_database() {
   local database
   database="$(azure sql db show --resource-group "$AZURE_RESOURCE_GROUP" --server "$AZURE_SQL_SERVER" --name "$AZURE_SQL_DATABASE" --output json)"
-  [[ "$(printf '%s' "$database" | json_value useFreeLimit)" == "true" ]] || fail "Database is not on the SQL free offer. No changes made to its billing mode."
-  [[ "$(printf '%s' "$database" | json_value freeLimitExhaustionBehavior)" == "AutoPause" ]] || fail "Database is configured for paid overage. Refusing to continue."
   [[ "$(printf '%s' "$database" | json_value maxSizeBytes)" -le 34359738368 ]] || fail "SQL storage exceeds the free-offer limit."
+  if [[ "$(printf '%s' "$database" | json_value useFreeLimit)" != "true" ||
+        "$(printf '%s' "$database" | json_value freeLimitExhaustionBehavior)" != "AutoPause" ]]; then
+    # Operator opt-in for a deliberate, temporary paid period (for example while the monthly free allowance is spent).
+    [[ "${AZURE_SQL_ALLOW_PAID:-}" == "true" ]] ||
+      fail "Database is not on the SQL free offer with AutoPause (paid usage possible). Refusing to continue; set AZURE_SQL_ALLOW_PAID=true for a deliberate paid run. No changes made to its billing mode."
+    printf '%s\n' 'WARNING: AZURE_SQL_ALLOW_PAID=true: the database is outside the free offer and SQL work in this run may be billed.' \
+      '         Restore the free offer (useFreeLimit=true, AutoPause) afterwards. Billing mode is never changed by these scripts.' >&2
+    return 0
+  fi
   # skip-allowance: SQL is never opened (azure-deploy.sh --no-sql), so an exhausted allowance cannot wake or bill it.
   [[ "${1:-}" == skip-allowance ]] || verify_free_allowance "$(printf '%s' "$database" | json_value status)"
 }
