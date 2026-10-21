@@ -1,4 +1,4 @@
-import { useDeferredValue, useState } from "react";
+import { useDeferredValue, useState, type ReactNode } from "react";
 import {
   ArrowLeftRight,
   ArrowLeft,
@@ -876,6 +876,151 @@ function loanEndDateLabel(type: string, startDate: string, duration: number) {
   return dateLabel(addDays(startDate, duration));
 }
 
+/** The terms that matter for one incoming offer: dates, money, role and only the clauses this deal includes. */
+function incomingOfferItems(
+  negotiation: Negotiation,
+  details: NegotiationData,
+  money: (value: number) => string,
+): [string, ReactNode][] {
+  const loan = LOAN_TYPES.includes(negotiation.type);
+  const start = details.plannedStart ?? negotiation.created;
+  const terms = details.terms;
+  const items: [string, ReactNode][] = [
+    [
+      loan ? "Borrowing club" : "Buying club",
+      <ClubLink
+        key="offer-club"
+        id={negotiation.buying_club_id}
+        name={negotiation.buyer_name ?? "Club"}
+        color={negotiation.buyer_color}
+        crest
+      />,
+    ],
+    ...(details.reason ? ([["Why they want him", details.reason.text]] as [string, ReactNode][]) : []),
+  ];
+  if (!loan)
+    return [
+      ...items,
+      ["Transfer fee", money(negotiation.offer)],
+      ["Wage offered to the player", `${money(negotiation.wage)} / week`],
+      ["Contract offered", `${plural(details.years, "year")} / ${details.role.toLowerCase()}`],
+      ["Reply by", dateLabel(negotiation.deadline)],
+    ];
+  return [
+    ...items,
+    ["Loan", negotiation.type],
+    ["Starts / ends", `${dateLabel(start)} to ${loanEndDateLabel(negotiation.type, start, terms.duration)}`],
+    ["Loan fee", money(negotiation.offer)],
+    ["Wage split", `${terms.salarySplit}% paid by them / ${100 - terms.salarySplit}% by you`],
+    ["Role / playing time", `${terms.role} / about ${terms.playingTime}% of minutes`],
+    ["Recall / injury recall", `${terms.recall ? "Yes" : "No"} / ${terms.injuryRecall ? "Yes" : "No"}`],
+    ...(negotiation.type === "Loan with option"
+      ? ([["Option to buy", money(terms.optionFee)]] as [string, ReactNode][])
+      : []),
+    ...(negotiation.type === "Loan with obligation"
+      ? ([
+          [
+            "Obligation to buy",
+            `${money(terms.optionFee)}${terms.obligationCondition === "Unconditional" ? "" : ` (${terms.obligationCondition.toLowerCase()})`}`,
+          ],
+        ] as [string, ReactNode][])
+      : []),
+    ...(negotiation.type === "Loan with sell-on"
+      ? ([["Their share of a future sale", `${terms.sellOn}%`]] as [string, ReactNode][])
+      : []),
+    ...(terms.bonus > 0
+      ? ([["Minutes bonus you pay", `${money(terms.bonus)} at ${terms.mandatoryMinutes} minutes`]] as [string, ReactNode][])
+      : []),
+    ["Reply by", dateLabel(negotiation.deadline)],
+  ];
+}
+
+/**
+ * Offers clubs have made for the director's players, with the details and reason of each deal: accept or reject
+ * here, or open the offer to counter.
+ */
+export function IncomingOffers({
+  offers,
+  onOpen,
+  emptyTitle,
+  emptyDetail,
+}: {
+  offers: Negotiation[];
+  onOpen: (negotiation: Negotiation) => void;
+  emptyTitle: string;
+  emptyDetail: string;
+}) {
+  const { act, confirm } = useGame();
+  const { money } = useCurrency();
+  const [pending, setPending] = useState<number | null>(null);
+  if (!offers.length) return <Empty icon={Handshake} title={emptyTitle} detail={emptyDetail} />;
+  async function respond(negotiation: Negotiation, action: "accept" | "reject") {
+    setPending(negotiation.id);
+    await act({ type: "negotiation", id: negotiation.id, action });
+    setPending(null);
+  }
+  return (
+    <div className="padded">
+      <div className="cards-list incoming-offers">
+        {offers.map((negotiation) => {
+          const details = JSON.parse(negotiation.data) as NegotiationData;
+          const loan = LOAN_TYPES.includes(negotiation.type);
+          return (
+            <article className="entity-card" key={negotiation.id} aria-label={`${negotiation.buyer_name} offer for ${negotiation.player_name}`}>
+              <div className="entity-card-top">
+                <Badge tone={loan ? "blue" : "green"}>{negotiation.type}</Badge>
+                {negotiation.buyer_reputation !== undefined && (
+                  <Badge>{`Reputation ${Math.round(negotiation.buyer_reputation)}`}</Badge>
+                )}
+              </div>
+              <h3>
+                <PlayerLink id={negotiation.player_id} name={negotiation.player_name ?? "Player"} />
+              </h3>
+              <p>
+                {negotiation.position} / {negotiation.age} yrs / {money(negotiation.offer)}
+              </p>
+              <DetailList items={incomingOfferItems(negotiation, details, money)} />
+              <div className="inline-controls">
+                <Button
+                  icon={Check}
+                  disabled={pending === negotiation.id}
+                  onClick={() =>
+                    confirm(
+                      `Accept ${negotiation.buyer_name}'s offer?`,
+                      loan
+                        ? `${negotiation.player_name} joins them on these terms once the medical and registration are complete. Other offers for him are withdrawn.`
+                        : `${negotiation.player_name} is sold for ${money(negotiation.offer)} once personal terms, the medical and registration are complete. Other offers for him are withdrawn.`,
+                      () => void respond(negotiation, "accept"),
+                    )
+                  }
+                >
+                  Accept
+                </Button>
+                <Button
+                  variant="secondary"
+                  icon={MessageSquare}
+                  disabled={pending === negotiation.id}
+                  onClick={() => onOpen(negotiation)}
+                >
+                  Counter
+                </Button>
+                <Button
+                  variant="ghost"
+                  icon={X}
+                  disabled={pending === negotiation.id}
+                  onClick={() => void respond(negotiation, "reject")}
+                >
+                  Reject
+                </Button>
+              </div>
+            </article>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 export function LoanTermsForm({
   terms,
   setTerms,
@@ -1311,7 +1456,7 @@ function AffiliateControls({
   );
 }
 
-function NegotiationSheet({
+export function NegotiationSheet({
   negotiation,
   close,
   fullPage = false,
@@ -1372,10 +1517,6 @@ function NegotiationSheet({
   const permanent =
     ["Permanent transfer", "Future transfer"].includes(negotiation.type) &&
     negotiation.selling_club_id !== null;
-  const lenderLoan =
-    loan &&
-    negotiation.selling_club_id === bootstrap?.club.id &&
-    negotiation.buying_club_id !== bootstrap?.club.id;
   const enquiry = !contractPage && negotiation.stage === "Enquiry";
   const review = contractPage && negotiation.stage === "Contract review";
   const agentFee = Math.round(
@@ -1647,40 +1788,21 @@ function NegotiationSheet({
             />
           </details>
         )}
+        {incoming && (
+          <details className="transfer-payment-summary" open>
+            <summary>{loan ? "Loan offer" : "Transfer offer"}</summary>
+            <DetailList
+              items={[
+                ...incomingOfferItems(negotiation, details, money),
+                ...(details.counter !== undefined
+                  ? ([[loan ? "Borrower's maximum fee" : "Buyer's maximum fee", money(details.counter)]] as [string, ReactNode][])
+                  : []),
+              ]}
+            />
+          </details>
+        )}
         {loan && incoming && (
           <>
-            <details className="transfer-payment-summary" open>
-              <summary>Loan agreement proposed</summary>
-              <DetailList
-                items={[
-                  ["Loan fee", money(negotiation.offer)],
-                  ["Ends", loanEndDateLabel(negotiation.type, negotiation.created, details.terms.duration)],
-                  ["Playing time", `${details.terms.playingTime}%`],
-                  [
-                    "Role / position",
-                    `${details.terms.role} / ${details.terms.position}`,
-                  ],
-                  ["Borrower wage share", `${details.terms.salarySplit}%`],
-                  ["Training plan", details.terms.developmentPlan],
-                  ["Mandatory minutes", details.terms.mandatoryMinutes],
-                  [
-                    "Recall / injury recall",
-                    `${details.terms.recall ? "Yes" : "No"} / ${details.terms.injuryRecall ? "Yes" : "No"}`,
-                  ],
-                  ["Option / obligation fee", money(details.terms.optionFee)],
-                  ["Minutes bonus", money(details.terms.bonus)],
-                  ["Sell-on", `${details.terms.sellOn}%`],
-                  ...(details.counter !== undefined
-                    ? [
-                        ["Borrower's maximum fee", money(details.counter)] as [
-                          string,
-                          string,
-                        ],
-                      ]
-                    : []),
-                ]}
-              />
-            </details>
             <fieldset className="agreed-loan-terms" disabled={pending}>
               <Field label="Counteroffer loan fee">
                 <MoneyInput min={0} value={fee} onChange={setFee} />
@@ -1697,15 +1819,7 @@ function NegotiationSheet({
           <>
             <div className="form-grid">
               {!contractPage && (
-                <Field
-                  label={
-                    lenderLoan
-                      ? "Loan fee you ask"
-                      : loan
-                        ? "Loan fee"
-                        : "Transfer fee"
-                  }
-                >
+                <Field label={loan ? "Loan fee" : "Transfer fee"}>
                   <MoneyInput
                     aria-label="Proposed transfer fee"
                     min={0}
@@ -1835,35 +1949,23 @@ function NegotiationSheet({
                   {negotiation.stage === "Club talks" &&
                     details.counter !== undefined && (
                       <span>
-                        {lenderLoan ? "Borrower's counter" : "Club counter-offer"}{" "}
+                        Club counter-offer{" "}
                         <strong>{money(details.counter)}</strong>
                       </span>
                     )}
                 </>
               )}
-              {lenderLoan ? (
-                <span>Borrower evaluates the loan fee, wage share and guarantees.</span>
-              ) : (
-                <span>
-                  Your available budget{" "}
-                  <strong>{money(bootstrap?.club.transfer_budget ?? 0)}</strong>
-                </span>
-              )}
+              <span>
+                Your available budget{" "}
+                <strong>{money(bootstrap?.club.transfer_budget ?? 0)}</strong>
+              </span>
             </div>
           </>
         )}
-        {!active && (contractPage || incoming) && (
+        {!active && contractPage && !incoming && (
           <DetailList
             items={[
               ["Fee", money(negotiation.offer)],
-              ...(incoming && details.counter !== undefined
-                ? [
-                    [loan ? "Borrower's maximum fee" : "Buyer's maximum fee", money(details.counter)] as [
-                      string,
-                      string,
-                    ],
-                  ]
-                : []),
               ["Wage", `${money(negotiation.wage)} / week`],
               ["Status", negotiation.stage],
               ...(review ||
@@ -1963,8 +2065,9 @@ function NegotiationSheet({
           <div className="information-note section-space">
             <Clock3 size={16} />
             <span>
-              Medical passed. Registration, work permission and funds are being
-              checked
+              Medical passed. Contract documents, international clearance and
+              funds are being finalized (work permission and competition
+              registration are assessed after signing and never stop it)
               {details.registrationDate
                 ? ` from ${dateLabel(details.registrationDate)}`
                 : ""}
@@ -2095,9 +2198,7 @@ function NegotiationSheet({
             disabled={pending}
             onClick={() => void submit()}
           >
-            {lenderLoan
-              ? "Send loan proposal"
-              : negotiation.stage === "Club talks"
+            {negotiation.stage === "Club talks"
               ? "Submit club offer"
               : "Submit personal terms"}
           </Button>
@@ -2209,8 +2310,12 @@ export default function Transfers() {
   if (error) return <ErrorState message={error} />;
   if (!data || !bootstrap) return <Loading />;
   const activeStages = ACTIVE_TRANSFER_STAGES;
-  const active = data.negotiations.filter((item) =>
-    activeStages.includes(item.stage),
+  // Offers clubs made for the director's players have their own inbox; Negotiations holds deals in progress.
+  const received = data.negotiations.filter(
+    (item) => item.stage === "Offer received" && item.selling_club_id === bootstrap.club.id,
+  );
+  const active = data.negotiations.filter(
+    (item) => activeStages.includes(item.stage) && !received.includes(item),
   );
   const completed = data.negotiations.filter(
     (item) => item.stage === "Completed",
@@ -2272,6 +2377,7 @@ export default function Transfers() {
         <Tabs
           items={[
             { id: "active", label: "Negotiations", count: active.length },
+            { id: "offers", label: "Offers received", count: received.length },
             {
               id: "targets",
               label: "Priority targets",
@@ -2473,6 +2579,14 @@ export default function Transfers() {
               </Button>
             </Empty>
           ))}
+        {tab === "offers" && (
+          <IncomingOffers
+            offers={received}
+            onOpen={(negotiation) => setSelected(negotiation.id)}
+            emptyTitle="No offers on the table"
+            emptyDetail="Clubs that need your listed, surplus or loan-available players make offers during the registration windows. Offer frequency is set in Settings."
+          />
+        )}
         {tab === "clauses" && (
           <>
             <SectionHeading title="Outstanding transfer payments" />

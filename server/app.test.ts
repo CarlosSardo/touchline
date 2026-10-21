@@ -863,6 +863,19 @@ describe.skipIf(!sqlIntegration)("game HTTP API and SQL saves", () => {
     expect(response.body).not.toHaveProperty("path");
   });
 
+  it("serves a player's GBE breakdown and validates the date", async () => {
+    const { id } = (await store.get<{ id: number }>(
+      "SELECT id FROM players WHERE age_group = 'Senior' AND club_id IS NOT NULL ORDER BY ability DESC, id LIMIT 1",
+    ))!;
+    const response = await request(app).get(`/api/players/${id}/gbe`);
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ playerId: id, ruleset: "fa-2026-27", passMark: 15 });
+    expect(response.body.breakdown).toHaveLength(6);
+    expect((await request(app).get(`/api/players/${id}/gbe?asOf=2027-01-01`)).body.asOf).toBe("2027-01-01");
+    expect((await request(app).get(`/api/players/${id}/gbe?asOf=soon`)).status).toBe(400);
+    expect((await request(app).get("/api/players/99999999/gbe")).status).toBe(404);
+  });
+
   it("groups snapshots by career identity without merging unrelated or legacy saves", () => {
     const slot = (
       name: string,
@@ -1061,7 +1074,12 @@ describe.skipIf(!sqlIntegration)("game HTTP API and SQL saves", () => {
       ).toBe(true);
       const dossier = await request(app).get(`/api/players/${player.id}`);
       // The v4 fixture's clubs are Scottish and Irish; the FA endorsement applies only to English clubs.
-      expect(dossier.body.registration.status).toBe("No FA endorsement required");
+      expect(dossier.body.eligibility.association.gbe).toBeUndefined();
+      if (dossier.body.signing)
+        expect(dossier.body.signing.registration).toMatchObject({
+          status: "registered",
+          reasons: [expect.stringMatching(/^No work-permit endorsement is required/)],
+        });
     } finally {
       await store.run(
         "UPDATE players SET profile = ? WHERE id = ?",
@@ -1872,6 +1890,52 @@ describe.skipIf(!sqlIntegration)("game HTTP API and SQL saves", () => {
     expect(autosaves.some((slot) => slot.career?.date === "2026-07-04")).toBe(
       true,
     );
+  });
+
+  it("commits every advanced day: a failure keeps the earlier days, reports them and logs the cause", async () => {
+    await request(app).patch("/api/settings").send({ autosave: "off" });
+    const start = (await stateOf(store)).date;
+    const failing = addDays(start, 3);
+    // A real SQL failure on day 3: PostgreSQL rejects the day's state update, which aborts that day's transaction.
+    await store.exec(`CREATE OR REPLACE FUNCTION fail_advance() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        IF NEW.key = 'state' AND NEW.value::jsonb ->> 'date' = '${failing}' THEN
+          RAISE EXCEPTION 'injected failure for %', NEW.value::jsonb ->> 'date';
+        END IF;
+        RETURN NEW;
+      END $$;
+      CREATE TRIGGER fail_advance BEFORE INSERT OR UPDATE ON meta FOR EACH ROW EXECUTE FUNCTION fail_advance();`);
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const partial = await request(app).post("/api/advance").send({ days: 5 });
+      expect(partial.status).toBe(200);
+      expect(partial.body).toMatchObject({ from: start, date: addDays(start, 2), days: 2 });
+      expect(partial.body.error).toBe(
+        `The simulation stopped after ${addDays(start, 2)}; 2 days were simulated and kept. An unexpected server error occurred.`,
+      );
+      expect((await stateOf(store)).date).toBe(addDays(start, 2));
+      const logged = errors.mock.calls.map((call) => call.join(" ")).join("\n");
+      expect(logged).toContain(`Touchline: advance_days failed (POST /api/advance after 2 of 5 days, from ${addDays(start, 2)})`);
+      expect(logged).toContain(`injected failure for ${failing}`);
+      expect(logged).toMatch(/\n\s*at /);
+      if (process.env.SQL_PASSWORD) expect(logged).not.toContain(process.env.SQL_PASSWORD);
+      errors.mockClear();
+      // The same failure on the first day of a request is an error response; nothing is half-done.
+      const failed = await request(app).post("/api/advance").send({ days: 3 });
+      expect(failed.status).toBe(500);
+      expect(failed.body).toEqual({ error: "An unexpected server error occurred." });
+      expect((await stateOf(store)).date).toBe(addDays(start, 2));
+      expect(errors.mock.calls.map((call) => call.join(" ")).join("\n")).toContain("advance_days failed");
+    } finally {
+      errors.mockRestore();
+      await store.exec("DROP TRIGGER IF EXISTS fail_advance ON meta; DROP FUNCTION IF EXISTS fail_advance();");
+    }
+    const resumed = await request(app).post("/api/advance").send({ days: 2 });
+    expect(resumed.status).toBe(200);
+    expect(resumed.body).toMatchObject({ date: addDays(start, 4), days: 2 });
+    expect(resumed.body.error).toBeUndefined();
+    // The world was never left busy.
+    expect((await request(app).get("/api/me")).body.activity ?? null).toBeNull();
   });
 
   it("deletes only the selected inactive career and protects the active career and database", async () => {

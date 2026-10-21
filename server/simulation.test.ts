@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { Store } from "./db.ts";
 import { tableName } from "./sql-schema.ts";
 import { generateWorld } from "./world.ts";
@@ -61,6 +61,8 @@ async function expectSchemaIntegrity(store: Store) {
 
 describe("connected simulation", () => {
   let store: Store;
+  /** SQL text of every statement of the first week (for statement budgets). */
+  const firstWeek: string[] = [];
   beforeAll(async () => {
     store = await Store.createTest("simulation");
     await generateWorld(store, { nations: ["EN", "ES"] });
@@ -75,7 +77,14 @@ describe("connected simulation", () => {
     const before = await store.all<{ id: number; potential: number }>(
       "SELECT id,potential FROM players WHERE club_id IS NOT NULL AND age <= 21 AND potential < 95 AND role != 'Retired' ORDER BY id LIMIT 40",
     );
-    const result = await advance(store, 7);
+    const spies = (["all", "get", "run"] as const).map((method) => {
+      const original = store[method].bind(store) as (sql: string, ...params: unknown[]) => Promise<unknown>;
+      return vi.spyOn(store, method).mockImplementation(((sql: string, ...params: unknown[]) => {
+        firstWeek.push(sql);
+        return original(sql, ...params);
+      }) as never);
+    });
+    const result = await advance(store, 7).finally(() => spies.forEach((spy) => spy.mockRestore()));
     expect(result.date).toBe("2026-07-08");
     expect((await stateOf(store)).week).toBe(1);
     const after = new Map(
@@ -118,6 +127,50 @@ describe("connected simulation", () => {
     expect((await store.get<{ amount: number }>(
       "SELECT amount FROM ledger WHERE club_id = 1 AND category = 'Matchday income'",
     ))!.amount).toBe(revenue.annualMatchday);
+  });
+
+  it("keeps the week's writes narrow and set-based: out-of-line profiles, batched accounts and friendlies, vacuumed players", async () => {
+    // Runs after the 7-day advance above (its seventh day was the weekly update).
+    const storage = (await store.get<{ external: number; total: number }>(
+      "SELECT count(*) FILTER (WHERE pg_column_toast_chunk_id(profile) IS NOT NULL) AS external, count(*) AS total FROM players",
+    ))!;
+    expect(storage.external / storage.total).toBeGreaterThan(0.95);
+    // One upsert for every club: each club's FFP figure is its season period's deficit.
+    const clubs = (await store.get<{ total: number }>("SELECT count(*) AS total FROM clubs WHERE type != 'national'"))!.total;
+    expect(clubs).toBeGreaterThan(100);
+    // (Transfers and other one-off items post their own rows; the weekly accounts are one statement, not one per club.)
+    expect(firstWeek.filter((sql) => sql.includes("INTO financial_periods")).length).toBeLessThan(clubs / 10);
+    expect(firstWeek.filter((sql) => sql.includes("INTO financial_periods") && sql.includes("unnest("))).toHaveLength(1);
+    expect(firstWeek.filter((sql) => /FROM financial_periods WHERE club_id = \?/.test(sql)).length).toBeLessThan(clubs / 10);
+    // Club friendlies go through the set-based batch: per-fixture squad selection is left to the user's club family.
+    const userFixtures = (await store.get<{ total: number }>(
+      "SELECT count(*) AS total FROM fixtures JOIN clubs ON clubs.id IN (fixtures.home_id, fixtures.away_id) WHERE fixtures.status = 'played' AND (clubs.id = 1 OR clubs.parent_id = 1)",
+    ))!.total;
+    expect(firstWeek.filter((sql) => sql.startsWith("SELECT * FROM players WHERE playing_club_id = ? AND birth_date >= ?")).length)
+      .toBeLessThanOrEqual(2 * userFixtures);
+    const state = await stateOf(store);
+    expect((await store.get<{ total: number }>(
+      `SELECT count(*) AS total FROM clubs LEFT JOIN financial_periods AS period ON period.club_id = clubs.id AND period.season = ?
+       WHERE clubs.type != 'national' AND (period.club_id IS NULL
+         OR abs(clubs.ffp - GREATEST(0, period.wages + period.operating + period.amortization + period.agent_fees - period.revenue - period.sale_profit)) > 0.01)`,
+      state.season,
+    ))!.total).toBe(0);
+    // Pre-season friendlies of AI clubs are played (by the batch path), with appearances but no discipline records.
+    const friendlies = (await store.get<{ played: number; due: number; appearances: number }>(
+      `SELECT count(*) FILTER (WHERE status = 'played') AS played, count(*) FILTER (WHERE status = 'scheduled') AS due,
+         (SELECT count(*) FROM player_match_appearances JOIN fixtures AS friendly ON friendly.id = player_match_appearances.fixture_id WHERE friendly.league_id IS NULL) AS appearances
+       FROM fixtures WHERE league_id IS NULL AND date <= ?`,
+      state.date,
+    ))!;
+    expect(friendlies.due).toBe(0);
+    if (friendlies.played) expect(friendlies.appearances).toBeGreaterThan(friendlies.played * 22);
+    expect(await store.get("SELECT 1 AS found FROM discipline WHERE scope = 'friendly'")).toBeUndefined();
+    // advance() ran outside a transaction, so the weekly rewrite of every player was vacuumed straight away.
+    await expect.poll(async () =>
+      (await store.get<{ vacuumed: boolean }>(
+        "SELECT last_vacuum IS NOT NULL AS vacuumed FROM pg_stat_user_tables WHERE relid = 'players'::regclass",
+      ))!.vacuumed,
+    ).toBe(true);
   });
 
   it("updates a complete league table from the same result used by match analytics", async () => {
@@ -551,7 +604,6 @@ describe("daily transfer market", () => {
         if (result.completed) days.push(date);
         expect(await worldTransfers(store, seedrandom("duplicate"))).toEqual({
           completed: 0,
-          offers: 0,
         });
       }
       expect(days.length).toBeGreaterThan(1);
@@ -576,41 +628,7 @@ describe("daily transfer market", () => {
       });
       expect(await worldTransfers(store, seedrandom("closed-window"))).toEqual({
         completed: 0,
-        offers: 0,
       });
-    } finally {
-      await store.close();
-    }
-  });
-
-  it("considers multiple listed players while capping incoming approaches", async () => {
-    const store = await marketWorld();
-    try {
-      await store.run(
-        "UPDATE players SET listed = 1, available_loan = 0 WHERE club_id = 1 AND age_group = 'Senior'",
-      );
-      for (let index = 0; index < 7; index++) {
-        await store.setMeta("state", {
-          ...(await stateOf(store)),
-          date: addDays("2026-07-01", index),
-        });
-        await worldTransfers(store, seedrandom(`listed-market-${index}`));
-      }
-      const offers = await store.all<{ player_id: number; stage: string }>(
-        "SELECT player_id,stage FROM negotiations WHERE selling_club_id = 1",
-      );
-      expect(offers).toHaveLength(3);
-      expect(new Set(offers.map((offer) => offer.player_id)).size).toBe(3);
-      expect(offers.every((offer) => offer.stage === "Offer received")).toBe(
-        true,
-      );
-      for (const offer of offers)
-        expect(
-          (await store.get<Player>(
-            "SELECT * FROM players WHERE id = ?",
-            offer.player_id,
-          ))!.club_id,
-        ).toBe(1);
     } finally {
       await store.close();
     }

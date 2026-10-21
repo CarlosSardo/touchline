@@ -128,6 +128,16 @@ describe("season retention (SQL)", () => {
       "INSERT INTO history (season, entity_type, entity_id, date, data) VALUES (2024, 'appearance', ?, '2024-09-01', '{}')",
       ids.pruned,
     );
+    await store.run(
+      `INSERT INTO player_registrations (player_id, club_id, association_id, status, evaluated_on)
+       SELECT ?, id, country_id, 'refused', '2025-07-01' FROM clubs WHERE id = ?`,
+      ids.pruned, clubs[0],
+    );
+    await store.run(
+      `INSERT INTO competition_registrations (player_id, league_id, season, club_id, status, evaluated_on)
+       SELECT ?, league_id, 2025, id, 'not_registered', '2025-07-01' FROM clubs WHERE id = ?`,
+      ids.pruned, clubs[0],
+    );
     const { clubId } = await store.meta<{ clubId: number }>("state");
     const others = (await store.all<{ id: number }>(
       "SELECT id FROM clubs WHERE type = 'club' AND id <> ? AND (parent_id IS NULL OR parent_id <> ?) ORDER BY id LIMIT 2",
@@ -185,7 +195,8 @@ describe("season retention (SQL)", () => {
     expect(homeOld).not.toHaveProperty("appearances");
 
     const pruned = [ids.pruned, ids.homeOld];
-    for (const table of ["reports", "assignments", "discipline", "player_assets", "registration_records", "minor_applications",
+    for (const table of ["reports", "assignments", "discipline", "player_assets", "registration_records", "player_registrations",
+      "competition_registrations", "minor_applications",
       "player_season_stats", "player_match_appearances", "promises", "negotiations", "loans", "sell_on_clauses",
       "transfer_payments", "buy_back_clauses"]) {
       const row = await store.get<{ total: number }>(

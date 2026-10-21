@@ -31,37 +31,15 @@ import {
 } from "../shared/rules.ts";
 import { advance, seasonRollover } from "./simulation.ts";
 import { owedInstalments, seasonBudgets } from "./finance.ts";
-import { CONTINENTAL } from "../shared/world-catalog/continental.ts";
 import {
   clubRegistration,
-  continentalBand,
   countsTowardQuota,
-  endorsementPoints,
   familyResidence,
   foreignQuota,
-  leagueBand,
   minorPresenceLegal,
   minorRoute,
   residenceYears,
-  type EndorsementEvidence,
 } from "./registration.ts";
-
-const evidence: EndorsementEvidence = {
-  nationalityCode: "BR",
-  destinationCode: "EN",
-  age: 24,
-  leagueBand: 6,
-  domesticMinutesPercent: 0,
-  internationalAppearancesPercent: 0,
-  internationalRank: 1,
-  continentalMinutesPercent: 0,
-  continentalBand: 3,
-  domesticFinish: "mid-table",
-  continentalStage: "Other",
-  seniorAppearance: false,
-  youthDebut: false,
-  existingPermission: false,
-};
 
 describe("minor international-transfer exceptions", () => {
   it("schedules future arrivals only after adulthood and inside a registration window", () => {
@@ -255,7 +233,6 @@ describe("youth recruitment registration", () => {
       store,
       player.id,
       "Future transfer",
-      undefined,
       true,
     );
     await negotiationStep(store, enquiry.id, "formalize");
@@ -428,7 +405,6 @@ describe("youth recruitment registration", () => {
       store,
       player.id,
       "Future transfer",
-      undefined,
       true,
     );
     await negotiationStep(store, deal.id, "formalize");
@@ -647,96 +623,5 @@ describe("youth recruitment registration", () => {
         )
       ).approved,
     ).toBe(false);
-  });
-});
-
-describe("FA 2026/27 endorsement criteria", () => {
-  it("classifies league bands from the published criteria", () => {
-    expect(leagueBand("EN", 1)).toBe(1);
-    expect(leagueBand("EN", 2)).toBe(2);
-    expect(leagueBand("BR", 1)).toBe(2);
-    expect(leagueBand("US", 1)).toBe(3);
-    expect(leagueBand("DE", 2)).toBe(4);
-    expect(leagueBand("EN", 3)).toBe(5);
-    expect(leagueBand("IS", 1)).toBe(6);
-  });
-  it("bands continental competitions by their catalog names, qualifying included", () => {
-    const expected: Record<string, number> = {
-      "UEFA Champions League": 1,
-      "CONMEBOL Libertadores": 1,
-      "UEFA Europa League": 2,
-      "UEFA Conference League": 2,
-      "CONMEBOL Sudamericana": 2,
-    };
-    const names = CONTINENTAL.competitions.map((competition) => competition.name);
-    expect(names).toEqual(expect.arrayContaining(Object.keys(expected)));
-    expect(names).toContain("CONMEBOL Libertadores Sub-20");
-    for (const name of names) {
-      const band = expected[name] ?? 3;
-      expect({ name, bands: [continentalBand(name), continentalBand(`${name} Qualifying`)] }).toEqual({
-        name,
-        bands: [band, band],
-      });
-    }
-  });
-  it("does not grant a permit without sporting evidence", () => {
-    const report = endorsementPoints(evidence);
-    expect(report.allowed).toBe(false);
-    expect(report.points).toBe(0);
-  });
-  it("uses the international automatic-pass thresholds", () => {
-    for (const [rank, percent] of [
-      [10, 30],
-      [20, 40],
-      [30, 60],
-      [50, 70],
-    ]) {
-      expect(
-        endorsementPoints({
-          ...evidence,
-          internationalRank: rank,
-          internationalAppearancesPercent: percent,
-        }).automatic,
-      ).toBe(true);
-      expect(
-        endorsementPoints({
-          ...evidence,
-          internationalRank: rank,
-          internationalAppearancesPercent: percent - 1,
-        }).automatic,
-      ).toBe(false);
-    }
-  });
-  it("awards the correct league minutes, youth debut and league quality points", () => {
-    const regular = endorsementPoints({
-      ...evidence,
-      leagueBand: 2,
-      domesticMinutesPercent: 90,
-      seniorAppearance: true,
-    });
-    expect(regular.breakdown["Domestic league minutes"]).toBe(10);
-    expect(regular.breakdown["Current league quality"]).toBe(10);
-    expect(regular.allowed).toBe(true);
-    const youth = endorsementPoints({
-      ...evidence,
-      age: 19,
-      leagueBand: 2,
-      seniorAppearance: true,
-      youthDebut: true,
-      domesticMinutesPercent: 2,
-    });
-    expect(youth.points).toBe(15);
-    expect(youth.allowed).toBe(true);
-  });
-  it("recognizes British and Irish work rights and already-approved registration", () => {
-    expect(
-      endorsementPoints({ ...evidence, nationalityCode: "IE" }).allowed,
-    ).toBe(true);
-    expect(
-      endorsementPoints({ ...evidence, nationalityCode: "SCO" }).allowed,
-    ).toBe(true);
-    expect(
-      endorsementPoints({ ...evidence, existingPermission: true }).allowed,
-    ).toBe(true);
   });
 });

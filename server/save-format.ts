@@ -78,6 +78,8 @@ export interface CheckpointSchemaTable {
   columns: CheckpointColumn[];
   /** Columns older checkpoints may list that this schema now derives or no longer has; accepted, then ignored. */
   legacyColumns?: string[];
+  /** Table added after older checkpoints were written: a checkpoint may omit it (it is restored empty). */
+  optional?: boolean;
 }
 
 export interface CheckpointSchema {
@@ -314,8 +316,7 @@ export function validateManifest(
   }
   if (
     expected &&
-    (names.size !== expected.tables.length ||
-      expected.tables.some((item) => !names.has(item.name)))
+    expected.tables.some((item) => !item.optional && !names.has(item.name))
   )
     throw new SaveFormatError("Checkpoint table inventory is incomplete.");
   if (manifest.provenance !== undefined) {

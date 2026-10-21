@@ -23,6 +23,7 @@ import {
 import {
   accessRequestsTableSql,
   appearanceBackfill,
+  ADDED_WORLD_TABLES,
   IDENTITY_TABLES,
   migrationTableSql,
   quoteIdentifier,
@@ -570,10 +571,14 @@ describe("SQL schema contract (no database)", () => {
   const schema = "touchline_test_schema_contract";
   const migrations = schemaMigrations(schema);
   const statements = migrations.flatMap((migration) => migration.statements);
-  const declaration = (table: string) => statements[WORLD_TABLES.indexOf(table as (typeof WORLD_TABLES)[number])];
+  const declaration = (table: string) =>
+    statements.find((statement) => statement.startsWith(`CREATE TABLE IF NOT EXISTS "${schema}"."${table}" (`))!;
+  // Tables added by later migrations (GBE ledger v3, registrations v4) follow the baseline's own tables.
+  const baseline = WORLD_TABLES.filter((table) => !ADDED_WORLD_TABLES.has(table));
 
   it("keeps all world tables in foreign-key dependency order, without saves or migrations", () => {
-    expect(WORLD_TABLES).toHaveLength(34);
+    expect(baseline).toHaveLength(34);
+    expect(WORLD_TABLES).toHaveLength(34 + ADDED_WORLD_TABLES.size);
     expect(new Set(WORLD_TABLES).size).toBe(WORLD_TABLES.length);
     for (const table of ["save_slots", "save_chunks", "schema_migrations"]) {
       expect(WORLD_TABLES).not.toContain(table);
@@ -581,7 +586,7 @@ describe("SQL schema contract (no database)", () => {
     }
     for (const table of IDENTITY_TABLES) expect(WORLD_TABLES).toContain(table);
     const seen = new Set<string>();
-    for (const [offset, table] of WORLD_TABLES.entries()) {
+    for (const [offset, table] of baseline.entries()) {
       const statement = statements[offset];
       expect(statement.startsWith(`CREATE TABLE IF NOT EXISTS "${schema}"."${table}" (`)).toBe(true);
       for (const match of statement.matchAll(/REFERENCES "([^"]+)"\."([^"]+)"/g)) {
@@ -595,11 +600,15 @@ describe("SQL schema contract (no database)", () => {
   });
 
   it("is one PostgreSQL baseline, scoped to the selected schema, with no T-SQL left", () => {
-    expect(migrations.map((migration) => migration.version)).toEqual([1]);
-    expect(migrations[0].name).toBe("PostgreSQL world baseline");
+    expect(migrations[0]).toMatchObject({ version: 1, name: "PostgreSQL world baseline" });
+    // Later migrations are appended in version order, one per version.
+    expect(migrations.map((migration) => migration.version)).toEqual(
+      [...new Set(migrations.map((migration) => migration.version))].sort((first, second) => first - second),
+    );
     expect(migrationTableSql(schema)).toContain(`CREATE TABLE IF NOT EXISTS "${schema}"."schema_migrations"`);
     for (const statement of statements) {
-      expect(statement).not.toMatch(
+      // String literals (JSON defaults such as '[]') are not identifiers.
+      expect(statement.replace(/'[^']*'/g, "''")).not.toMatch(
         /\[|N'|NVARCHAR|VARBINARY|UNIQUEIDENTIFIER|DATETIME2|\bBIT\b|FLOAT\(|IDENTITY\(|OBJECT_ID|\bsys\.|\bdbo\b|\bGO\b|PERSISTED|OPENJSON|JSON_VALUE|\bREAL\b|SYSUTCDATETIME/,
       );
       expect(statement).toContain(`"${schema}".`);
@@ -1434,9 +1443,9 @@ describe.skipIf(!integration)("SQL Store integration (explicit opt-in, real Post
         first.schemaName,
       );
       expect(tables.map((row) => row.name)).toEqual([...STORE_TABLES].sort());
-      expect(await first.all("SELECT version, name FROM schema_migrations")).toEqual([
-        { version: 1, name: "PostgreSQL world baseline" },
-      ]);
+      expect(await first.all("SELECT version, name FROM schema_migrations ORDER BY version")).toEqual(
+        schemaMigrations(first.schemaName).map(({ version, name }) => ({ version, name })),
+      );
       expect(await first.meta("appearanceIndexVersion")).toBe(1);
       expect(await first.get("SELECT current_schema() AS schema, current_setting('TimeZone') AS zone, current_setting('application_name') AS app"))
         .toEqual({ schema: first.schemaName, zone: "UTC", app: "Touchline" });
@@ -1472,14 +1481,16 @@ describe.skipIf(!integration)("SQL Store integration (explicit opt-in, real Post
       await store.setMeta("kept", "value");
       await store.schema();
       await store.schema();
-      expect(await store.all("SELECT version FROM schema_migrations")).toEqual([{ version: 1 }]);
+      const versions = schemaMigrations(store.schemaName).map(({ version }) => ({ version }));
+      expect(await store.all("SELECT version FROM schema_migrations ORDER BY version")).toEqual(versions);
       expect(await store.meta("kept")).toBe("value");
-      await store.run("INSERT INTO schema_migrations (version, name) VALUES (?, ?)", 2, "from the future");
+      const future = versions.at(-1)!.version + 1;
+      await store.run("INSERT INTO schema_migrations (version, name) VALUES (?, ?)", future, "from the future");
       await expect(store.schema()).rejects.toThrow(/migrated by a newer version of Touchline/);
-      await store.run("DELETE FROM schema_migrations WHERE version = ?", 2);
+      await store.run("DELETE FROM schema_migrations WHERE version = ?", future);
       await store.exec("CREATE TABLE users (id uuid)");
       await expect(store.schema()).rejects.toThrow(/account registry schema/);
-      expect(await store.all("SELECT version FROM schema_migrations")).toEqual([{ version: 1 }]);
+      expect(await store.all("SELECT version FROM schema_migrations ORDER BY version")).toEqual(versions);
     } finally {
       await store.close();
     }
@@ -1730,6 +1741,74 @@ describe.skipIf(!integration)("SQL Store integration (explicit opt-in, real Post
     }
   });
 
+  it("vacuum() reclaims dead row versions outside a transaction and is skipped inside one", async () => {
+    const store = await Store.createTest("vacuum");
+    try {
+      const country = await insertRow(store, "countries", countryRow("VAC"));
+      for (let index = 0; index < 3; index++) await insertRow(store, "players", playerRow(`Player ${index}`, country, null));
+      await store.run("UPDATE players SET ability = ability + 1");
+      expect(await store.transaction(() => store.vacuum(["players"]))).toBe(false);
+      expect(await store.batched(() => store.vacuum(["players"]))).toBe(false);
+      expect(await store.vacuum(["players", "clubs"])).toBe(true);
+      // Conditional: three dead versions are far below a quarter of the (minimum) 1000 rows.
+      expect(await store.vacuum(["players"], { deadShare: 0.25 })).toBe(false);
+      await store.run("UPDATE players SET ability = ability + 1");
+      // Statistics reach the shared counters within about a second.
+      await expect.poll(() => store.vacuum(["players"], { deadShare: 0 }), { timeout: 15_000, interval: 500 }).toBe(true);
+      expect(await store.vacuum([])).toBe(false);
+      await expect(store.vacuum(["pg_class"])).rejects.toThrow(/Unknown Touchline table/);
+      await store.exec("SELECT pg_stat_force_next_flush()");
+      await expect.poll(async () =>
+        (await store.get<{ vacuumed: boolean }>(
+          "SELECT last_vacuum IS NOT NULL AS vacuumed FROM pg_stat_user_tables WHERE relid = 'players'::regclass",
+        ))!.vacuumed,
+      ).toBe(true);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it("savepoint() rolls back only a failed optional step and keeps the transaction usable", async () => {
+    const store = await Store.createTest("savepoints");
+    try {
+      await store.setMeta("state", "before");
+      const outcome = await store.transaction(async () => {
+        await store.setMeta("state", "kept");
+        const failure = await store.savepoint(async () => {
+          await store.setMeta("optional", "discarded");
+          await store.exec("SELECT 1/0");
+        }).catch((error: unknown) => error);
+        expect(failure).toMatchObject({ code: "22012" });
+        // A thrown error inside a nested transaction() is rolled back to the savepoint as well.
+        await expect(store.savepoint(async () => {
+          await store.transaction(async () => {
+            await store.setMeta("nested", "discarded");
+            throw new Error("nested only");
+          });
+        })).rejects.toThrow("nested only");
+        expect(await store.savepoint(async () => {
+          await store.setMeta("released", "yes");
+          return "ok";
+        })).toBe("ok");
+        await store.setMeta("after", "yes");
+        return "committed";
+      });
+      expect(outcome).toBe("committed");
+      expect(await store.meta("state")).toBe("kept");
+      expect(await store.meta("released")).toBe("yes");
+      expect(await store.meta("after")).toBe("yes");
+      expect(await store.get("SELECT key FROM meta WHERE key IN ('optional', 'nested')")).toBeUndefined();
+      // Outside a transaction it is a transaction of its own.
+      await expect(store.savepoint(async () => {
+        await store.setMeta("alone", "discarded");
+        throw new Error("alone");
+      })).rejects.toThrow("alone");
+      expect(await store.get("SELECT key FROM meta WHERE key = 'alone'")).toBeUndefined();
+    } finally {
+      await store.close();
+    }
+  });
+
   it("upserts metadata and reports missing keys", async () => {
     const store = await Store.createTest("meta");
     try {
@@ -1825,6 +1904,8 @@ describe.skipIf(!integration)("SQL Store integration (explicit opt-in, real Post
     // Regression: the holder sat idle in a transaction; on a Raspberry Pi a world build outlasted
     // idle_in_transaction_session_timeout, PostgreSQL ended the session and the process crashed.
     const store = await Store.createTest("batched_idle");
+    // Only this world's lock: other sessions on a shared test database hold advisory locks of their own.
+    const worldLock = `((lock.classid::bigint << 32) | lock.objid::bigint) = (${advisoryLockKey(`touchline:world:${store.schemaName}`)})::bigint`;
     try {
       const holder = await store.batched(async () => {
         await store.setMeta("slow", 1);
@@ -1832,11 +1913,11 @@ describe.skipIf(!integration)("SQL Store integration (explicit opt-in, real Post
           `SELECT activity.state, activity.xact_start IS NOT NULL AS in_transaction
            FROM pg_locks AS lock JOIN pg_stat_activity AS activity ON activity.pid = lock.pid
            WHERE lock.locktype = 'advisory' AND lock.granted AND activity.pid <> pg_backend_pid()
-             AND activity.datname = current_database()`,
+             AND activity.datname = current_database() AND ${worldLock}`,
         );
       });
       expect(holder).toEqual({ state: "idle", in_transaction: false });
-      const locks = await store.get<{ n: number }>("SELECT count(*) AS n FROM pg_locks WHERE locktype = 'advisory' AND pid <> pg_backend_pid()");
+      const locks = await store.get<{ n: number }>(`SELECT count(*) AS n FROM pg_locks AS lock WHERE locktype = 'advisory' AND pid <> pg_backend_pid() AND ${worldLock}`);
       expect(locks?.n).toBe(0);
     } finally {
       await store.close();
@@ -1930,7 +2011,9 @@ describe.skipIf(!integration)("SQL Store integration (explicit opt-in, real Post
       await Promise.all([replacement, deletion]);
       expect(await store.get("SELECT id FROM countries")).toBeUndefined();
       expect(await store.get("SELECT name FROM save_slots WHERE id = ?", saveId)).toEqual({ name: "Kept" });
-      expect(await store.all("SELECT version FROM schema_migrations")).toEqual([{ version: 1 }]);
+      expect(await store.all("SELECT version FROM schema_migrations ORDER BY version")).toEqual(
+        schemaMigrations(store.schemaName).map(({ version }) => ({ version })),
+      );
       expect(await insertRow(store, "countries", countryRow("TWO"))).toBe(1);
       await store.run("DELETE FROM save_slots WHERE id = ?", saveId);
       expect(await store.get("SELECT ordinal FROM save_chunks WHERE save_id = ?", saveId)).toBeUndefined();
@@ -2022,7 +2105,9 @@ describe.skipIf(!integration)("SQL Store integration (explicit opt-in, real Post
       for (const table of WORLD_TABLES)
         expect(await store.get(`SELECT count(*) AS rows FROM ${table}`), table).toEqual({ rows: 0 });
       expect(await store.get("SELECT count(*) AS rows FROM save_slots")).toEqual({ rows: 1 });
-      expect(await store.all("SELECT version FROM schema_migrations")).toEqual([{ version: 1 }]);
+      expect(await store.all("SELECT version FROM schema_migrations ORDER BY version")).toEqual(
+        schemaMigrations(store.schemaName).map(({ version }) => ({ version })),
+      );
       expect(await insertRow(store, "countries", countryRow("NEW"))).toBe(1);
       await expect(store.transaction(async () => {
         await store.clearWorld();
@@ -2031,6 +2116,55 @@ describe.skipIf(!integration)("SQL Store integration (explicit opt-in, real Post
       expect(await store.get("SELECT code FROM countries")).toEqual({ code: "NEW" });
       await store.transaction(() => store.clearWorld());
       expect(await store.get("SELECT code FROM countries")).toBeUndefined();
+    } finally {
+      await store.close();
+    }
+  });
+
+  it("migration 2 keeps player profiles out of line, so squad updates stay narrow and HOT, also for existing worlds", async () => {
+    const store = await Store.createTest("narrow_players");
+    try {
+      const storage = () =>
+        store.get<{ options: string[]; filter: boolean; search: boolean }>(
+          `SELECT relation.reloptions AS options, to_regclass(quote_ident(current_schema()) || '.player_filter') IS NOT NULL AS filter,
+             to_regclass(quote_ident(current_schema()) || '.player_search') IS NOT NULL AS search
+           FROM pg_class AS relation WHERE relation.oid = 'players'::regclass`,
+        );
+      expect(await storage()).toEqual({
+        options: expect.arrayContaining(["toast_tuple_target=128", "fillfactor=50"]),
+        filter: false,
+        search: true,
+      });
+      const country = await insertRow(store, "countries", countryRow("NRW"));
+      const club = await insertRow(store, "clubs", clubRow("Narrow", country));
+      const profile = JSON.stringify({ notes: "A long scouting history. ".repeat(250) });
+      const external = () =>
+        store.get<{ external: boolean; profile: string }>(
+          "SELECT pg_column_toast_chunk_id(profile) IS NOT NULL AS external, profile FROM players WHERE club_id = ?",
+          club,
+        );
+      // A world built before migration 2: default TOAST target (compressed profile kept inline) and the old index.
+      await store.exec(`ALTER TABLE players RESET (toast_tuple_target, fillfactor);
+        DROP INDEX player_search; CREATE INDEX player_filter ON players (position, age, ability, potential, value);`);
+      await insertRow(store, "players", { ...playerRow("Inline", country, club), profile });
+      expect(await external()).toEqual({ external: false, profile });
+      await store.run("DELETE FROM schema_migrations WHERE version = 2");
+      await store.schema();
+      expect(await external()).toEqual({ external: true, profile });
+      expect(await storage()).toEqual({
+        options: expect.arrayContaining(["toast_tuple_target=128", "fillfactor=50"]),
+        filter: false,
+        search: true,
+      });
+      // Morale and value change after every match: with no index on value and a narrow row, the update is HOT.
+      const before = await store.get<{ hot: number }>(
+        "SELECT n_tup_hot_upd AS hot FROM pg_stat_user_tables WHERE relid = 'players'::regclass",
+      );
+      await store.run("UPDATE players SET morale = morale + 1, value = value * 1.01 WHERE club_id = ?", club);
+      await store.exec("SELECT pg_stat_force_next_flush()");
+      await expect.poll(async () =>
+        (await store.get<{ hot: number }>("SELECT n_tup_hot_upd AS hot FROM pg_stat_user_tables WHERE relid = 'players'::regclass"))!.hot,
+      ).toBe(before!.hot + 1);
     } finally {
       await store.close();
     }

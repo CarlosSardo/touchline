@@ -58,6 +58,7 @@ import { CALL_UPS_PATH, callUpBadge } from "../callups.ts";
 import type { CallUpDesk } from "../../shared/features/callups.ts";
 import type { InternationalsDesk } from "../../shared/features/youth-internationals.ts";
 import { INTERNATIONALS_PATH, dutyByPlayer, dutyText } from "../internationals.ts";
+import { EligibilityBadge } from "../EligibilityBadge.tsx";
 
 const roles = [
   "Captain",
@@ -423,6 +424,7 @@ export function Squad() {
                           </Badge>
                           {isInjured(player) && <small>Until {dateLabel(player.injury_until!)}</small>}
                           {!!player.parent_club_id && <Badge tone="blue">On loan</Badge>}
+                          <EligibilityBadge eligibility={player.eligibility} />
                           {(() => {
                             const callUp = callUps?.active.find((entry) => entry.playerId === player.id);
                             return callUp ? (

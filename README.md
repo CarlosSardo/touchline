@@ -33,13 +33,17 @@ Touchline is a football sporting-director simulation. You take charge of a club'
 ## Features
 
 - **A large procedural world:** 211 football associations, 107 of them with their own league pyramid of one to six tiers (England six), B teams, U19/U17 leagues, national cups and continental competitions.
-- **Internationals:** Senior, U21, U20, U19 and U17 national teams, UEFA youth qualifying and the main youth tournaments; caps on player dossiers and a club policy for releasing players outside FIFA windows.
+- **Internationals:** Senior, U21, U20, U19 and U17 national teams, UEFA youth qualifying and the main youth tournaments, senior international friendlies in the FIFA windows; caps on player dossiers and a club policy for releasing players outside FIFA windows.
 - **Call-ups:** temporary moves between the club's own teams (next match, a number of days, until a date), coach call-ups or proposals, a debut budget per season and up to three development requests.
 - **Scouting and transfers:** uncertain scout reports, shortlists and multi-stage deals with instalments, buy-back, sell-on, seller loan-back and pre-contract options; rival bids, best-and-final rounds, future arrivals and affiliate placements; transfer history per player and per club.
-- **Loans and youth recruitment:** nine loan types, incoming/outgoing loan offers with borrower counters, recalls, purchase clauses, affiliate development loans and modelled FIFA rules for minors.
+- **Club offers for your players:** other clubs make transfer and loan offers based on their own squad needs, level, budget and wage room. **Settings › Simulation › Transfer/Loan Offer Frequency** (Low / Medium / High, default Medium) sets how busy that market is; see [How the transfer market works](#how-the-transfer-market-works).
+- **Loans and youth recruitment:** nine loan types. Loans out are club-initiated: clubs send loan offers (dates, fee, wage split, role and playing time, recall, option or obligation, sell-on, reason) that you accept, reject or counter, and you choose who is on your loan list. Loans in, recalls, purchase clauses, affiliate development loans and modelled FIFA rules for minors remain.
+- **Signing separate from registration:** a signing is stopped only by real transfer rules. Association registration (work permission), competition registration (foreign quotas) and match eligibility are decided afterwards and shown as statuses such as *Signed · eligible*, *Signed · not registered* or *Ineligible · insufficient GBE (9/15)*; see [Registration and eligibility](#registration-and-eligibility).
+- **GBE:** FA 2026/27 points model with a per-criterion breakdown on the player sheet. The points come from simulated international caps, club minutes, results and league standard, and are recalculated as the career goes on. Missing data counts as *no data*, not as zero. See [GBE](#gbe).
 - **Squad and academy:** first team, reserve club, U19 and U17 groups, development plans, mentors and squad roles.
 - **A living club:** staff, facilities, board and press decisions, an affiliate network and unexpected events.
 - **Match analysis:** reproducible simulation with ratings, xG, xA, xPts and interactive pitch maps.
+- **Robust simulation:** every simulated day commits on its own, so a failure part-way through *Continue* keeps the days already played and reports where it stopped.
 - **Media and supporters:** fictional journalists, a news feed and supporter reactions.
 - **Saves and settings:** PostgreSQL persistence, autosaves, portable `.touchline.gz` exports, colour modes, themes and eight display currencies.
 
@@ -83,7 +87,7 @@ Open [http://127.0.0.1:5173](http://127.0.0.1:5173); the API runs on `127.0.0.1:
 | `npm run world:reset -- --all`      | Dry run of emptying every world and snapshot; `--apply --yes` performs it (keeps accounts and migrations) |
 | `npm run db:footprint`              | Read-only per-table size report; flags worlds over 1.6 GB                |
 | `npm run world:check`               | Generate the world in a test schema and check its invariants; prints one JSON line, exits 1 on a violation (`-- --nations=EN,ES`) |
-| `npm run simulation:check`          | Compare a 600-match sample with real aggregates (`-- --seasons=3` soak) |
+| `npm run simulation:check`          | Compare a 600-match sample with real aggregates (`-- --seasons=3` soak; the soak fails if the world outgrows its storage budget) |
 | `npm run image:build`               | Build the Docker image for this machine's architecture (`touchline:local`) |
 | `npm run pi:backup` / `npm run pi:restore` | Back up / restore the compose stack's PostgreSQL database (see [Backups](#backups-and-restore)) |
 
@@ -218,6 +222,8 @@ docker compose --profile https up -d --wait
 
 Pin a digest (`TOUCHLINE_IMAGE=ghcr.io/carlossardo/touchline@sha256:…`, printed by the image workflow) for reproducible upgrades and rollbacks; roll back the database with `pi-restore.sh`, not by running an older image against migrated data. For a PostgreSQL major upgrade, back up, remove the `postgres-data` volume, change the image tag and restore.
 
+World migrations 2–5 (narrow player rows, the GBE evidence tables, player and competition registrations, an index for club offers) apply to existing careers through the same `db:migrate -- --registered` step; no new world is needed. Migration 2 rewrites each world's `players` table once and is exempt from the statement timeout, so on a full-sized world it takes longer than the others.
+
 ### Moving careers from the old Azure version
 
 The Azure SQL deployment is retired, and its database cannot be attached to PostgreSQL. Careers move as portable saves:
@@ -231,21 +237,56 @@ Keep the exported files until every player has confirmed their career on the Pi.
 
 - Use an SSD (USB 3) rather than an SD card, active cooling to avoid throttling, and the 64-bit OS. PostgreSQL is tuned for that; adjust the `-c` flags in `compose.yaml` on a different machine.
 - Simulation runs in the app process: full-world days and generating a new full world take noticeably longer than on a desktop (minutes for a new career). A smaller world (`db:seed -- --nations ...`) is faster.
+- *Continue* commits each simulated day, and its autosave, separately instead of holding one transaction for the whole week or month. Old row versions can be cleaned up between days, and if a later day fails the days already played are kept: the request still succeeds and shows the error. Only a failure on the first day returns an error status. Failures are logged with the operation, route, SQL error code and stack (`docker compose logs app`). Other actions still wait until the request finishes.
+- Player rows are rewritten after every match day, so the `players` table is tuned for frequent updates (migration 2): the large profile column is stored out of line, pages are kept half empty (`fillfactor = 50`) so most updates stay on their page (HOT), autovacuum runs earlier, and the search index no longer covers player value. The simulation also vacuums `players` itself every week, after busy match days and at the season rollover. In a development measurement on a 6,400-player world, the `players` table measured 669 MB after 120 simulated days with the old 7-days-per-transaction advance, compared with 32 MB now. Pi timings have not been measured yet.
+- Weekly club finances are one set-based statement, cup-round fixtures are prepared in batches, and club friendlies skip the per-match squad queries.
 - The app's heap is capped at 1.5 GB (`TOUCHLINE_NODE_OPTIONS`) within a 2 GB container limit; raise both together if a large world needs more.
-- `log_min_duration_statement=2s` logs slow queries (`docker compose logs postgres`); `npm run db:footprint` reports per-table sizes.
+- `log_min_duration_statement=2s` logs slow queries (`docker compose logs postgres`); `npm run db:footprint` reports per-table sizes. The `simulation:check` soak fails when the `players` table exceeds 10 KB per player or the other tables grow faster in a season than the budget for the fixtures played. A one-season soak passed with +24.4 MB against its 32 MB budget. The GBE evidence tables added 3.7 MB per season on that soak world and about 27 MB after a season on a 60,000-player world.
 
 ## Saves and legacy careers
 
 - Careers save to PostgreSQL as you play. **Settings > Saves** manages snapshot slots and `.touchline.gz` imports/exports; imports run in a single transaction.
 - Restore and import replace the active world, so make a named save first.
 - Deploying does not upgrade a career. Worlds before version 4 cannot be imported; start a new career instead.
+- Careers and `.touchline.gz` saves made before the registration, GBE and offer-frequency changes still load. Their missing registration and GBE tables are restored empty: existing players keep their registrations, foreign-quota lists are rebuilt on the next day played, and GBE evidence is rebuilt once (a pre-career estimate plus the months already played). **Transfer/Loan Offer Frequency** starts at Medium.
 - The one-time SQLite import tool was retired with SQL Server: convert a SQLite-era career with an earlier release and export it as `.touchline.gz`. Keep the originals offline.
 
 ## Game rules
 
-Touchline aims to be believable, not a certified replica of football regulations. World rules live in [shared/world-rules.ts](shared/world-rules.ts), valuations and finance in [shared/rules.ts](shared/rules.ts) and [server/finance.ts](server/finance.ts), and implemented features versus gaps in [REQUIREMENTS.md](REQUIREMENTS.md).
+Touchline aims to be believable, not a certified replica of football regulations. World rules live in [shared/world-rules.ts](shared/world-rules.ts), valuations and finance in [shared/rules.ts](shared/rules.ts) and [server/finance.ts](server/finance.ts), registration and eligibility in [server/eligibility.ts](server/eligibility.ts) and [shared/eligibility.ts](shared/eligibility.ts), GBE rules in [shared/gbe/](shared/gbe/), club offers in [server/market-offers.ts](server/market-offers.ts), and implemented features versus gaps in [REQUIREMENTS.md](REQUIREMENTS.md).
 
 References: [FIFA RSTP (Jan 2025)](https://digitalhub.fifa.com/m/696d877ea35ca761/original/Regulations-on-the-Status-and-Transfer-of-Players-January-2025-edition.pdf), [FA minor clearance](https://playerstatus.thefa.com/support/solutions/articles/80001135173-what-is-international-clearance-itc-including-minor-applications), [FA GBE criteria 2026/27](https://www.thefa.com/-/media/files/thefaportal/governance-docs/registrations/gbe-2026-27/fa-mens-players-gbe-criteria-202627.ashx), [UEFA format](https://www.uefa.com/uefachampionsleague/news/0268-12157d69ce2d-9f011c70f6fa-1000--new-format-for-champions-league-post-2024-everything-you-ne/), IFAB laws on [players](https://www.theifab.com/laws/latest/the-players/) and [duration](https://www.theifab.com/laws/latest/the-duration-of-the-match/), and the [Premier League Handbook 2026/27](https://resources.premierleague.pulselive.com/premierleague/document/2026/07/31/8a890ff9-176c-4364-a8ff-e08f995e2c86/TM2040_PL-Handbook-and-Collateral-2026-27_Digital_31.07.pdf).
+
+### How the transfer market works
+
+Registration windows run from 15 June to 1 September and from 1 January to early February. Every day, each other club looks at its own squad depth by position, its level, its transfer budget and its wage room, including money and wages already committed to other deals. It approaches you only when it needs a player like yours and can afford him, and his personal terms are checked before the offer is sent. Injured players, players out on loan and players already in talks are not approached. Offers mostly concern players on your transfer or loan list, surplus players and young or unregistered players a club needs. On Medium and High, a club occasionally bids above value for an unlisted key player.
+
+- **Offer frequency** (*Settings › Simulation › Transfer/Loan Offer Frequency*, saved with the career): Low aims at about 2 relevant offers per open-window week, Medium about 5 and High about 9. These are targets, not quotas: a club needs a real reason to make an offer, so you get fewer when few of your players suit other clubs. In development runs, the averages per window week were 2.2 (Low), 5.4–5.6 (Medium) and 9.4 (High), about 40% transfers and 60% loans.
+- **Timing:** offers stop 7 days before deadline day, so an accepted deal still registers in the window. In the 10 days before a window opens, clubs make offers that take effect on its opening day. Between windows there are only domestic emergency loans from clubs with three or more unavailable senior players.
+- **Limits:** a club does not come back for the same player within 42 days, and each player and each club can have only a few open offers at once. Accepting an offer withdraws the others for that player. Clubs also withdraw an offer if the player gets injured, their budget no longer covers it, or they sign someone else for that position.
+- **Loan offers** (*Loans › Loan offers*) state the club, start and end dates, loan fee, wage split, role and expected playing time, recall clauses, any option or obligation to buy (with its conditions) or sell-on share, the club's reason and a reply-by date. You accept, reject or counter. A loan starts on the agreed date and appears in the *Loan tracker* with weekly monitoring. At the end date it becomes permanent if an obligation's condition is met or the borrower takes up its option; otherwise the player returns. Recalls follow the agreed clauses. Because offers are checked before they are sent, every accepted offer completed in development runs; before this change, many accepted loans failed at a later rule check.
+- **Loan list:** there is no "find a club" search for your own players. Use *Loans › Loan list* to make a player available, and to see how many open offers he has. Loans in are still arranged from the player database.
+
+### Registration and eligibility
+
+Being signed and being allowed to play are separate:
+
+1. **Contract (signing).** Only real transfer rules can stop a signing: the registration window, the transfer and wage budgets (or a transfer embargo), FIFA Article 19 for minors, loan rules and a valid contract. A GBE or a foreign-player quota never does.
+2. **Association registration.** In this model only English clubs need work permission. British and Irish nationals, and players moving between English clubs with an existing registration, need no Governing Body Endorsement (GBE); everyone else needs enough GBE points. If a player does not have enough points, registration is refused, and if no GBE evidence exists yet it is pending. In both cases the case is reviewed again after 28 days. An approved registration lasts for the whole spell at the club.
+3. **Competition registration.** Domestic senior league and cup squads count the association's foreign-player quota. Continental competitions need only the association registration. When a quota place frees up during a window, the next player on the list is registered.
+4. **Match eligibility.** Competitive matches need both registrations and a player who is not injured or suspended. Friendlies and training need only a contract. The manager never picks an ineligible player for a competitive match.
+
+Registrations are reviewed again after each GBE refresh, when a window opens, every 28 days for open cases, when a quota place frees up, at the season rollover, and when a loan starts, ends or is recalled. Squad lists, the player database and *Boardroom › Squad registration* show badges such as *Signed · eligible*, *Signed · not registered*, *Registration pending*, *Ineligible · insufficient GBE (x/15)*, *Eligible after requirements (date)* and *On loan · eligible*. The player sheet's *Registration & eligibility* section shows the contract, the association and competition registrations with their reasons, whether he can play the next match, and the GBE breakdown. For players at other clubs it shows *Registration if signed*. A signed but unregistered player can still train and play friendlies, and clubs may offer to take him on loan so he can earn GBE points. Real UK immigration rules would stop such a signing altogether; letting it go ahead is a deliberate simplification.
+
+#### GBE
+
+GBE: FA 2026/27 points model with a per-criterion breakdown on the player sheet. Six criteria score points: senior international appearances, domestic minutes, continental minutes, league position, continental progression and league standard. Club minutes count over the last 12 months, and senior international appearances and Elite Significant Contribution over the last 24 months (12 months for youth internationals). A player needs 15 points. With 10–14 points he is in the Exceptions Panel band, which the game does not grant automatically, and a high enough international record is an automatic pass. British and Irish nationals are exempt. Each criterion shows as *scored*, *zero* (data exists but earns no points), *no data* (missing evidence is not counted as zero) or *pre-game estimate* (for careers that started before the match was simulated). The overall result is automatic pass, pass, Exceptions Panel band, fail, exempt or no data.
+
+Every senior match feeds a monthly minutes record. The points are recalculated weekly whenever a new month starts, for every player at the season rollover, for squad players after each senior international window, and on request when a player's result is out of date (he changed club, it is more than 38 days old, or the ruleset changed). Older careers and saves build this record on the next day played or when the save loads. The breakdown appears in the player sheet's *Registration & eligibility* section and in the *Registration if signed* preview, and the API serves it at `GET /api/players/:id/gbe`.
+
+Senior national teams play an *International Friendlies* competition in the March and June FIFA windows; nations outside their confederation's Nations Series also play on its autumn dates, about ten matches a year in total. Friendlies count as international appearances only for nations that played fewer than 30% competitive matches, as in the FA rules.
+
+In a development run of 12 nations (about 22,500 senior club players), 8% of players had zero points in a fresh world and 7% after a season; before this model nearly everyone had zero. Capped internationals averaged about 34 points and 95% passed, against about 7 points and a 16–18% pass rate for uncapped players. After a season, players in the strongest league band averaged 21.1 points (63% of non-exempt players passing), falling through 16.2 (55%), 12.0 (38%), 7.7 (2%) and 5.1 (0%) to 2.4 (0%) in the weakest band.
 
 ## Project layout
 

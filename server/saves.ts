@@ -7,8 +7,9 @@ import { randomUUID } from "node:crypto";
 import { Readable, Writable } from "node:stream";
 import { finished, pipeline } from "node:stream/promises";
 import type { SqlParameter, Store } from "./db.ts";
-import { WORLD_TABLES, quoteIdentifier, schemaMigrations, tableName as qualifiedTable } from "./sql-schema.ts";
+import { ADDED_WORLD_TABLES, WORLD_TABLES, quoteIdentifier, schemaMigrations, tableName as qualifiedTable } from "./sql-schema.ts";
 import { ensureClubSupport } from "./club-support.ts";
+import { ensureGbeBaseline } from "./gbe.ts";
 import {
   clubOf,
   GameError,
@@ -311,7 +312,12 @@ export async function checkpointSchema(
         `Inconsistent writable column inventory for ${name}.`,
       );
     const legacy = LEGACY_COLUMNS[name];
-    tables.push({ name, columns: stored.map(portableColumn), ...(legacy ? { legacyColumns: [...legacy] } : {}) });
+    tables.push({
+      name,
+      columns: stored.map(portableColumn),
+      ...(legacy ? { legacyColumns: [...legacy] } : {}),
+      ...(ADDED_WORLD_TABLES.has(name) ? { optional: true } : {}),
+    });
   }
   const schema = { version: SAVE_SCHEMA_VERSION, tables };
   validateManifest({
@@ -695,6 +701,8 @@ export async function restoreCheckpointFile(
       throw new SaveFormatError("The checkpoint's active club does not exist.");
     if (upgrade) {
       await ensureClubSupport(store);
+      // Checkpoints older than the GBE ledger: pre-game estimate and the months already played, rebuilt once.
+      await ensureGbeBaseline(store);
       const settings = await store.meta<Settings>("settings");
       if (settings.cloudSync !== false)
         await store.setMeta("settings", { ...settings, cloudSync: false });

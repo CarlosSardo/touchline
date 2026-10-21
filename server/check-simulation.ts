@@ -15,6 +15,7 @@ import {
   minorPresenceLegal,
 } from "./registration.ts";
 import { databaseFootprint, FOOTPRINT_BUDGET } from "./retention.ts";
+import { quoteIdentifier } from "./sql-schema.ts";
 import { COMPETITIONS } from "./calendar.ts";
 import { continentalEntries } from "./qualification.ts";
 import { ageOn, daysBetween, VALUE_RANGE } from "../shared/rules.ts";
@@ -197,21 +198,74 @@ const activePlayers = async (store: Store) =>
     "SELECT count(*) AS total FROM players WHERE role != 'Retired'",
   ))!.total;
 
-/** Same report as `npm run db:footprint`; a season growing the world by more than the budget is flagged. */
-export async function reportFootprint(store: Store, label: string, previousMB?: number) {
+/** Fixtures a season in the full world, which decision 11's season budget was set for. */
+export const FULL_WORLD_FIXTURES = 110_000;
+/** Below this a soak world's season budget does not shrink further (fixed per-world overheads dominate). */
+export const MIN_SEASON_BUDGET_MB = 32;
+/**
+ * The players table (heap, out-of-line profiles and indexes) per player row. Squads are rewritten every week, so
+ * the table settles at about two versions of every row once the first weeks have run (measured ≈7.5 KB per row);
+ * row-version bloat (issue 1: 29–95 KB per row after a season) breaks it.
+ */
+export const PLAYER_ROW_BUDGET_BYTES = 10_240;
+
+/**
+ * The season growth budget of a soak world: decision 11 allows FOOTPRINT_BUDGET.seasonMB for the full world's
+ * ~110k fixtures; smaller worlds get the same megabytes per fixture played, with a floor.
+ */
+export function seasonBudgetMB(fixtures: number) {
+  return Math.max(
+    MIN_SEASON_BUDGET_MB,
+    Math.round(FOOTPRINT_BUDGET.seasonMB * Math.min(1, fixtures / FULL_WORLD_FIXTURES)),
+  );
+}
+
+export interface FootprintCheck {
+  worldMB: number;
+  /** World tables other than players: what accumulates season by season (fixtures, history, statistics…). */
+  accumulatedMB: number;
+  /** Growth of accumulatedMB since the previous report. */
+  seasonMB: number | undefined;
+  budgetMB: number;
+  playerBytesPerRow: number;
+  over: boolean;
+}
+
+/**
+ * Same report as `npm run db:footprint`, after fresh statistics so row counts are current. The players table must
+ * stay within PLAYER_ROW_BUDGET_BYTES per row; with `previousMB` (the last report's accumulatedMB) and the season's
+ * `fixtures`, the other tables' growth must stay within seasonBudgetMB(). Either overrun is `over` (the soak fails).
+ */
+export async function reportFootprint(
+  store: Store,
+  label: string,
+  previousMB?: number,
+  fixtures = FULL_WORLD_FIXTURES,
+): Promise<FootprintCheck> {
+  await store.exec(`ANALYZE ${(await store.worldTables()).map(quoteIdentifier).join(", ")}`);
   const [footprint] = await databaseFootprint(store);
-  const seasonMB = previousMB === undefined ? undefined : Math.round((footprint.worldMB - previousMB) * 10) / 10;
-  const over = seasonMB !== undefined && seasonMB > FOOTPRINT_BUDGET.seasonMB;
+  const players = footprint.tables.find((table) => table.table === "players");
+  const playersMB = players?.reservedMB ?? 0;
+  const accumulatedMB = Math.round((footprint.worldMB - playersMB) * 10) / 10;
+  const seasonMB = previousMB === undefined ? undefined : Math.round((accumulatedMB - previousMB) * 10) / 10;
+  const budgetMB = seasonBudgetMB(fixtures);
+  const playerBytesPerRow = players?.rows ? Math.round((playersMB * 1048576) / players.rows) : 0;
+  const seasonOver = seasonMB !== undefined && seasonMB > budgetMB;
+  const playersOver = playerBytesPerRow > PLAYER_ROW_BUDGET_BYTES;
   const largest = footprint.tables.slice(0, 4).map((table) => `${table.table} ${table.reservedMB}`).join(", ");
   console.log(
     `Footprint ${label}: world ${footprint.worldMB} MB, ${footprint.rows} rows` +
-      (seasonMB === undefined ? "" : `, ${seasonMB >= 0 ? "+" : ""}${seasonMB} MB this season`) +
-      (over ? ` OVER the ${FOOTPRINT_BUDGET.seasonMB} MB season budget` : "") +
+      (seasonMB === undefined
+        ? ""
+        : `, other tables ${seasonMB >= 0 ? "+" : ""}${seasonMB} MB this season (budget ${budgetMB} MB for ${fixtures} fixtures)${seasonOver ? " OVER BUDGET" : ""}`) +
+      `; players ${playersMB} MB, ${playerBytesPerRow} bytes per row (budget ${PLAYER_ROW_BUDGET_BYTES})${playersOver ? " OVER BUDGET" : ""}` +
       ` (largest: ${largest})`,
   );
-  if (over && process.env.GITHUB_ACTIONS === "true")
-    console.log(`::warning title=DB footprint::${label} added ${seasonMB} MB (budget ${FOOTPRINT_BUDGET.seasonMB} MB).`);
-  return { worldMB: footprint.worldMB, seasonMB };
+  if ((seasonOver || playersOver) && process.env.GITHUB_ACTIONS === "true")
+    console.log(
+      `::error title=DB footprint::${label}: other tables ${seasonMB ?? 0} MB this season (budget ${budgetMB} MB), players ${playerBytesPerRow} bytes per row (budget ${PLAYER_ROW_BUDGET_BYTES}).`,
+    );
+  return { worldMB: footprint.worldMB, accumulatedMB, seasonMB, budgetMB, playerBytesPerRow, over: seasonOver || playersOver };
 }
 
 /** Section 8 squad invariant: minimums with two goalkeepers everywhere, youth and AI first-team caps. */
@@ -689,19 +743,18 @@ export async function seasonSoak(seasons: number, fullWorld = false, nations: re
     const initialPlayers = await activePlayers(store);
     const initialSizes = leagueSizes(await seniorPlaces(store));
     const generated = await reportFootprint(store, "after generation");
-    let worldMB = generated.worldMB;
+    let accumulatedMB = generated.accumulatedMB;
     await checkSquads(store, "world start");
     await checkMinors(store, (await stateOf(store)).date);
     let heights = await checkYouthHeights(store, (await stateOf(store)).date, new Map());
-    const rollovers: (Omit<Awaited<ReturnType<typeof checkRollover>>, "heights"> & {
-      worldMB: number;
-      seasonMB: number | undefined;
+    const rollovers: (Omit<Awaited<ReturnType<typeof checkRollover>>, "heights"> & FootprintCheck & {
       seasonStartPlayers: number;
       playersBeforeRollover: number;
     })[] = [];
     const squadChecks: SquadCheck[] = [];
     let seasonStartPlayers = initialPlayers;
     let simulated = 0;
+    let seasonMatches = 0;
     let weeks = 0;
     let advanceSeconds = 0;
     const timing = () => {
@@ -710,7 +763,7 @@ export async function seasonSoak(seasons: number, fullWorld = false, nations: re
         matchesPerSecond: Math.round((simulated / Math.max(0.01, advanceSeconds)) * 10) / 10,
         secondsPerWeek: Math.round(perWeek * 10) / 10,
         // First-order scaling by fixture volume: ~110k fixtures a season in the full v4 world.
-        fullWorldSecondsPerWeek: Math.round((perWeek * (110_000 / 52)) / Math.max(1, simulated / Math.max(1, weeks))),
+        fullWorldSecondsPerWeek: Math.round((perWeek * (FULL_WORLD_FIXTURES / 52)) / Math.max(1, simulated / Math.max(1, weeks))),
       };
     };
     while ((await stateOf(store)).date < end) {
@@ -727,6 +780,7 @@ export async function seasonSoak(seasons: number, fullWorld = false, nations: re
         daysBetween(current.date, `${current.season + 1}-07-01`) <= step ? await seniorPlaces(store) : undefined;
       const playersBeforeRollover = before ? await activePlayers(store) : undefined;
       const result = await advance(store, step);
+      seasonMatches += result.matches;
       const now = await stateOf(store);
       if (now.season !== current.season) {
         assert(before && playersBeforeRollover !== undefined, "A rollover ran before the step that reaches 1 July");
@@ -741,8 +795,9 @@ export async function seasonSoak(seasons: number, fullWorld = false, nations: re
           `Population ${summary.season - 1}/${String(summary.season).slice(-2)}: ${seasonStartPlayers} at the start; ${playersBeforeRollover} before the rollover (${change(playersBeforeRollover - seasonStartPlayers)}; weekly squad check: ${describeInSeason(inSeason)}); ` +
             `${summary.players} after it (${change(summary.players - playersBeforeRollover)}; ${flows.count} created incl. ${flows.academy} academy, ${flows.topUps} top-up places, ${flows.pools} home-pool entrants, ${flows.retired} retired, ${flows.leftFootball} left football)`,
         );
-        const footprint = await reportFootprint(store, `after the ${summary.season} rollover`, worldMB);
-        worldMB = footprint.worldMB;
+        const footprint = await reportFootprint(store, `after the ${summary.season} rollover`, accumulatedMB, seasonMatches);
+        accumulatedMB = footprint.accumulatedMB;
+        seasonMatches = 0;
         rollovers.push({ ...summary, ...footprint, seasonStartPlayers, playersBeforeRollover });
         seasonStartPlayers = summary.players;
       }
@@ -774,6 +829,12 @@ export async function seasonSoak(seasons: number, fullWorld = false, nations: re
     }
     assert.equal(rollovers.length, seasons, "Every season must roll over");
     await checkSqlConstraints(store);
+    const overBudget = rollovers.filter((rollover) => rollover.over);
+    assert.equal(
+      overBudget.length,
+      0,
+      `The world grew past its footprint budget: ${overBudget.map((rollover) => `${rollover.season - 1}/${String(rollover.season).slice(-2)} other tables +${rollover.seasonMB} MB (budget ${rollover.budgetMB} MB), players ${rollover.playerBytesPerRow} bytes per row (budget ${PLAYER_ROW_BUDGET_BYTES})`).join(", ")}`,
+    );
     const failedChecks = squadChecks.filter((check) => !check.ok);
     assert.equal(
       failedChecks.length,

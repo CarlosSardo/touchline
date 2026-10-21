@@ -34,8 +34,9 @@ import { MATCH_RULES_VERSION } from "./match.ts";
 import { recordAssociationCoefficients } from "./qualification.ts";
 import { pruneSeason, storedAppearanceStats, storedMatchData } from "./retention.ts";
 import { assessRegistration } from "./registration.ts";
+import { competitiveRegistrationSql, processRegistrations } from "./eligibility.ts";
+import { generateUserClubOffers } from "./market-offers.ts";
 import {
-  assessPlayerInterest,
   buyerGoingRate,
   marketMoveInterest,
   marketWageOffer,
@@ -51,7 +52,6 @@ import {
 import {
   dailyMedia,
   publishClubRoundup,
-  publishTransferStory,
 } from "./media.ts";
 import {
   assessFinances,
@@ -59,7 +59,8 @@ import {
   estimateClubRevenue,
   leaguePrizeMoney,
   parachutePayment,
-  postWeeklyAccounts,
+  postWeeklyAccountsBatch,
+  type WeeklyAccount,
   recordFinancialItem,
   seasonBudgets,
   MOVEMENT_BUDGET_FACTOR,
@@ -86,6 +87,7 @@ import {
 import { CALL_UP_RULES } from "../shared/features/callups.ts";
 import { exposureValueFactor, type NationalDutyRecord } from "../shared/features/youth-internationals.ts";
 import { dutySquad, playersOnDuty, processInternationalDuty } from "./internationals.ts";
+import { closeGbeSeason, ensureGbeBaseline, recordGbeMatches, refreshGbe, refreshGbeIfDue } from "./gbe.ts";
 import { nationByCode } from "../shared/world-catalog/index.ts";
 import { marketValueFactor } from "../shared/world-catalog/market.ts";
 import { MIN_GOALKEEPERS, SQUAD_MINIMUMS } from "../shared/world-rules.ts";
@@ -94,17 +96,10 @@ import {
   closeNegotiation,
   progressDealMilestones,
   processTransferPayments,
-  defaultLoanTerms,
   experience,
   expireLoans,
   finishScouting,
   GameError,
-  internationalLoanIssue,
-  loanAskingFee,
-  loanEndDate,
-  loanTermsIssue,
-  maxLoanBonus,
-  minimumOptionFee,
   news,
   playerOf,
   reviewLoans,
@@ -121,6 +116,7 @@ import {
   daysBetween,
   deadlineDay,
   disciplineScope,
+  FORMATION_POSITIONS,
   internationalBreak,
   LEGACY_DISCIPLINE_SCOPE,
   LOAN_TYPES,
@@ -148,12 +144,7 @@ import type {
   Standing,
 } from "../shared/types.ts";
 
-const formations: Record<string, Position[]> = {
-  "4-3-3": ["GK", "RB", "CB", "CB", "LB", "DM", "CM", "CM", "RW", "ST", "LW"],
-  "4-2-3-1": ["GK", "RB", "CB", "CB", "LB", "DM", "CM", "RW", "AM", "LW", "ST"],
-  "3-5-2": ["GK", "CB", "CB", "CB", "RB", "CM", "DM", "CM", "LB", "ST", "ST"],
-  "4-4-2": ["GK", "RB", "CB", "CB", "LB", "RW", "CM", "CM", "LW", "ST", "ST"],
-};
+const formations = FORMATION_POSITIONS;
 const AGE_LIMITS: Record<string, number> = { U17: 17, U19: 19, U20: 20, U21: 21 };
 
 type ColumnType = "integer" | "double precision" | "text";
@@ -295,6 +286,11 @@ export async function matchTeam(
   // National teams on duty play their named squad; clubs lose players away with national teams.
   const squad = club.type === "national" ? await dutySquad(store, club.id, league?.id, date) : undefined;
   const onDuty = club.type === "national" ? new Set<number>() : await playersOnDuty(store, date);
+  // Competitive fixtures need the player's registration; friendlies (no league) only a contract.
+  const registered =
+    club.type !== "national" && league
+      ? `AND ${competitiveRegistrationSql("players", String(Number(league.id)), String(Number((await stateOf(store)).season)))}`
+      : "";
   let eligible = squad
     ? await store.all<Player>(
         `SELECT * FROM players WHERE id = ANY(?::integer[]) AND role != 'Retired' AND (injury_until IS NULL OR injury_until <= ?) AND NOT EXISTS(SELECT 1 FROM discipline WHERE discipline.player_id = players.id AND discipline.scope = ? AND suspension > 0) AND NOT EXISTS(SELECT 1 FROM player_match_appearances WHERE player_match_appearances.player_id = players.id AND date = ? AND minutes > 0) ORDER BY ability + fitness * 0.3 DESC, id LIMIT 60`,
@@ -304,7 +300,7 @@ export async function matchTeam(
         date,
       )
     : await store.all<Player>(
-    `SELECT * FROM players WHERE ${club.type === "national" ? "country_id" : "playing_club_id"} = ? AND birth_date >= ? AND role != 'Retired' AND (injury_until IS NULL OR injury_until <= ?) AND NOT EXISTS(SELECT 1 FROM discipline WHERE discipline.player_id = players.id AND discipline.scope = ? AND suspension > 0) ${club.type === "national" ? "" : "AND age_group = ?"} AND NOT EXISTS(SELECT 1 FROM player_match_appearances WHERE player_match_appearances.player_id = players.id AND date = ? AND minutes > 0) ORDER BY ability + fitness * 0.3 + CASE role WHEN 'Key player' THEN 5 WHEN 'Captain' THEN 6 WHEN 'Regular starter' THEN 3 ELSE 0 END + coalesce((SELECT ${jsonNumber("terms", "$.playingTime")} / 15.0 FROM loans WHERE loans.player_id = players.id AND loans.status = 'active'),0) DESC, id LIMIT 60`,
+    `SELECT * FROM players WHERE ${club.type === "national" ? "country_id" : "playing_club_id"} = ? AND birth_date >= ? AND role != 'Retired' AND (injury_until IS NULL OR injury_until <= ?) AND NOT EXISTS(SELECT 1 FROM discipline WHERE discipline.player_id = players.id AND discipline.scope = ? AND suspension > 0) ${club.type === "national" ? "" : "AND age_group = ?"} ${registered} AND NOT EXISTS(SELECT 1 FROM player_match_appearances WHERE player_match_appearances.player_id = players.id AND date = ? AND minutes > 0) ORDER BY ability + fitness * 0.3 + CASE role WHEN 'Key player' THEN 5 WHEN 'Captain' THEN 6 WHEN 'Regular starter' THEN 3 ELSE 0 END + coalesce((SELECT ${jsonNumber("terms", "$.playingTime")} / 15.0 FROM loans WHERE loans.player_id = players.id AND loans.status = 'active'),0) DESC, id LIMIT 60`,
     club.type === "national" ? club.country_id : club.id,
     birthCutoff,
     date,
@@ -322,7 +318,7 @@ export async function matchTeam(
     eligible,
     (team, cutoff) =>
       store.all<Player>(
-        "SELECT * FROM players WHERE playing_club_id = ? AND age_group = ? AND birth_date >= ? AND role != 'Retired' AND fitness >= ? AND (injury_until IS NULL OR injury_until <= ?) AND NOT EXISTS(SELECT 1 FROM discipline WHERE discipline.player_id = players.id AND discipline.scope = ? AND suspension > 0) AND NOT EXISTS(SELECT 1 FROM player_match_appearances WHERE player_match_appearances.player_id = players.id AND date >= ? AND minutes > 0) ORDER BY ability DESC, id LIMIT 8",
+        `SELECT * FROM players WHERE playing_club_id = ? AND age_group = ? AND birth_date >= ? AND role != 'Retired' AND fitness >= ? AND (injury_until IS NULL OR injury_until <= ?) AND NOT EXISTS(SELECT 1 FROM discipline WHERE discipline.player_id = players.id AND discipline.scope = ? AND suspension > 0) ${registered} AND NOT EXISTS(SELECT 1 FROM player_match_appearances WHERE player_match_appearances.player_id = players.id AND date >= ? AND minutes > 0) ORDER BY ability DESC, id LIMIT 8`,
         team.clubId,
         team.ageGroup,
         cutoff,
@@ -687,7 +683,7 @@ async function standingsConsequences(
     club.id,
   );
   await store.run(
-    "UPDATE players SET morale = LEAST(99,GREATEST(1,morale + ?)), value = value * ? WHERE club_id = ?",
+    "UPDATE players SET morale = LEAST(99,GREATEST(1,players.morale + changes.morale)), value = players.value * changes.factor FROM (SELECT ?::double precision AS morale, ?::double precision AS factor) AS changes WHERE club_id = ? AND (changes.factor <> 1 OR LEAST(99,GREATEST(1,players.morale + changes.morale)) <> players.morale)",
     result * 2 - crisis / 100,
     1 + hype / 20000 - crisis / 18000,
     club.id,
@@ -894,6 +890,8 @@ export async function playFixture(store: Store, fixture: Fixture) {
     );
     if (!saved.changes) return;
     await updateTable(store, fixture, officialResult);
+    // Before discipline: today's bans and injuries still describe who was unavailable for this match.
+    await recordGbeMatches(store, state.date, [{ fixture, league, teams: [snapshot.home, snapshot.away], result }], await playersOnDuty(store, state.date));
     const appearances: Record<string, string | number | null>[] = [];
     const playerUpdates: Record<string, string | number | null>[] = [];
     const history: Record<string, string | number>[] = [];
@@ -1025,7 +1023,7 @@ interface BatchCandidate {
   fitness: number;
 }
 
-const SIDE_COLUMNS: RowColumns = { k: "integer", club_id: "integer", age_group: "text", scope: "text", cutoff: "text" };
+const SIDE_COLUMNS: RowColumns = { k: "integer", club_id: "integer", league_id: "integer", age_group: "text", scope: "text", cutoff: "text" };
 
 /** Whether a result counts in the competition's table: league, league-phase and group matches, not knockout ties. */
 function tableFixture(fixture: Pick<Fixture, "stage" | "data">) {
@@ -1047,7 +1045,7 @@ async function addBatchCallUps(
   batch: Fixture[],
   clubs: Map<number, Club>,
   leagues: Map<number, League>,
-  sides: { k: number; scope: string; cutoff: string }[],
+  sides: { k: number; scope: string; cutoff: string; league_id: number | null }[],
   candidates: Map<number, BatchCandidate[]>,
   onDuty: ReadonlySet<number>,
 ) {
@@ -1062,9 +1060,11 @@ async function addBatchCallUps(
       leagueIds,
     ))
       lastRound.set(row.league_id, row.last);
-  const selected: { k: number; owner: number; club_id: number; age_group: string; scope: string; cutoff: string; level: TargetLevel; roll: number; late: boolean; tier: number }[] = [];
+  const selected: { k: number; owner: number; club_id: number; league_id: number | null; age_group: string; scope: string; cutoff: string; level: TargetLevel; roll: number; late: boolean; tier: number }[] = [];
   batch.forEach((fixture, index) => {
-    const league = leagues.get(fixture.league_id!)!;
+    // Friendlies play the club's own squad, as in playFixture.
+    if (fixture.league_id === null) return;
+    const league = leagues.get(fixture.league_id)!;
     const last = lastRound.get(league.id);
     const late = last !== undefined && last - fixture.round < CALL_UP_RULES.ai.lateRounds;
     [fixture.home_id, fixture.away_id].forEach((clubId, side) => {
@@ -1076,7 +1076,7 @@ async function addBatchCallUps(
       if (!aiNeedsLower(candidates.get(k) ?? []) && roll >= aiMeritChance(level, late, league.tier)) return;
       const lower = lowerTeam(club, level);
       if (lower)
-        selected.push({ k, owner: clubId, club_id: lower.clubId, age_group: lower.ageGroup, scope: sides[k].scope, cutoff: sides[k].cutoff, level, roll, late, tier: league.tier });
+        selected.push({ k, owner: clubId, club_id: lower.clubId, league_id: sides[k].league_id, age_group: lower.ageGroup, scope: sides[k].scope, cutoff: sides[k].cutoff, level, roll, late, tier: league.tier });
     });
   });
   if (!selected.length) return;
@@ -1092,6 +1092,7 @@ async function addBatchCallUps(
        CROSS JOIN LATERAL (SELECT players.id, players.name, players.position, players.secondary_position, players.ability, players.fitness, players.age FROM players
          WHERE players.playing_club_id = side.club_id AND players.age_group = side.age_group AND players.birth_date >= side.cutoff AND players.role != 'Retired' AND players.fitness >= ? AND (players.injury_until IS NULL OR players.injury_until <= ?)
          AND NOT EXISTS(SELECT 1 FROM discipline WHERE discipline.player_id = players.id AND discipline.scope = side.scope AND discipline.suspension > 0)
+         AND ${competitiveRegistrationSql("players", "side.league_id", String(Number(state.season)))}
          AND NOT EXISTS(SELECT 1 FROM player_match_appearances WHERE player_match_appearances.player_id = players.id AND player_match_appearances.date >= ? AND player_match_appearances.minutes > 0)
          ORDER BY players.ability DESC, players.id LIMIT 8) AS pick
        ORDER BY side.k, pick.ability DESC, pick.id`,
@@ -1128,7 +1129,8 @@ async function addBatchCallUps(
 
 /**
  * Plays fixtures outside the user's club family with the fast result model and set-based
- * statements. Returns the fixtures it cannot handle (two-leg ties, national teams, friendlies).
+ * statements, club friendlies included (no table, discipline, season statistics or injuries, as in playFixture).
+ * Returns the fixtures it cannot handle (two-leg ties, unnamed or friendly national teams).
  */
 export async function playFixtureBatch(store: Store, fixtures: Fixture[]) {
   if (!fixtures.length) return [];
@@ -1165,28 +1167,33 @@ export async function playFixtureBatch(store: Store, fixtures: Fixture[]) {
       }
   const onDuty = await playersOnDuty(store, state.date);
   const batch = fixtures.filter((fixture) => {
-    const league = fixture.league_id === null ? undefined : leagues.get(fixture.league_id);
+    const friendly = fixture.league_id === null;
+    const league = friendly ? undefined : leagues.get(fixture.league_id!);
     // One fixture per squad per batch keeps table and squad updates order-free.
-    const keys = [fixture.home_id, fixture.away_id].map((id) => `${id}:${league?.age_group}`);
+    const keys = [fixture.home_id, fixture.away_id].map((id) => `${id}:${league?.age_group ?? "Senior"}`);
     const handled =
-      league !== undefined &&
+      (league !== undefined || friendly) &&
       !JSON.parse(fixture.data).tie &&
       keys.every((key) => !squads.has(key)) &&
       [fixture.home_id, fixture.away_id].every(
-        (id) => clubs.has(id) && (clubs.get(id)!.type !== "national" || named.has(`${id}:${fixture.league_id}`)),
+        (id) =>
+          clubs.has(id) &&
+          (clubs.get(id)!.type !== "national" || (!friendly && named.has(`${id}:${fixture.league_id}`))),
       );
     if (handled) for (const key of keys) squads.add(key);
     else leftover.push(fixture);
     return handled;
   });
   const sides = batch.flatMap((fixture, index) => {
-    const league = leagues.get(fixture.league_id!)!;
-    const limit = AGE_LIMITS[league.age_group] ?? 100;
+    const league = fixture.league_id === null ? undefined : leagues.get(fixture.league_id)!;
+    const ageGroup = league?.age_group ?? "Senior";
+    const limit = AGE_LIMITS[ageGroup] ?? 100;
     const year = Number((limit < 100 ? String(state.season) : state.date).slice(0, 4));
     return [fixture.home_id, fixture.away_id].map((clubId, side) => ({
       k: index * 2 + side,
       club_id: clubId,
-      age_group: league.age_group,
+      league_id: fixture.league_id,
+      age_group: ageGroup,
       scope: disciplineScope(league),
       cutoff: `${year - limit + 1}-01-01`,
       squad: named.get(`${clubId}:${fixture.league_id}`)?.players,
@@ -1205,6 +1212,7 @@ export async function playFixtureBatch(store: Store, fixtures: Fixture[]) {
          FROM players
          WHERE players.playing_club_id = side.club_id AND players.age_group = side.age_group AND players.birth_date >= side.cutoff AND players.role != 'Retired' AND (players.injury_until IS NULL OR players.injury_until <= ?)
          AND NOT EXISTS(SELECT 1 FROM discipline WHERE discipline.player_id = players.id AND discipline.scope = side.scope AND discipline.suspension > 0)
+         AND ${competitiveRegistrationSql("players", "side.league_id", String(Number(state.season)))}
          AND NOT EXISTS(SELECT 1 FROM player_match_appearances WHERE player_match_appearances.player_id = players.id AND player_match_appearances.date = ? AND player_match_appearances.minutes > 0)
          ORDER BY score DESC, players.id LIMIT ${clubTop}) AS pick
        ORDER BY side.k, pick.score DESC, pick.id`,
@@ -1297,20 +1305,20 @@ export async function playFixtureBatch(store: Store, fixtures: Fixture[]) {
         ).map((country) => [country.id, country.code])
       : [],
   );
-  const goalFactor = (league: League) =>
-    league.kind === "league" && league.age_group === "Senior" && league.country_id !== null
+  const goalFactor = (league: League | undefined) =>
+    league?.kind === "league" && league.age_group === "Senior" && league.country_id !== null
       ? matchGoalFactor(countryCodes.get(league.country_id), league.tier)
       : 1;
   const matches = batch.map((fixture, index) => {
-    const league = leagues.get(fixture.league_id!)!;
-    const rules = knockoutRules(league.name, fixture.stage);
+    const league = fixture.league_id === null ? undefined : leagues.get(fixture.league_id)!;
+    const rules = knockoutRules(league?.name ?? "Friendly", fixture.stage);
     const snapshot: MatchSnapshot = {
       rulesVersion: MATCH_RULES_VERSION,
       goalFactor: goalFactor(league),
       home: team(clubs.get(fixture.home_id)!, candidates.get(index * 2) ?? []),
       away: team(clubs.get(fixture.away_id)!, candidates.get(index * 2 + 1) ?? []),
       weather: "Clear",
-      importance: fixture.stage === "Final" ? 100 : league.kind === "league" ? 65 : 78,
+      importance: fixture.stage === "Final" ? 100 : league?.kind === "league" ? 65 : 78,
       detail: String(settings.matchDetail),
       rules: {
         decisive: isKnockoutStage(fixture.stage),
@@ -1341,7 +1349,8 @@ export async function playFixtureBatch(store: Store, fixtures: Fixture[]) {
 
 interface BatchMatch {
   fixture: Fixture;
-  league: League;
+  /** Undefined for a club friendly. */
+  league: League | undefined;
   snapshot: MatchSnapshot;
   scopes: string[];
   /** Country of a national side (its suspensions are served by nationality), else null. */
@@ -1356,6 +1365,12 @@ async function writeMatchBatch(
   matches: BatchMatch[],
 ) {
   if (!matches.length) return;
+  await recordGbeMatches(
+    store,
+    state.date,
+    matches.map(({ fixture, league, snapshot, result }) => ({ fixture, league, teams: [snapshot.home, snapshot.away], result })),
+    await playersOnDuty(store, state.date),
+  );
   const participantIds = matches.flatMap(({ result }) =>
     Object.entries(result.players)
       .filter(([, stats]) => stats.minutes > 0)
@@ -1377,7 +1392,7 @@ async function writeMatchBatch(
   const playerUpdates: Record<string, string | number | null>[] = [];
   const history: Record<string, string | number>[] = [];
   const disciplineTeams: { club_id: number; scope: string; country_id: number; national: number; age_group: string }[] = [];
-  const participants: { player: MatchPlayer; stats: Record<string, number>; team: MatchTeam; match: BatchMatch; scope: string }[] = [];
+  const participants: { player: MatchPlayer; stats: Record<string, number>; team: MatchTeam; match: BatchMatch; league: League; scope: string }[] = [];
   const injuries: { id: number; until: string }[] = [];
   const senior: { club_id: number; league_id: number; result: number; margin: number }[] = [];
   for (const match of matches) {
@@ -1420,7 +1435,7 @@ async function writeMatchBatch(
         false,
       ),
     });
-    if (tableFixture(fixture))
+    if (league && tableFixture(fixture))
       for (const home of [true, false])
         tableRows.set(`${fixture.league_id}:${home ? fixture.home_id : fixture.away_id}`, {
           league_id: fixture.league_id!,
@@ -1432,21 +1447,24 @@ async function writeMatchBatch(
           xpts: home ? result.homeXpts : result.awayXpts,
           home,
         });
-    if (league.kind === "league" && league.age_group === "Senior")
+    if (league?.kind === "league" && league.age_group === "Senior")
       for (const home of [true, false]) {
         const margin = home ? result.homeGoals - result.awayGoals : result.awayGoals - result.homeGoals;
         senior.push({ club_id: home ? fixture.home_id : fixture.away_id, league_id: league.id, result: Math.sign(margin), margin });
       }
-    for (const injury of result.injuries ?? [])
-      injuries.push({ id: injury.playerId, until: addDays(fixture.date, injury.days) });
+    // Friendlies leave tables, discipline, season statistics and injuries alone (as in playFixture).
+    if (league)
+      for (const injury of result.injuries ?? [])
+        injuries.push({ id: injury.playerId, until: addDays(fixture.date, injury.days) });
     for (const team of [snapshot.home, snapshot.away]) {
       const scope = match.scopes[team.id === fixture.home_id ? 0 : 1];
       const nation = match.nations?.[team.id === fixture.home_id ? 0 : 1] ?? null;
-      disciplineTeams.push({ club_id: team.id, scope, country_id: nation ?? 0, national: nation === null ? 0 : 1, age_group: league.age_group });
+      if (league)
+        disciplineTeams.push({ club_id: team.id, scope, country_id: nation ?? 0, national: nation === null ? 0 : 1, age_group: league.age_group });
       for (const player of [...team.lineup, ...(team.bench ?? [])]) {
         const stats = result.players[player.id];
         if (!stats?.minutes) continue;
-        participants.push({ player, stats, team, match, scope });
+        if (league) participants.push({ player, stats, team, match, league, scope });
         const on = result.substitutions?.find((change) => change.onId === player.id);
         const off = result.substitutions?.find((change) => change.offId === player.id);
         const exit = result.events.find(
@@ -1586,7 +1604,7 @@ async function writeBatchDiscipline(
   store: Store,
   state: Awaited<ReturnType<typeof stateOf>>,
   teams: { club_id: number; scope: string; country_id: number; national: number; age_group: string }[],
-  participants: { player: MatchPlayer; stats: Record<string, number>; team: MatchTeam; match: BatchMatch; scope: string }[],
+  participants: { player: MatchPlayer; stats: Record<string, number>; team: MatchTeam; match: BatchMatch; league: League; scope: string }[],
 ) {
   await inChunks(teams, 5000, (chunk) => {
     const team = rowSet(
@@ -1614,12 +1632,12 @@ async function writeBatchDiscipline(
   );
   const seasonStats: Record<string, string | number>[] = [];
   const disciplineRows: Record<string, string | number>[] = [];
-  for (const { player, stats, team, match, scope } of participants) {
+  for (const { player, stats, team, match, league, scope } of participants) {
     seasonStats.push({
       player_id: player.id,
       season: state.season,
       club_id: team.id,
-      league_id: match.league.id,
+      league_id: league.id,
       minutes: stats.minutes,
       goals: stats.goals,
       assists: stats.assists,
@@ -1633,7 +1651,7 @@ async function writeBatchDiscipline(
       ? dismissal.text.includes("second caution")
         ? 1
         : 3
-      : match.league.kind === "continental"
+      : league.kind === "continental"
         ? cautions >= 3 && (cautions - 3) % 2 === 0 && stats.yellowCards > 0
           ? 1
           : 0
@@ -1712,7 +1730,7 @@ async function writeTableConsequences(
   await inChunks(squadRows, 5000, (chunk) => {
     const changes = rowSet("changes", { club_id: "integer", morale: "double precision", factor: "double precision" }, chunk);
     return store.run(
-      `UPDATE players AS target SET morale = LEAST(99, GREATEST(1, target.morale + changes.morale)), value = target.value * changes.factor FROM ${changes.sql} WHERE changes.club_id = target.club_id`,
+      `UPDATE players AS target SET morale = LEAST(99, GREATEST(1, target.morale + changes.morale)), value = target.value * changes.factor FROM ${changes.sql} WHERE changes.club_id = target.club_id AND (changes.factor <> 1 OR LEAST(99, GREATEST(1, target.morale + changes.morale)) <> target.morale)`,
       ...changes.params,
     );
   });
@@ -2211,24 +2229,6 @@ async function weeklyFinances(store: Store) {
   const leagues = new Map(
     (await store.all<League>("SELECT * FROM leagues")).map((league) => [league.id, league]),
   );
-  const accountUpdates: Record<string, string | number | null>[] = [];
-  const flushAccounts = async () => {
-    await updateSimulationRows(
-      store,
-      "clubs",
-      accountUpdates,
-      {
-        id: "integer",
-        net: "double precision",
-        income: "double precision",
-        expenses: "double precision",
-        ffp: "double precision",
-        budget_increase: "double precision",
-      },
-      "balance = target.balance + changes.net, income = target.income + changes.income, spending = target.spending + changes.expenses, ffp = changes.ffp, transfer_budget = GREATEST(0,target.transfer_budget + changes.budget_increase)",
-    );
-    accountUpdates.length = 0;
-  };
   // The first week fixes each club's reference wage budget, so budget rebalancing cannot lower operating costs.
   await store.run(
     "UPDATE clubs SET data = jsonb_set(data::jsonb, '{operatingWageBudget}', to_jsonb(wage_budget))::text WHERE type != 'national' AND data::jsonb ->> 'operatingWageBudget' IS NULL",
@@ -2242,6 +2242,15 @@ async function weeklyFinances(store: Store) {
   const countryCodes = new Map(
     (await store.all<{ id: number; code: string }>("SELECT id, code FROM countries")).map((row) => [row.id, row.code]),
   );
+  const weeks: {
+    club: (typeof clubs)[number];
+    income: number;
+    wages: number;
+    running: number;
+    sponsorship: number;
+    gate: number;
+    account: WeeklyAccount;
+  }[] = [];
   for (const club of clubs) {
     const wages = (salaries.get(club.id) ?? 0) + (staffCosts.get(club.id) ?? 0);
     const league = leagues.get(club.league_id ?? -1);
@@ -2277,84 +2286,104 @@ async function weeklyFinances(store: Store) {
     const sponsorship = Math.round(revenue.annualCommercial / 52);
     const gate = revenue.annualMatchday;
     const income = sponsorship + gate;
-    const expenses = wages + running;
-    const net = income - expenses;
-    await postWeeklyAccounts(
-      store,
-      club.id,
+    weeks.push({
+      club,
       income,
       wages,
-      operating.facilities + operating.operations,
-      operating.academy,
-    );
-    const period = (await store.get<{ deficit: number }>(
-      "SELECT GREATEST(0,wages + operating + amortization + agent_fees - revenue - sale_profit) AS deficit FROM financial_periods WHERE club_id = ? AND season = ?",
-      club.id,
-      state.season,
-    ))!;
-    const ffp = period.deficit;
-    accountUpdates.push({
-      id: club.id,
-      net,
-      income,
-      expenses,
-      ffp,
-      budget_increase: net > 0 ? net * 0.08 : 0,
+      running,
+      sponsorship,
+      gate,
+      account: {
+        clubId: club.id,
+        revenue: income,
+        wages,
+        operating: operating.facilities + operating.operations,
+        academy: operating.academy,
+      },
     });
-    if (accountUpdates.length === 1000) await flushAccounts();
-    if (club.id === state.clubId) {
-      await flushAccounts();
-      for (const [category, amount] of [
-        ["Sponsorship & broadcasting", sponsorship],
-        ["Matchday income", gate],
-        ["Player & staff wages", -wages],
-        ["Club operations & academy", -running],
-      ] as [string, number][])
-        await store.run(
-          "INSERT INTO ledger(club_id, date, category, amount, description) VALUES (?, ?, ?, ?, ?)",
-          club.id,
-          state.date,
-          category,
-          amount,
-          "Weekly accounts",
-        );
+  }
+  // Set-based: one financial_periods upsert and one clubs update for the whole world.
+  const deficits = await postWeeklyAccountsBatch(store, weeks.map((week) => week.account));
+  await updateSimulationRows(
+    store,
+    "clubs",
+    weeks.map(({ club, income, wages, running }) => {
+      const expenses = wages + running;
+      const net = income - expenses;
+      return {
+        id: club.id,
+        net,
+        income,
+        expenses,
+        ffp: deficits.get(club.id) ?? 0,
+        budget_increase: net > 0 ? net * 0.08 : 0,
+      };
+    }),
+    {
+      id: "integer",
+      net: "double precision",
+      income: "double precision",
+      expenses: "double precision",
+      ffp: "double precision",
+      budget_increase: "double precision",
+    },
+    "balance = target.balance + changes.net, income = target.income + changes.income, spending = target.spending + changes.expenses, ffp = changes.ffp, transfer_budget = GREATEST(0,target.transfer_budget + changes.budget_increase)",
+  );
+  const own = weeks.find((week) => week.club.id === state.clubId);
+  if (own) {
+    const { club, income, wages, running, sponsorship, gate } = own;
+    const expenses = wages + running;
+    const net = income - expenses;
+    const ffp = deficits.get(club.id) ?? 0;
+    for (const [category, amount] of [
+      ["Sponsorship & broadcasting", sponsorship],
+      ["Matchday income", gate],
+      ["Player & staff wages", -wages],
+      ["Club operations & academy", -running],
+    ] as [string, number][])
       await store.run(
-        "INSERT INTO history(season, entity_type, entity_id, date, data) VALUES (?, ?, ?, ?, ?)",
-        state.season,
-        "finance",
+        "INSERT INTO ledger(club_id, date, category, amount, description) VALUES (?, ?, ?, ?, ?)",
         club.id,
         state.date,
-        JSON.stringify({
-          balance: club.balance + net,
-          income,
-          expenses,
-          ffp,
-          wages,
-          transferBudget: club.transfer_budget,
-        }),
+        category,
+        amount,
+        "Weekly accounts",
       );
-      if (club.balance > 0 && club.balance + net < 0)
-        await news(
-          store,
-          "Finance",
-          "Cash balance enters the red",
-          "The board has requested a financial recovery plan. Player sales and wage reductions may be needed.",
-          "warning",
-          "finances",
-        );
-      const assessment = await assessFinances(store, club.id);
-      if (settings.ffp && assessment.issues.length && state.week % 4 === 0)
-        await news(
-          store,
-          "Finance",
-          "Financial sustainability warning",
-          `${assessment.policy}: ${assessment.issues.join(" ")} The board requires a sustainable spending plan.`,
-          "warning",
-          "finances",
-        );
-    }
+    await store.run(
+      "INSERT INTO history(season, entity_type, entity_id, date, data) VALUES (?, ?, ?, ?, ?)",
+      state.season,
+      "finance",
+      club.id,
+      state.date,
+      JSON.stringify({
+        balance: club.balance + net,
+        income,
+        expenses,
+        ffp,
+        wages,
+        transferBudget: club.transfer_budget,
+      }),
+    );
+    if (club.balance > 0 && club.balance + net < 0)
+      await news(
+        store,
+        "Finance",
+        "Cash balance enters the red",
+        "The board has requested a financial recovery plan. Player sales and wage reductions may be needed.",
+        "warning",
+        "finances",
+      );
+    const assessment = await assessFinances(store, club.id);
+    if (settings.ffp && assessment.issues.length && state.week % 4 === 0)
+      await news(
+        store,
+        "Finance",
+        "Financial sustainability warning",
+        `${assessment.policy}: ${assessment.issues.join(" ")} The board requires a sustainable spending plan.`,
+        "warning",
+        "finances",
+      );
   }
-  await flushAccounts();
 }
 
 async function weeklyStaffAndPolitics(store: Store, random: seedrandom.PRNG) {
@@ -2689,16 +2718,30 @@ async function processNegotiations(store: Store, random: seedrandom.PRNG) {
         "UPDATE negotiations SET stage = 'Expired' WHERE id = ?",
         negotiation.id,
       );
-      await news(
-        store,
-        "Transfers",
-        "Negotiation deadline passed",
-        `${(await playerOf(store, negotiation.player_id)).name}'s representatives have closed talks.`,
-        "important",
-        "transfers",
-      );
+      const name = (await playerOf(store, negotiation.player_id)).name;
+      if (negotiation.stage === "Offer received")
+        await news(
+          store,
+          "Transfers",
+          `Offer for ${name} lapsed`,
+          `${(await clubOf(store, negotiation.buying_club_id)).name} received no answer by ${negotiation.deadline} and have let their offer lapse.`,
+          "info",
+          LOAN_TYPES.includes(negotiation.type) ? "loans" : "transfers",
+          { playerId: negotiation.player_id, clubId: negotiation.buying_club_id },
+        );
+      else
+        await news(
+          store,
+          "Transfers",
+          "Negotiation deadline passed",
+          `${name}'s representatives have closed talks.`,
+          "important",
+          "transfers",
+        );
       continue;
     }
+    // Leaks, hijacks and disputes belong to talks in progress, not to an offer awaiting the director's answer.
+    if (negotiation.stage === "Offer received") continue;
     const lastWindowDay = deadlineDay(state.date);
     const eventChance = (lastWindowDay ? 0.18 : 0.015) * (settings.chaos ? 3 : 1);
     if (random() > eventChance) continue;
@@ -2779,7 +2822,7 @@ async function processNegotiations(store: Store, random: seedrandom.PRNG) {
 
 export async function worldTransfers(store: Store, random: seedrandom.PRNG) {
   const state = await stateOf(store);
-  const activity = { completed: 0, offers: 0 };
+  const activity = { completed: 0 };
   if (
     !transferWindow(state.date) ||
     (
@@ -2826,8 +2869,17 @@ export async function worldTransfers(store: Store, random: seedrandom.PRNG) {
       continue;
     const fee = Math.round(player.value * (0.95 + random() * 0.15));
     const minimumWage = Math.round(player.wage * 1.1);
+    // One squad aggregate per club that passes the cheap club filters (covered by player_market_squad).
     const buyers = await store.all<Club>(
-      "SELECT * FROM clubs WHERE type = 'club' AND id NOT IN (?,?) AND reputation BETWEEN ? AND ? AND transfer_budget > ? AND balance > ? AND wage_budget > (SELECT coalesce(sum(wage),0) FROM players WHERE players.club_id = clubs.id) + ? AND (SELECT count(*) FROM players WHERE players.club_id = clubs.id AND age_group = 'Senior' AND role != 'Retired') < 28 ORDER BY (SELECT count(*) FROM players WHERE players.club_id = clubs.id AND players.position = ? AND age_group = 'Senior'),abs(reputation - ?),id LIMIT 8",
+      `SELECT clubs.* FROM clubs CROSS JOIN LATERAL (
+         SELECT coalesce(sum(players.wage),0) AS wages,
+           count(*) FILTER (WHERE players.age_group = 'Senior' AND players.role != 'Retired') AS seniors,
+           count(*) FILTER (WHERE players.age_group = 'Senior' AND players.position = ?) AS rivals
+         FROM players WHERE players.club_id = clubs.id) AS squad
+       WHERE clubs.type = 'club' AND clubs.id NOT IN (?,?) AND clubs.reputation BETWEEN ? AND ? AND clubs.transfer_budget > ? AND clubs.balance > ?
+         AND clubs.wage_budget > squad.wages + ? AND squad.seniors < 28
+       ORDER BY squad.rivals, abs(clubs.reputation - ?), clubs.id LIMIT 8`,
+      player.position,
       player.club_id!,
       state.clubId,
       Math.max(1, player.ability - 12),
@@ -2835,7 +2887,6 @@ export async function worldTransfers(store: Store, random: seedrandom.PRNG) {
       fee,
       fee,
       minimumWage,
-      player.position,
       player.ability + random() * 10,
     );
     let buyer: Club | undefined;
@@ -2879,199 +2930,6 @@ export async function worldTransfers(store: Store, random: seedrandom.PRNG) {
     activity.completed++;
   }
   activity.completed += await signClublessPlayers(store, state, Math.max(1, Math.round(quota / 2)), random);
-  const recentOffers = (await store.get<{ total: number }>(
-    "SELECT count(*) AS total FROM negotiations WHERE selling_club_id = ? AND buying_club_id != ? AND created >= ?",
-    state.clubId,
-    state.clubId,
-    addDays(state.date, -6),
-  ))!.total;
-  const loanTypeList = LOAN_TYPES.map(() => "?").join(",");
-  const recentLoanOffers = (await store.get<{ total: number }>(
-    `SELECT count(*) AS total FROM negotiations WHERE selling_club_id = ? AND buying_club_id != ? AND type IN (${loanTypeList}) AND created >= ?`,
-    state.clubId,
-    state.clubId,
-    ...LOAN_TYPES,
-    addDays(state.date, -6),
-  ))!.total;
-  const offerCap = deadlineWeek ? 5 : 3;
-  const loanOfferCap = deadlineWeek ? 2 : 1;
-  if (recentOffers >= offerCap && recentLoanOffers >= loanOfferCap) return activity;
-  const prospects = await store.all<Player>(
-    "SELECT * FROM players WHERE club_id = ? AND parent_club_id IS NULL AND age >= 16 AND role != 'Retired' AND contract_end > ? AND ((available_loan = 1) OR (age >= 18 AND age_group = 'Senior' AND (listed = 1 OR form >= 7.2 OR (age <= 23 AND potential - ability >= 8) OR contract_end <= ?))) AND NOT EXISTS (SELECT 1 FROM negotiations WHERE negotiations.player_id = players.id AND (stage NOT IN ('Completed','Rejected','Withdrawn','Expired','Hijacked') OR created >= ?)) AND (listed = 1 OR available_loan = 1 OR NOT EXISTS (SELECT 1 FROM history WHERE history.entity_type = 'transfer' AND history.entity_id = players.id AND history.date >= ?)) ORDER BY listed DESC,available_loan DESC,form DESC,potential DESC,id LIMIT 16",
-    state.clubId,
-    state.date,
-    addDays(state.date, 365),
-    addDays(state.date, -21),
-    // No unsolicited bids in a signing's first year: a bought player cannot be flipped at once for a premium.
-    addDays(state.date, -365),
-  );
-  for (const listed of prospects) {
-    if (
-      !listed.listed &&
-      !listed.available_loan &&
-      random() > (deadlineWeek ? 0.35 : 0.15)
-    )
-      continue;
-    const isLoan = !listed.listed && !!listed.available_loan;
-    if (isLoan && recentLoanOffers >= loanOfferCap) continue;
-    if (!isLoan && recentOffers >= offerCap) continue;
-    if (!isLoan && (listed.age < 18 || listed.age_group !== "Senior")) continue;
-    const roughFee = Math.round(
-      listed.value * (isLoan ? 0.03 : listed.listed ? 0.88 + random() * 0.16 : 1 + random() * 0.1),
-    );
-    const familyIds = [...userFamily];
-    const interested = await store.all<Club>(
-      "SELECT * FROM clubs WHERE id != ALL(?::integer[]) AND type = 'club' AND transfer_budget > ? AND balance > ? AND reputation BETWEEN ? AND ? AND (SELECT count(*) FROM players WHERE players.club_id = clubs.id AND age_group = 'Senior' AND role != 'Retired') < 28 ORDER BY abs(reputation - ?),id LIMIT 10",
-      familyIds,
-      roughFee,
-      roughFee,
-      Math.max(1, listed.ability - 20),
-      listed.ability + 20,
-      listed.ability + (isLoan ? -5 : 3),
-    );
-    let buyer: Club | undefined;
-    let offeredWage = 0;
-    let fee = roughFee;
-    let dealType = "Permanent transfer";
-    let terms = defaultLoanTerms(listed, await clubOf(store, state.clubId));
-    let interestDetails;
-    for (const candidate of interested) {
-      let candidateFee = roughFee;
-      let candidateTerms = terms;
-      let candidateType = dealType;
-      if (isLoan) {
-        const parent = await clubOf(store, state.clubId);
-        const january = state.date.slice(5, 7) === "01";
-        candidateType =
-          listed.age >= 22 && random() < 0.14
-            ? "Loan with option"
-            : january && random() < 0.45
-              ? "Short loan"
-              : random() < 0.62
-                ? "Development loan"
-                : "Standard loan";
-        candidateTerms = defaultLoanTerms(listed, candidate);
-        if (candidateType === "Short loan") {
-          candidateTerms.duration = 182;
-          candidateTerms.mandatoryMinutes = 900;
-        }
-        const abilityGap = listed.ability - candidate.reputation;
-        candidateTerms.playingTime = abilityGap >= 8 ? 78 : abilityGap >= 0 ? 65 : 52;
-        candidateTerms.role = abilityGap >= 8 ? "Regular starter" : abilityGap >= 0 ? "Squad player" : "Fringe player";
-        candidateTerms.salarySplit = Math.round(clamp(58 + abilityGap / 2 + random() * 20, 35, 90));
-        if (candidateType === "Loan with option")
-          candidateTerms.optionFee = Math.max(minimumOptionFee(candidateType, listed.value), Math.round(listed.value * (1.05 + random() * 0.2)));
-        const international = parent.country_id !== candidate.country_id;
-        if (listed.age < 18 && international) continue;
-        const limit = international ? await internationalLoanIssue(store, listed, parent, candidate, state.date) : null;
-        if (limit) continue;
-        const endDate = loanEndDate(candidateType, state.date, candidateTerms.duration);
-        if (endDate > listed.contract_end) continue;
-        const days = daysBetween(state.date, endDate);
-        candidateTerms.bonus = Math.min(candidateTerms.bonus, maxLoanBonus(listed.value, days, candidateTerms.mandatoryMinutes));
-        const issue = loanTermsIssue(
-          { type: candidateType, value: listed.value, days, international },
-          candidateTerms,
-        );
-        if (issue) continue;
-        candidateFee = loanAskingFee(
-          { type: candidateType, value: listed.value, wage: listed.wage, days, referenceSplit: candidateTerms.salarySplit },
-          candidateTerms,
-        );
-        candidateTerms.fee = candidateFee;
-      }
-      // A permanent bidder offers a raise or its own going rate for the player's level, whichever is higher.
-      const wage = isLoan
-        ? listed.wage
-        : Math.max(Math.round(listed.wage * 1.15), await buyerGoingRate(store, listed, candidate));
-      const assessment = await assessPlayerInterest(store, listed, candidate, {
-        loan: isLoan,
-        role: isLoan ? candidateTerms.role : "Regular starter",
-        wage,
-        playingTime: isLoan ? candidateTerms.playingTime : undefined,
-      });
-      if (assessment.refuses || (assessment.moveScore ?? assessment.score) < MOVE_REFUSAL_THRESHOLD) continue;
-      if (
-        candidate.transfer_budget >= candidateFee &&
-        candidate.balance >= candidateFee &&
-        (await weeklyWages(store, candidate.id)) +
-          (isLoan ? (listed.wage * candidateTerms.salarySplit) / 100 : wage) <=
-          candidate.wage_budget &&
-        (await assessRegistration(store, listed, candidate)).allowed
-      ) {
-        buyer = candidate;
-        offeredWage = wage;
-        fee = candidateFee;
-        dealType = candidateType;
-        terms = candidateTerms;
-        interestDetails = assessment;
-        break;
-      }
-    }
-    if (buyer) {
-      const profile = JSON.parse(listed.profile) as PlayerProfile;
-      const data = {
-        workflowVersion: 2,
-        interestDetails,
-        log: [
-          {
-            date: state.date,
-            type: "Offer",
-            message: `${buyer.name} have submitted a formal ${isLoan ? "loan" : "transfer"} offer.`,
-          },
-        ],
-        agent: profile.agent,
-        years: listed.age < 18 ? 3 : 4,
-        role: isLoan ? terms.role : "Regular starter",
-        promises: [],
-        terms,
-        ...(isLoan ? { loanReferenceSplit: terms.salarySplit } : {}),
-      };
-      const inserted = await store.run(
-        "INSERT INTO negotiations(player_id, buying_club_id, selling_club_id, type, stage, asking_price, offer, wage, interest, created, deadline, data) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        listed.id,
-        buyer.id,
-        state.clubId,
-        dealType,
-        "Offer received",
-        isLoan ? fee : listed.value,
-        fee,
-        offeredWage,
-        interestDetails!.score,
-        state.date,
-        addDays(state.date, 7),
-        JSON.stringify(data),
-      );
-      await news(
-        store,
-        "Transfers",
-        `An offer for ${listed.name}`,
-        isLoan
-          ? `${buyer.name} want ${listed.name} on ${dealType.toLowerCase()} until ${loanEndDate(dealType, state.date, terms.duration)}. The decision is yours.`
-          : `${buyer.name} have made a proposal. The decision is yours.`,
-        "important",
-        "transfers",
-        {
-          playerId: listed.id,
-          clubId: buyer.id,
-          fee,
-          unsolicited: !listed.listed && !listed.available_loan,
-        },
-      );
-      await publishTransferStory(store, {
-        key: `negotiation:${inserted.lastInsertRowid}:bid`,
-        phase: "bid",
-        playerId: listed.id,
-        buyerId: buyer.id,
-        sellerId: state.clubId,
-        fee,
-        loan: isLoan,
-        negotiationId: Number(inserted.lastInsertRowid),
-      });
-      activity.offers++;
-      break;
-    }
-  }
   return activity;
 }
 
@@ -3475,6 +3333,7 @@ export async function seasonRollover(store: Store) {
       "success",
       "academy",
     );
+    await closeGbeSeason(store, oldSeason, state.date);
     await pruneSeason(store, oldSeason, state.date);
   });
 }
@@ -3522,6 +3381,7 @@ async function weeklyUpdate(store: Store) {
     );
   }
   await experience(store, 10);
+  await refreshGbeIfDue(store);
 }
 
 export async function advance(store: Store, days: number) {
@@ -3532,11 +3392,14 @@ export async function advance(store: Store, days: number) {
       "Your tenure has ended. Accept another club role to continue.",
     );
   await createCalendar(store);
+  // Worlds and saves older than the GBE ledger get their pre-game estimate and rebuilt months once.
+  await ensureGbeBaseline(store);
   const started = performance.now();
   const from = (await stateOf(store)).date;
   let played = 0;
   for (let day = 0; day < days; day++) {
     let rollover = false;
+    let weekly = false;
     await store.transaction(async () => {
       const state = await stateOf(store);
       state.date = addDays(state.date, 1);
@@ -3557,11 +3420,15 @@ export async function advance(store: Store, days: number) {
       // AI squads keep their minimums (first team 25, B-team and youth 20; two goalkeepers) between windows too; self-throttles to weekly.
       await maintainSquads(store, state);
       await worldTransfers(store, random);
+      // Clubs approach the director about his players (offer frequency setting; pre-window and emergency loans too).
+      await generateUserClubOffers(store, state);
       await finishScouting(store);
       // The coach calls up/returns players of the user's club family before today's fixtures.
       await processCallUps(store);
       // National squads for fixtures in the next days; players away are unavailable to their clubs.
       await processInternationalDuty(store);
+      // Registration reviews, window openings, freed quota places and (once per season) the competition lists.
+      await processRegistrations(store);
       const fixtures = await store.all<Fixture>(
         "SELECT * FROM fixtures WHERE date <= ? AND season = ? AND status = 'scheduled' ORDER BY date, id",
         state.date,
@@ -3588,8 +3455,10 @@ export async function advance(store: Store, days: number) {
       await expireLoans(store);
       await progressCompetitions(store, state.date);
       await processCompetitionNotifications(store);
-      if (daysBetween("2026-07-01", state.date) % 7 === 0)
+      if (daysBetween("2026-07-01", state.date) % 7 === 0) {
         await weeklyUpdate(store);
+        weekly = true;
+      }
       await processAssistant(store);
       await processStaffCareers(store);
       if (
@@ -3648,7 +3517,16 @@ export async function advance(store: Store, days: number) {
           );
       }
     });
-    if (rollover) await createCalendar(store);
+    if (rollover) {
+      await createCalendar(store);
+      // New season: Last Season, Current Club and this season's continental places all changed.
+      await refreshGbe(store);
+    }
+    // Weekly development and the rollover rewrite every player row: reuse the old versions' space before the
+    // next week adds more (outside a transaction only; autovacuum alone lags days of simulation behind). Busy
+    // match days leave several versions of whole squads too: those are reclaimed once they outnumber a quarter
+    // of the players.
+    await store.vacuum(["players"], weekly || rollover ? {} : { deadShare: 0.25 });
     if ((await stateOf(store)).gameOver) break;
   }
   return {

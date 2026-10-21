@@ -394,21 +394,31 @@ export async function annualAmortization(
   clubId: number,
   date: string,
 ) {
-  return (
-    await store.all<{ cost: number; acquired: string; expires: string }>(
-      "SELECT * FROM player_assets WHERE club_id = ? AND status = 'active' AND expires > ?",
-      clubId,
-      date,
-    )
-  ).reduce(
-    (total, asset) =>
-      total +
-      (daysBetween(asset.acquired, date) <
-      Math.min(5 * 365.25, daysBetween(asset.acquired, asset.expires))
-        ? assetAmortization(asset.cost, asset.acquired, asset.expires)
-        : 0),
-    0,
-  );
+  return (await annualAmortizations(store, [clubId], date)).get(clubId) ?? 0;
+}
+
+/** annualAmortization for many clubs with one query; clubs without active assets are absent. */
+export async function annualAmortizations(
+  store: Store,
+  clubIds: readonly number[],
+  date: string,
+) {
+  const totals = new Map<number, number>();
+  if (!clubIds.length) return totals;
+  for (const asset of await store.all<{ club_id: number; cost: number; acquired: string; expires: string }>(
+    "SELECT club_id, cost, acquired, expires FROM player_assets WHERE club_id = ANY(?::integer[]) AND status = 'active' AND expires > ? ORDER BY club_id, id",
+    clubIds,
+    date,
+  ))
+    totals.set(
+      asset.club_id,
+      (totals.get(asset.club_id) ?? 0) +
+        (daysBetween(asset.acquired, date) <
+        Math.min(5 * 365.25, daysBetween(asset.acquired, asset.expires))
+          ? assetAmortization(asset.cost, asset.acquired, asset.expires)
+          : 0),
+    );
+  return totals;
 }
 
 export async function acquirePlayerAsset(
@@ -655,24 +665,47 @@ export async function postWeeklyAccounts(
   operating: number,
   academy: number,
 ) {
+  await postWeeklyAccountsBatch(store, [{ clubId, revenue, wages, operating, academy }]);
+}
+
+export interface WeeklyAccount {
+  clubId: number;
+  revenue: number;
+  wages: number;
+  operating: number;
+  academy: number;
+}
+
+/**
+ * Adds a week to many clubs' financial periods in one statement (amortization from one asset query) and returns
+ * each club's season FFP deficit after posting: max(0, costs counted by the rules − revenue − sale profit).
+ */
+export async function postWeeklyAccountsBatch(store: Store, accounts: readonly WeeklyAccount[]) {
+  const deficits = new Map<number, number>();
+  if (!accounts.length) return deficits;
   const state = await store.meta<GameState>("state");
-  const amortization =
-    (await annualAmortization(store, clubId, state.date)) / 52;
-  await store.run(
+  const clubIds = accounts.map((account) => account.clubId);
+  const amortization = await annualAmortizations(store, clubIds, state.date);
+  for (const row of await store.all<{ club_id: number; deficit: number }>(
     `INSERT INTO financial_periods (club_id, season, revenue, wages, operating, amortization, excluded_investment)
-     VALUES (?, ?, ?, ?, ?, ?, ?)
+     SELECT week.club_id, ?::integer, week.revenue, week.wages, week.operating, week.amortization, week.academy
+     FROM unnest(?::integer[], ?::double precision[], ?::double precision[], ?::double precision[], ?::double precision[], ?::double precision[])
+       AS week(club_id, revenue, wages, operating, amortization, academy)
      ON CONFLICT (club_id, season) DO UPDATE SET revenue = financial_periods.revenue + EXCLUDED.revenue,
        wages = financial_periods.wages + EXCLUDED.wages, operating = financial_periods.operating + EXCLUDED.operating,
        amortization = financial_periods.amortization + EXCLUDED.amortization,
-       excluded_investment = financial_periods.excluded_investment + EXCLUDED.excluded_investment`,
-    clubId,
+       excluded_investment = financial_periods.excluded_investment + EXCLUDED.excluded_investment
+     RETURNING club_id, GREATEST(0, wages + operating + amortization + agent_fees - revenue - sale_profit) AS deficit`,
     state.season,
-    revenue,
-    wages,
-    operating,
-    amortization,
-    academy,
-  );
+    clubIds,
+    accounts.map((account) => account.revenue),
+    accounts.map((account) => account.wages),
+    accounts.map((account) => account.operating),
+    clubIds.map((clubId) => (amortization.get(clubId) ?? 0) / 52),
+    accounts.map((account) => account.academy),
+  ))
+    deficits.set(row.club_id, row.deficit);
+  return deficits;
 }
 
 export async function closeFinancialYear(store: Store, season: number) {

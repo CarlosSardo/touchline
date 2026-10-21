@@ -48,6 +48,8 @@ const PLAYER_TABLES = [
   "discipline",
   "player_assets",
   "registration_records",
+  "player_registrations",
+  "competition_registrations",
   "minor_applications",
   "player_season_stats",
   "player_match_appearances",

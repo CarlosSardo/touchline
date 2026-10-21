@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { Store } from "./db.ts";
 import { generateWorld, planWorld } from "./world.ts";
 import {
@@ -581,6 +581,37 @@ describe("competition-specific knockout regulations", () => {
     expect([finals[0].home_id, finals[0].away_id].sort()).toEqual(
       expectedWinners.sort(),
     );
+  });
+
+  it("schedules a cup round from its own clubs' fixtures only, still keeping their recovery days", async () => {
+    const id = Number(
+      (
+        await store.run(
+          "INSERT INTO leagues(name,confederation,tier,age_group,kind,reputation,format,data) VALUES ('Lazy batch cup','UEFA',0,'Senior','continental',80,'Knockout',?)",
+          JSON.stringify({ spec: COMPETITIONS.find((competition) => competition.name === "UEFA Conference League") }),
+        )
+      ).lastInsertRowid,
+    );
+    // Clubs 21 and 22 already play on the round's date: the tie must move at least three days on.
+    await store.run(
+      "INSERT INTO fixtures(league_id,home_id,away_id,date,season,round,stage,seed,status,data) VALUES (NULL,21,22,'2027-03-10',2026,1,'Friendly','lazy-batch','scheduled','{}')",
+    );
+    const queries: string[] = [];
+    const all = store.all.bind(store);
+    const spy = vi.spyOn(store, "all").mockImplementation((sql, ...params) => {
+      queries.push(sql);
+      return all(sql, ...params);
+    });
+    try {
+      await scheduleKnockout(store, id, [21, 22], 2026, "2027-03-10");
+    } finally {
+      spy.mockRestore();
+    }
+    const reads = queries.filter((sql) => sql.includes("FROM fixtures LEFT JOIN leagues"));
+    expect(reads).toHaveLength(1);
+    expect(reads[0]).toContain("fixtures.home_id = ANY(");
+    const [final] = await store.all<Fixture>("SELECT * FROM fixtures WHERE league_id = ?", id);
+    expect(final.date >= "2027-03-13").toBe(true);
   });
 
   it("starts the knockout at once when a small league phase leaves one club for the play-offs", async () => {

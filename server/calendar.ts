@@ -61,7 +61,8 @@ import {
   type EntrantTeam,
   type YouthTournamentSpec,
 } from "../shared/features/youth-internationals.ts";
-import { ensureNationalTeams } from "./internationals.ts";
+import { ensureNationalTeams, FRIENDLY_WINDOW_DATES, friendlyPairs } from "./internationals.ts";
+import { ensureGbeBaseline, FRIENDLIES_NAME } from "./gbe.ts";
 import type {
   AgeGroup,
   Club,
@@ -98,6 +99,8 @@ export interface CompetitionSpec {
   groupSize?: number;
   legs?: 1 | 2;
   matchdays?: string[];
+  /** Senior international friendlies (not a Senior Competitive International Match for the GBE). */
+  friendly?: boolean;
 }
 
 type BracketSize = "playoff" | "16" | "8" | "4" | "2";
@@ -376,9 +379,14 @@ async function conferenceGroups(
 }
 
 interface FixtureBatch {
+  season: number;
   ages: Map<number, string>;
   national: Set<number>;
+  /** Fixture days per `${ageGroup}:${clubId}`; complete for every club when `complete`, else for `loaded` clubs. */
   occupied: Map<string, Set<number>>;
+  complete: boolean;
+  loaded: Set<number>;
+  /** Leagues known to have fixtures this season (all of them when `complete`). */
   scheduledLeagues: Set<number>;
   rows: Record<string, string | number | null>[];
 }
@@ -392,10 +400,26 @@ async function flushFixtures(store: Store, batch: FixtureBatch) {
   batch.rows = [];
 }
 
+function occupy(batch: FixtureBatch, ageGroup: string, clubId: number, date: string) {
+  const key = `${ageGroup}:${clubId}`;
+  const dates = batch.occupied.get(key) ?? new Set<number>();
+  dates.add(fixtureDay(date));
+  batch.occupied.set(key, dates);
+}
+
+type ExistingFixture = { home_id: number; away_id: number; date: string; league_id: number | null; age_group: string; season: number };
+const EXISTING_FIXTURES =
+  "SELECT fixtures.home_id,fixtures.away_id,fixtures.date,fixtures.league_id,fixtures.season,coalesce(leagues.age_group,'Senior') AS age_group FROM fixtures LEFT JOIN leagues ON leagues.id = fixtures.league_id WHERE fixtures.date >= ?";
+
+/**
+ * Collects new fixtures and the clubs' fixture days (to keep a safe gap). `preload: "all"` reads every fixture of the
+ * season once (building a whole calendar); `"lazy"` (a cup round, a play-off) reads only the clubs it schedules.
+ */
 async function withFixtureBatch<Result>(
   store: Store,
   season: number,
   callback: () => Promise<Result>,
+  preload: "all" | "lazy" = "lazy",
 ): Promise<Result> {
   if (fixtureBatches.has(store)) return callback();
   return store.transaction(async () => {
@@ -405,34 +429,23 @@ async function withFixtureBatch<Result>(
     const national = await store.all<{ id: number }>(
       "SELECT id FROM clubs WHERE type = 'national'",
     );
-    const existing = await store.all<{
-      home_id: number;
-      away_id: number;
-      date: string;
-      league_id: number | null;
-      age_group: string;
-      season: number;
-    }>(
-      "SELECT fixtures.home_id,fixtures.away_id,fixtures.date,fixtures.league_id,fixtures.season,coalesce(leagues.age_group,'Senior') AS age_group FROM fixtures LEFT JOIN leagues ON leagues.id = fixtures.league_id WHERE fixtures.date >= ?",
-      `${season}-01-01`,
-    );
     const batch: FixtureBatch = {
+      season,
       ages: new Map(ages.map((league) => [league.id, league.age_group])),
       national: new Set(national.map((club) => club.id)),
       occupied: new Map(),
+      complete: preload === "all",
+      loaded: new Set(),
       scheduledLeagues: new Set(),
       rows: [],
     };
-    for (const fixture of existing) {
-      if (fixture.league_id && fixture.season === season)
-        batch.scheduledLeagues.add(fixture.league_id);
-      for (const clubId of [fixture.home_id, fixture.away_id]) {
-        const key = `${fixture.age_group}:${clubId}`;
-        const dates = batch.occupied.get(key) ?? new Set<number>();
-        dates.add(fixtureDay(fixture.date));
-        batch.occupied.set(key, dates);
+    if (batch.complete)
+      for (const fixture of await store.all<ExistingFixture>(EXISTING_FIXTURES, `${season}-01-01`)) {
+        if (fixture.league_id && fixture.season === season)
+          batch.scheduledLeagues.add(fixture.league_id);
+        for (const clubId of [fixture.home_id, fixture.away_id])
+          occupy(batch, fixture.age_group, clubId, fixture.date);
       }
-    }
     fixtureBatches.set(store, batch);
     try {
       const result = await callback();
@@ -442,6 +455,35 @@ async function withFixtureBatch<Result>(
       fixtureBatches.delete(store);
     }
   });
+}
+
+/** Reads the fixture days of clubs a lazy batch has not seen yet (before any fixture of theirs is added). */
+async function loadClubFixtures(store: Store, batch: FixtureBatch, clubIds: number[]) {
+  if (batch.complete) return;
+  const missing = [...new Set(clubIds)].filter((id) => !batch.loaded.has(id));
+  if (!missing.length) return;
+  const wanted = new Set(missing);
+  for (const fixture of await store.all<ExistingFixture>(
+    `${EXISTING_FIXTURES} AND (fixtures.home_id = ANY(?::integer[]) OR fixtures.away_id = ANY(?::integer[]))`,
+    `${batch.season}-01-01`,
+    missing,
+    missing,
+  ))
+    for (const clubId of [fixture.home_id, fixture.away_id])
+      if (wanted.has(clubId)) occupy(batch, fixture.age_group, clubId, fixture.date);
+  for (const id of missing) batch.loaded.add(id);
+}
+
+async function leagueScheduled(store: Store, batch: FixtureBatch, leagueId: number) {
+  if (batch.scheduledLeagues.has(leagueId)) return true;
+  if (batch.complete) return false;
+  const found = await store.get<{ found: number }>(
+    "SELECT 1 AS found FROM fixtures WHERE league_id = ? AND season = ? LIMIT 1",
+    leagueId,
+    batch.season,
+  );
+  if (found) batch.scheduledLeagues.add(leagueId);
+  return Boolean(found);
 }
 
 async function addFixture(
@@ -459,6 +501,7 @@ async function addFixture(
   if (!home || !away || home === away) return;
   const batch = fixtureBatches.get(store)!;
   const ageGroup = leagueId ? batch.ages.get(leagueId)! : "Senior";
+  await loadClubFixtures(store, batch, [home, away]);
   const busy = (date: string) => {
     const day = fixtureDay(date);
     for (const clubId of [home, away]) {
@@ -492,12 +535,7 @@ async function addFixture(
     data: JSON.stringify(details),
   });
   if (leagueId) batch.scheduledLeagues.add(leagueId);
-  for (const clubId of [home, away]) {
-    const key = `${ageGroup}:${clubId}`;
-    const dates = batch.occupied.get(key) ?? new Set<number>();
-    dates.add(fixtureDay(scheduled));
-    batch.occupied.set(key, dates);
-  }
+  for (const clubId of [home, away]) occupy(batch, ageGroup, clubId, scheduled);
   if (batch.rows.length === 5000) await flushFixtures(store, batch);
   return scheduled;
 }
@@ -1134,10 +1172,15 @@ export async function scheduleDomesticLeagues(
   fromDate?: string,
 ) {
   await activateWorldStructure(store, season);
-  return withFixtureBatch(store, season, async () => {
-    for (const league of leagues)
-      await scheduleDomesticLeague(store, league, season, fromDate);
-  });
+  return withFixtureBatch(
+    store,
+    season,
+    async () => {
+      for (const league of leagues)
+        await scheduleDomesticLeague(store, league, season, fromDate);
+    },
+    "all",
+  );
 }
 
 export async function scheduleDomesticLeague(
@@ -1149,7 +1192,7 @@ export async function scheduleDomesticLeague(
   return withFixtureBatch(store, season, async () => {
     if (Number(JSON.parse(league.data).activeFromSeason ?? season) > season)
       return;
-    if (fixtureBatches.get(store)!.scheduledLeagues.has(league.id)) return;
+    if (await leagueScheduled(store, fixtureBatches.get(store)!, league.id)) return;
     const rows = (
       await store.all<Club & { group_name: string }>(
         "SELECT clubs.*, standings.group_name FROM standings JOIN clubs ON clubs.id = standings.club_id WHERE standings.league_id = ? ORDER BY clubs.id",
@@ -1827,6 +1870,62 @@ async function setupContinental(
   await tryStartMain(store, mainId, season, addDays(seasonDate(season, spec.start), -3));
 }
 
+/**
+ * Senior international friendlies in the FIFA windows: every nation in March and June, and nations outside their
+ * confederation's Nations Series on its autumn dates, so every national team plays about ten matches a year.
+ * Only dates after `after` are scheduled (worlds whose season calendar predates the friendlies get the rest).
+ */
+async function scheduleSeniorFriendlies(store: Store, season: number, after = "") {
+  const teams = (
+    await store.all<{ id: number; code: string; confederation: string; reputation: number }>(
+      "SELECT clubs.id, countries.code, countries.confederation, clubs.reputation FROM clubs JOIN countries ON countries.id = clubs.country_id WHERE clubs.type = 'national' AND clubs.age_group = 'Senior' ORDER BY clubs.id",
+    )
+  ).filter((team) => !isSuspended(team.code, "national"));
+  if (teams.length < 2) return;
+  const spec: CompetitionSpec = {
+    name: FRIENDLIES_NAME,
+    confederation: "FIFA",
+    age: "Senior",
+    kind: "international",
+    teams: teams.length,
+    format: "Groups",
+    rounds: 0,
+    qualifies: 0,
+    start: FRIENDLY_WINDOW_DATES[0],
+    national: true,
+    friendly: true,
+  };
+  const leagueId = await createLeague(store, spec);
+  await setData(store, leagueId, { spec, season, phase: "friendlies" });
+  const seriesTeams = new Set(
+    (
+      await store.all<{ club_id: number }>(
+        "SELECT standings.club_id FROM standings JOIN leagues ON leagues.id = standings.league_id WHERE leagues.name LIKE '% Nations Series' AND leagues.kind = 'international'",
+      )
+    ).map((row) => row.club_id),
+  );
+  const dates = [
+    ...NATIONS_SERIES_DATES.map((monthDay) => ({ date: seasonDate(season, monthDay), all: false })),
+    ...FRIENDLY_WINDOW_DATES.map((monthDay) => ({ date: seasonDate(season, monthDay), all: true })),
+  ].filter(({ date }) => date > after);
+  for (const [round, { date, all }] of dates.entries()) {
+    const random = seedrandom(`${season}:friendlies:${date}`);
+    const playing = all ? teams : teams.filter((team) => !seriesTeams.has(team.id));
+    for (const [home, away] of friendlyPairs(playing, random))
+      await addFixture(store, leagueId, season, date, home, away, "Friendly", round + 1);
+  }
+}
+
+/** A season calendar built before the friendlies existed gets the season's remaining friendly dates once. */
+async function ensureSeniorFriendlies(store: Store, season: number, date: string) {
+  const league = await store.get<{ season: number | null }>(
+    "SELECT CASE WHEN data::jsonb ->> 'season' ~ '^[0-9]+$' THEN (data::jsonb ->> 'season')::integer END AS season FROM leagues WHERE name = ? AND country_id IS NULL",
+    FRIENDLIES_NAME,
+  );
+  if (league?.season === season) return;
+  await withFixtureBatch(store, season, () => scheduleSeniorFriendlies(store, season, date));
+}
+
 export async function createCalendar(store: Store) {
   const state = await store.meta<GameState>("state");
   if (
@@ -1837,7 +1936,7 @@ export async function createCalendar(store: Store) {
       )
     )?.value === JSON.stringify(state.season)
   )
-    return;
+    return ensureSeniorFriendlies(store, state.season, state.date);
   const season = state.season;
   const settings = await store.meta<Settings>("settings");
   await store.transaction(async () => {
@@ -2027,9 +2126,12 @@ export async function createCalendar(store: Store) {
           );
         }
       }
+      await scheduleSeniorFriendlies(store, season);
       await store.setMeta("calendarSeason", season);
-    });
+    }, "all");
   });
+  // A new world's pre-game career (minutes, caps, last season) once its first season's competitions exist.
+  await ensureGbeBaseline(store);
 }
 
 export interface CountryPyramid {

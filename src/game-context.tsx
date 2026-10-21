@@ -9,6 +9,7 @@ import {
 } from "react";
 import type {
   AccountSession,
+  AdvanceResult,
   Bootstrap,
   DeleteActiveCareerRequest,
   DeleteActiveCareerResult,
@@ -860,14 +861,16 @@ export function GameProvider({ children }: { children: ReactNode }) {
     advanceLock.current = true;
     setBusy(true);
     try {
-      const result = await api<{ date: string; days: number; matches: number }>(
+      const result = await api<AdvanceResult>(
         "advance",
         { method: "POST", body: JSON.stringify({ days }) },
       );
       if (!(await refresh()) || !currentAccount()) return;
-      notify(
-        `${plural(result.days, "day")} advanced. ${plural(result.matches, "match", "matches")} simulated.`,
-      );
+      if (result.error) notify(result.error, "error");
+      else
+        notify(
+          `${plural(result.days, "day")} advanced. ${plural(result.matches, "match", "matches")} simulated.`,
+        );
     } catch (failure) {
       notify(
         failure instanceof Error ? failure.message : "Simulation failed.",

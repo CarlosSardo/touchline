@@ -30,6 +30,7 @@ import {
   type YouthTournamentSpec,
 } from "../shared/features/youth-internationals.ts";
 import type { AgeGroup, Club, Position } from "../shared/types.ts";
+import { refreshGbe } from "./gbe.ts";
 
 export const DUTY_META = "internationalDuty";
 const AGE_LIMIT: Record<string, number> = { U17: 17, U19: 19, U20: 20, U21: 21 };
@@ -91,6 +92,46 @@ export async function ensureNationalTeams(store: Store) {
      WHERE base.type = 'national' AND base.age_group = 'U20'
        AND NOT EXISTS (SELECT 1 FROM clubs AS other WHERE other.type = 'national' AND other.age_group = 'U21' AND other.country_id = base.country_id)`,
   );
+}
+
+/** Senior friendly dates (MM-DD) in the March and June FIFA windows, played by every senior national team. */
+export const FRIENDLY_WINDOW_DATES = ["03-24", "03-28", "06-08", "06-12"];
+
+export interface FriendlyTeam {
+  id: number;
+  confederation: string;
+  reputation: number;
+}
+
+/**
+ * Opponents for one friendly date: teams of similar strength within each confederation (a seeded shuffle of the
+ * strength order keeps opponents varying between dates), odd teams paired across confederations, and a random team
+ * without a match when the number is odd. Stronger side at home.
+ */
+export function friendlyPairs(teams: readonly FriendlyTeam[], random: () => number): [number, number][] {
+  const pairs: [number, number][] = [];
+  const leftover: { team: FriendlyTeam; score: number }[] = [];
+  const bye = teams.length % 2 ? teams[Math.floor(random() * teams.length)] : undefined;
+  const byConfederation = new Map<string, FriendlyTeam[]>();
+  for (const team of teams)
+    if (team !== bye) byConfederation.set(team.confederation, [...(byConfederation.get(team.confederation) ?? []), team]);
+  const pair = (list: { team: FriendlyTeam; score: number }[]) => {
+    for (let index = 0; index + 1 < list.length; index += 2) {
+      const [left, right] = [list[index].team, list[index + 1].team];
+      pairs.push(left.reputation >= right.reputation ? [left.id, right.id] : [right.id, left.id]);
+    }
+    if (list.length % 2) leftover.push(list.at(-1)!);
+  };
+  for (const confederation of [...byConfederation.keys()].sort())
+    pair(
+      byConfederation
+        .get(confederation)!
+        .map((team) => ({ team, score: team.reputation + (random() - 0.5) * 14 }))
+        .sort((left, right) => right.score - left.score || left.team.id - right.team.id),
+    );
+  const rest = leftover.splice(0).sort((left, right) => right.score - left.score);
+  pair(rest);
+  return pairs;
 }
 
 const tournamentOf = (name: string) => YOUTH_TOURNAMENT_BY_NAME.get(name.replace(/ Qualifying$/, ""));
@@ -187,7 +228,12 @@ export async function processInternationalDuty(store: Store) {
     rewarded: duty.rewarded ?? [],
     nextCheck: later && addDays(later, -NATIONAL_DUTY_RULES.lookaheadDays + 1) < idle ? addDays(later, -NATIONAL_DUTY_RULES.lookaheadDays + 1) : idle,
   };
-  if (ended.length) await endDuty(store, state.season, ended);
+  if (ended.length) {
+    await endDuty(store, state.season, ended);
+    // After a senior window the caps (and the nation's available matches) changed for these players.
+    const senior = ended.filter((record) => record.ageGroup === "Senior").flatMap((record) => record.players);
+    if (senior.length) await refreshGbe(store, senior);
+  }
   for (const league of leagues) {
     const spec = YOUTH_TOURNAMENT_BY_NAME.get(league.name);
     if (!spec || league.phase !== "complete" || league.season !== state.season || next.rewarded!.includes(league.id)) continue;

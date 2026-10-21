@@ -25,6 +25,28 @@ export function clubCompetitionEligible(
     !data.pendingSeniorLeague;
 }
 
+export interface CompetitionRegistrationRule {
+  /** Players need an approved association registration (work authorisation included) with their club. */
+  association: true;
+  /** The association's foreign-player quota limits who can be registered (it never blocks the signing). */
+  foreignQuota: boolean;
+  /** New registrations only inside a registration window. */
+  windowed: true;
+}
+
+/**
+ * Player-registration rules of an official competition. Domestic senior league and cup registrations count the
+ * association's foreign quota (LaLiga/RFEF, LFP, MLS and A-League licences cover all domestic competitions);
+ * continental club competitions only need the association registration. National-team football has no club rule.
+ */
+export function competitionRegistrationRule(
+  league: Pick<League, "kind" | "country_id" | "age_group">,
+): CompetitionRegistrationRule | null {
+  if (league.kind === "international") return null;
+  const domestic = league.country_id !== null && (league.kind === "league" || league.kind === "cup");
+  return { association: true, foreignQuota: domestic && league.age_group === "Senior", windowed: true };
+}
+
 export interface KnockoutRules {
   version: number;
   legs: 1 | 2;

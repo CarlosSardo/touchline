@@ -1,3 +1,4 @@
+import type { EligibilitySummary } from "./eligibility.ts";
 export type Position =
   "GK" | "CB" | "LB" | "RB" | "DM" | "CM" | "AM" | "LW" | "RW" | "ST";
 export type AgeGroup = "Senior" | "U19" | "U17" | "U20" | "U21";
@@ -146,6 +147,8 @@ export interface Player {
   country_code?: string;
   report?: ScoutReport;
   details?: PlayerProfile;
+  /** Registration badge in squad and club lists (server/eligibility.ts eligibilitySummaries). */
+  eligibility?: EligibilitySummary;
 }
 
 export interface Country {
@@ -558,6 +561,8 @@ export interface Negotiation {
   ability?: number;
   potential?: number;
   buyer_name?: string;
+  buyer_color?: string;
+  buyer_reputation?: number;
   seller_name?: string;
   /** Transfer desk only: rivals for this player as the director knows them (data.rivals is removed). */
   rivals?: RivalInterest[];
@@ -802,4 +807,28 @@ export interface NegotiationData {
   onwardLoan?: OnwardLoanPlan;
   /** Future transfers only: the minor already moved domestically to the buyer's affiliate. */
   affiliatePlacement?: AffiliatePlacement;
+  /** "approach": an unsolicited offer an AI club made for one of the director's players (market-offers.ts). */
+  origin?: "approach";
+  /** Why the club made the approach (shown with the offer and copied to the loan record). */
+  reason?: OfferReason;
+  /** Expected start: the loan start or arrival date (the window opening for pre-window approaches). */
+  plannedStart?: string;
+  /** Why an open approach was withdrawn by the club or closed by another agreement. */
+  closedReason?: "accepted-elsewhere" | "needs-changed" | "window" | "injury" | "budget" | "unavailable";
+}
+
+export type OfferReasonCode =
+  | "starter-need"
+  | "depth"
+  | "injury-cover"
+  | "upgrade"
+  | "development-pathway"
+  | "registration"
+  | "option-to-buy"
+  | "contract-expiry"
+  | "listed";
+
+export interface OfferReason {
+  code: OfferReasonCode;
+  text: string;
 }

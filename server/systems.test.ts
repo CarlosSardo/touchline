@@ -9,6 +9,8 @@ import {
   WAGE_INTEREST_CAP,
 } from "./recruitment.ts";
 import { heldNationalities, passportGroup } from "./registration.ts";
+import { gbeAssessment } from "./gbe.ts";
+import { playerEligibility } from "./eligibility.ts";
 import { addDays, DEFAULT_TRANSFER_TERMS } from "../shared/rules.ts";
 import {
   assignScout,
@@ -21,6 +23,7 @@ import {
   exerciseBuyBack,
   expireLoans,
   finishScouting,
+  loanTermsIssue,
   negotiate,
   negotiationStep,
   progressDealMilestones,
@@ -1064,8 +1067,6 @@ describe("director decisions and ownership boundaries", () => {
     await store.run("UPDATE clubs SET reputation = 70 WHERE id = 2");
     await store.run("UPDATE players SET position = 'GK' WHERE club_id = 2 AND position = 'CM'");
     await store.run("UPDATE players SET age_group = 'U19' WHERE id IN (SELECT id FROM players WHERE club_id = 2 AND age_group = 'Senior' ORDER BY id LIMIT 5)");
-    const negotiation = await enquire(store, player.id, type, 2);
-    await negotiationStep(store, negotiation.id, "formalize");
     const loanPlayer = await playerOf(store, player.id);
     const terms = {
       ...defaultLoanTerms(
@@ -1073,22 +1074,42 @@ describe("director decisions and ownership boundaries", () => {
         await clubOf(store, 2),
       ),
       recall,
-      duration: 365,
+      duration: type === "Two-year loan" ? 730 : 365,
       ...(type === "Loan with obligation" ? { optionFee: Math.round(loanPlayer.value * 0.95) } : {}),
       // Above the parent's 70% reference: no wage subsidy to price (transfer-finance.test covers the subsidy).
       salarySplit: 75,
       // A two-season loan's minutes bonus needs at least half of two seasons' league minutes.
       ...(type === "Two-year loan" ? { mandatoryMinutes: 3600 } : {}),
     };
-    const input = {
-      fee: 0,
-      wage: player.wage * 2,
-      years: 3,
-      role: "Regular starter",
-      promises: ["First-team minutes"],
+    // Clubs approach the director with loan offers (market-offers.ts); the director accepts this one.
+    const date = (await stateOf(store)).date;
+    const data: NegotiationData = {
+      workflowVersion: 2,
+      origin: "approach",
+      reason: { code: "development-pathway", text: "A development pathway with regular minutes." },
+      plannedStart: date,
+      log: [],
+      agent: JSON.parse(loanPlayer.profile).agent,
       terms,
+      loanReferenceSplit: terms.salarySplit,
+      years: 3,
+      role: terms.role,
+      promises: [],
     };
-    await negotiate(store, negotiation.id, input);
+    const negotiation = { id: Number(
+      (
+        await store.run(
+          "INSERT INTO negotiations(player_id,buying_club_id,selling_club_id,type,stage,asking_price,offer,wage,interest,created,deadline,data) VALUES (?,2,1,?,'Offer received',0,0,?,85,?,?,?)",
+          player.id,
+          type,
+          loanPlayer.wage,
+          date,
+          addDays(date, 7),
+          JSON.stringify(data),
+        )
+      ).lastInsertRowid,
+    ) };
+    expect((await negotiationStep(store, negotiation.id, "accept")).stage).toBe("Agent talks");
     for (const date of ["2026-07-02", "2026-07-03"]) {
       await store.setMeta("state", { ...(await stateOf(store)), date });
       await progressDealMilestones(
@@ -1186,7 +1207,8 @@ describe("director decisions and ownership boundaries", () => {
       date: "2027-07-04",
     });
     await store.run("UPDATE clubs SET transfer_budget = 0 WHERE id = 2");
-    await reviewLoans(store);
+    // Loans end in the daily expiry, before the weekly review.
+    await expireLoans(store);
     expect(
       (await store.get<Loan>("SELECT * FROM loans WHERE id = ?", loan.id))!
         .status,
@@ -1213,7 +1235,7 @@ describe("director decisions and ownership boundaries", () => {
     ).rejects.toThrow("not awaiting");
     const details = JSON.parse(completed.data) as NegotiationData;
     expect(details.log.map((entry) => entry.type)).toEqual(
-      expect.arrayContaining(["Enquiry", "Agent talks", "Medical"]),
+      expect.arrayContaining(["Club talks", "Agent talks", "Medical"]),
     );
     await expect(completeNegotiation(store, completed)).rejects.toThrow(
       "registration has changed",
@@ -1286,15 +1308,15 @@ describe("director decisions and ownership boundaries", () => {
       "SELECT * FROM players WHERE club_id = 1 AND age_group = 'Senior' AND age >= 18 AND parent_club_id IS NULL ORDER BY id LIMIT 1",
     ))!;
     await store.run("UPDATE players SET contract_end = '2030-06-30' WHERE id = ?", player.id);
-    const foreign = (await store.get<{ id: number }>(
-      "SELECT id FROM clubs WHERE country_id = 2 AND type = 'club' ORDER BY id LIMIT 1",
-    ))!;
-    await expect(enquire(store, player.id, "Two-year loan", foreign.id)).rejects.toThrow("one year");
-    const domestic = await enquire(store, player.id, "Two-year loan", 2);
-    expect(JSON.parse(domestic.data).loanReferenceSplit).toBeGreaterThanOrEqual(25);
+    const terms = defaultLoanTerms(player, await clubOf(store, 2));
+    const pricing = { type: "Two-year loan", value: player.value, days: 730 };
+    expect(loanTermsIssue({ ...pricing, international: true }, { ...terms, mandatoryMinutes: 3600 })).toContain("one year");
+    expect(loanTermsIssue({ ...pricing, international: false }, { ...terms, mandatoryMinutes: 3600 })).toBeNull();
+    // The director no longer shops his players around: clubs approach him with loan offers instead.
+    await expect(enquire(store, player.id, "Two-year loan")).rejects.toThrow("contract renewal");
   });
 
-  it("does not grant English registration based on ability alone", async () => {
+  it("signs regardless of GBE and does not grant English registration based on ability alone", async () => {
     // Some v4 Spaniards hold British citizenship through a parent (domestic work rights), so skip them.
     const foreign = (
       await store.all<Player>(
@@ -1305,10 +1327,12 @@ describe("director decisions and ownership boundaries", () => {
         (code) => !["GB", "IE"].includes(passportGroup(code)),
       ),
     )!;
+    const evidence = (await gbeAssessment(store, foreign.id)).points;
     await store.run(
       "UPDATE players SET ability = 99, potential = 99, wage = 5000, value = 1000000, age = 25 WHERE id = ?",
       foreign.id,
     );
+    expect((await gbeAssessment(store, foreign.id)).points).toBe(evidence);
     const enquiry = await enquire(store, foreign.id, "Permanent transfer");
     const data = JSON.parse(enquiry.data) as NegotiationData;
     data.medicalDate = "2026-07-01";
@@ -1333,9 +1357,16 @@ describe("director decisions and ownership boundaries", () => {
         "SELECT * FROM negotiations WHERE id = ?",
         enquiry.id,
       ))!.stage,
-    ).toBe("Rejected");
-    expect((await clubOf(store)).balance).toBe(balance);
-    expect((await playerOf(store, foreign.id)).club_id).toBe(foreign.club_id);
+    ).toBe("Completed");
+    expect((await clubOf(store)).balance).toBeLessThan(balance);
+    expect((await playerOf(store, foreign.id)).club_id).toBe((await stateOf(store)).clubId);
+    // Registration follows the GBE evidence (never the rating); a refusal leaves him signed for friendlies only.
+    const { association, contracted } = await playerEligibility(store, foreign.id);
+    expect(contracted).toBe(true);
+    const outcome = association.gbe?.outcome;
+    expect(association.status).toBe(
+      !outcome || ["auto_pass", "pass", "exempt"].includes(outcome) ? "registered" : outcome === "no_data" ? "pending" : "refused",
+    );
   });
 
   it("cannot skip enquiry, agreement or registration stages", async () => {

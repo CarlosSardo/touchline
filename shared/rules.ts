@@ -212,6 +212,13 @@ export const POSITIONS = [
   "RW",
   "ST",
 ] as const;
+/** The eleven positions each formation fields; match selection fills these slots (simulation.ts). */
+export const FORMATION_POSITIONS: Record<string, readonly (typeof POSITIONS)[number][]> = {
+  "4-3-3": ["GK", "RB", "CB", "CB", "LB", "DM", "CM", "CM", "RW", "ST", "LW"],
+  "4-2-3-1": ["GK", "RB", "CB", "CB", "LB", "DM", "CM", "RW", "AM", "LW", "ST"],
+  "3-5-2": ["GK", "CB", "CB", "CB", "RB", "CM", "DM", "CM", "LB", "ST", "ST"],
+  "4-4-2": ["GK", "RB", "CB", "CB", "LB", "RW", "CM", "CM", "LW", "ST", "ST"],
+};
 export const STAFF_ROLES = [
   "Assistant manager",
   "Head of youth",
@@ -803,6 +810,14 @@ export const SETTING_DEFINITIONS: SettingDefinition[] = [
   {
     id: "unexpectedEvents",
     label: "Unexpected events",
+    group: "Simulation",
+    type: "select",
+    default: "medium",
+    options: ["low", "medium", "high"],
+  },
+  {
+    id: "marketOfferFrequency",
+    label: "Transfer/Loan Offer Frequency",
     group: "Simulation",
     type: "select",
     default: "medium",

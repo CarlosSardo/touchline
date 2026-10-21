@@ -287,6 +287,7 @@ interface TransactionContext {
   readOnly: boolean;
   failed: boolean;
   failure?: unknown;
+  savepoints: number;
 }
 
 interface ColumnInfo {
@@ -540,6 +541,66 @@ export class Store {
   }
 
   /**
+   * Runs an optional step of the current transaction under a SAVEPOINT. If it fails (a SQL error or any thrown
+   * error), only its own statements are rolled back, the transaction stays usable, and the error is rethrown for
+   * the caller to handle. Do not issue other statements of the same transaction concurrently with the callback.
+   * Without a transaction (or inside batched()) it behaves like transaction().
+   */
+  async savepoint<Result>(callback: () => Promise<Result>): Promise<Result> {
+    this.assertWritable();
+    const context = this.context.getStore();
+    if (!context) return this.transaction(callback);
+    if (context.failed) throw context.failure;
+    const name = `touchline_savepoint_${++context.savepoints}`;
+    await this.request((client) => client.query(`SAVEPOINT ${name}`));
+    try {
+      const result = await callback();
+      await context.tail;
+      if (context.failed) throw context.failure;
+      await this.request((client) => client.query(`RELEASE SAVEPOINT ${name}`));
+      return result;
+    } catch (error) {
+      await context.tail;
+      if (!context.active) throw error;
+      context.failed = false;
+      context.failure = undefined;
+      try {
+        await this.request((client) => client.query(`ROLLBACK TO SAVEPOINT ${name}; RELEASE SAVEPOINT ${name}`));
+      } catch (rollbackError) {
+        throw new AggregateError([error, rollbackError], "SQL step and savepoint rollback both failed.");
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * VACUUM of world tables (heap and TOAST), so space of dead row versions is reused before the table grows. It
+   * cannot run inside a transaction: inside one, or inside batched(), it does nothing and returns false.
+   * With `deadShare`, only tables whose statistics count more dead row versions than that share of their live rows
+   * (at least 1000) are vacuumed; returns whether any table was.
+   */
+  async vacuum(tables: readonly string[], options: { deadShare?: number } = {}): Promise<boolean> {
+    this.assertOpen();
+    if (this.context.getStore() || this.batchContext.getStore()) return false;
+    let names = tables.map((table) => tableName(this.schemaName, this.knownTable(table)));
+    if (names.length && options.deadShare !== undefined) {
+      const due = new Set(
+        (await this.all<{ name: string }>(
+          `SELECT relname AS name FROM pg_catalog.pg_stat_user_tables
+           WHERE schemaname = ? AND relname = ANY(?::text[]) AND n_dead_tup > ?::double precision * GREATEST(n_live_tup, 1000)`,
+          this.schemaName,
+          tables.map((table) => this.knownTable(table)),
+          options.deadShare,
+        )).map((row) => row.name),
+      );
+      names = tables.filter((table) => due.has(this.knownTable(table))).map((table) => tableName(this.schemaName, this.knownTable(table)));
+    }
+    if (!names.length) return false;
+    await this.withClient((client) => client.query(`VACUUM ${names.join(", ")}`));
+    return true;
+  }
+
+  /**
    * A read-only transaction under the world lock in SHARED mode: readers run side by side, yet every writer
    * (which takes the lock exclusively) still waits for them and they for it. Any write inside it throws.
    * Inside another transaction or batched() it just runs the callback there.
@@ -665,6 +726,7 @@ export class Store {
       locked: false,
       readOnly: shared,
       failed: false,
+      savepoints: 0,
     };
     try {
       await this.useSchema(client);

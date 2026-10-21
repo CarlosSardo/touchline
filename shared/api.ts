@@ -22,6 +22,7 @@ import type {
   PlayerInterest,
 } from "./types.ts";
 import type { AssistantDuty } from "./rules.ts";
+import type { GbeAssessment, PlayerEligibility, RegistrationStatus } from "./eligibility.ts";
 
 export const PORTABLE_SAVE_EXTENSION = ".touchline.gz";
 
@@ -59,6 +60,19 @@ export type WorldBusyResponse = {
   error: string;
   code: "world_busy";
 } & WorldActivity;
+
+/**
+ * Response of POST /api/advance. Each day commits on its own: when a later day fails, the days already simulated
+ * are kept and `error` explains why the run stopped early (a failure on the first day is an error response).
+ */
+export interface AdvanceResult {
+  from: string;
+  date: string;
+  days: number;
+  matches: number;
+  seconds: number;
+  error?: string;
+}
 
 /** hasWorld is null exactly when activity is set: the world is busy and was not read. */
 export interface AccountSession {
@@ -322,18 +336,19 @@ export interface PlayerDetail {
   }[];
   interest: PlayerInterest;
   youthTransfer: YouthTransferAssessment;
+  /** Contract, association, competition and next-fixture eligibility at the player's current club. */
+  eligibility: PlayerEligibility;
+  /**
+   * A signing by the user's club: transfer rules (never GBE or quotas) and the association registration it would
+   * get; null for the user's own players.
+   */
+  signing: {
+    ok: boolean;
+    reasons: string[];
+    registration: { status: RegistrationStatus; reasons: string[]; gbe?: GbeAssessment };
+  } | null;
   buyBackClauses: BuyBackClause[];
   sellOnClauses: SellOnClause[];
-  registration: {
-    allowed: boolean;
-    status: string;
-    points: number;
-    threshold: number;
-    automatic: boolean;
-    breakdown: Record<string, number>;
-    reasons: string[];
-    source: string;
-  };
   player: Player;
   profile: PlayerProfile;
   report: ScoutReport | null;
@@ -648,7 +663,8 @@ export interface LoanDesk {
     strength: number;
     data: string;
   }[];
-  candidates: Player[];
+  /** The director's players available for loan (and young players clubs may ask about), with open loan offers. */
+  loanList: (Player & { open_offers: number; last_offer: string | null })[];
 }
 export interface StaffDesk {
   staff: Staff[];

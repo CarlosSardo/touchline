@@ -1,5 +1,17 @@
-import { describe, expect, it } from "vitest";
-import { squadCheckpoints, squadShortfalls, type SquadCount } from "./check-simulation.ts";
+import { describe, expect, it, vi } from "vitest";
+import {
+  FULL_WORLD_FIXTURES,
+  MIN_SEASON_BUDGET_MB,
+  PLAYER_ROW_BUDGET_BYTES,
+  reportFootprint,
+  seasonBudgetMB,
+  squadCheckpoints,
+  squadShortfalls,
+  type SquadCount,
+} from "./check-simulation.ts";
+import { Store } from "./db.ts";
+import { FOOTPRINT_BUDGET } from "./retention.ts";
+import { generateWorld } from "./world.ts";
 
 const squad = (id: number, type: string, group: SquadCount["squad"], players: number, keepers = 2): SquadCount => ({
   id,
@@ -47,4 +59,48 @@ describe("in-season squad check", () => {
     rows[2] = squad(3, "club", "U19", 20, 1);
     expect(squadShortfalls(rows, "2027-01-06")).toMatchObject({ short: 3, ok: false });
   });
+});
+
+describe("season footprint budget", () => {
+  it("scales decision 11's full-world season budget by fixtures played, with a floor", () => {
+    expect(seasonBudgetMB(FULL_WORLD_FIXTURES)).toBe(FOOTPRINT_BUDGET.seasonMB);
+    expect(seasonBudgetMB(FULL_WORLD_FIXTURES * 2)).toBe(FOOTPRINT_BUDGET.seasonMB);
+    expect(seasonBudgetMB(FULL_WORLD_FIXTURES / 2)).toBe(FOOTPRINT_BUDGET.seasonMB / 2);
+    expect(seasonBudgetMB(0)).toBe(MIN_SEASON_BUDGET_MB);
+  });
+
+  it.skipIf(process.env.SQL_INTEGRATION_TESTS !== "true")(
+    "fails a season whose other tables outgrew the budget, or whose players table bloated past its per-row budget",
+    async () => {
+      const store = await Store.createTest("footprint");
+      const log = vi.spyOn(console, "log").mockImplementation(() => {});
+      try {
+        await store.schema();
+        await generateWorld(store, { nations: ["FO"], squads: "minimum", seed: "footprint" });
+        const start = await reportFootprint(store, "start");
+        expect(start.playerBytesPerRow).toBeGreaterThan(0);
+        expect(start.playerBytesPerRow).toBeLessThan(PLAYER_ROW_BUDGET_BYTES);
+        expect(await reportFootprint(store, "steady", start.accumulatedMB, 1000)).toMatchObject({
+          seasonMB: 0,
+          over: false,
+          budgetMB: MIN_SEASON_BUDGET_MB,
+        });
+        const grown = await reportFootprint(store, "grown", start.accumulatedMB - MIN_SEASON_BUDGET_MB - 1, 1000);
+        expect(grown).toMatchObject({ over: true, budgetMB: MIN_SEASON_BUDGET_MB });
+        expect(log.mock.calls.at(-1)?.[0]).toMatch(/other tables \+\d+(\.\d)? MB this season \(budget 32 MB for 1000 fixtures\) OVER BUDGET/);
+        // Issue 1: whole-squad rewrites of an indexed column inside one transaction leave every old version behind.
+        await store.transaction(async () => {
+          for (let round = 0; round < 30; round++) await store.run("UPDATE players SET ability = ability + 0");
+        });
+        const bloated = await reportFootprint(store, "bloated", start.accumulatedMB, 1000);
+        expect(bloated.playerBytesPerRow).toBeGreaterThan(PLAYER_ROW_BUDGET_BYTES);
+        expect(bloated).toMatchObject({ seasonMB: 0, over: true });
+        expect(log.mock.calls.at(-1)?.[0]).toContain(`bytes per row (budget ${PLAYER_ROW_BUDGET_BYTES}) OVER BUDGET`);
+      } finally {
+        log.mockRestore();
+        await store.close();
+      }
+    },
+    120_000,
+  );
 });

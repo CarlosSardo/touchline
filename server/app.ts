@@ -9,6 +9,7 @@ import { rm } from "node:fs/promises";
 import { pipeline } from "node:stream/promises";
 import { z } from "zod";
 import { DatabaseUnavailableError, Store } from "./db.ts";
+import { describeSqlError } from "./sql-config.ts";
 import { Accounts } from "./accounts.ts";
 import { createAdminRouter, isAccessAdministration, type AccessAdministration } from "./admin-routes.ts";
 import {
@@ -47,6 +48,7 @@ import {
 import { resolveUnexpectedEvent, unexpectedEvents } from "./events.ts";
 import { answerCallUpProposal, callUpDesk, callUpPlayer, endCallUp, setDevelopmentRequest } from "./callups.ts";
 import { internationalsDesk, nationalTeamView, playerCaps } from "./internationals.ts";
+import { gbeAssessment } from "./gbe.ts";
 import { CALL_UP_RULES } from "../shared/features/callups.ts";
 import {
   assignScout,
@@ -100,6 +102,7 @@ import type { Club, Negotiation, PlayerProfile } from "../shared/types.ts";
 import type {
   AccountSession,
   AccountUser,
+  AdvanceResult,
   DeleteActiveCareerResult,
   Health,
   HealthDetails,
@@ -394,6 +397,7 @@ export async function dispatchAction(
       )!.options!;
       if (!choices.includes(data.background))
         throw new GameError("Choose a director background.");
+      const clubChanged = !!data.clubId && data.clubId !== state.clubId;
       if (data.clubId && data.clubId !== state.clubId) {
         if (state.started && !state.gameOver)
           throw new GameError("You already hold a club position.");
@@ -425,6 +429,9 @@ export async function dispatchAction(
           [skill]: 2,
         };
       }
+      // The new director decides who is available: the world generator's loan flags at his club are cleared.
+      if (!state.started || clubChanged)
+        await store.run("UPDATE players SET available_loan = 0 WHERE club_id = ? AND available_loan = 1", state.clubId);
       state.started = true;
       await store.setMeta("state", state);
       await store.setMeta("settings", {
@@ -483,7 +490,6 @@ export async function dispatchAction(
             "Pre-contract agreement",
             ...LOAN_TYPES,
           ]),
-          destinationId: idSchema.optional(),
           guardianConsent: z.boolean().default(false),
         })
         .parse(body);
@@ -491,17 +497,11 @@ export async function dispatchAction(
         const player = await store.get<{ club_id: number | null }>("SELECT club_id FROM players WHERE id = ?", data.playerId);
         const error = loanDurationError({
           type: data.dealType,
-          crossBorder: !!player && (await loanCrossesBorder(store, data.destinationId ?? state.clubId, player.club_id)),
+          crossBorder: !!player && (await loanCrossesBorder(store, state.clubId, player.club_id)),
         });
         if (error) throw new GameError(error);
       }
-      return enquire(
-        store,
-        data.playerId,
-        data.dealType,
-        data.destinationId,
-        data.guardianConsent,
-      );
+      return enquire(store, data.playerId, data.dealType, data.guardianConsent);
     }
     case "offer": {
       const data = z
@@ -1186,11 +1186,14 @@ export function createApp(
   app.use(
     (
       error: unknown,
-      _request: Request,
+      request: Request,
       response: Response,
       _next: NextFunction,
     ) => {
-      if (response.headersSent) return response.destroy();
+      if (response.headersSent) {
+        logUnexpectedError(request, response, error);
+        return response.destroy();
+      }
       if (
         error instanceof AuthenticationRequiredError ||
         error instanceof NotAuthorizedError
@@ -1245,13 +1248,30 @@ export function createApp(
             .status(415)
             .json({ error: "Unsupported request encoding." });
       }
-      console.error("Touchline: an API request failed.");
+      logUnexpectedError(request, response, error);
       return response.status(500).json({
         error: "An unexpected server error occurred.",
       });
     },
   );
   return app;
+}
+
+/**
+ * Logs an unexpected failure with its operation, route, SQLSTATE, message chain and stack, redacting configured
+ * secrets; request bodies and SQL parameters are never logged.
+ */
+export function logUnexpectedError(request: Pick<Request, "method" | "path">, response: Pick<Response, "locals">, error: unknown) {
+  const operation = typeof response.locals.operation === "string" ? response.locals.operation : "api_request";
+  const context = typeof response.locals.failureContext === "string" ? ` ${response.locals.failureContext}` : "";
+  const detail = error && typeof error === "object" ? describeSqlError(error).join(" | ") : String(error);
+  const stack = error instanceof Error && error.stack ? describeSqlError({ message: error.stack })[0] : "";
+  console.error(`Touchline: ${operation} failed (${request.method} ${request.path}${context}): ${detail}${stack ? `\n${stack}` : ""}`);
+}
+
+/** The message a player sees for a failure: game rule messages as they are, anything else generic. */
+function publicFailure(error: unknown) {
+  return error instanceof GameError && error.status < 500 ? error.message : "An unexpected server error occurred.";
 }
 
 const WORLD_REPLACING = new Set<WorldOperation>([
@@ -1312,6 +1332,7 @@ function createWorldRouter(
     async (request: Request, response: Response, next: NextFunction) => {
       if (activity) return conflict(response, activity);
       activity = { operation, startedAt: new Date().toISOString() };
+      response.locals.operation = operation;
       try {
         if (readers > 0)
           await new Promise<void>((resolveReads) => {
@@ -1479,6 +1500,16 @@ function createWorldRouter(
   app.get(
     "/api/players/:id/caps",
     read((request) => playerCaps(store, idSchema.parse(request.params.id))),
+  );
+  app.get(
+    "/api/players/:id/gbe",
+    read((request) =>
+      gbeAssessment(
+        store,
+        idSchema.parse(request.params.id),
+        z.object({ asOf: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional() }).parse(request.query).asOf,
+      ),
+    ),
   );
   app.get(
     "/api/scouting",
@@ -1693,16 +1724,18 @@ function createWorldRouter(
         .object({ days: z.number().int().min(1).max(28) })
         .parse(request.body);
       const started = performance.now();
-      const result = await store.transaction(async () => {
-        const initial = await stateOf(store);
-        const progress = {
-          from: initial.date,
-          date: initial.date,
-          days: 0,
-          matches: 0,
-          seconds: 0,
-        };
-        for (let step = 0; step < days; step++) {
+      const initial = await stateOf(store);
+      const progress: AdvanceResult = {
+        from: initial.date,
+        date: initial.date,
+        days: 0,
+        matches: 0,
+        seconds: 0,
+      };
+      // Every simulated day (and its autosave) commits on its own: no transaction or world lock spans the request,
+      // and a failure keeps the days already played. `activity` still holds other mutations and reads off until the end.
+      for (let step = 0; step < days; step++) {
+        try {
           const day = await advance(store, 1);
           progress.days += day.days;
           progress.matches += day.matches;
@@ -1717,11 +1750,16 @@ function createWorldRouter(
           )
             await saves.create("Career", true);
           if (state.gameOver) break;
+        } catch (error) {
+          response.locals.failureContext = `after ${progress.days} of ${days} days, from ${progress.date}`;
+          if (!progress.days) throw error;
+          if (!(error instanceof GameError && error.status < 500)) logUnexpectedError(request, response, error);
+          progress.error = `The simulation stopped after ${progress.date}; ${progress.days === 1 ? "1 day was" : `${progress.days} days were`} simulated and kept. ${publicFailure(error)}`;
+          break;
         }
-        return progress;
-      });
-      result.seconds = Math.round((performance.now() - started) / 10) / 100;
-      response.json(result);
+      }
+      progress.seconds = Math.round((performance.now() - started) / 10) / 100;
+      response.json(progress);
     }),
   );
   app.get(

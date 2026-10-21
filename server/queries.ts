@@ -71,7 +71,7 @@ import {
   clubValuation,
   projectedOperatingRevenue,
 } from "./finance.ts";
-import { assessRegistration } from "./registration.ts";
+import { canSign, eligibilitySummaries, playerEligibility, predictRegistration } from "./eligibility.ts";
 import { assessPlayerInterest, assessYouthTransfer } from "./recruitment.ts";
 import { clubAffiliates } from "./club-support.ts";
 import { describeIdentity, peopleContext } from "./people.ts";
@@ -239,7 +239,7 @@ export async function clubDetail(
       "SELECT * FROM clubs WHERE parent_id = ? ORDER BY name",
       id,
     ),
-    players: roster.map(withoutProfile),
+    players: await withEligibility(store, roster.map(withoutProfile)),
     staff: await store.all<Staff>(
       "SELECT * FROM staff WHERE club_id = ? ORDER BY role,ability DESC",
       id,
@@ -758,6 +758,18 @@ async function activePlayers(
   return counts.active.total;
 }
 
+/** Transfer rules and the registration a signing by the user's club would get (registration never blocks it). */
+async function signingPreview(store: Store, playerId: number, clubId: number, kind: "transfer" | "free") {
+  const { ok, reasons } = await canSign(store, playerId, clubId, kind);
+  return { ok, reasons, registration: await predictRegistration(store, playerId, clubId) };
+}
+
+/** Adds the registration badge of each listed player (two queries per list). */
+async function withEligibility<Row extends Player>(store: Store, rows: Row[]): Promise<Row[]> {
+  const summaries = await eligibilitySummaries(store, rows);
+  return rows.map((row) => ({ ...row, eligibility: summaries.get(row.id) }));
+}
+
 /** Search rows also carry the current body and whether a club-less player belongs to a home-based pool. */
 function searchRow(player: Player) {
   const profile = JSON.parse(player.profile) as PlayerProfile;
@@ -846,10 +858,13 @@ export async function players(
     ).map((player) => [player.id, player]),
   );
   return {
-    players: ids.flatMap((id) => {
-      const player = rows.get(id);
-      return player ? [searchRow(player)] : [];
-    }),
+    players: await withEligibility(
+      store,
+      ids.flatMap((id) => {
+        const player = rows.get(id);
+        return player ? [searchRow(player)] : [];
+      }),
+    ),
     total,
     totalCapped: capped && search.filtered,
     page,
@@ -911,12 +926,16 @@ export async function playerDetail(
   return {
     canManage: await canManagePlayer(store, player),
     squadDestinations: await squadDestinations(store, player),
-    registration: await assessRegistration(store, player, await clubOf(store)),
     youthTransfer: await assessYouthTransfer(
       store,
       player,
       await clubOf(store),
     ),
+    eligibility: await playerEligibility(store, id),
+    signing:
+      player.club_id === state.clubId || player.parent_club_id === state.clubId
+        ? null
+        : await signingPreview(store, id, state.clubId, player.club_id ? "transfer" : "free"),
     interest: await assessPlayerInterest(store, player, await clubOf(store)),
     buyBackClauses: await store.all(
       `${buyBackSelect} WHERE clauses.player_id = ? AND clauses.status = 'active' AND clauses.expires >= ? ORDER BY clauses.expires`,
@@ -1074,7 +1093,7 @@ export async function squad(
     clubs,
     selectedClubId: filter.club,
     ageGroup: filter.ageGroup,
-    players: senior.map(withoutProfile),
+    players: await withEligibility(store, senior.map(withoutProfile)),
     matrix: relationshipMatrix(senior),
     succession: POSITIONS.map((position) => {
       const current = senior.find((player) => player.position === position);
@@ -1133,7 +1152,7 @@ export async function transfers(store: Store): Promise<TransferDesk> {
   const negotiations = await withBattleViews(
     store,
     await store.all<Negotiation>(
-      "SELECT negotiations.*, players.name AS player_name, players.position, players.age, players.ability, players.potential, buyer.name AS buyer_name, seller.name AS seller_name FROM negotiations JOIN players ON players.id = negotiations.player_id JOIN clubs AS buyer ON buyer.id = negotiations.buying_club_id LEFT JOIN clubs AS seller ON seller.id = negotiations.selling_club_id WHERE buying_club_id = ? OR selling_club_id = ? ORDER BY negotiations.id DESC",
+      "SELECT negotiations.*, players.name AS player_name, players.position, players.age, players.ability, players.potential, buyer.name AS buyer_name, buyer.color AS buyer_color, buyer.reputation AS buyer_reputation, seller.name AS seller_name FROM negotiations JOIN players ON players.id = negotiations.player_id JOIN clubs AS buyer ON buyer.id = negotiations.buying_club_id LEFT JOIN clubs AS seller ON seller.id = negotiations.selling_club_id WHERE buying_club_id = ? OR selling_club_id = ? ORDER BY negotiations.id DESC",
       id,
       id,
     ),
@@ -1198,7 +1217,7 @@ export async function loans(store: Store): Promise<LoanDesk> {
     loanOffers: await withBattleViews(
       store,
       await store.all<Negotiation>(
-        `SELECT negotiations.*, players.name AS player_name, players.position, players.age, players.ability, players.potential, buyer.name AS buyer_name, seller.name AS seller_name FROM negotiations JOIN players ON players.id = negotiations.player_id JOIN clubs AS buyer ON buyer.id = negotiations.buying_club_id LEFT JOIN clubs AS seller ON seller.id = negotiations.selling_club_id WHERE (negotiations.buying_club_id = ? OR negotiations.selling_club_id = ?) AND negotiations.type IN (${loanTypeList}) AND negotiations.stage IN ('Enquiry','Club talks','Agent talks','Contract review','Scheduled','Medical','Registration','Offer received') ORDER BY negotiations.id DESC`,
+        `SELECT negotiations.*, players.name AS player_name, players.position, players.age, players.ability, players.potential, buyer.name AS buyer_name, buyer.color AS buyer_color, buyer.reputation AS buyer_reputation, seller.name AS seller_name FROM negotiations JOIN players ON players.id = negotiations.player_id JOIN clubs AS buyer ON buyer.id = negotiations.buying_club_id LEFT JOIN clubs AS seller ON seller.id = negotiations.selling_club_id WHERE (negotiations.buying_club_id = ? OR negotiations.selling_club_id = ?) AND negotiations.type IN (${loanTypeList}) AND negotiations.stage IN ('Enquiry','Club talks','Agent talks','Contract review','Scheduled','Medical','Registration','Offer received') ORDER BY negotiations.id DESC`,
         id,
         id,
         ...LOAN_TYPES,
@@ -1210,12 +1229,16 @@ export async function loans(store: Store): Promise<LoanDesk> {
       id,
       id,
     ),
-    candidates: (
-      await store.all<Player>(
-        `${playerSelect} WHERE players.club_id = ? AND players.age BETWEEN 16 AND 24 AND players.parent_club_id IS NULL ORDER BY available_loan DESC, potential DESC,players.id LIMIT 30`,
+    // Players clubs may approach for a loan: those the director made available, then young players by potential.
+    loanList: await withEligibility(
+      store,
+      (await store.all<Player & { open_offers: number; last_offer: string | null }>(
+        `SELECT players.*, clubs.name AS club_name, clubs.color AS club_color, countries.name AS country_name, countries.code AS country_code, (SELECT count(*) FROM negotiations WHERE negotiations.player_id = players.id AND negotiations.stage = 'Offer received' AND negotiations.type = ANY(?::text[])) AS open_offers, (SELECT max(created) FROM negotiations WHERE negotiations.player_id = players.id AND negotiations.selling_club_id = players.club_id AND negotiations.type = ANY(?::text[])) AS last_offer FROM players LEFT JOIN clubs ON clubs.id = players.club_id JOIN countries ON countries.id = players.country_id WHERE players.club_id = ? AND players.parent_club_id IS NULL AND players.role <> 'Retired' AND players.age >= 16 AND (players.available_loan = 1 OR players.age <= 23) ORDER BY available_loan DESC, potential DESC,players.id LIMIT 40`,
+        LOAN_TYPES,
+        LOAN_TYPES,
         id,
-      )
-    ).map(withoutProfile),
+      )).map((row) => ({ ...withoutProfile(row), open_offers: row.open_offers, last_offer: row.last_offer })),
+    ),
   };
 }
 
