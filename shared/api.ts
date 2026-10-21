@@ -81,7 +81,7 @@ export interface Health {
 }
 
 export interface HealthDetails extends Health {
-  database: "SQL Server";
+  database: "PostgreSQL";
   databaseName: string;
   schema: string;
   hosted: boolean;

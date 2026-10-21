@@ -3,11 +3,24 @@ import { createWriteStream } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { exportOptions, main, verifyBackup } from "../scripts/data-export.ts";
-import { SAVE_FORMAT_VERSION, SAVE_SCHEMA_VERSION, writeCheckpoint, type CheckpointManifest } from "./save-format.ts";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { backupBeforeReplace, exportData, exportOptions, main, targetInventory, verifyBackup } from "../scripts/data-export.ts";
+import { Store } from "./db.ts";
+import { SAVE_FORMAT_VERSION, SAVE_SCHEMA_VERSION, validateCheckpoint, writeCheckpoint, type CheckpointManifest } from "./save-format.ts";
+import { generateWorld } from "./world.ts";
 
-vi.mock("./db.ts", () => ({ Store: { open: () => Promise.reject(new Error("The offline backup check must not open SQL.")) } }));
+// The offline checks must never open the configured database; the SQL tests below use isolated test schemas.
+vi.mock("./db.ts", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./db.ts")>();
+  return {
+    ...actual,
+    Store: new Proxy(actual.Store, {
+      get: (target, property, receiver) => property === "open"
+        ? () => Promise.reject(new Error("The offline backup check must not open SQL."))
+        : Reflect.get(target, property, receiver),
+    }),
+  };
+});
 
 interface FakeItem { kind: string; schema: string; file: string; bytes: number; sha256: string; rows?: Record<string, number> }
 interface FakeManifest {
@@ -15,9 +28,9 @@ interface FakeManifest {
   items: Record<string, FakeItem>; failures: Record<string, string>;
 }
 
-const SNAPSHOT_KEY = "dbo/snapshots/0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
+const SNAPSHOT_KEY = "public/snapshots/0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
 const SNAPSHOT = `${SNAPSHOT_KEY}.touchline.gz`;
-const WORLD = "dbo/world.touchline.gz";
+const WORLD = "public/world.touchline.gz";
 const OWNER_WORLD = "touchline_user_0a1b2c3d4e5f4a6b8c7d9e0f1a2b3c4d";
 const checkpoint: CheckpointManifest = {
   kind: "manifest",
@@ -47,7 +60,7 @@ async function fileItem(kind: string, schema: string, file: string, counts?: Rec
 // A tiny --everything backup as the exporter lays it out: registry, one world checkpoint, one snapshot.
 beforeEach(async () => {
   directory = await mkdtemp(join(tmpdir(), "touchline-backup-"));
-  await mkdir(join(directory, "dbo", "snapshots"), { recursive: true });
+  await mkdir(join(directory, "public", "snapshots"), { recursive: true });
   for (const file of [WORLD, SNAPSHOT])
     await writeCheckpoint(createWriteStream(join(directory, file)), checkpoint, (table) => rows[table.name]);
   await writeFile(join(directory, "accounts-users.json"), JSON.stringify({ schema: "accounts", accounts: [{ id: "a" }, { id: "b" }] }));
@@ -56,8 +69,8 @@ beforeEach(async () => {
     updatedAt: "2026-09-26T02:16:00.000Z", complete: true, failures: {},
     items: {
       registry: await fileItem("registry", "accounts", "accounts-users.json", { users: 2 }),
-      "dbo/world": await fileItem("world", "dbo", WORLD, { meta: 1, clubs: 2 }),
-      [SNAPSHOT_KEY]: await fileItem("snapshot", "dbo", SNAPSHOT),
+      "public/world": await fileItem("world", "public", WORLD, { meta: 1, clubs: 2 }),
+      [SNAPSHOT_KEY]: await fileItem("snapshot", "public", SNAPSHOT),
     },
   };
   await save();
@@ -74,7 +87,7 @@ describe("full backup verification (no database)", () => {
     const data = await readFile(join(directory, WORLD));
     data[data.length >> 1] ^= 0xff;
     await writeFile(join(directory, WORLD), data);
-    expect((await verifyBackup(directory)).problems).toEqual(["dbo/world: size or SHA-256 differs"]);
+    expect((await verifyBackup(directory)).problems).toEqual(["public/world: size or SHA-256 differs"]);
   });
 
   it("fails an incomplete backup: recorded failures, a truncated file and a missing file, with account worlds masked", async () => {
@@ -91,32 +104,32 @@ describe("full backup verification (no database)", () => {
       `${SNAPSHOT_KEY}: size or SHA-256 differs`,
     ]);
     expect(JSON.stringify(result)).not.toContain(OWNER_WORLD);
-    delete manifest.items["dbo/world"];
+    delete manifest.items["public/world"];
     await save();
     expect((await verifyBackup(directory)).problems).toEqual(expect.arrayContaining([
-      "no world file in the backup", "dbo: snapshots without its world file",
+      "no world file in the backup", "public: snapshots without its world file",
     ]));
   });
 
   it("fails a bad gzip even when the manifest recorded its SHA-256", async () => {
     await writeFile(join(directory, SNAPSHOT), "not gzip");
     await truncate(join(directory, WORLD), (await readFile(join(directory, WORLD))).length - 12);
-    manifest.items[SNAPSHOT_KEY] = await fileItem("snapshot", "dbo", SNAPSHOT);
-    manifest.items["dbo/world"] = await fileItem("world", "dbo", WORLD, { meta: 1, clubs: 2 });
+    manifest.items[SNAPSHOT_KEY] = await fileItem("snapshot", "public", SNAPSHOT);
+    manifest.items["public/world"] = await fileItem("world", "public", WORLD, { meta: 1, clubs: 2 });
     await save();
     expect((await verifyBackup(directory)).problems).toEqual([
-      expect.stringMatching(/^dbo\/world: content check failed \(.+\)$/),
-      expect.stringMatching(/^dbo\/snapshots\/[0-9a-f-]+: content check failed \(.+\)$/),
+      expect.stringMatching(/^public\/world: content check failed \(.+\)$/),
+      expect.stringMatching(/^public\/snapshots\/[0-9a-f-]+: content check failed \(.+\)$/),
     ]);
   });
 
   it("fails when per-table row counts or the account count differ from the manifest", async () => {
-    manifest.items["dbo/world"].rows = { meta: 1, clubs: 3 };
+    manifest.items["public/world"].rows = { meta: 1, clubs: 3 };
     manifest.items.registry.rows = { users: 3 };
     await save();
     expect((await verifyBackup(directory)).problems).toEqual([
       "registry: account count differs from the manifest",
-      "dbo/world: row counts differ from the manifest (clubs)",
+      "public/world: row counts differ from the manifest (clubs)",
     ]);
   });
 
@@ -144,7 +157,6 @@ describe("data-export flags (no database)", () => {
     expect(exportOptions(["--out", "world.touchline.gz", "--database", "touchline"])).toMatchObject({ out: "world.touchline.gz", database: "touchline" });
     expect(exportOptions(["--everything", "--out-dir", "backup", "--skip-snapshots"])).toMatchObject({ everything: true, "out-dir": "backup" });
     expect(exportOptions(["--dry-run"])).toMatchObject({ "dry-run": true });
-    expect(exportOptions(["--verify-staging", "staging"])).toMatchObject({ "verify-staging": "staging" });
     expect(exportOptions(["--help"])).toBeUndefined();
   });
 
@@ -155,7 +167,53 @@ describe("data-export flags (no database)", () => {
     expect(() => exportOptions(["--verify", "backup", "--out-dir", "backup"])).toThrow(/only for --everything/);
     expect(() => exportOptions(["--verify", "backup", "--skip-snapshots"])).toThrow(/only for --everything/);
     expect(() => exportOptions(["--out", "world.touchline.gz", "--verify", "backup"])).toThrow(/exactly one/);
+    expect(() => exportOptions(["--verify-staging", "staging"])).toThrow();
     expect(() => exportOptions(["--verify", "backup", "--database", "touchline"])).toThrow(/no --database/);
     expect(() => exportOptions([])).toThrow(/exactly one/);
+  });
+});
+
+describe("single-world export (SQL)", () => {
+  let store: Store;
+  let output = "";
+
+  beforeAll(async () => {
+    store = await Store.createTest("data_export");
+    output = await mkdtemp(join(tmpdir(), "touchline-export-"));
+  });
+
+  afterAll(async () => {
+    await store?.close();
+    if (output) await rm(output, { recursive: true, force: true });
+  });
+
+  it("treats a freshly provisioned schema as empty and a career world as nonempty", async () => {
+    const empty = await targetInventory(store);
+    expect(empty).toMatchObject({ schema: store.schemaName, nonempty: false });
+    expect(empty.tables.map((table) => table.name)).toEqual(expect.arrayContaining(["players", "save_slots", "save_chunks"]));
+    expect(await backupBeforeReplace(store, {})).toMatchObject({ backup: null });
+
+    await generateWorld(store, { nations: ["SCO"], squads: "minimum", seed: "export-world" });
+    const inventory = await targetInventory(store);
+    expect(inventory.nonempty).toBe(true);
+    const players = (await store.get<{ total: number }>("SELECT count(*) AS total FROM players"))!.total;
+    expect(inventory.tables.find((table) => table.name === "players")?.rows).toBe(players);
+    await expect(store.transaction(() => backupBeforeReplace(store, {}))).rejects.toThrow(/--replace --yes --backup/);
+  });
+
+  it("exports a verified checkpoint whose row counts match the world, and refuses to overwrite it", async () => {
+    const file = join(output, "world.touchline.gz");
+    const summary = await exportData(store, file);
+    const inventory = await targetInventory(store);
+    for (const table of summary.tables)
+      expect(table.rowCount, table.name).toBe(inventory.tables.find((row) => row.name === table.name)?.rows);
+    const { createReadStream } = await import("node:fs");
+    expect((await validateCheckpoint(createReadStream(file))).sha256).toBe(summary.sha256);
+    await expect(exportData(store, file)).rejects.toThrow();
+    await expect(exportData(store, join(output, "world.gz"))).rejects.toThrow(/\.touchline\.gz/);
+
+    const backup = join(output, "before-replace.touchline.gz");
+    const replaced = await store.transaction(() => backupBeforeReplace(store, { replace: true, yes: true, backup }));
+    expect(replaced.backup).toMatchObject({ file: backup, sha256: expect.stringMatching(/^[a-f0-9]{64}$/) });
   });
 });

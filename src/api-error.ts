@@ -1,6 +1,7 @@
 import type { WorldActivity } from "../shared/api.ts";
 
 export type AccessIssueCode =
+  | "authentication_required"
   | "invite_required"
   | "account_not_provisioned"
   | "not_authorized"
@@ -33,6 +34,7 @@ export class ApiError extends Error {
 }
 
 const accessIssueCodes = new Set<string>([
+  "authentication_required",
   "invite_required",
   "account_not_provisioned",
   "not_authorized",
@@ -49,7 +51,8 @@ export function isAccessIssue(failure: unknown): failure is ApiError & {
   return (
     failure instanceof ApiError &&
     isAccessIssueCode(failure.code) &&
-    ((failure.status === 403 && failure.code !== "capacity_unavailable") ||
+    ((failure.status === 401 && failure.code === "authentication_required") ||
+      (failure.status === 403 && failure.code !== "capacity_unavailable" && failure.code !== "authentication_required") ||
       (failure.status === 503 && failure.code === "capacity_unavailable"))
   );
 }

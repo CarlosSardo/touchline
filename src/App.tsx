@@ -767,7 +767,7 @@ function Shell() {
               </div>
               <div>
                 <dt>Storage</dt>
-                <dd>SQL Server</dd>
+                <dd>PostgreSQL</dd>
               </div>
               <div>
                 <dt>Save format</dt>
@@ -821,7 +821,10 @@ function AccessState({
   issue: AccessIssue;
   onRetry: () => void;
 }) {
-  const content = accessStateContent(issue);
+  const content = accessStateContent(
+    issue,
+    `${location.pathname}${location.search}${location.hash}`,
+  );
   return (
     <main className="access-state" aria-labelledby="access-state-title">
       <span className="eyebrow">{content.eyebrow}</span>
@@ -836,9 +839,17 @@ function AccessState({
         ) : (
           <Button onClick={onRetry}>Try again</Button>
         )}
-        <a className="button button-secondary" href={content.secondary.href}>
-          {content.secondary.label}
-        </a>
+        {"action" in content.secondary ? (
+          <form method="post" action={content.secondary.action} style={{ display: "contents" }}>
+            <button type="submit" className="button button-secondary">
+              {content.secondary.label}
+            </button>
+          </form>
+        ) : (
+          <a className="button button-secondary" href={content.secondary.href}>
+            {content.secondary.label}
+          </a>
+        )}
       </div>
     </main>
   );

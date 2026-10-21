@@ -1,0 +1,11 @@
+# HTTPS reverse proxy for `docker compose --profile https up -d`.
+# TOUCHLINE_DOMAIN must resolve to this host and ports 80/443 must reach it for Let's Encrypt.
+# Set TRUST_PROXY=1 in .env so the app trusts Caddy's X-Forwarded-* headers.
+{$TOUCHLINE_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy app:3001
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+	}
+}

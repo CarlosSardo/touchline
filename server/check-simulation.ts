@@ -228,7 +228,7 @@ export async function checkSquads(store: Store, label: string) {
     keepers: number;
     contracted: number;
   }>(
-    "SELECT clubs.id,clubs.type,clubs.parent_id,league_country.code AS league_code,leagues.tier,squads.squad,count(players.id) AS players,coalesce(sum(CASE WHEN players.position = 'GK' THEN 1 ELSE 0 END),0) AS keepers,coalesce(sum(CASE WHEN players.parent_club_id IS NULL THEN 1 ELSE 0 END),0) AS contracted FROM clubs CROSS APPLY (VALUES ('Senior'),('U19'),('U17')) AS squads(squad) LEFT JOIN leagues ON leagues.id = clubs.league_id LEFT JOIN countries AS league_country ON league_country.id = leagues.country_id LEFT JOIN players ON coalesce(players.squad_club_id,players.club_id) = clubs.id AND players.age_group = squads.squad AND players.role != 'Retired' WHERE clubs.type = 'club' OR (clubs.type = 'bteam' AND squads.squad = 'Senior') GROUP BY clubs.id,clubs.type,clubs.parent_id,league_country.code,leagues.tier,squads.squad",
+    "SELECT clubs.id,clubs.type,clubs.parent_id,league_country.code AS league_code,leagues.tier,squads.squad,count(players.id) AS players,coalesce(sum(CASE WHEN players.position = 'GK' THEN 1 ELSE 0 END),0) AS keepers,coalesce(sum(CASE WHEN players.parent_club_id IS NULL THEN 1 ELSE 0 END),0) AS contracted FROM clubs CROSS JOIN (VALUES ('Senior'),('U19'),('U17')) AS squads(squad) LEFT JOIN leagues ON leagues.id = clubs.league_id LEFT JOIN countries AS league_country ON league_country.id = leagues.country_id LEFT JOIN players ON players.playing_club_id = clubs.id AND players.age_group = squads.squad AND players.role != 'Retired' WHERE clubs.type = 'club' OR (clubs.type = 'bteam' AND squads.squad = 'Senior') GROUP BY clubs.id,clubs.type,clubs.parent_id,league_country.code,leagues.tier,squads.squad",
   );
   const failures: string[] = [];
   for (const row of rows) {
@@ -308,7 +308,7 @@ export const describeSquadCheck = (report: SquadCheck) =>
 export async function checkInSeasonSquads(store: Store) {
   const state = await stateOf(store);
   const rows = await store.all<SquadCount>(
-    "SELECT clubs.id,clubs.name,clubs.type,squads.squad,count(players.id) AS players,coalesce(sum(CASE WHEN players.position = 'GK' THEN 1 ELSE 0 END),0) AS keepers FROM clubs CROSS APPLY (VALUES ('Senior'),('U19'),('U17')) AS squads(squad) LEFT JOIN players ON coalesce(players.squad_club_id,players.club_id) = clubs.id AND players.club_id IS NOT NULL AND players.age_group = squads.squad AND players.role != 'Retired' AND (players.contract_end >= ? OR players.parent_club_id IS NOT NULL) AND (squads.squad = 'Senior' OR players.birth_date >= CASE squads.squad WHEN 'U17' THEN ? ELSE ? END) WHERE (clubs.type = 'club' OR (clubs.type = 'bteam' AND squads.squad = 'Senior')) AND clubs.id != ? AND coalesce(clubs.parent_id,0) != ? GROUP BY clubs.id,clubs.name,clubs.type,squads.squad",
+    "SELECT clubs.id,clubs.name,clubs.type,squads.squad,count(players.id) AS players,coalesce(sum(CASE WHEN players.position = 'GK' THEN 1 ELSE 0 END),0) AS keepers FROM clubs CROSS JOIN (VALUES ('Senior'),('U19'),('U17')) AS squads(squad) LEFT JOIN players ON players.playing_club_id = clubs.id AND players.club_id IS NOT NULL AND players.age_group = squads.squad AND players.role != 'Retired' AND (players.contract_end >= ? OR players.parent_club_id IS NOT NULL) AND (squads.squad = 'Senior' OR players.birth_date >= CASE squads.squad WHEN 'U17' THEN ?::text ELSE ?::text END) WHERE (clubs.type = 'club' OR (clubs.type = 'bteam' AND squads.squad = 'Senior')) AND clubs.id != ? AND coalesce(clubs.parent_id,0) != ? GROUP BY clubs.id,clubs.name,clubs.type,squads.squad",
     state.date,
     youthBirthCutoff("U17", state.season),
     youthBirthCutoff("U19", state.season),
@@ -322,7 +322,7 @@ type InSeasonTotals = Record<"moved" | "left" | "promoted" | "signed" | "registe
 
 /** Season totals of the weekly in-season squad check (`maintainSquads`), undefined if none were recorded for `season`. */
 async function inSeasonTotals(store: Store, season: number) {
-  const row = await store.get<{ value: string }>("SELECT [value] FROM meta WHERE [key] = 'youthSquadCheck'");
+  const row = await store.get<{ value: string }>("SELECT value FROM meta WHERE key = 'youthSquadCheck'");
   const check = row ? (JSON.parse(row.value) as { season: number; totals?: InSeasonTotals }) : undefined;
   return check?.season === season ? check.totals : undefined;
 }
@@ -342,16 +342,16 @@ export async function checkMinors(store: Store, date: string) {
     code: string;
     club_code: string;
     club_data: string;
-    identity: string;
-    family: string | null;
+    identity: PlayerProfile["identity"];
+    family: PlayerProfile["familyMove"] | null;
   }>(
-    "SELECT players.id,players.birth_date,countries.code,club_country.code AS club_code,clubs.data AS club_data,JSON_QUERY(players.profile,'$.identity') AS [identity],JSON_QUERY(players.profile,'$.familyMove') AS family FROM players JOIN countries ON countries.id = players.country_id JOIN clubs ON clubs.id = players.club_id JOIN countries AS club_country ON club_country.id = clubs.country_id WHERE players.birth_date > ? AND players.role != 'Retired' AND clubs.type != 'national'",
+    "SELECT players.id,players.birth_date,countries.code,club_country.code AS club_code,clubs.data AS club_data,players.profile::jsonb -> 'identity' AS identity,players.profile::jsonb -> 'familyMove' AS family FROM players JOIN countries ON countries.id = players.country_id JOIN clubs ON clubs.id = players.club_id JOIN countries AS club_country ON club_country.id = clubs.country_id WHERE players.birth_date > ? AND players.role != 'Retired' AND clubs.type != 'national'",
     cutoff,
   );
   const illegal = minors.filter((minor) => {
     const profile = {
-      identity: JSON.parse(minor.identity) as PlayerProfile["identity"],
-      ...(minor.family ? { familyMove: JSON.parse(minor.family) as PlayerProfile["familyMove"] } : {}),
+      identity: minor.identity,
+      ...(minor.family ? { familyMove: minor.family } : {}),
     };
     return !minorPresenceLegal({
       age: ageOn(minor.birth_date, date),
@@ -368,7 +368,7 @@ export async function checkMinors(store: Store, date: string) {
 export async function checkYouthHeights(store: Store, date: string, previous: ReadonlyMap<number, number>) {
   const cutoff = `${Number(date.slice(0, 4)) - 21}${date.slice(4)}`;
   const rows = await store.all<{ id: number; height: number | null }>(
-    "SELECT id,TRY_CONVERT(float,JSON_VALUE(profile,'$.identity.height')) AS height FROM players WHERE birth_date > ? AND role != 'Retired'",
+    "SELECT id,jsonb_path_query_first(profile::jsonb, '$.identity.height.double()', silent => true)::double precision AS height FROM players WHERE birth_date > ? AND role != 'Retired'",
     cutoff,
   );
   const failures = rows.filter(
@@ -412,7 +412,7 @@ export async function checkMovement(store: Store, before: readonly SeniorPlace[]
   const sizes = leagueSizes(after);
   const parked = (
     await store.all<{ id: number; parent_id: number | null; league_id: number | null; data: string }>(
-      "SELECT id,parent_id,league_id,data FROM clubs WHERE type = 'bteam' AND JSON_VALUE(data,'$.parkedLeagueId') IS NOT NULL",
+      "SELECT id,parent_id,league_id,data FROM clubs WHERE type = 'bteam' AND data::jsonb ->> 'parkedLeagueId' IS NOT NULL",
     )
   ).map((club) => ({ ...club, leagueId: Number(JSON.parse(club.data).parkedLeagueId) }));
   const parkedIn = new Map<number, number>();
@@ -596,7 +596,7 @@ export async function checkForfeits(store: Store, season: number) {
     season,
   ))!.total;
   const rows = await store.all<{ club_id: number; name: string; age_group: string; forfeits: number }>(
-    "SELECT forfeited.club_id,clubs.name,forfeited.age_group,count(*) AS forfeits FROM (SELECT CASE WHEN TRY_CONVERT(int,JSON_VALUE(fixtures.data,'$.awarded.home')) = 0 THEN fixtures.home_id ELSE fixtures.away_id END AS club_id,coalesce(leagues.age_group,'Senior') AS age_group FROM fixtures LEFT JOIN leagues ON leagues.id = fixtures.league_id WHERE fixtures.season = ? AND fixtures.status = 'played' AND JSON_QUERY(fixtures.data,'$.awarded') IS NOT NULL) AS forfeited JOIN clubs ON clubs.id = forfeited.club_id GROUP BY forfeited.club_id,clubs.name,forfeited.age_group ORDER BY count(*) DESC,forfeited.club_id",
+    "SELECT forfeited.club_id,clubs.name,forfeited.age_group,count(*) AS forfeits FROM (SELECT CASE WHEN fixtures.data::jsonb #> '{awarded,home}' = '0'::jsonb THEN fixtures.home_id ELSE fixtures.away_id END AS club_id,coalesce(leagues.age_group,'Senior') AS age_group FROM fixtures LEFT JOIN leagues ON leagues.id = fixtures.league_id WHERE fixtures.season = ? AND fixtures.status = 'played' AND jsonb_typeof(fixtures.data::jsonb -> 'awarded') = 'object') AS forfeited JOIN clubs ON clubs.id = forfeited.club_id GROUP BY forfeited.club_id,clubs.name,forfeited.age_group ORDER BY count(*) DESC,forfeited.club_id",
     season,
   );
   const forfeits = rows.reduce((total, row) => total + row.forfeits, 0);
@@ -634,7 +634,7 @@ export async function checkRollover(
   assert.equal(outside.length, 0, `Intake outside ${INTAKE.min}-${INTAKE.max} at clubs ${outside.slice(0, 10).map((club) => club.id).join(",")}`);
   const cutoff = (years: number) => `${Number(state.date.slice(0, 4)) - years}${state.date.slice(4)}`;
   const wrongAge = (await store.get<{ total: number }>(
-    "SELECT count(*) AS total FROM players WHERE JSON_VALUE(profile,'$.intake.source') = 'academy' AND JSON_VALUE(profile,'$.intake.season') = ? AND (birth_date > ? OR birth_date <= ?)",
+    "SELECT count(*) AS total FROM players WHERE profile::jsonb #>> '{intake,source}' = 'academy' AND profile::jsonb #>> '{intake,season}' = ? AND (birth_date > ? OR birth_date <= ?)",
     String(state.season),
     cutoff(14),
     cutoff(16),
@@ -676,7 +676,7 @@ export async function seasonSoak(seasons: number, fullWorld = false, nations: re
   const store = await Store.createTest("simulation-check");
   try {
     assert(
-      store.testMode && store.schemaName !== "dbo",
+      store.testMode && store.schemaName !== "public",
       "Simulation checks cannot use gameplay schemas",
     );
     await store.schema();

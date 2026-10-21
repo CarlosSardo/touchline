@@ -257,15 +257,15 @@ async function rivalClubs(store: Store, ids: number[]) {
   return new Map(
     (
       await store.all<RivalClub>(
-        `SELECT clubs.id,clubs.name,clubs.reputation,countries.name AS country_name FROM clubs JOIN countries ON countries.id = clubs.country_id WHERE clubs.id IN (${unique.map(() => "?").join(",")})`,
-        ...unique,
+        "SELECT clubs.id,clubs.name,clubs.reputation,countries.name AS country_name FROM clubs JOIN countries ON countries.id = clubs.country_id WHERE clubs.id = ANY(?::integer[])",
+        unique,
       )
     ).map((club) => [club.id, club]),
   );
 }
 
 async function marketBids(store: Store) {
-  const row = await store.get<{ value: string }>("SELECT [value] FROM meta WHERE [key] = ?", MARKET_BIDS_KEY);
+  const row = await store.get<{ value: string }>("SELECT value FROM meta WHERE key = ?", MARKET_BIDS_KEY);
   return row ? (JSON.parse(row.value) as MarketBid[]) : [];
 }
 
@@ -315,8 +315,8 @@ export async function withBattleViews(store: Store, negotiations: Negotiation[])
   const knowledge = new Map(
     (
       await store.all<{ id: number; knowledge: number }>(
-        `SELECT id,knowledge FROM players WHERE id IN (${ids.map(() => "?").join(",")})`,
-        ...ids,
+        "SELECT id,knowledge FROM players WHERE id = ANY(?::integer[])",
+        ids,
       )
     ).map((player) => [player.id, player.knowledge]),
   );
@@ -365,7 +365,7 @@ export function withoutRivalTruth(negotiation: Negotiation): Negotiation {
 export async function withRivals(store: Store, playerId: number, interest: PlayerInterest): Promise<PlayerInterest> {
   const state = await stateOf(store);
   const negotiation = await store.get<Negotiation>(
-    "SELECT TOP (1) * FROM negotiations WHERE player_id = ? AND buying_club_id = ? AND stage NOT IN ('Completed','Rejected','Withdrawn','Expired','Hijacked') ORDER BY id DESC",
+    "SELECT * FROM negotiations WHERE player_id = ? AND buying_club_id = ? AND stage NOT IN ('Completed','Rejected','Withdrawn','Expired','Hijacked') ORDER BY id DESC LIMIT 1",
     playerId,
     state.clubId,
   );
@@ -565,7 +565,7 @@ async function findRival(
 ): Promise<RivalBid | null> {
   const seller = (await store.get<Club>("SELECT * FROM clubs WHERE id = ?", negotiation.selling_club_id))!;
   const candidates = await store.all<Club>(
-    "SELECT TOP (6) * FROM clubs WHERE type = 'club' AND id NOT IN (?,?) AND reputation BETWEEN ? AND ? AND transfer_budget >= ? AND balance > ? AND (SELECT count(*) FROM players WHERE players.club_id = clubs.id AND age_group = 'Senior' AND role != 'Retired') < 28 ORDER BY (SELECT count(*) FROM players WHERE players.club_id = clubs.id AND players.position = ? AND age_group = 'Senior'),abs(reputation - ?),id",
+    "SELECT * FROM clubs WHERE type = 'club' AND id NOT IN (?,?) AND reputation BETWEEN ? AND ? AND transfer_budget >= ? AND balance > ? AND (SELECT count(*) FROM players WHERE players.club_id = clubs.id AND age_group = 'Senior' AND role != 'Retired') < 28 ORDER BY (SELECT count(*) FROM players WHERE players.club_id = clubs.id AND players.position = ? AND age_group = 'Senior'),abs(reputation - ?),id LIMIT 6",
     state.clubId,
     seller.id,
     Math.max(1, player.ability - 12),
@@ -928,7 +928,7 @@ export async function processTransferBattles(store: Store) {
   let pending = await marketBids(store);
   const pendingBefore = JSON.stringify(pending);
   const negotiations = await store.all<Negotiation>(
-    `SELECT TOP (${MAX_BATTLES_PER_DAY}) * FROM negotiations WHERE buying_club_id = ? AND selling_club_id IS NOT NULL AND type = 'Permanent transfer' AND stage IN ('Enquiry','Club talks','Agent talks','Contract review') AND deadline >= ? ORDER BY id DESC`,
+    `SELECT * FROM negotiations WHERE buying_club_id = ? AND selling_club_id IS NOT NULL AND type = 'Permanent transfer' AND stage IN ('Enquiry','Club talks','Agent talks','Contract review') AND deadline >= ? ORDER BY id DESC LIMIT ${MAX_BATTLES_PER_DAY}`,
     state.clubId,
     state.date,
   );
@@ -1049,11 +1049,10 @@ export async function processTransferBattles(store: Store) {
 /** Rivals with live bids keep chasing the player after the director withdraws or his talks expire. */
 async function handOverRivals(store: Store, state: GameState, pending: MarketBid[]) {
   for (const negotiation of await store.all<Negotiation>(
-    `SELECT TOP (${MAX_BATTLES_PER_DAY}) * FROM negotiations WHERE buying_club_id = ? AND stage IN ('Withdrawn','Rejected','Expired') AND deadline >= ? AND data LIKE ? AND data NOT LIKE ? ORDER BY id DESC`,
+    `SELECT * FROM negotiations WHERE buying_club_id = ? AND stage IN ('Withdrawn','Rejected','Expired') AND deadline >= ? AND data LIKE ? AND data NOT LIKE ? ORDER BY id DESC LIMIT ${MAX_BATTLES_PER_DAY}`,
     state.clubId,
     addDays(state.date, -14),
-    // '[' opens a character class in T-SQL LIKE; '[[]' matches the literal bracket of the JSON array.
-    '%"rivals":[[]{%',
+    '%"rivals":[{%',
     '%"handedOver":true%',
   )) {
     const data = JSON.parse(negotiation.data) as NegotiationData;
@@ -1092,7 +1091,7 @@ async function settleMarketBids(store: Store, state: GameState, pending: MarketB
     // Due: the move completes now if it is still possible, otherwise the bid lapses.
     if (!transferWindow(state.date)) continue;
     const talks = await store.get<{ id: number }>(
-      "SELECT TOP (1) id FROM negotiations WHERE player_id = ? AND stage NOT IN ('Completed','Rejected','Withdrawn','Expired','Hijacked')",
+      "SELECT id FROM negotiations WHERE player_id = ? AND stage NOT IN ('Completed','Rejected','Withdrawn','Expired','Hijacked') LIMIT 1",
       bid.playerId,
     );
     const player = await store.get<Player>("SELECT * FROM players WHERE id = ?", bid.playerId);

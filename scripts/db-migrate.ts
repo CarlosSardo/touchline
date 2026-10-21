@@ -18,7 +18,7 @@ export async function main(args = process.argv.slice(2)) {
   });
   if (values.help) {
     console.log(
-      "Usage: tsx scripts/db-migrate.ts [--dry-run] [--database NAME] [--registered --account-schema accounts]\n       tsx scripts/db-migrate.ts --apply --yes [--database NAME] [--registered --account-schema accounts]\nApplies versioned SQL schema migrations only. Never seeds a world. Startup does neither. Uses SQL_* connection settings.\nDefault: only SQL_SCHEMA (dbo when unset). --registered: every existing world in the separate account registry; missing registries/worlds fail closed.\nAccount registry initialization and new users require accounts-migrate.ts, never world migrations.",
+      "Usage: tsx scripts/db-migrate.ts [--dry-run] [--database NAME] [--registered --account-schema accounts]\n       tsx scripts/db-migrate.ts --apply --yes [--database NAME] [--registered --account-schema accounts]\nApplies versioned SQL schema migrations only. Never seeds a world. Startup does neither. Uses SQL_* connection settings.\nDefault: only SQL_SCHEMA (public when unset). --registered: every existing world in the separate account registry; missing registries/worlds fail closed.\nAccount registry initialization and new users require accounts-migrate.ts, never world migrations.",
     );
     return;
   }
@@ -36,10 +36,10 @@ export async function main(args = process.argv.slice(2)) {
         {
           dryRun: true,
           database: values.database ?? process.env.SQL_DATABASE ?? "touchline",
-          schema: process.env.SQL_SCHEMA ?? "dbo",
+          schema: process.env.SQL_SCHEMA ?? "public",
           registered: Boolean(values.registered),
           accountSchema,
-          migrations: schemaMigrations(process.env.SQL_SCHEMA ?? "dbo").map(
+          migrations: schemaMigrations(process.env.SQL_SCHEMA ?? "public").map(
             ({ version, name }) => ({ version, name }),
           ),
           note: values.registered
@@ -53,8 +53,6 @@ export async function main(args = process.argv.slice(2)) {
     return;
   }
   if (!values.yes) throw new Error("Schema changes require --apply --yes.");
-  if (process.env.CONTAINER_APP_NAME || process.env.AZURE_CLIENT_ID)
-    throw new Error("Schema migration requires an operator SQL identity, never the hosted runtime identity.");
   const { Store } = await import("../server/db.ts");
   const store = await Store.open(values.database);
   try {

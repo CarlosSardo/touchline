@@ -8,6 +8,7 @@ import {
   Handshake,
   HardDrive,
   LockKeyhole,
+  LogOut,
   Monitor,
   Moon,
   Network,
@@ -23,6 +24,7 @@ import {
   Wallet,
 } from "lucide-react";
 import { api, useCurrency, useGame, useResource } from "../game-context.tsx";
+import { signOutAction } from "../access-state.ts";
 import {
   Badge,
   Button,
@@ -64,6 +66,13 @@ function AccountIdentity() {
     <section className="account-identity" aria-label="Signed-in account">
       <SectionHeading title="Signed-in account" />
       <DetailList items={details} />
+      {session.user.id !== "local" && (
+        <form method="post" action={signOutAction} style={{ marginTop: 12 }}>
+          <Button type="submit" icon={LogOut} variant="secondary">
+            Sign out
+          </Button>
+        </form>
+      )}
     </section>
   );
 }

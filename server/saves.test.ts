@@ -1,5 +1,5 @@
 import { createReadStream } from "node:fs";
-import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable, Writable } from "node:stream";
@@ -23,6 +23,7 @@ import {
   decodeCell,
   encodeCell,
   readCheckpoint,
+  restorableColumn,
   validateCheckpoint,
   validateManifest,
   worldDigest,
@@ -119,284 +120,81 @@ describe("logical checkpoint manifest (no database)", () => {
     const enormous = manifest();
     enormous.tables[0].rowCount = Number.MAX_SAFE_INTEGER;
     expect(() => validateManifest(enormous, schema)).toThrow("limits");
-    const narrowed = manifest();
-    narrowed.tables[0].columns[1].maxLength = 200;
-    expect(() => validateManifest(narrowed, schema)).toThrow("incompatible");
+    // The file's column holds longer values than the current schema allows.
+    const bounded: CheckpointSchema = structuredClone(schema);
+    bounded.tables[1].columns[1].maxLength = 100;
+    expect(() => validateManifest(manifest(), bounded)).toThrow("incompatible");
+    const retyped = manifest();
+    retyped.tables[1].columns[0] = { name: "id", type: "float", nullable: false };
+    expect(() => validateManifest(retyped, schema)).toThrow("incompatible");
+    const nullable = manifest();
+    nullable.tables[1].columns[0].nullable = true;
+    expect(() => validateManifest(nullable, schema)).toThrow("incompatible");
+    const missing = manifest();
+    missing.tables[1].columns.pop();
+    expect(() => validateManifest(missing, schema)).toThrow("incompatible");
   });
-});
 
-describe("legacy conversion safeguards (temporary fixtures, no SQL)", () => {
-  it("inventories raw/gzip files, WAL and sidecars without changing any source", async () => {
-    const { inventoryLegacy, hashFile, main } =
-      await import("../scripts/data-migrate.ts");
-    const directory = await mkdtemp(
-      join(tmpdir(), "touchline-inventory-test-"),
+  it("accepts SQL Server column descriptions that restore losslessly, and drops declared legacy columns", async () => {
+    // Earlier versions described bounded nvarchar(n) columns (now unbounded text) and smaller integer types.
+    const legacy = manifest();
+    legacy.tables[0].columns[0].maxLength = 50;
+    legacy.tables[1].columns = [
+      { name: "name", type: "nvarchar", nullable: false, maxLength: 200 },
+      { name: "computed_id", type: "int", nullable: false },
+      { name: "id", type: "smallint", nullable: false },
+    ];
+    expect(() => validateManifest(legacy, schema)).toThrow("incompatible");
+    const target: CheckpointSchema = structuredClone(schema);
+    target.tables[1].legacyColumns = ["computed_id"];
+    expect(validateManifest(legacy, target).tables[1].columns).toHaveLength(3);
+    for (const [source, column] of [
+      [{ type: "tinyint" }, { type: "bigint" }],
+      [{ type: "int" }, { type: "float" }],
+      [{ type: "real" }, { type: "float" }],
+      [{ type: "varchar", maxLength: 10 }, { type: "nvarchar", maxLength: -1 }],
+      [{ type: "datetime" }, { type: "datetime2" }],
+      [{ type: "decimal", precision: 10, scale: 2 }, { type: "decimal", precision: 12, scale: 4 }],
+    ] as const)
+      expect(restorableColumn({ name: "x", nullable: false, ...source }, { name: "x", nullable: true, ...column })).toBe(true);
+    for (const [source, column] of [
+      [{ type: "bigint" }, { type: "int" }],
+      [{ type: "int" }, { type: "real" }],
+      [{ type: "float" }, { type: "real" }],
+      [{ type: "nvarchar", maxLength: -1 }, { type: "nvarchar", maxLength: 4000 }],
+      [{ type: "nvarchar", maxLength: 10 }, { type: "varchar", maxLength: 10 }],
+      [{ type: "nvarchar", maxLength: 10 }, { type: "nchar", maxLength: 20 }],
+      [{ type: "decimal", precision: 10, scale: 2 }, { type: "decimal", precision: 10, scale: 1 }],
+      [{ type: "bit" }, { type: "int" }],
+    ] as const)
+      expect(restorableColumn({ name: "x", nullable: false, ...source }, { name: "x", nullable: false, ...column })).toBe(false);
+
+    legacy.tables[0].rowCount = 1;
+    legacy.tables[1].rowCount = 1;
+    const chunks: Buffer[] = [];
+    await writeCheckpoint(
+      new Writable({
+        write(chunk, _encoding, callback) {
+          chunks.push(Buffer.from(chunk));
+          callback();
+        },
+      }),
+      legacy,
+      (table) => (table.name === "meta" ? [["state", "{}"]] : [["Northbridge", 0, 42]]),
     );
-    try {
-      const source = join(directory, "active.sqlite");
-      await writeFile(source, "synthetic source bytes");
-      await writeFile(`${source}-wal`, "uncommitted to main-file bytes");
-      await writeFile(
-        join(directory, "snapshot.sqlite.gz"),
-        gzipSync("synthetic snapshot"),
-      );
-      await writeFile(
-        join(directory, "snapshot.sqlite.gz.json"),
-        '{ "name": "Original label" }\n',
-      );
-      const before = await inventoryLegacy(source, [directory]);
-      expect(before.sources).toHaveLength(2);
-      expect(
-        before.sources
-          .find((item) => item.active)
-          ?.files.map((item) => item.name),
-      ).toContain(`${source}-wal`);
-      expect(
-        before.sources
-          .flatMap((item) => item.files)
-          .every((item) => /^[a-f0-9]{64}$/.test(item.sha256)),
-      ).toBe(true);
-      const names = await readdir(directory);
-      const log = vi.spyOn(console, "log").mockImplementation(() => {});
-      try {
-        await main(["--source", source, "--saves", directory, "--dry-run"]);
-        expect(JSON.parse(String(log.mock.calls[0][0])).dryRun).toBe(true);
-      } finally {
-        log.mockRestore();
-      }
-      expect(await inventoryLegacy(source, [directory])).toEqual(before);
-      expect(await readdir(directory)).toEqual(names);
-      await writeFile(join(directory, "missing.sqlite.gz.json"), "{}");
-      expect((await inventoryLegacy(source, [directory])).orphans).toHaveLength(
-        1,
-      );
-      expect((await hashFile(source)).sha256).toBe(
-        before.sources.find((item) => item.active)!.files[0].sha256,
-      );
-    } finally {
-      await rm(directory, { recursive: true, force: true });
-    }
-  });
-
-  it("reconciles only documented additive columns and rejects unknown or incompatible data", async () => {
-    const { reconcileLegacyTable } = await import("../scripts/data-migrate.ts");
-    const source = [{ name: "id", type: "INTEGER", notnull: 0, pk: 1 }];
-    const target = [
-      { name: "id", type: "int", nullable: false },
-      { name: "squad_club_id", type: "int", nullable: true },
-    ] as const;
-    expect(reconcileLegacyTable("players", source, [...target])).toEqual([
-      { table: "players", column: "squad_club_id", value: null },
+    const seen: { table: string; columns: string[]; values: RestoredValue[] }[] = [];
+    const read = await readCheckpoint(Readable.from(chunks), {
+      expected: target,
+      onRow(table, values) {
+        seen.push({ table: table.name, columns: table.columns.map((column) => column.name), values });
+      },
+    });
+    expect(seen).toEqual([
+      { table: "meta", columns: ["key", "value"], values: ["state", "{}"] },
+      { table: "countries", columns: ["id", "name"], values: [42, "Northbridge"] },
     ]);
-    expect(() =>
-      reconcileLegacyTable(
-        "players",
-        [...source, { name: "future", type: "TEXT", notnull: 0, pk: 0 }],
-        [...target],
-      ),
-    ).toThrow("Unknown legacy column");
-    expect(() =>
-      reconcileLegacyTable(
-        "players",
-        [{ ...source[0], type: "TEXT" }],
-        [...target],
-      ),
-    ).toThrow("Incompatible");
-    expect(() =>
-      reconcileLegacyTable("clubs", source, [
-        { name: "id", type: "int", nullable: false },
-        { name: "future", type: "int", nullable: true },
-      ]),
-    ).toThrow("Missing required");
-  });
-
-  it("preserves fractional ratings when widening legacy INTEGER columns", async () => {
-    const { reconcileLegacyTable } = await import("../scripts/data-migrate.ts");
-    const column = { name: "reputation", type: "float", nullable: false } as const;
-    expect(
-      reconcileLegacyTable(
-        "clubs",
-        [{ name: "reputation", type: "INTEGER", pk: 0, notnull: 1 }],
-        [column],
-      ),
-    ).toEqual([]);
-    expect(encodeCell(78.125, column)).toBe(78.125);
-    expect(encodeCell(78n, column)).toBe(78);
-    expect(() => encodeCell(9007199254740993n, column)).toThrow("exactly");
-  });
-
-  it("rejects local validation reports after source, checkpoint or schema changes", async () => {
-    const { createHash } = await import("node:crypto");
-    const { validateMigrationReport } = await import("../scripts/data-migrate.ts");
-    const { schemaMigrations } = await import("./sql-schema.ts");
-    const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
-    const inventory = { version: 1 as const, active: "source", roots: [], sources: [], orphans: [] };
-    const sources = [{ source: "source", sha256: "original-checkpoint", tables: [] }];
-    const report = {
-      version: 1 as const,
-      inventoryHash: hash(inventory),
-      schemaHash: hash(schema),
-      migrationVersion: schemaMigrations("dbo").at(-1)!.version,
-      sources,
-    };
-    expect(() => validateMigrationReport(report, inventory, schema, sources)).not.toThrow();
-    expect(() => validateMigrationReport(report, { ...inventory, active: "different" }, schema, sources)).toThrow("does not match");
-    expect(() => validateMigrationReport(report, inventory, { ...schema, version: 2 }, sources)).toThrow("does not match");
-    expect(() => validateMigrationReport(report, inventory, schema, [])).toThrow("does not match");
-    expect(() => validateMigrationReport({ ...report, migrationVersion: 0 }, inventory, schema, sources)).toThrow("does not match");
-  });
-
-  it("converts an uncheckpointed WAL through a read-only temporary backup and preserves raw JSON", async () => {
-    const { DatabaseSync, backup } = await import("node:sqlite");
-    const { convertLegacy, inventoryLegacy, hashFile } =
-      await import("../scripts/data-migrate.ts");
-    const sourceDirectory = await mkdtemp(
-      join(tmpdir(), "touchline-sqlite-fixture-"),
-    );
-    const outputDirectory = await mkdtemp(
-      join(tmpdir(), "touchline-convert-test-"),
-    );
-    const source = join(sourceDirectory, "autosave_original.sqlite");
-    const database = new DatabaseSync(source);
-    const target: CheckpointSchema = {
-      version: SAVE_SCHEMA_VERSION,
-      tables: [
-        { name: "meta", columns: schema.tables[0].columns },
-        {
-          name: "clubs",
-          columns: [
-            { name: "id", type: "int", nullable: false },
-            { name: "name", type: "nvarchar", nullable: false, maxLength: -1 },
-          ],
-        },
-        {
-          name: "players",
-          columns: [
-            { name: "id", type: "int", nullable: false },
-            { name: "club_id", type: "int", nullable: false },
-            {
-              name: "profile",
-              type: "nvarchar",
-              nullable: false,
-              maxLength: -1,
-            },
-            { name: "squad_club_id", type: "int", nullable: true },
-          ],
-        },
-        {
-          name: "club_support",
-          columns: [{ name: "club_id", type: "int", nullable: false }],
-        },
-      ],
-    };
-    const rawState =
-      '{ "clubId": 7, "date": "2026-07-19", "season": 2026, "seed": "000-original-seed", "director": {"name":"Synthetic Director"}, "careerId": "original-id", "careerName": "Original career" }';
-    const rawProfile =
-      '{ "nested": { "seed": "00-seed", "value": 0.0000001 }, "retained": true }';
-    const sidecar =
-      '{ "name": "Untouched sidecar label", "custom": {"preserve":"everything"} }\n';
-    try {
-      database.exec(
-        "PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0; CREATE TABLE meta (key TEXT PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE clubs (id INTEGER PRIMARY KEY,name TEXT NOT NULL); CREATE TABLE players (id INTEGER PRIMARY KEY,club_id INTEGER NOT NULL REFERENCES clubs(id),profile TEXT NOT NULL);",
-      );
-      const put = database.prepare("INSERT INTO meta VALUES (?,?)");
-      for (const [key, value] of [
-        ["schemaVersion", "1"],
-        ["state", rawState],
-        ["settings", '{ "cloudSync": false }'],
-        ["world", '{"countries":1,"version":1}'],
-      ])
-        put.run(key, value);
-      database
-        .prepare("INSERT INTO clubs VALUES (?,?)")
-        .run(7, "Original club");
-      database
-        .prepare("INSERT INTO players VALUES (?,?,?)")
-        .run(91, 7, rawProfile);
-      await writeFile(`${source}.json`, sidecar);
-      const before = await inventoryLegacy(source, [sourceDirectory]);
-      expect(
-        before.sources[0].files.some(
-          (file) => file.name.endsWith("-wal") && file.bytes > 0,
-        ),
-      ).toBe(true);
-      const converted = await convertLegacy(
-        before.sources[0],
-        target,
-        outputDirectory,
-      );
-      const records = new Map<string, RestoredValue[][]>();
-      const checked = await readCheckpoint(createReadStream(converted.file), {
-        expected: target,
-        onRow(table, values) {
-          const rows = records.get(table.name) ?? [];
-          rows.push(values);
-          records.set(table.name, rows);
-        },
-      });
-      expect(records.get("players")).toEqual([[91, 7, rawProfile, null]]);
-      expect(records.get("meta")).toContainEqual(["state", rawState]);
-      expect(checked.manifest.provenance?.sidecar).toBe(sidecar);
-      expect(converted.options).toMatchObject({
-        name: "Untouched sidecar label",
-        imported: true,
-        automatic: true,
-        career: { id: "original-id" },
-      });
-      expect(converted.reconciliation).toEqual({
-        missingTables: ["club_support"],
-        addedColumns: [
-          { table: "players", column: "squad_club_id", value: null },
-        ],
-      });
-      expect(await inventoryLegacy(source, [sourceDirectory])).toEqual(before);
-      const compressed = join(sourceDirectory, "z_snapshot.sqlite.gz");
-      const copied = join(outputDirectory, "gzip-fixture.sqlite");
-      await backup(database, copied);
-      await writeFile(compressed, gzipSync(await readFile(copied)));
-      await writeFile(`${compressed}.json`, sidecar);
-      const gzipInventory = await inventoryLegacy(source, [sourceDirectory]);
-      const zipped = await convertLegacy(
-        gzipInventory.sources.find((item) => item.file === compressed)!,
-        target,
-        outputDirectory,
-      );
-      expect(zipped.summary.tables).toEqual(converted.summary.tables);
-      expect(zipped.summary.manifest.provenance?.sidecar).toBe(sidecar);
-      expect(await inventoryLegacy(source, [sourceDirectory])).toEqual(
-        gzipInventory,
-      );
-      expect(
-        (await readdir(outputDirectory)).some((name) =>
-          name.startsWith("source-"),
-        ),
-      ).toBe(false);
-      database.exec("ALTER TABLE players ADD COLUMN unknown_payload TEXT");
-      const unsupported = await inventoryLegacy(source, [sourceDirectory]);
-      await expect(
-        convertLegacy(unsupported.sources[0], target, outputDirectory),
-      ).rejects.toThrow("Unknown legacy column");
-      expect((await hashFile(source)).sha256).toBe(
-        unsupported.sources[0].files[0].sha256,
-      );
-      expect(await inventoryLegacy(source, [sourceDirectory])).toEqual(
-        unsupported,
-      );
-      database.exec(
-        "CREATE TABLE sqlitex_user_table (id INTEGER PRIMARY KEY, payload TEXT)",
-      );
-      const unknownTable = await inventoryLegacy(source, [sourceDirectory]);
-      await expect(
-        convertLegacy(unknownTable.sources[0], target, outputDirectory),
-      ).rejects.toThrow("Unknown legacy table");
-      expect(await inventoryLegacy(source, [sourceDirectory])).toEqual(
-        unknownTable,
-      );
-    } finally {
-      database.close();
-      await rm(sourceDirectory, { recursive: true, force: true });
-      await rm(outputDirectory, { recursive: true, force: true });
-    }
+    // The summary still describes the file as written, so its digests stay verifiable.
+    expect(read.manifest.tables[1].columns.map((column) => column.name)).toEqual(["name", "computed_id", "id"]);
   });
 });
 
@@ -502,7 +300,7 @@ if (process.env.SQL_SAVE_TESTS === "true") {
         await empty.setMeta("world", { incomplete: true });
         await expect(personal.prepareCareer("Verified Director")).rejects.toMatchObject({ status: 409 });
         expect(generate).not.toHaveBeenCalled();
-        await empty.run("DELETE FROM meta WHERE [key] = 'world'");
+        await empty.run("DELETE FROM meta WHERE key = 'world'");
         const generateSmallWorld = async (target: Store, options?: Parameters<typeof world.generateWorld>[1]) =>
           generateWorldFixture(target, { ...options, nations: ["SCO"], squads: "minimum" });
         generate.mockImplementationOnce(async (target, options) => {
@@ -536,7 +334,7 @@ if (process.env.SQL_SAVE_TESTS === "true") {
         saves.create("Dirty checkpoint"),
       );
       const rawState = (await store.get<{ value: string }>(
-        "SELECT value FROM meta WHERE [key] = 'state'",
+        "SELECT value FROM meta WHERE key = 'state'",
       ))!.value;
       await store.run(
         "UPDATE clubs SET balance = 7 WHERE id = ?",
@@ -548,7 +346,7 @@ if (process.env.SQL_SAVE_TESTS === "true") {
       );
       expect(
         (await store.get<{ value: string }>(
-          "SELECT value FROM meta WHERE [key] = 'state'",
+          "SELECT value FROM meta WHERE key = 'state'",
         ))!.value,
       ).toBe(rawState);
       expect(
@@ -561,7 +359,7 @@ if (process.env.SQL_SAVE_TESTS === "true") {
       expect(saved.file).toMatch(/^[a-f0-9-]{36}\.touchline\.gz$/);
       expect(
         (await store.get<{ maximum: number }>(
-          "SELECT MAX(CONVERT(INT,DATALENGTH(data))) AS maximum FROM save_chunks",
+          "SELECT max(octet_length(data)) AS maximum FROM save_chunks",
         ))!.maximum,
       ).toBeLessThanOrEqual(1024 * 1024);
       const exported = await saveTestStep("export portable checkpoint", () =>
@@ -586,7 +384,7 @@ if (process.env.SQL_SAVE_TESTS === "true") {
         );
         expect(
           (await store.get<{ total: number }>(
-            "SELECT COUNT(*) AS total FROM save_slots WHERE imported = 1",
+            "SELECT count(*) AS total FROM save_slots WHERE imported",
           ))!.total,
         ).toBeGreaterThan(0);
       } finally {
@@ -594,46 +392,100 @@ if (process.env.SQL_SAVE_TESTS === "true") {
       }
     }, 300_000);
 
-    it("resumes committed import batches without exposing a partial career or duplicating archives", async () => {
-      const { Store } = await import("./db.ts");
-      const { resumableImport } = await import("../scripts/data-migrate.ts");
-      const { validateWorldCheckpoint } = await import("./saves.ts");
+    it("imports a checkpoint described in SQL Server types, ignoring computed columns it lists", async () => {
+      const { checkpointSchema } = await import("./saves.ts");
+      const described = await checkpointSchema(store);
+      const columnsOf = (name: string) => described.tables.find((table) => table.name === name)!;
+      expect(columnsOf("meta").columns).toEqual([
+        { name: "key", type: "nvarchar", nullable: false, maxLength: -1 },
+        { name: "value", type: "nvarchar", nullable: false, maxLength: -1 },
+      ]);
+      expect(columnsOf("clubs").columns.find((column) => column.name === "balance"))
+        .toEqual({ name: "balance", type: "float", nullable: false });
+      expect(columnsOf("players").columns.map((column) => column.name)).not.toContain("playing_club_id");
+      expect(columnsOf("players").columns.at(-1)).toEqual({ name: "squad_club_id", type: "int", nullable: true });
+      expect(columnsOf("news").legacyColumns).toEqual(["notification_key", "notification_unkeyed_id"]);
+
+      const state = await store.meta<GameState>("state");
+      await store.run(
+        "INSERT INTO news (date, category, title, body, data) VALUES (?, ?, ?, ?, ?)",
+        state.date, "Test", "Keyed", "Legacy notification", JSON.stringify({ notificationKey: "legacy-key" }),
+      );
       const exported = await saves.export();
-      const owner = await Store.createTest("resumable_import");
-      const previousSchema = process.env.SQL_SCHEMA;
-      process.env.SQL_SCHEMA = owner.schemaName;
-      const target = await Store.open();
       try {
-        const validated = await validateWorldCheckpoint(target, exported.file);
-        const source = {
-          file: exported.file, source: "synthetic-source", active: true,
-          options: { name: "Resumable fixture", imported: true },
-          validated, summary: validated.summary,
-        };
-        const originalBulk = target.bulkInsert.bind(target);
-        const interrupted = vi.spyOn(target, "bulkInsert").mockImplementation(async (table, rows) => {
-          if (table === "players") throw new Error("injected interrupted transfer");
-          await originalBulk(table, rows);
+        const rows = new Map<string, RestoredValue[][]>();
+        const contents = await readCheckpoint(createReadStream(exported.file), {
+          onRow(table, values) {
+            rows.set(table.name, [...(rows.get(table.name) ?? []), values]);
+          },
         });
-        await expect(resumableImport(target, [source], "source-fingerprint", async () => {}, () => Store.open())).rejects.toThrow("injected interrupted transfer");
-        interrupted.mockRestore();
-        expect(await owner.get("SELECT value FROM meta WHERE [key] = 'state'")).toBeUndefined();
-        expect(await owner.get("SELECT value FROM meta WHERE [key] = '__touchline_legacy_import'")).toBeDefined();
-        const rowCount = (table: string) => validated.summary.tables.find((entry) => entry.name === table)!.rowCount;
-        expect((await owner.get<{ total: number }>("SELECT COUNT(*) AS total FROM countries"))!.total).toBe(rowCount("countries"));
-        expect((await owner.get<{ total: number }>("SELECT COUNT(*) AS total FROM save_slots"))!.total).toBe(1);
-        await expect(resumableImport(target, [source], "wrong-fingerprint", async () => {}, () => Store.open())).rejects.toThrow("different source");
-        const result = await resumableImport(target, [source], "source-fingerprint", async () => {}, () => Store.open());
-        expect(result.migrated).toBe(true);
-        expect(await owner.meta("state")).toEqual(validated.state);
-        expect(await owner.get("SELECT value FROM meta WHERE [key] = '__touchline_legacy_import'")).toBeUndefined();
-        expect((await owner.get<{ total: number }>("SELECT COUNT(*) AS total FROM save_slots"))!.total).toBe(1);
-        expect((await owner.get<{ total: number }>("SELECT COUNT(*) AS total FROM players"))!.total).toBe(rowCount("players"));
+        // Bounded lengths the SQL Server schema declared; PostgreSQL stores these columns as unbounded text.
+        const bounded: Record<string, number> = {
+          "meta.key": 200, "countries.code": 16, "players.name": 200, "players.position": 16,
+          "players.age_group": 32, "players.contract_end": 10, "players.injury_until": 10, "players.role": 100,
+          "fixtures.date": 10, "fixtures.status": 32, "staff.role": 100, "unexpected_events.date": 10,
+        };
+        const legacy = structuredClone(contents.manifest);
+        legacy.createdAt = "2026-09-01T00:00:00.000Z";
+        for (const table of legacy.tables)
+          for (const column of table.columns) {
+            const length = bounded[`${table.name}.${column.name}`];
+            if (length) column.maxLength = length;
+          }
+        const table = (name: string) => legacy.tables.find((item) => item.name === name)!;
+        const index = (name: string, column: string) => table(name).columns.findIndex((item) => item.name === column);
+        const [squad, club, data, id] = [
+          index("players", "squad_club_id"), index("players", "club_id"), index("news", "data"), index("news", "id"),
+        ];
+        table("players").columns.push({ name: "playing_club_id", type: "int", nullable: true });
+        table("news").columns.push(
+          { name: "notification_key", type: "nvarchar", nullable: true, maxLength: 450 },
+          { name: "notification_unkeyed_id", type: "int", nullable: false },
+        );
+        const players = rows.get("players")!.map((row) => [...row, row[squad] ?? row[club]]);
+        const news = rows.get("news")!.map((row) => {
+          const key = (JSON.parse(row[data] as string) as { notificationKey?: string }).notificationKey ?? null;
+          return [...row, key, key === null ? row[id] : 0];
+        });
+        expect(news.some((row) => row.at(-2) === "legacy-key")).toBe(true);
+        const balance = index("clubs", "balance");
+        const clubs = rows.get("clubs")!.map((row) =>
+          row[index("clubs", "id")] === state.clubId
+            ? row.map((value, column) => (column === balance ? 2468.5 : value))
+            : row);
+        const replaced = new Map([["players", players], ["news", news], ["clubs", clubs]]);
+        const chunks: Buffer[] = [];
+        await writeCheckpoint(
+          new Writable({
+            write(chunk, _encoding, callback) {
+              chunks.push(Buffer.from(chunk));
+              callback();
+            },
+          }),
+          legacy,
+          (item) => replaced.get(item.name) ?? rows.get(item.name) ?? [],
+        );
+        await store.run("UPDATE clubs SET balance = 1 WHERE id = ?", state.clubId);
+        const before = (await saves.list()).length;
+        await saveTestStep("import SQL Server-typed checkpoint", () => saves.import(Buffer.concat(chunks)));
+        expect((await store.get<{ balance: number }>("SELECT balance FROM clubs WHERE id = ?", state.clubId))!.balance)
+          .toBe(2468.5);
+        expect((await store.get<{ total: number }>("SELECT count(*) AS total FROM players"))!.total).toBe(players.length);
+        expect((await store.get<{ total: number }>(
+          "SELECT count(*) AS total FROM players WHERE playing_club_id IS DISTINCT FROM COALESCE(squad_club_id, club_id)",
+        ))!.total).toBe(0);
+        expect((await store.get<{ total: number }>(
+          "SELECT count(*) AS total FROM news WHERE notification_key = 'legacy-key'",
+        ))!.total).toBe(1);
+        // Identity sequences continue after the imported ids.
+        const next = await store.run(
+          "INSERT INTO news (date, category, title, body) VALUES (?, ?, ?, ?)", state.date, "Test", "Next", "After import",
+        );
+        expect(next.lastInsertRowid).toBe(Math.max(...news.map((row) => row[id] as number)) + 1);
+        const slots = await saves.list();
+        expect(slots).toHaveLength(before + 1);
+        expect(slots.filter((slot) => slot.imported)).not.toHaveLength(0);
       } finally {
-        if (previousSchema === undefined) delete process.env.SQL_SCHEMA;
-        else process.env.SQL_SCHEMA = previousSchema;
-        await target.close();
-        await owner.close();
         await rm(exported.file, { force: true });
       }
     }, 300_000);
@@ -641,7 +493,7 @@ if (process.env.SQL_SAVE_TESTS === "true") {
     it("retains imported autosaves and manual archives while pruning only this career's generated autosaves", async () => {
       const imported = await saves.create("Historical autosave", true);
       await store.run(
-        "UPDATE save_slots SET imported = 1,created_at = '2000-01-01' WHERE id = ?",
+        "UPDATE save_slots SET imported = true, created_at = '2000-01-01' WHERE id = ?",
         imported.file.replace(".touchline.gz", ""),
       );
       const manual = await saves.create("Manual safety archive");
@@ -709,7 +561,7 @@ if (process.env.SQL_SAVE_TESTS === "true") {
       expect(kept.map((slot) => slot.file)).toContain(baseline.file);
       const players = await count("players");
       expect(players).toBeGreaterThan(0);
-      const marker = await store.get<{ value: string }>("SELECT [value] FROM meta WHERE [key] = 'appearanceIndexVersion'");
+      const marker = await store.get<{ value: string }>("SELECT value FROM meta WHERE key = 'appearanceIndexVersion'");
       expect(marker).toBeDefined();
 
       await expect(saves.deleteActiveCareer({ careerId: "some-other-career", seed: active.seed }))
@@ -742,13 +594,13 @@ if (process.env.SQL_SAVE_TESTS === "true") {
         expect(await chunks(id)).toEqual([]);
         expect(await store.get("SELECT id FROM save_slots WHERE id = ?", id)).toBeUndefined();
       }
-      expect(await store.all("SELECT [key], [value] FROM meta")).toEqual([{ key: "appearanceIndexVersion", value: marker!.value }]);
+      expect(await store.all("SELECT key, value FROM meta")).toEqual([{ key: "appearanceIndexVersion", value: marker!.value }]);
       for (const table of WORLD_TABLES.filter((name) => name !== "meta"))
         expect(await count(table), table).toBe(0);
       await expect(saves.deleteActiveCareer({ careerId: active.careerId!, seed: active.seed }))
         .rejects.toMatchObject({ status: 404 });
       expect((await store.run(
-        "INSERT INTO news ([date], [category], [title], [body]) VALUES (?,?,?,?)",
+        "INSERT INTO news (date, category, title, body) VALUES (?,?,?,?)",
         "2026-07-01", "Test", "Identity", "Reset after deletion",
       )).lastInsertRowid).toBe(1);
       await store.run("DELETE FROM news");
@@ -881,7 +733,7 @@ if (process.env.SQL_SAVE_TESTS === "true") {
       try {
         const imported = await saves.create("Imported archive");
         await store.run(
-          "UPDATE save_slots SET imported = 1, created_at = '2000-01-01' WHERE id = ?",
+          "UPDATE save_slots SET imported = true, created_at = '2000-01-01' WHERE id = ?",
           imported.file.replace(".touchline.gz", ""),
         );
         const autosave = await saves.create("Autosave", true);
@@ -994,7 +846,7 @@ if (process.env.SQL_SAVE_TESTS === "true") {
         expect(generate).toHaveBeenCalledOnce();
         // Batched builds commit as they go: the failed build is discarded, leaving no career rather than a partial world.
         expect(await saves.currentState()).toBeNull();
-        expect(await store.get("SELECT [key] FROM meta WHERE [key] <> 'appearanceIndexVersion'")).toBeUndefined();
+        expect(await store.get("SELECT key FROM meta WHERE key <> 'appearanceIndexVersion'")).toBeUndefined();
         expect(await saves.list()).toEqual(beforeSlots);
       } finally {
         generate.mockRestore();
@@ -1019,7 +871,7 @@ if (process.env.SQL_SAVE_TESTS === "true") {
       ).rejects.toThrow("injected generation failure");
       generate.mockRestore();
       expect(await saves.currentState()).toBeNull();
-      expect(await store.get("SELECT [key] FROM meta WHERE [key] = 'worldBuild'")).toBeUndefined();
+      expect(await store.get("SELECT key FROM meta WHERE key = 'worldBuild'")).toBeUndefined();
       expect((await store.get<{ total: number }>("SELECT COUNT(*) AS total FROM players"))!.total).toBe(0);
       const slots = await saves.list();
       expect(slots.length).toBe(beforeCount + 1);
@@ -1183,6 +1035,10 @@ describe("streamed logical checkpoints (no database)", () => {
     expect(() =>
       encodeCell(NaN, { name: "balance", type: "float", nullable: false }),
     ).toThrow("Invalid");
+    const rating = { name: "reputation", type: "float", nullable: false } as const;
+    expect(encodeCell(78.125, rating)).toBe(78.125);
+    expect(encodeCell(78n, rating)).toBe(78);
+    expect(() => encodeCell(9007199254740993n, rating)).toThrow("exactly");
   });
 
   it("rejects a writer whose table changes during its snapshot", async () => {
@@ -1264,7 +1120,7 @@ describe("career load speed-ups (no database)", () => {
     const store = {
       schemaName: "touchline_test_chunks",
       async all(sql: string, _id: string, from: number) {
-        expect(sql).toContain("TOP (4)");
+        expect(sql).toMatch(/\bLIMIT 4\b/);
         reads.push(from);
         if (failFrom !== undefined && from >= failFrom) throw new Error("injected read failure");
         return chunks

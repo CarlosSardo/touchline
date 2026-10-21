@@ -1,27 +1,41 @@
 import type { AccessIssue, AccessIssueCode } from "./api-error.ts";
 
+export interface AccessStateLink {
+  label: string;
+  href: string;
+}
+
+/** A same-origin POST form (sign-out must not be a GET link). */
+export interface AccessStateForm {
+  label: string;
+  action: string;
+}
+
 export interface AccessStateContent {
   eyebrow: string;
   heading: string;
   explanation: string;
   reminder?: string;
-  primary?: {
-    label: string;
-    href: string;
-  };
-  secondary: {
-    label: string;
-    href: string;
-  };
+  primary?: AccessStateLink;
+  secondary: AccessStateLink | AccessStateForm;
+}
+
+export const signOutAction = "/auth/logout";
+
+/** Sign-in URL that returns to `returnTo` (a same-origin path) afterwards. */
+export function signInHref(returnTo = "/") {
+  return returnTo.startsWith("/") && !returnTo.startsWith("//") && returnTo !== "/"
+    ? `/auth/login?returnTo=${encodeURIComponent(returnTo)}`
+    : "/auth/login";
 }
 
 export const microsoftAccountReminder =
   "Touchline sign-in requires a personal Microsoft account: Outlook.com, Hotmail, Live.com, MSN, or any email address registered as a Microsoft account.";
 
 const requestInvite = { label: "Request an invite", href: "/invite" };
-const logout = {
+const logout: AccessStateForm = {
   label: "Signed in with the wrong account?",
-  href: "/.auth/logout?post_logout_redirect_uri=/",
+  action: signOutAction,
 };
 
 const inviteContent: AccessStateContent = {
@@ -34,7 +48,7 @@ const inviteContent: AccessStateContent = {
   secondary: logout,
 };
 
-const contentByCode: Record<AccessIssueCode, AccessStateContent> = {
+const contentByCode: Record<Exclude<AccessIssueCode, "authentication_required">, AccessStateContent> = {
   invite_required: inviteContent,
   account_not_provisioned: inviteContent,
   not_authorized: inviteContent,
@@ -48,6 +62,19 @@ const contentByCode: Record<AccessIssueCode, AccessStateContent> = {
   },
 };
 
-export function accessStateContent(issue: Pick<AccessIssue, "code">) {
+export function accessStateContent(
+  issue: Pick<AccessIssue, "code">,
+  returnTo = "/",
+): AccessStateContent {
+  if (issue.code === "authentication_required")
+    return {
+      eyebrow: "Signed out",
+      heading: "Sign in to continue",
+      explanation:
+        "Your Touchline session has ended. Sign in again to pick up where you left off.",
+      reminder: microsoftAccountReminder,
+      primary: { label: "Sign in", href: signInHref(returnTo) },
+      secondary: requestInvite,
+    };
   return contentByCode[issue.code];
 }

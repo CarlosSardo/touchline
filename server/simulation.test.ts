@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Store } from "./db.ts";
+import { tableName } from "./sql-schema.ts";
 import { generateWorld } from "./world.ts";
 import {
   createCalendar,
@@ -39,26 +40,23 @@ import type {
 } from "../shared/types.ts";
 
 async function expectSchemaIntegrity(store: Store) {
-  const tables = await store.all<{ id: number; name: string }>(
-    "SELECT object_id AS id,name FROM sys.tables WHERE schema_id = SCHEMA_ID(?) ORDER BY name",
-    store.schemaName,
-  );
-  expect(tables.length).toBeGreaterThan(0);
+  expect(
+    (await store.get<{ count: number }>(
+      "SELECT count(*) AS count FROM pg_catalog.pg_tables WHERE schemaname = ?",
+      store.schemaName,
+    ))!.count,
+  ).toBeGreaterThan(0);
+  // PostgreSQL enforces every validated constraint on write; only NOT VALID constraints or disabled FK triggers could admit bad rows.
   expect(
     await store.all(
-      "SELECT name FROM sys.foreign_keys WHERE schema_id = SCHEMA_ID(?) AND (is_disabled = 1 OR is_not_trusted = 1)",
+      `SELECT constraint_row.conname FROM pg_catalog.pg_constraint AS constraint_row
+       JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = constraint_row.connamespace
+       WHERE namespace.nspname = ? AND (NOT constraint_row.convalidated OR EXISTS (
+         SELECT 1 FROM pg_catalog.pg_trigger AS trigger_row
+         WHERE trigger_row.tgconstraint = constraint_row.oid AND trigger_row.tgenabled = 'D'))`,
       store.schemaName,
     ),
   ).toEqual([]);
-  for (const table of tables) {
-    expect(Number.isSafeInteger(table.id)).toBe(true);
-    expect(
-      await store.all(
-        `DBCC CHECKCONSTRAINTS (${table.id}) WITH ALL_CONSTRAINTS, ALL_ERRORMSGS`,
-      ),
-      table.name,
-    ).toEqual([]);
-  }
 }
 
 describe("connected simulation", () => {
@@ -75,7 +73,7 @@ describe("connected simulation", () => {
   it("advances the calendar, develops players, updates market values and persists weekly accounts", async () => {
     // Player 1 is now an elite player at the 99 ceiling, where upward drift is clamped away: sample squads instead.
     const before = await store.all<{ id: number; potential: number }>(
-      "SELECT TOP (40) id,potential FROM players WHERE club_id IS NOT NULL AND age <= 21 AND potential < 95 AND role != 'Retired' ORDER BY id",
+      "SELECT id,potential FROM players WHERE club_id IS NOT NULL AND age <= 21 AND potential < 95 AND role != 'Retired' ORDER BY id LIMIT 40",
     );
     const result = await advance(store, 7);
     expect(result.date).toBe("2026-07-08");
@@ -125,7 +123,7 @@ describe("connected simulation", () => {
   it("updates a complete league table from the same result used by match analytics", async () => {
     // Only the user's fixtures keep the snapshot and full stats; the rest are stored compact.
     const fixture = (await store.get<Fixture>(
-      "SELECT TOP (1) * FROM fixtures WHERE ? IN (home_id, away_id) AND stage = 'League' AND status = 'scheduled' ORDER BY date",
+      "SELECT * FROM fixtures WHERE ?::integer IN (home_id, away_id) AND stage = 'League' AND status = 'scheduled' ORDER BY date, id LIMIT 1",
       (await stateOf(store)).clubId,
     ))!;
     await playFixture(store, fixture);
@@ -198,7 +196,7 @@ describe("connected simulation", () => {
 
   it("backfills legacy saves without rewriting snapshots or duplicating appearances", async () => {
     const fixture = (await store.get<Fixture>(
-      "SELECT TOP (1) * FROM fixtures WHERE status = 'played' AND JSON_QUERY(data, '$.snapshot') IS NOT NULL ORDER BY id",
+      "SELECT * FROM fixtures WHERE status = 'played' AND jsonb_typeof(data::jsonb -> 'snapshot') = 'object' ORDER BY id LIMIT 1",
     ))!;
     const snapshot: MatchSnapshot = {
       ...JSON.parse(fixture.data).snapshot,
@@ -222,7 +220,10 @@ describe("connected simulation", () => {
         )
       ).lastInsertRowid,
     );
-    const originals = await store.all(
+    // The backfill re-serializes stats through jsonb (different key order and spacing), so compare them as JSON.
+    const appearanceRows = async (sql: string, ...params: number[]) =>
+      (await store.all<{ stats: string }>(sql, ...params)).map((row) => ({ ...row, stats: JSON.parse(row.stats) as unknown }));
+    const originals = await appearanceRows(
       "SELECT * FROM player_match_appearances ORDER BY fixture_id,player_id",
     );
     const snapshots = await store.all(
@@ -230,12 +231,12 @@ describe("connected simulation", () => {
     );
     // A legacy save has full data for every fixture; compact (non-user) fixtures keep their rows because they cannot be rebuilt.
     await store.run(
-      "DELETE FROM player_match_appearances WHERE fixture_id IN (SELECT id FROM fixtures WHERE JSON_QUERY(data, '$.players') IS NOT NULL)",
+      "DELETE FROM player_match_appearances WHERE fixture_id IN (SELECT id FROM fixtures WHERE jsonb_typeof(data::jsonb -> 'players') IN ('object', 'array'))",
     );
-    await store.run("DELETE FROM meta WHERE [key] = 'appearanceIndexVersion'");
+    await store.run("DELETE FROM meta WHERE key = 'appearanceIndexVersion'");
     await store.schema();
     expect(
-      await store.all(
+      await appearanceRows(
         "SELECT * FROM player_match_appearances WHERE fixture_id != ? ORDER BY fixture_id,player_id",
         legacyId,
       ),
@@ -287,7 +288,7 @@ describe("connected simulation", () => {
     expect(summary.academy).toBe(Object.values(intake.clubs).reduce((total, count) => total + count, 0));
     expect(summary.count).toBeGreaterThanOrEqual(summary.academy);
     const academy = await store.all<{ birth_date: string; age_group: string; profile: string }>(
-      "SELECT birth_date,age_group,profile FROM players WHERE JSON_VALUE(profile,'$.intake.source') = 'academy' AND JSON_VALUE(profile,'$.intake.season') = '2027'",
+      "SELECT birth_date,age_group,profile FROM players WHERE profile::jsonb #>> '{intake,source}' = 'academy' AND profile::jsonb #>> '{intake,season}' = '2027'",
     );
     expect(academy).toHaveLength(summary.academy);
     for (const player of academy) {
@@ -301,7 +302,7 @@ describe("connected simulation", () => {
     await checkMinors(store, "2027-07-01");
     expect(
       (await store.get<{ count: number }>(
-        "SELECT count(*) AS count FROM players WHERE role = 'Retired' AND JSON_VALUE(profile,'$.retirement.reason') IS NULL",
+        "SELECT count(*) AS count FROM players WHERE role = 'Retired' AND profile::jsonb #>> '{retirement,reason}' IS NULL",
       ))!.count,
     ).toBe(0);
     expect(
@@ -313,7 +314,7 @@ describe("connected simulation", () => {
       await store.all("SELECT * FROM standings WHERE played != 0"),
     ).toHaveLength(0);
     const oldAppearance = (await store.get<{ player_id: number }>(
-      "SELECT TOP (1) player_id FROM player_match_appearances",
+      "SELECT player_id FROM player_match_appearances ORDER BY fixture_id, player_id LIMIT 1",
     ))!;
     expect(
       (await playerCareer(store, oldAppearance.player_id, { season: 2026 }))
@@ -323,7 +324,7 @@ describe("connected simulation", () => {
 
   it("completes position training and accelerates a supported rehabilitation plan", async () => {
     const player = (await store.get<Player>(
-      "SELECT TOP (1) * FROM players WHERE club_id = 1",
+      "SELECT * FROM players WHERE club_id = 1 ORDER BY id LIMIT 1",
     ))!;
     const profile = JSON.parse(player.profile) as PlayerProfile;
     profile.development.positionTarget = "DM";
@@ -335,7 +336,7 @@ describe("connected simulation", () => {
       player.id,
     );
     const injured = (await store.get<Player>(
-      "SELECT TOP (1) * FROM players WHERE club_id = 1 AND id != ?",
+      "SELECT * FROM players WHERE club_id = 1 AND id != ? ORDER BY id LIMIT 1",
       player.id,
     ))!;
     await store.run(
@@ -364,7 +365,7 @@ describe("persisted football media", () => {
     try {
       await generateWorld(store, { nations: ["EN"] });
       const player = (await store.get<Player>(
-        "SELECT TOP (1) * FROM players WHERE club_id = 2 AND age_group = 'Senior'",
+        "SELECT * FROM players WHERE club_id = 2 AND age_group = 'Senior' ORDER BY id LIMIT 1",
       ))!;
       const input = {
         key: "test-bid",
@@ -455,8 +456,11 @@ describe("daily transfer market", () => {
         has_filter: boolean;
         filter_definition: string | null;
       }>(
-        "SELECT indexes.name,indexes.is_disabled,indexes.has_filter,indexes.filter_definition FROM sys.indexes AS indexes JOIN sys.tables AS tables ON tables.object_id = indexes.object_id WHERE tables.schema_id = SCHEMA_ID(?) AND tables.name = 'players' AND indexes.name IN ('player_market_candidate','player_market_squad')",
-        store.schemaName,
+        `SELECT index_class.relname AS name, NOT (info.indisvalid AND info.indisready) AS is_disabled,
+           info.indpred IS NOT NULL AS has_filter, pg_get_expr(info.indpred, info.indrelid) AS filter_definition
+         FROM pg_catalog.pg_index AS info JOIN pg_catalog.pg_class AS index_class ON index_class.oid = info.indexrelid
+         WHERE info.indrelid = to_regclass(?) AND index_class.relname IN ('player_market_candidate','player_market_squad')`,
+        tableName(store.schemaName, "players"),
       );
       expect(indexes).toHaveLength(2);
       expect(indexes.every((index) => !index.is_disabled)).toBe(true);
@@ -476,8 +480,14 @@ describe("daily transfer market", () => {
         ],
       ] as const) {
         const columns = await store.all<{ name: string }>(
-          "SELECT columns.name FROM sys.indexes AS indexes JOIN sys.tables AS tables ON tables.object_id = indexes.object_id JOIN sys.index_columns AS indexed ON indexed.object_id = indexes.object_id AND indexed.index_id = indexes.index_id JOIN sys.columns AS columns ON columns.object_id = indexed.object_id AND columns.column_id = indexed.column_id WHERE tables.schema_id = SCHEMA_ID(?) AND tables.name = 'players' AND indexes.name = ? AND indexed.key_ordinal > 0 ORDER BY indexed.key_ordinal",
-          store.schemaName,
+          `SELECT attribute.attname AS name
+           FROM pg_catalog.pg_index AS info
+           JOIN pg_catalog.pg_class AS index_class ON index_class.oid = info.indexrelid
+           CROSS JOIN LATERAL unnest(info.indkey::int2[]) WITH ORDINALITY AS indexed(attnum, ordinal)
+           JOIN pg_catalog.pg_attribute AS attribute ON attribute.attrelid = info.indrelid AND attribute.attnum = indexed.attnum
+           WHERE info.indrelid = to_regclass(?) AND index_class.relname = ? AND indexed.ordinal <= info.indnkeyatts
+           ORDER BY indexed.ordinal`,
+          tableName(store.schemaName, "players"),
           name,
         );
         expect(columns.map((column) => column.name)).toEqual(expectedColumns);
@@ -507,7 +517,7 @@ describe("daily transfer market", () => {
           lastId + 1,
         ]) {
           const candidate = await store.get<Player>(
-            "SELECT TOP (1) * FROM players WHERE id >= ? AND club_id IS NOT NULL AND parent_club_id IS NULL AND age BETWEEN 18 AND 31 AND age_group = 'Senior' AND role != 'Retired' AND contract_end > ? AND (injury_until IS NULL OR injury_until <= ?) AND NOT EXISTS (SELECT 1 FROM negotiations WHERE negotiations.player_id = players.id AND stage NOT IN ('Completed','Rejected','Withdrawn','Expired','Hijacked')) AND NOT EXISTS (SELECT 1 FROM history WHERE entity_type = 'transfer' AND entity_id = players.id AND date >= ?) ORDER BY id",
+            "SELECT * FROM players WHERE id >= ? AND club_id IS NOT NULL AND parent_club_id IS NULL AND age BETWEEN 18 AND 31 AND age_group = 'Senior' AND role != 'Retired' AND contract_end > ? AND (injury_until IS NULL OR injury_until <= ?) AND NOT EXISTS (SELECT 1 FROM negotiations WHERE negotiations.player_id = players.id AND stage NOT IN ('Completed','Rejected','Withdrawn','Expired','Hijacked')) AND NOT EXISTS (SELECT 1 FROM history WHERE entity_type = 'transfer' AND entity_id = players.id AND date >= ?) ORDER BY id LIMIT 1",
             lowerBound,
             date,
             date,
@@ -612,11 +622,11 @@ describe("daily transfer market", () => {
       const buyer = await clubOf(store, 1);
       await store.run("UPDATE clubs SET reputation = 99 WHERE id = ?", buyer.id);
       const seller = (await store.get<{ id: number }>(
-        "SELECT TOP (1) id FROM clubs WHERE type = 'club' AND country_id != ? ORDER BY id",
+        "SELECT id FROM clubs WHERE type = 'club' AND country_id != ? ORDER BY id LIMIT 1",
         buyer.country_id,
       ))!;
       const player = (await store.get<Player>(
-        "SELECT TOP (1) * FROM players WHERE club_id = ? AND age >= 18 AND parent_club_id IS NULL ORDER BY id",
+        "SELECT * FROM players WHERE club_id = ? AND age >= 18 AND parent_club_id IS NULL ORDER BY id LIMIT 1",
         seller.id,
       ))!;
       const contractEnd = (await stateOf(store)).date;

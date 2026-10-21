@@ -166,13 +166,16 @@ async function request<Data>(
         ? (body as WorldBusyResponse)
         : null;
     const retryAfter = Number(response.headers.get("Retry-After"));
+    const signedOut = response.redirected || response.status === 401;
     const failure = new ApiError(
-      response.redirected
+      signedOut
         ? "Your session has expired. Sign in again to continue."
         : body?.error ?? "The game could not complete that action.",
-      response.redirected ? 401 : response.status,
+      signedOut ? 401 : response.status,
       {
-        code: typeof body?.code === "string" ? body.code : undefined,
+        code: signedOut
+          ? "authentication_required"
+          : typeof body?.code === "string" ? body.code : undefined,
         retryAfter: retryAfter > 0 ? retryAfter : undefined,
         activity: busy
           ? { operation: busy.operation, startedAt: busy.startedAt }

@@ -1073,7 +1073,7 @@ export async function insertPlayers(
   let inserted = 0;
   await store.transaction(async () => {
     let nextId = (await store.get<{ id: number }>(
-      "SELECT coalesce(max(id),0) AS id FROM players WITH (UPDLOCK,HOLDLOCK)",
+      "SELECT coalesce(max(id), 0) AS id FROM players",
     ))!.id;
     let batch: PlayerRow[] = [];
     const flush = async () => {
@@ -1084,7 +1084,7 @@ export async function insertPlayers(
     };
     for (const row of rows) {
       batch.push({ id: ++nextId, ...row });
-      if (batch.length === 1000) await flush();
+      if (batch.length === 5000) await flush();
     }
     await flush();
   });

@@ -51,7 +51,7 @@ export interface CompetitionRow {
 }
 
 // Full-engine appearance stats carry passing data; fast-model rows keep {} or only goals/assists/cards/rating.
-const FULL_ENGINE = "(CASE WHEN JSON_VALUE(appearance.stats,'$.passes') IS NOT NULL THEN 1 ELSE 0 END)";
+const FULL_ENGINE = "(CASE WHEN appearance.stats::jsonb ->> 'passes' IS NOT NULL THEN 1 ELSE 0 END)";
 
 export const parse = (text: string): Record<string, unknown> => {
   try {
@@ -297,7 +297,7 @@ export function buildPlayerHistory(input: {
 export async function playerHistory(store: Store, playerId: number): Promise<PlayerHistory> {
   await playerOf(store, playerId);
   const recent = await store.all<HistoryMoveRow>(
-    `SELECT TOP (${PLAYER_HISTORY_MOVE_LIMIT + 1}) id,season,date,entity_type,data FROM history WHERE entity_type IN ('transfer','loan','squad') AND entity_id = ? ORDER BY date DESC,id DESC`,
+    `SELECT id,season,date,entity_type,data FROM history WHERE entity_type IN ('transfer','loan','squad') AND entity_id = ? ORDER BY date DESC,id DESC LIMIT ${PLAYER_HISTORY_MOVE_LIMIT + 1}`,
     playerId,
   );
   const movesTruncated = recent.length > PLAYER_HISTORY_MOVE_LIMIT;
@@ -326,14 +326,14 @@ export async function playerHistory(store: Store, playerId: number): Promise<Pla
     appearanceStats,
     clubs: clubIds.length
       ? await store.all<PlayerHistoryClub>(
-          "SELECT id,name,color FROM clubs WHERE id IN (SELECT [id] FROM OPENJSON(?) WITH ([id] INT '$'))",
-          JSON.stringify(clubIds),
+          "SELECT id,name,color FROM clubs WHERE id = ANY(?::int[])",
+          clubIds,
         )
       : [],
     competitions: leagueIds.length
       ? await store.all<CompetitionRow>(
-          "SELECT id,name,age_group FROM leagues WHERE id IN (SELECT [id] FROM OPENJSON(?) WITH ([id] INT '$'))",
-          JSON.stringify(leagueIds),
+          "SELECT id,name,age_group FROM leagues WHERE id = ANY(?::int[])",
+          leagueIds,
         )
       : [],
     movesTruncated,

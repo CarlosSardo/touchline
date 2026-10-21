@@ -14,7 +14,7 @@ import type { YouthTransferAssessment } from "../shared/api.ts";
 
 // Players' season minutes count the regulation clock only (v4), so available minutes must too.
 const REGULATION_MINUTES =
-  "CASE WHEN coalesce(TRY_CONVERT(float, JSON_VALUE(fixtures.data,'$.duration')),90) >= 120 THEN 120 ELSE 90 END";
+  "CASE WHEN jsonb_path_exists(fixtures.data::jsonb, '$.duration ? (@ >= 120)') THEN 120 ELSE 90 END";
 
 // ------------------------------------------------ nationality facts (all held nationalities count)
 
@@ -560,7 +560,7 @@ export async function assessRegistration(
     nationalOrder.length + 1;
   const tableData = league
     ? await store.get<{ data: string }>(
-        "SELECT TOP (1) data FROM history WHERE entity_type = 'league' AND entity_id = ? AND season = ? ORDER BY id DESC",
+        "SELECT data FROM history WHERE entity_type = 'league' AND entity_id = ? AND season = ? ORDER BY id DESC LIMIT 1",
         league.id,
         state.season - 1,
       )
@@ -627,7 +627,7 @@ export async function assessRegistration(
   }
   if (currentClub && finish !== "champion") {
     const qualified = await store.get<{ name: string }>(
-      "SELECT TOP (1) leagues.name FROM standings JOIN leagues ON leagues.id = standings.league_id WHERE standings.club_id = ? AND leagues.kind = 'continental' AND leagues.name NOT LIKE '%Qualifying' ORDER BY leagues.reputation DESC",
+      "SELECT leagues.name FROM standings JOIN leagues ON leagues.id = standings.league_id WHERE standings.club_id = ? AND leagues.kind = 'continental' AND leagues.name NOT LIKE '%Qualifying' ORDER BY leagues.reputation DESC LIMIT 1",
       currentClub.id,
     );
     if (qualified)

@@ -616,7 +616,7 @@ for (const width of [1440, 390, 320]) {
       expect(mutations(accountApi)).toEqual(["POST /api/careers"]);
     });
 
-    test("real account failures still show Reconnect or session expiry", async ({
+    test("real account failures still show Reconnect or the sign-in screen", async ({
       page, accountApi,
     }) => {
       accountApi.meStatus = 500;
@@ -626,13 +626,15 @@ for (const width of [1440, 390, 320]) {
       accountApi.meStatus = undefined;
       await expect(page.getByRole("heading", { name: "No career started", exact: true })).toBeVisible({ timeout: 20_000 });
 
-      await test.step("401 while waiting on a busy world stops polling and expires the session", async () => {
+      await test.step("401 while waiting on a busy world stops polling and asks to sign in again", async () => {
         accountApi.activity = { operation: "prepare_world", startedAt: new Date().toISOString() };
         await page.reload();
         await expect(busyStatus(page)).toBeVisible();
         accountApi.meStatus = 401;
         await page.getByRole("button", { name: "Check now", exact: true }).click();
-        await expect(page.locator(".error-state")).toContainText("Your session has expired.");
+        await expect(page.getByRole("heading", { name: "Sign in to continue", exact: true })).toBeVisible();
+        await expect(page.getByRole("link", { name: "Sign in", exact: true }))
+          .toHaveAttribute("href", /^\/auth\/login\?returnTo=%2F/);
         const polls = count(accountApi, "GET /api/me");
         await page.waitForTimeout(3000);
         expect(count(accountApi, "GET /api/me")).toBe(polls);

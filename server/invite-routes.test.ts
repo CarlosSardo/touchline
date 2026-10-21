@@ -5,6 +5,7 @@ import { DatabaseUnavailableError, Store } from "./db.ts";
 import { createApp } from "./app.ts";
 import { CONSUMER_TENANT_ID, type Capacity, type InviteRequest } from "./invite-store.ts";
 import { signInviteToken, type InviteStoreLike } from "./invite-routes.ts";
+import { sessionCookieName, signSession } from "./auth.ts";
 import { OWNER_EMAIL_DEFAULT } from "./legacy-account.ts";
 import type { MailMessage, Mailer } from "./mailer.ts";
 
@@ -13,23 +14,29 @@ const guest = "22222222-2222-2222-2222-222222222222";
 const tenant = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
 const secret = "12345678901234567890123456789012";
 const appOrigin = "https://touchline.example.com";
+const sessionSecret = "session-secret-abcdefghijklmnopqrstuvwxyz";
 const configuration = {
-  CONTAINER_APP_NAME: "touchline",
   API_HOST: "0.0.0.0",
   REQUIRE_AUTH: "true",
   OWNER_OBJECT_ID: owner,
-  AZURE_TENANT_ID: tenant,
+  AUTH_HOME_TENANT_ID: tenant,
   APP_ORIGIN: appOrigin,
+  OIDC_CLIENT_ID: "touchline-client",
+  SESSION_SECRET: sessionSecret,
   INVITE_SIGNING_SECRET: secret,
   EMAIL_TRANSPORT: "gmail",
   APPROVER_EMAIL: "approver@example.test",
   OWNER_EMAIL: OWNER_EMAIL_DEFAULT,
 };
-const principal = (objectId: string, tenantId = tenant, additional: { typ: string; val: string }[] = []) =>
-  Buffer.from(JSON.stringify({ auth_typ: "aad", claims: [
-    { typ: "oid", val: objectId }, { typ: "tid", val: tenantId }, ...additional,
-  ] })).toString("base64");
-const ownerHeaders = { "x-ms-client-principal": principal(owner), Origin: appOrigin };
+/** Cookie header for a signed-in session, as issued by GET /auth/callback. */
+const signedIn = (objectId: string, tenantId = tenant, profile: { email?: string; name?: string } = {}) =>
+  `${sessionCookieName(true)}=${signSession({
+    tenantId,
+    objectId,
+    displayName: profile.name ?? "Sporting director",
+    email: profile.email ?? null,
+  }, { sessionSecret, sessionTtlSeconds: 3600 })}`;
+const ownerHeaders = { Cookie: signedIn(owner), Origin: appOrigin };
 const invite = (overrides: Partial<InviteRequest> = {}): InviteRequest => ({
   id: "aaaaaaaa-0000-4000-8000-000000000001",
   email: "player@example.test",
@@ -219,17 +226,59 @@ describe("invite request routes", () => {
     expect(mailer.sent).toHaveLength(1);
     expect(store.purged).toBe(1);
   });
+
+  it("hashes the address seen by Express according to TRUST_PROXY", async () => {
+    vi.stubEnv("TRUST_PROXY", "false");
+    const direct = makeApp();
+    await request(direct.app).post("/invite")
+      .set("Origin", appOrigin)
+      .set("X-Forwarded-For", "203.0.113.10")
+      .type("form").send({ email: "player@example.test" });
+    expect(direct.store.createCalls[0].ipHash).not.toBe(
+      createHash("sha256").update(secret).update("203.0.113.10").digest("hex"),
+    );
+    vi.stubEnv("TRUST_PROXY", "2");
+    const twoHops = makeApp();
+    await request(twoHops.app).post("/invite")
+      .set("Origin", appOrigin)
+      .set("X-Forwarded-For", "198.51.100.7, 203.0.113.10, 10.0.0.1")
+      .type("form").send({ email: "player@example.test" });
+    expect(twoHops.store.createCalls[0].ipHash).toBe(
+      createHash("sha256").update(secret).update("203.0.113.10").digest("hex"),
+    );
+  });
 });
 
 describe("invite admin routes", () => {
   it("requires an approver", async () => {
     const { app } = makeApp();
-    expect((await request(app).get("/admin/invites")).status).toBe(403);
     const response = await request(app).get("/admin/invites")
-      .set("x-ms-client-principal", principal(guest, CONSUMER_TENANT_ID, [
-        { typ: "email", val: "someone@example.test" },
-      ]));
+      .set("Cookie", signedIn(guest, CONSUMER_TENANT_ID, { email: "someone@example.test" }));
     expect(response.status).toBe(403);
+    expect((await request(app).get("/admin/invites")
+      .set("Cookie", signedIn(guest, "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", { email: OWNER_EMAIL_DEFAULT }))).status).toBe(403);
+    expect((await request(app).get("/admin/invites")
+      .set("Cookie", signedIn(owner, CONSUMER_TENANT_ID))).status).toBe(403);
+  });
+
+  it("sends anonymous approvers through sign-in and back to the emailed review link", async () => {
+    const { app, store } = makeApp();
+    const list = await request(app).get("/admin/invites");
+    expect(list.status).toBe(302);
+    expect(list.headers.location).toBe("/auth/login?returnTo=%2Fadmin%2Finvites");
+    const token = signInviteToken({ id: invite().id, action: "accept", secret, now: new Date("2026-09-27T10:00:00Z") });
+    const review = `/admin/invites/${invite().id}?action=accept&token=${encodeURIComponent(token)}`;
+    const link = await request(app).get(review);
+    expect(link.status).toBe(302);
+    expect(link.headers.location).toBe(`/auth/login?returnTo=${encodeURIComponent(review)}`);
+    const forged = await request(app).get("/admin/invites")
+      .set("Cookie", `${sessionCookieName(true)}=${signSession({ tenantId: tenant, objectId: owner, displayName: "Owner", email: null }, { sessionSecret: "another-secret-abcdefghijklmnopqrstuvwxyz", sessionTtlSeconds: 3600 })}`);
+    expect(forged.status).toBe(302);
+    const post = await request(app).post(`/admin/invites/${invite().id}/decision`)
+      .set("Origin", appOrigin)
+      .type("form").send({ action: "accept", token });
+    expect(post.status).toBe(403);
+    expect(store.decisions).toEqual([]);
   });
 
   it("lists invites with fresh review tokens", async () => {
@@ -245,11 +294,21 @@ describe("invite admin routes", () => {
   it("treats the consumers-tenant owner email as an approver", async () => {
     const { app } = makeApp();
     const response = await request(app).get("/admin/invites")
-      .set("x-ms-client-principal", principal(guest, CONSUMER_TENANT_ID, [
-        { typ: "email", val: OWNER_EMAIL_DEFAULT },
-      ]));
+      .set("Cookie", signedIn(guest, CONSUMER_TENANT_ID, { email: OWNER_EMAIL_DEFAULT }));
     expect(response.status).toBe(200);
     expect(response.text).toContain("player@example.test");
+  });
+
+  it("treats the consumers-tenant approver email as an approver and records it as the decider", async () => {
+    const { app, store } = makeApp();
+    const approver = signedIn(guest, CONSUMER_TENANT_ID, { email: "approver@example.test" });
+    expect((await request(app).get("/admin/invites").set("Cookie", approver)).status).toBe(200);
+    const token = signInviteToken({ id: invite().id, action: "deny", secret, now: new Date("2026-09-27T10:00:00Z") });
+    const response = await request(app).post(`/admin/invites/${invite().id}/decision`)
+      .set("Cookie", approver).set("Origin", appOrigin)
+      .type("form").send({ action: "deny", token });
+    expect(response.status).toBe(200);
+    expect(store.decisions).toEqual([{ id: invite().id, action: "deny", decidedBy: "approver@example.test" }]);
   });
 
   it("rejects tampered, expired and mismatched review tokens", async () => {
@@ -358,7 +417,7 @@ describe("invite admin routes", () => {
     expect(response.status).toBe(403);
     const token = signInviteToken({ id: invite().id, action: "resend", secret, now: new Date("2026-09-27T10:00:00Z") });
     const origin = await request(app).post(`/admin/invites/${invite().id}/resend`)
-      .set("x-ms-client-principal", principal(owner))
+      .set("Cookie", signedIn(owner))
       .set("Origin", "https://evil.example")
       .type("form").send({ action: "resend", token });
     expect(origin.status).toBe(403);
@@ -369,7 +428,7 @@ describe("invite admin routes", () => {
     const { app, store } = makeApp();
     const token = signInviteToken({ id: invite().id, action: "deny", secret, now: new Date("2026-09-27T10:00:00Z") });
     const response = await request(app).post(`/admin/invites/${invite().id}/decision`)
-      .set("x-ms-client-principal", principal(owner))
+      .set("Cookie", signedIn(owner))
       .set("Origin", "https://evil.example")
       .type("form").send({ action: "deny", token });
     expect(response.status).toBe(403);

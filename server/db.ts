@@ -45,6 +45,7 @@ export function advisoryLockKey(name: string): bigint {
 
 const WRITING_KEYWORDS = new Set([
   "insert",
+  "into",
   "update",
   "delete",
   "merge",
@@ -471,7 +472,7 @@ export class Store {
     const prepared = bindSql(sql, params);
     const insert = prepared.insert;
     if (insert && !insert.returning)
-      prepared.sql = `${prepared.sql.replace(/[\s;]+$/, "")} RETURNING id`;
+      prepared.sql = `${prepared.sql.replace(/[\s;]+$/, "")}\nRETURNING id`;
     return this.atomic(async () =>
       this.request(async (client) => {
         const result = (await this.query(client, prepared)).at(-1);
@@ -833,7 +834,7 @@ export class Store {
   }
 
   private async lockSchemaMaintenance(): Promise<void> {
-    await this.request((client) => this.lock(client, "touchline:schema-maintenance", false, MAINTENANCE_LOCK_TIMEOUT));
+    await this.request((client) => this.lock(client, `touchline:schema-maintenance:${this.schemaName.toLowerCase()}`, false, MAINTENANCE_LOCK_TIMEOUT));
   }
 
   async close(): Promise<void> {

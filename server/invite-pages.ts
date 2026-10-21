@@ -64,8 +64,10 @@ const pageStyle = `
   .hp{position:absolute;left:-10000px;width:1px;height:1px;overflow:hidden} .divider{height:1px;margin:24px 0 16px;background:var(--line);border:0}
   @media (max-width:640px){.shell{padding:16px 12px}.stats{grid-template-columns:repeat(2,minmax(0,1fr))}.actions .button{flex:1 1 auto}}`;
 
-function layout(title: string, body: string, wide = false) {
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'none'; img-src 'none'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"><title>${escapeHtml(title)}</title><style>${pageStyle}</style></head><body><main class="shell${wide ? " wide" : ""}">${body}</main></body></html>`;
+/** `formActionOrigins` lets a sign-out form follow the redirect to the identity provider's logout endpoint. */
+function layout(title: string, body: string, wide = false, formActionOrigins: string[] = []) {
+  const formAction = ["'self'", ...formActionOrigins.map(escapeHtml)].join(" ");
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'none'; img-src 'none'; form-action ${formAction}; base-uri 'none'; frame-ancestors 'none'"><title>${escapeHtml(title)}</title><style>${pageStyle}</style></head><body><main class="shell${wide ? " wide" : ""}">${body}</main></body></html>`;
 }
 
 const dateFormat = new Intl.DateTimeFormat("en-GB", {
@@ -125,7 +127,7 @@ export function renderInvitePage(input: { state: "form" | "submitted" | "error";
   </section>`);
 }
 
-export function renderNotInvitedPage(input: { inviteUrl: string; logoutUrl: string; email: string | null }): string {
+export function renderNotInvitedPage(input: { inviteUrl: string; logoutAction: string; providerOrigin?: string; email: string | null }): string {
   const email = input.email ? `<p class="meta">Signed in as ${escapeHtml(input.email)}.</p>` : "";
   return layout("Invite required", `<section class="card">
     <p class="eyebrow">Access needed</p>
@@ -133,7 +135,26 @@ export function renderNotInvitedPage(input: { inviteUrl: string; logoutUrl: stri
     <p class="lead">Touchline is invite-only while the player worlds are capped.</p>
     ${email}
     ${accountNotice(input.email ?? undefined)}
-    <div class="actions"><a class="button button-primary" href="${escapeHtml(input.inviteUrl)}">Request an invite</a><a href="${escapeHtml(input.logoutUrl)}">Signed in with the wrong account?</a></div>
+    <div class="actions"><a class="button button-primary" href="${escapeHtml(input.inviteUrl)}">Request an invite</a><form class="inline-form" method="post" action="${escapeHtml(input.logoutAction)}"><button class="button button-secondary" type="submit">Signed in with the wrong account?</button></form></div>
+  </section>`, false, input.providerOrigin ? [input.providerOrigin] : []);
+}
+
+export function renderSignedOutPage(input: { signInUrl: string }): string {
+  return layout("Signed out", `<section class="card">
+    <p class="eyebrow">Touchline access</p>
+    <h1>You're signed out</h1>
+    <p class="lead">Your Touchline session has ended on this device.</p>
+    ${accountNotice()}
+    <div class="actions"><a class="button button-primary" href="${escapeHtml(input.signInUrl)}">Sign in</a><a class="button button-secondary" href="/invite">Request an invite</a></div>
+  </section>`);
+}
+
+export function renderSignInErrorPage(input: { title: string; message: string; retryUrl: string }): string {
+  return layout(input.title, `<section class="card">
+    <p class="eyebrow">Touchline sign-in</p>
+    <h1>${escapeHtml(input.title)}</h1>
+    <div class="notice error" role="alert">${escapeHtml(input.message)}</div>
+    <div class="actions"><a class="button button-primary" href="${escapeHtml(input.retryUrl)}">Try signing in again</a><a class="button button-secondary" href="/invite">Request an invite</a></div>
   </section>`);
 }
 

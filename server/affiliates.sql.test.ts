@@ -43,7 +43,7 @@ describe("affiliate transfer persistence", () => {
       buyer.country_id,
     );
     await store.run(
-      "UPDATE players SET club_id = NULL, squad_club_id = NULL WHERE club_id = 3 AND id NOT IN (SELECT TOP (20) id FROM players WHERE club_id = 3 ORDER BY id)",
+      "UPDATE players SET club_id = NULL, squad_club_id = NULL WHERE club_id = 3 AND id NOT IN (SELECT id FROM players WHERE club_id = 3 ORDER BY id LIMIT 20)",
     );
     await store.run(
       "INSERT INTO partnerships(club_id, partner_id, type, strength, data) VALUES (1, 3, 'Affiliate', 80, '{}')",
@@ -54,7 +54,7 @@ describe("affiliate transfer persistence", () => {
   it("settles a scheduled future fee and registers the minor at the affiliate", async () => {
     const { seller, affiliate } = await partnerAffiliate();
     const player = (await store.get<{ id: number; profile: string }>(
-      "SELECT TOP (1) id,profile FROM players WHERE club_id = ? ORDER BY id",
+      "SELECT id,profile FROM players WHERE club_id = ? ORDER BY id LIMIT 1",
       seller.id,
     ))!;
     const profile = JSON.parse(player.profile) as PlayerProfile;
@@ -97,14 +97,14 @@ describe("affiliate transfer persistence", () => {
     expect(deal.offer).toBe(0);
     expect(updated.reservedBudget).toBe(50000);
     expect(updated.affiliatePlacement?.originalSellerId).toBe(seller.id);
-    expect(await store.get("SELECT id FROM history WHERE entity_type = 'transfer' AND JSON_VALUE(data,'$.type') = 'Transfer to affiliate'"))
+    expect(await store.get("SELECT id FROM history WHERE entity_type = 'transfer' AND data::jsonb ->> 'type' = 'Transfer to affiliate'"))
       .toBeTruthy();
   });
 
   it("rejects affiliate placement for scheduled pre-contract agreements", async () => {
     const { seller, affiliate } = await partnerAffiliate();
     const player = (await store.get<{ id: number; profile: string }>(
-      "SELECT TOP (1) id,profile FROM players WHERE club_id = ? ORDER BY id",
+      "SELECT id,profile FROM players WHERE club_id = ? ORDER BY id LIMIT 1",
       seller.id,
     ))!;
     const profile = JSON.parse(player.profile) as PlayerProfile;
@@ -139,7 +139,7 @@ describe("affiliate transfer persistence", () => {
   it("keeps original-seller clauses and buyer asset cost after affiliate placement completes", async () => {
     const { buyer, seller, affiliate } = await partnerAffiliate();
     const player = (await store.get<{ id: number; profile: string }>(
-      "SELECT TOP (1) id,profile FROM players WHERE club_id = ? ORDER BY id",
+      "SELECT id,profile FROM players WHERE club_id = ? ORDER BY id LIMIT 1",
       seller.id,
     ))!;
     const profile = JSON.parse(player.profile) as PlayerProfile;
@@ -230,7 +230,7 @@ describe("affiliate transfer persistence", () => {
     const { buyer, seller, affiliate } = await partnerAffiliate();
     await store.run("UPDATE clubs SET country_id = ? WHERE id = 3", buyer.country_id);
     const player = (await store.get<{ id: number; profile: string }>(
-      "SELECT TOP (1) id,profile FROM players WHERE club_id = ? AND age >= 18 ORDER BY id",
+      "SELECT id,profile FROM players WHERE club_id = ? AND age >= 18 ORDER BY id LIMIT 1",
       seller.id,
     ))!;
     const profile = JSON.parse(player.profile) as PlayerProfile;

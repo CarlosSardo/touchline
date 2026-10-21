@@ -46,6 +46,10 @@ async function start() {
     configuration = readApiConfiguration();
     if (configuration.hosted && configuration.emailTransport === "disabled")
       console.warn("Touchline: hosted email delivery is disabled; invite email flags will remain unset until SMTP is configured.");
+    if (configuration.auth)
+      console.log(
+        `Touchline: OpenID Connect sign-in via ${configuration.auth.issuer} (redirect URI ${configuration.auth.redirectUri}); trusting proxies: ${String(configuration.trustProxy)}.`,
+      );
   } catch (error) {
     console.error(
       `Touchline: ${error instanceof Error ? error.message : "Invalid API configuration."}`,
@@ -70,7 +74,7 @@ async function start() {
       });
       console.log("Touchline maintenance mode: SQL is not opened; game access is disabled.");
     } else {
-      // Opening SQL at boot would resume the serverless database for every stray request that starts a replica.
+      // PostgreSQL may still be starting next to the app after a reboot; requests that need SQL wait and retry.
       database = openOnFirstUse(() => openDatabase(configuration), {
         retryable: (error) => !(error instanceof StartupCheckError),
       });

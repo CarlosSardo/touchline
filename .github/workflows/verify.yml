@@ -1,6 +1,6 @@
 name: Verify
 
-# Full verification against throwaway SQL Server containers. No push trigger and no secrets; Azure is never contacted.
+# Full verification against throwaway PostgreSQL 18 containers. No push trigger and no secrets.
 on:
   workflow_dispatch:
     inputs:
@@ -145,13 +145,13 @@ jobs:
           cache: npm
       - name: Install dependencies
         run: mkdir -p ci-logs && npm ci
-      - name: Start disposable SQL Server (test-local equivalent)
-        uses: ./.github/actions/disposable-sql
+      - name: Start disposable PostgreSQL (test-local equivalent)
+        uses: ./.github/actions/disposable-postgres
       - name: Backend tests (npm test)
         run: npm test 2>&1 | tee ci-logs/backend-tests.log
-      - name: Collect SQL Server log
+      - name: Collect PostgreSQL log
         if: failure()
-        run: docker logs touchline-sql > ci-logs/sql-server.log 2>&1 || true
+        run: docker logs touchline-postgres > ci-logs/postgres.log 2>&1 || true
       - name: Redact the throwaway SQL password from logs
         if: failure()
         run: find ci-logs -type f -exec sed -i "s/${SQL_PASSWORD:-__unset__}/[redacted]/g" {} +
@@ -182,9 +182,9 @@ jobs:
           cache: npm
       - name: Install dependencies
         run: mkdir -p ci-logs && npm ci
-      - name: Start disposable SQL Server (test-local equivalent)
+      - name: Start disposable PostgreSQL (test-local equivalent)
         id: sql
-        uses: ./.github/actions/disposable-sql
+        uses: ./.github/actions/disposable-postgres
       - name: Catalog test (shared/world-catalog)
         run: npx vitest run shared/world-catalog 2>&1 | tee ci-logs/catalog-test.log
       - name: World check (npm run world:check)
@@ -240,9 +240,9 @@ jobs:
           if grep -Eq '"truncate": \[$|"snapshots": [1-9]' ci-logs/world-reset-after.log; then
             echo "::error::world:reset left rows or snapshots behind"; exit 1
           fi
-      - name: Collect SQL Server log
+      - name: Collect PostgreSQL log
         if: failure()
-        run: docker logs touchline-sql > ci-logs/sql-server.log 2>&1 || true
+        run: docker logs touchline-postgres > ci-logs/postgres.log 2>&1 || true
       - name: Redact the throwaway SQL password from logs
         if: ${{ !cancelled() }}
         run: find ci-logs -type f -exec sed -i "s/${SQL_PASSWORD:-__unset__}/[redacted]/g" {} +
@@ -278,17 +278,17 @@ jobs:
         run: mkdir -p ci-logs && npm ci
       - name: Install Chromium for Playwright
         run: npx playwright install --with-deps chromium
-      - name: Start disposable SQL Server (test-local equivalent)
-        uses: ./.github/actions/disposable-sql
+      - name: Start disposable PostgreSQL (test-local equivalent)
+        uses: ./.github/actions/disposable-postgres
       - name: Use a fresh E2E schema
         run: |
           schema="touchline_e2e_$(openssl rand -hex 16)"
           { echo "TOUCHLINE_E2E_SCHEMA=${schema}"; echo "SQL_SCHEMA=${schema}"; } >> "$GITHUB_ENV"
       - name: Playwright e2e (npm run test:e2e)
         run: npm run test:e2e -- --reporter=list,html 2>&1 | tee ci-logs/e2e.log
-      - name: Collect SQL Server log
+      - name: Collect PostgreSQL log
         if: failure()
-        run: docker logs touchline-sql > ci-logs/sql-server.log 2>&1 || true
+        run: docker logs touchline-postgres > ci-logs/postgres.log 2>&1 || true
       - name: Redact the throwaway SQL password from logs
         if: failure()
         run: find ci-logs -type f -exec sed -i "s/${SQL_PASSWORD:-__unset__}/[redacted]/g" {} +

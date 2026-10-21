@@ -8,9 +8,9 @@ export const baseWage = (ability: number) =>
 
 /** people.ts professionalBaseWage in SQL (youth professionals at 8%). */
 const BASE_WAGE_SQL =
-  "ROUND(POWER(CONVERT(float, players.ability) / 100.0, 7) * CASE WHEN players.age_group = 'Senior' THEN 19000 ELSE 1520 END, 0) * 10 + 50";
+  "round(power(players.ability / 100, 7) * CASE WHEN players.age_group = 'Senior' THEN 19000 ELSE 1520 END) * 10 + 50";
 const PROFESSIONAL =
-  "coalesce(JSON_VALUE(players.profile,'$.contract.status'),'professional') = 'professional'";
+  "coalesce(players.profile::jsonb #>> '{contract,status}', 'professional') = 'professional'";
 const REGISTERED = "players.club_id IS NOT NULL AND players.role != 'Retired'";
 /** The generator's payroll inputs: professional base wages, and amateur allowances (the amateurs' wages). */
 const PAYROLL_SQL = `coalesce(sum(CASE WHEN ${PROFESSIONAL} THEN ${BASE_WAGE_SQL} ELSE 0 END),0) AS base,coalesce(sum(CASE WHEN ${PROFESSIONAL} THEN 0 ELSE players.wage END),0) AS allowances`;
@@ -372,7 +372,8 @@ export async function recordFinancialItem(
     throw new Error("Non-finite financial posting.");
   const postingSeason = season ?? (await store.meta<GameState>("state")).season;
   await store.run(
-    `MERGE financial_periods WITH (HOLDLOCK) AS target USING (VALUES (?,?,?)) AS source(club_id,season,amount) ON target.club_id = source.club_id AND target.season = source.season WHEN MATCHED THEN UPDATE SET ${field} = target.${field} + source.amount WHEN NOT MATCHED THEN INSERT (club_id,season,${field}) VALUES (source.club_id,source.season,source.amount);`,
+    `INSERT INTO financial_periods (club_id, season, ${field}) VALUES (?, ?, ?)
+     ON CONFLICT (club_id, season) DO UPDATE SET ${field} = financial_periods.${field} + EXCLUDED.${field}`,
     clubId,
     postingSeason,
     amount,
@@ -517,7 +518,7 @@ export async function assessFinances(
     club.league_id,
   );
   const continental = !!(await store.get(
-    "SELECT TOP (1) standings.club_id FROM standings JOIN leagues ON leagues.id = standings.league_id WHERE standings.club_id = ? AND leagues.kind = 'continental' AND leagues.confederation = 'UEFA'",
+    "SELECT standings.club_id FROM standings JOIN leagues ON leagues.id = standings.league_id WHERE standings.club_id = ? AND leagues.kind = 'continental' AND leagues.confederation = 'UEFA' LIMIT 1",
     clubId,
   ));
   const premier = country.code === "EN" && league?.tier === 1;
@@ -549,7 +550,10 @@ export async function assessFinances(
     clubId,
   ))!.total;
   const loanAdjustment = (await store.get<{ total: number }>(
-    "SELECT coalesce(sum(CASE WHEN loans.destination_id = ? THEN players.wage * TRY_CONVERT(float, JSON_VALUE(loans.terms,'$.salarySplit'))/100.0 ELSE -players.wage * TRY_CONVERT(float, JSON_VALUE(loans.terms,'$.salarySplit'))/100.0 END),0) AS total FROM loans JOIN players ON players.id = loans.player_id WHERE loans.status = 'active' AND (loans.parent_id = ? OR loans.destination_id = ?)",
+    `SELECT coalesce(sum(CASE WHEN loans.destination_id = ? THEN 1 ELSE -1 END * players.wage * (
+       jsonb_path_query_first(loans.terms::jsonb, '$.salarySplit ? (@.type() == "number")') #>> '{}')::double precision / 100), 0) AS total
+     FROM loans JOIN players ON players.id = loans.player_id
+     WHERE loans.status = 'active' AND (loans.parent_id = ? OR loans.destination_id = ?)`,
     clubId,
     clubId,
     clubId,
@@ -655,7 +659,12 @@ export async function postWeeklyAccounts(
   const amortization =
     (await annualAmortization(store, clubId, state.date)) / 52;
   await store.run(
-    "MERGE financial_periods WITH (HOLDLOCK) AS target USING (VALUES (?,?,?,?,?,?,?)) AS source(club_id,season,revenue,wages,operating,amortization,excluded_investment) ON target.club_id = source.club_id AND target.season = source.season WHEN MATCHED THEN UPDATE SET revenue = target.revenue + source.revenue, wages = target.wages + source.wages, operating = target.operating + source.operating, amortization = target.amortization + source.amortization, excluded_investment = target.excluded_investment + source.excluded_investment WHEN NOT MATCHED THEN INSERT (club_id,season,revenue,wages,operating,amortization,excluded_investment) VALUES (source.club_id,source.season,source.revenue,source.wages,source.operating,source.amortization,source.excluded_investment);",
+    `INSERT INTO financial_periods (club_id, season, revenue, wages, operating, amortization, excluded_investment)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT (club_id, season) DO UPDATE SET revenue = financial_periods.revenue + EXCLUDED.revenue,
+       wages = financial_periods.wages + EXCLUDED.wages, operating = financial_periods.operating + EXCLUDED.operating,
+       amortization = financial_periods.amortization + EXCLUDED.amortization,
+       excluded_investment = financial_periods.excluded_investment + EXCLUDED.excluded_investment`,
     clubId,
     state.season,
     revenue,

@@ -19,14 +19,13 @@ import {
   type InviteRequest,
 } from "./invite-store.ts";
 import type { ApiConfiguration } from "./app.ts";
+import { AuthenticationRequiredError, loginUrl } from "./auth.ts";
 
 type InviteAction = "accept" | "deny";
 type InviteTokenAction = InviteAction | "resend";
 type TokenStatus = "valid" | "expired" | "invalid";
-type PrincipalParser = (
-  encoded: unknown,
-  configuration: Pick<ApiConfiguration, "allowedUserObjectIds" | "ownerObjectId" | "tenantId">,
-) => AuthenticatedIdentity;
+/** Returns the signed-in, authorized identity; throws AuthenticationRequiredError or NotAuthorizedError. */
+type Authenticate = (request: Request) => AuthenticatedIdentity;
 
 export interface InviteStoreLike {
   create(input: { email: string; note: string | null; ipHash: string | null }):
@@ -43,7 +42,7 @@ export interface InviteStoreLike {
 export interface InviteRouteOptions {
   configuration?: ApiConfiguration;
   getStore?: () => Promise<Store>;
-  parsePrincipal?: PrincipalParser;
+  authenticate?: Authenticate;
   inviteStore?: InviteStoreLike | ((root: Store) => InviteStoreLike);
   mailer?: Mailer;
   now?: () => Date;
@@ -134,21 +133,9 @@ function baseUrl(request: Request, configuration: ApiConfiguration) {
   return `http://${host}`;
 }
 
-function clientIp(request: Request, configuration: ApiConfiguration) {
-  if (configuration.hosted) {
-    const forwarded = request.headers["x-forwarded-for"];
-    const entries = (Array.isArray(forwarded) ? forwarded[0] : forwarded)
-      ?.split(",")
-      .map((entry) => entry.trim())
-      .filter(Boolean);
-    const value = entries?.at(-1);
-    if (value) return value;
-  }
-  return request.socket.remoteAddress ?? "";
-}
-
 function ipHash(request: Request, configuration: ApiConfiguration) {
-  const ip = clientIp(request, configuration);
+  // request.ip honours TRUST_PROXY: the nearest X-Forwarded-For hop not added by a trusted reverse proxy.
+  const ip = request.ip ?? request.socket.remoteAddress ?? "";
   return ip ? createHash("sha256").update(configuration.inviteSigningSecret).update(ip).digest("hex") : null;
 }
 
@@ -162,9 +149,9 @@ function inviteLimits(configuration: ApiConfiguration): InviteLimits {
 }
 
 export function createInviteRouter(options: InviteRouteOptions) {
-  const { configuration, getStore, parsePrincipal } = options;
-  if (!configuration || !getStore || !parsePrincipal)
-    throw new Error("Invite routes require configuration, getStore and parsePrincipal.");
+  const { configuration, getStore, authenticate } = options;
+  if (!configuration || !getStore || !authenticate)
+    throw new Error("Invite routes require configuration, getStore and authenticate.");
   const router = express.Router();
   const parseForm = express.urlencoded({ extended: false, limit: "8kb" });
   let lazyMailer: Mailer | undefined = options.mailer;
@@ -241,25 +228,32 @@ export function createInviteRouter(options: InviteRouteOptions) {
     await mailer().send({ to: invite.email, ...email });
     await store.markEmailSent(invite.id, "accepted");
   };
-  const requireApprover = (request: Request): { ok: true; identity: AuthenticatedIdentity } | { ok: false } => {
+  const requireApprover = (request: Request):
+    { ok: true; identity: AuthenticatedIdentity } | { ok: false; signedIn: boolean } => {
     if (!configuration.requireAuth) {
       return localRequest(request)
-        ? { ok: true, identity: { tenantId: configuration.tenantId || "local", objectId: "local", displayName: "Local director", email: configuration.approverEmail } }
-        : { ok: false };
+        ? { ok: true, identity: { tenantId: configuration.homeTenantId || "local", objectId: "local", displayName: "Local director", email: configuration.approverEmail } }
+        : { ok: false, signedIn: false };
     }
     try {
-      const identity = parsePrincipal(request.headers["x-ms-client-principal"], configuration);
+      const identity = authenticate(request);
       if (
-        (identity.tenantId === configuration.tenantId && identity.objectId === configuration.ownerObjectId) ||
+        (!!configuration.homeTenantId && identity.tenantId === configuration.homeTenantId &&
+          identity.objectId === configuration.ownerObjectId) ||
         (identity.tenantId === CONSUMER_TENANT_ID && identity.email === configuration.ownerEmail) ||
         (identity.tenantId === CONSUMER_TENANT_ID && identity.email === configuration.approverEmail)
       )
         return { ok: true, identity };
-    } catch {
-      return { ok: false };
+    } catch (error) {
+      return { ok: false, signedIn: !(error instanceof AuthenticationRequiredError) };
     }
-    return { ok: false };
+    return { ok: false, signedIn: true };
   };
+  /** Anonymous approvers following an emailed review link sign in first and come back to the same URL. */
+  const forbidden = (request: Request, response: Response, approver: { signedIn: boolean }) =>
+    configuration.requireAuth && !approver.signedIn && request.method === "GET"
+      ? response.set("Cache-Control", "no-store").redirect(302, loginUrl(request.originalUrl))
+      : html(response, 403, statusPage("Forbidden", "You are not authorized to review invite requests."));
 
   router.get("/invite", (_request, response) =>
     html(response, 200, renderInvitePage({ state: "form" })),
@@ -305,8 +299,8 @@ export function createInviteRouter(options: InviteRouteOptions) {
 
   router.get("/admin/invites", async (request, response, next) => {
     try {
-      if (!requireApprover(request).ok)
-        return html(response, 403, statusPage("Forbidden", "You are not authorized to review invite requests."));
+      const approver = requireApprover(request);
+      if (!approver.ok) return forbidden(request, response, approver);
       const store = await invites();
       const [requests, capacity] = await Promise.all([store.list(), store.capacity()]);
       return html(response, 200, renderAdminListPage({ requests, capacity, reviewUrl, resendForm }));
@@ -317,8 +311,8 @@ export function createInviteRouter(options: InviteRouteOptions) {
 
   router.get("/admin/invites/:id", async (request, response, next) => {
     try {
-      if (!requireApprover(request).ok)
-        return html(response, 403, statusPage("Forbidden", "You are not authorized to review invite requests."));
+      const approver = requireApprover(request);
+      if (!approver.ok) return forbidden(request, response, approver);
       const action = actionSchema.safeParse(request.query.action);
       if (!action.success)
         return html(response, 400, statusPage("Invalid request", "Choose accept or deny from the invite list."));

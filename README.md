@@ -2,7 +2,7 @@
 
 Touchline is a football sporting-director simulation. You take charge of a club's long-term project on **1 July 2026**: recruitment, contracts, squad planning, the academy, staff, facilities and finances. The manager picks the team and plays the matches; your job is to give them the right players and keep the club healthy for years to come.
 
-- Play the hosted game: [Open Touchline](https://touchline.thankfulgrass-3ef59c98.swedencentral.azurecontainerapps.io/) is invite-based. [Request an invite](https://touchline.thankfulgrass-3ef59c98.swedencentral.azurecontainerapps.io/invite), then sign in with a personal Microsoft account (Outlook.com, Hotmail, Live.com, MSN or any email registered as a Microsoft account). Work/school, Google and Apple sign-in are not supported.
+- Self-host it: one Docker Compose stack (PostgreSQL 18 + the app, optional Caddy for HTTPS) runs on a Raspberry Pi 4 (8 GB, SSD) or any 64-bit Linux host. Hosted access is invite-based: players request an invite at `/invite`, then sign in with a personal Microsoft account (Outlook.com, Hotmail, Live.com, MSN or any email registered as a Microsoft account). Work/school, Google and Apple sign-in are not supported.
 - Current status and known gaps: [REQUIREMENTS.md](REQUIREMENTS.md)
 - How to contribute: [CONTRIBUTING.md](CONTRIBUTING.md)
 
@@ -17,21 +17,20 @@ Touchline is a football sporting-director simulation. You take charge of a club'
 - **A living club:** staff, facilities, board and press decisions, an affiliate network and unexpected events.
 - **Match analysis:** reproducible simulation with ratings, xG, xA, xPts and interactive pitch maps.
 - **Media and supporters:** fictional journalists, a news feed and supporter reactions.
-- **Saves and settings:** SQL persistence, autosaves, portable `.touchline.gz` exports, colour modes, themes and eight display currencies.
+- **Saves and settings:** PostgreSQL persistence, autosaves, portable `.touchline.gz` exports, colour modes, themes and eight display currencies.
 
 All names, clubs, attributes and results are procedurally generated, not licensed real-world records.
 
 ## Quick start
 
-You need **Node.js 22.13 or newer** (see [.nvmrc](.nvmrc)), npm and Docker.
+You need **Node.js 22.13 or newer** (see [.nvmrc](.nvmrc)), npm and Docker (or an existing PostgreSQL 18).
 
 ```sh
 npm ci
-cp .env.example .env        # then set a strong SQL_PASSWORD; never commit .env
-docker compose up -d --wait # SQL Server 2022 Developer on 127.0.0.1:1433
-docker compose exec sql /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -C -Q "CREATE DATABASE touchline"
-set -a; . ./.env; set +a    # load .env without printing it
-npm run db:migrate          # review the plan, then:
+cp .env.example .env               # set POSTGRES_PASSWORD and SQL_PASSWORD; never commit .env
+docker compose up -d --wait postgres # PostgreSQL 18 on 127.0.0.1:5432; creates the touchline database and role
+set -a; . ./.env; set +a           # load .env without printing it
+npm run db:migrate                 # review the plan, then:
 npm run db:migrate -- --apply --yes
 npm run db:seed -- --seed touchline-2026 --apply --yes # new, empty database only; add --nations PT,IE for a small world
 npm run dev
@@ -39,8 +38,9 @@ npm run dev
 
 Open [http://127.0.0.1:5173](http://127.0.0.1:5173); the API runs on `127.0.0.1:3001`.
 
+- Without Docker, point `SQL_HOST`/`SQL_PORT`/`SQL_USER`/`SQL_PASSWORD` at a PostgreSQL 18 whose database (`SQL_DATABASE`) is owned by `SQL_USER`.
 - Startup never migrates the schema or generates a world. Never reseed to repair an existing career.
-- Local development runs without sign-in, so it does not exercise Entra authentication or per-account isolation.
+- Local development runs without sign-in, so it does not exercise OpenID Connect authentication or per-account isolation.
 - All settings are environment variables, listed with local defaults in [.env.example](.env.example).
 
 ## Commands
@@ -52,51 +52,66 @@ Open [http://127.0.0.1:5173](http://127.0.0.1:5173); the API runs on `127.0.0.1:
 | `npm run lint` / `npm run format`   | Lint with oxlint / format with Prettier                                 |
 | `npm run db:migrate`                | Show pending schema migrations; add `-- --apply --yes` to apply         |
 | `npm run db:seed -- ...`            | Generate a world in a new, empty database                               |
+| `npm run accounts:migrate`          | Dry run of creating the account registry for hosted sign-in; `-- --apply --yes` applies |
 | `npm run data:export -- --out FILE` | Export the active world to a portable `.touchline.gz` file              |
 | `npm run data:export -- --everything --out-dir DIR` | Back up the registry, every world and snapshot with `manifest.json`; `--verify DIR` checks it offline |
 | `npm run world:reset -- --all`      | Dry run of emptying every world and snapshot; `--apply --yes` performs it (keeps accounts and migrations) |
 | `npm run db:footprint`              | Read-only per-table size report; flags worlds over 1.6 GB                |
 | `npm run world:check`               | Generate the world in a test schema and check its invariants; prints one JSON line, exits 1 on a violation (`-- --nations=EN,ES`) |
 | `npm run simulation:check`          | Compare a 600-match sample with real aggregates (`-- --seasons=3` soak) |
+| `npm run image:build`               | Build the Docker image for this machine's architecture (`touchline:local`) |
+| `npm run pi:backup` / `npm run pi:restore` | Back up / restore the compose stack's PostgreSQL database (see [Backups](#backups-and-restore)) |
 
 If ports are taken: `API_PORT=3011 UI_PORT=5181 npm run dev`. `npm run preview` serves only the static build, not the game engine.
 
 ## Testing
 
-`npm run test:local` starts a disposable SQL Server on `127.0.0.1:14330` (credentials in the ignored `.env.test.local`, no Azure) and runs `npm test`, or any command after `--`:
+`npm run test:local` starts a disposable PostgreSQL 18 container on `127.0.0.1:54329` (Compose project `touchline-checks`, password in the ignored `.env.test.local`) and runs `npm test`, or any command after `--`. Without Docker, `--no-docker` uses an already-running loopback PostgreSQL from `SQL_HOST`, `SQL_PORT`, `SQL_USER` and `SQL_PASSWORD`; both modes create and use the `touchline_checks` database:
 
 ```sh
 npx playwright install chromium   # once, for browser tests
 npm run test:local -- npm run verify
 npm run test:local -- npm run verify -- --parallel
+npm run test:local -- --no-docker -- npx vitest run server/draw.test.ts
 ```
 
-`npm run verify` runs lint, the production build, SQL-backed unit/integration/save tests and the Playwright suite. Tests use the real SQL schema in isolated `touchline_test_` / `touchline_e2e_` schemas and must never target a player's world. Remote-database rules and guards are in [CONTRIBUTING.md](CONTRIBUTING.md).
+`npm run verify` runs lint, the production build, SQL-backed unit/integration/save tests and the Playwright suite; `--parallel` runs them as concurrent jobs in per-job databases and writes logs to `reports/`. Tests use the real schema in isolated `touchline_test_` / `touchline_e2e_` schemas and must never target a player's world. Remote-database rules and guards are in [CONTRIBUTING.md](CONTRIBUTING.md). The manual/PR GitHub Actions workflow [verify.yml](.github/workflows/verify.yml) runs the same suites against a throwaway PostgreSQL 18 container.
 
-## Hosting and deployment
+## Hosting on a Raspberry Pi
 
-The hosted game is one Azure Container App (Consumption, 0 to 1 replicas) serving the React UI and Express API behind EasyAuth, plus one Azure SQL Free database. EasyAuth uses the `https://login.microsoftonline.com/common/v2.0` issuer, and the app registration accepts personal Microsoft accounts. Images are built with the [Dockerfile](Dockerfile), pushed to private GHCR and deployed from the workstation; there is no CI pipeline.
+The production stack in [compose.yaml](compose.yaml) runs on a Raspberry Pi 4 Model B (8 GB) with an SSD and 64-bit Raspberry Pi OS, or on any arm64/amd64 Linux host with Docker:
 
-Access is invite-based:
+- `postgres`: the official `postgres:18` image, data in the `postgres-data` volume, published only on `127.0.0.1:5432`, tuned for 8 GB RAM and an SSD (`shared_buffers=1GB`, `effective_cache_size=4GB`, `random_page_cost=1.1`, `jit=off`, compressed WAL, 15-minute checkpoints). On first start [deploy/postgres/initdb](deploy/postgres/initdb/10-touchline-role.sh) creates `SQL_USER` as a non-superuser owner of `SQL_DATABASE`; the `postgres` superuser is only for administration and backups.
+- `app`: the multi-arch image `ghcr.io/carlossardo/touchline` built by [image.yml](.github/workflows/image.yml) on every push to `main` (or built locally from the [Dockerfile](Dockerfile)), React UI and Express API on `127.0.0.1:3001`, 2 GB memory limit.
+- `caddy` (Compose profile `https`): automatic Let's Encrypt HTTPS for `TOUCHLINE_DOMAIN` with [deploy/Caddyfile](deploy/Caddyfile).
 
-1. A player requests an invite at [`/invite`](https://touchline.thankfulgrass-3ef59c98.swedencentral.azurecontainerapps.io/invite).
-2. The approver gets an email and reviews the request at `/admin/invites` while signed in.
-3. Accepting sends the player an email. Denying is silent.
-4. On first sign-in with the accepted personal Microsoft account, an owner-executed stored procedure creates that player's private world schema. The runtime still has no `CREATE SCHEMA` permission.
+### First install
 
-The owner/legacy world rebind happens automatically on first personal-account sign-in as `sardo.kiko@gmail.com` or `carlos.sardo@outlook.com`. The app keeps the free-tier guardrails: `MAX_PLAYERS=10` and `INVITE_DB_SIZE_LIMIT_GB=24` for the Azure SQL Free 32 GB database.
-
-Email uses Gmail SMTP with a Google app password. If hosted `SMTP_PASSWORD` is unset, deployment uses `EMAIL_TRANSPORT=disabled`: invite requests still appear in `/admin/invites`, and emails can be resent after SMTP is configured. Local development uses the `log` transport and prints invite links to the API console.
-
-Operator setup:
+1. Install 64-bit Raspberry Pi OS, boot from the SSD and install Docker (`curl -fsSL https://get.docker.com | sh`, then `sudo usermod -aG docker $USER`).
+2. Clone the repository (for example to `/opt/touchline`) and create the configuration: `cp .env.example .env && chmod 600 .env`. Set `POSTGRES_PASSWORD` and `SQL_PASSWORD` (`openssl rand -hex 24`), `TOUCHLINE_DOMAIN`, and uncomment the sign-in and invite settings (`REQUIRE_AUTH=true`, `APP_ORIGIN=https://<TOUCHLINE_DOMAIN>`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, `SESSION_SECRET`, `INVITE_SIGNING_SECRET`, `TRUST_PROXY=1`, email). The app refuses to listen beyond loopback without sign-in.
+3. Register the sign-in app at [Microsoft Entra](https://entra.microsoft.com) > App registrations: supported account types *personal Microsoft accounts* (or *any organizational directory and personal accounts* if you set `AUTH_HOME_TENANT_ID`), platform **Web**, redirect URI `https://<TOUCHLINE_DOMAIN>/auth/callback`; create a client secret for `OIDC_CLIENT_SECRET`. The default `OIDC_ISSUER` is the personal-account issuer.
+4. If the GHCR package is private, `docker login ghcr.io` with a token that has `read:packages`. Without a registry, `docker compose build app` builds the image on the Pi (several minutes).
+5. Start the database, create the account registry and start everything:
 
 ```sh
-npm run azure:auth -- --yes --allow-personal-accounts
-# Set SMTP_PASSWORD in .env from Google Account > Security > 2-Step Verification > App passwords.
-npm run azure:deploy -- --yes
+docker compose up -d --wait postgres
+docker compose run --rm app npm run accounts:migrate                  # dry run: review it
+docker compose run --rm app npm run accounts:migrate -- --apply --yes
+docker compose --profile https up -d --wait
 ```
 
-Invite settings:
+Invited players' worlds are created empty on first sign-in, and each player starts a career in the app. Startup never migrates or seeds.
+
+### HTTPS and reverse proxy
+
+`docker compose --profile https up -d` starts Caddy, which needs `TOUCHLINE_DOMAIN` resolving to your public IP and ports 80 and 443 forwarded to the Pi. Without port forwarding, keep the app on `127.0.0.1:3001` and publish it with a tunnel (for example Cloudflare Tunnel or Tailscale Funnel) or your own proxy; set `APP_ORIGIN` to the public HTTPS origin and `TRUST_PROXY` to the number of proxies in front of the app. Sign-in needs HTTPS. Never publish PostgreSQL.
+
+### Invites and email
+
+1. A player requests an invite at `/invite`.
+2. The approver (`APPROVER_EMAIL`) gets an email and reviews the request at `/admin/invites` while signed in.
+3. Accepting sends the player an email. Denying is silent.
+4. On first sign-in with the accepted personal Microsoft account, the app creates that player's private world schema.
 
 | Variable | Purpose |
 | --- | --- |
@@ -107,28 +122,56 @@ Invite settings:
 | `INVITE_SIGNING_SECRET` | HMAC secret for signed review/resend links |
 | `EMAIL_TRANSPORT` | `gmail`, `disabled` when hosted; `log` for local development |
 | `SMTP_USER` | Gmail SMTP account |
-| `SMTP_PASSWORD` | Google app password for Gmail SMTP |
+| `SMTP_PASSWORD` | Google app password for Gmail SMTP (Google Account > Security > 2-Step Verification > App passwords) |
 | `SMTP_FROM` | Optional From header, defaulting to `Touchline <SMTP_USER>` |
 
-Cost: the invite/auth/email setup uses free services only (Gmail SMTP, personal Microsoft account sign-in, Container Apps consumption grant and Azure SQL Free).
+With `EMAIL_TRANSPORT=disabled`, invite requests still appear in `/admin/invites`, and emails can be resent after SMTP is configured.
 
-Operator commands (each documents itself with `--help`): `azure:provision`, `azure:auth`, `azure:sql`, `azure:deploy`, `azure:rollback`, `accounts:migrate` and `career:delete`. See [scripts/azure-deploy.sh](scripts/azure-deploy.sh), [scripts/azure-provision.sh](scripts/azure-provision.sh) and [scripts/azure-rollback.sh](scripts/azure-rollback.sh).
+### Backups and restore
 
-Release safety rules (full rules in [CONTRIBUTING.md](CONTRIBUTING.md)):
+`npm run pi:backup` (or `bash scripts/pi-backup.sh` on a host without Node) writes an online `pg_dump` custom-format file of the whole database (every world, save and the account registry) plus the cluster roles to `backups/`, verifies that it reads back and deletes backups older than `BACKUP_RETENTION_DAYS` (14). Schedule it daily and copy `backups/` off the Pi:
 
-- Keep secrets only in the ignored `.env`, never in commands, images, logs or chat.
-- The automatic pre-deploy export covers only the `dbo` world; back up other accounts and the registry separately.
-- Deployment never provisions accounts or seeds careers. Rollback and `--image` releases fail closed once the registry exists; ship a reviewed forward fix instead.
-- Promote a `--hold-ingress` candidate only through the reviewed manual procedure, never by rerunning deploy, rollback or `--image`. It is in `git show 1acda49:README.md`.
-- SQL Free auto-pauses when its monthly allowance runs out. Do not add keep-alive probes or billable extras.
-- While the allowance is spent, `azure:deploy -- --yes --no-sql --verification smoke --image <digest>` ships without waking SQL. The operator scripts refuse a database outside the free offer unless you set `AZURE_SQL_ALLOW_PAID=true` for a deliberate paid run; switch the database back to the free offer (AutoPause) afterwards.
+```sh
+15 4 * * * cd /opt/touchline && bash scripts/pi-backup.sh >> backups/backup.log 2>&1
+```
+
+To restore, `bash scripts/pi-restore.sh backups/touchline-<stamp>.dump --yes` stops the app, takes a safety backup, recreates the database owned by `SQL_USER`, restores the dump and starts the app again. On a new Pi, start `postgres` with the same `.env` first so the app role exists. `npm run data:export -- --everything --out-dir DIR` remains available as a portable, engine-independent backup.
+
+### Upgrading
+
+```sh
+bash scripts/pi-backup.sh
+git pull                                   # compose file, scripts and docs
+docker compose pull app                    # or: docker compose build app
+docker compose run --rm app npm run db:migrate -- --registered               # review
+docker compose run --rm app npm run db:migrate -- --registered --apply --yes
+docker compose --profile https up -d --wait
+```
+
+Pin a digest (`TOUCHLINE_IMAGE=ghcr.io/carlossardo/touchline@sha256:…`, printed by the image workflow) for reproducible upgrades and rollbacks; roll back the database with `pi-restore.sh`, not by running an older image against migrated data. For a PostgreSQL major upgrade, back up, remove the `postgres-data` volume, change the image tag and restore.
+
+### Moving careers from the old Azure version
+
+The Azure SQL deployment is retired, and its database cannot be attached to PostgreSQL. Careers move as portable saves:
+
+1. While the old site still runs, each player opens **Settings > Saves** and exports a `.touchline.gz` save (the operator can also run `npm run data:export -- --out FILE` per world from a checkout of the last Azure release).
+2. On the Pi, the player signs in (the owner, or with an accepted invite), starts any career, then imports the file in **Settings > Saves**. The import runs in a single transaction and replaces that world; worlds before version 4 cannot be imported.
+
+Keep the exported files until every player has confirmed their career on the Pi.
+
+### Performance on the Pi
+
+- Use an SSD (USB 3) rather than an SD card, active cooling to avoid throttling, and the 64-bit OS. PostgreSQL is tuned for that; adjust the `-c` flags in `compose.yaml` on a different machine.
+- Simulation runs in the app process: full-world days and generating a new full world take noticeably longer than on a desktop (minutes for a new career). A smaller world (`db:seed -- --nations ...`) is faster.
+- The app's heap is capped at 1.5 GB (`TOUCHLINE_NODE_OPTIONS`) within a 2 GB container limit; raise both together if a large world needs more.
+- `log_min_duration_statement=2s` logs slow queries (`docker compose logs postgres`); `npm run db:footprint` reports per-table sizes.
 
 ## Saves and legacy careers
 
-- Careers save to SQL as you play. **Settings > Saves** manages snapshot slots and `.touchline.gz` imports/exports; imports run in a single transaction.
+- Careers save to PostgreSQL as you play. **Settings > Saves** manages snapshot slots and `.touchline.gz` imports/exports; imports run in a single transaction.
 - Restore and import replace the active world, so make a named save first.
 - Deploying does not upgrade a career. Worlds before version 4 cannot be imported; start a new career instead.
-- Old SQLite careers can be imported once with `npm run data:migrate`; keep the originals offline. Options are in [scripts/data-migrate.ts](scripts/data-migrate.ts).
+- The one-time SQLite import tool was retired with SQL Server: convert a SQLite-era career with an earlier release and export it as `.touchline.gz`. Keep the originals offline.
 
 ## Game rules
 
@@ -143,10 +186,11 @@ References: [FIFA RSTP (Jan 2025)](https://digitalhub.fifa.com/m/696d877ea35ca76
 | [src/](src/)         | React screens, components and canvas pitch maps                          |
 | [server/](server/)   | Express API, SQL store, world generation, match engines, saves, accounts |
 | [shared/](shared/)   | Types, API contracts, rules and formulas shared by client and server     |
-| [scripts/](scripts/) | Migration, seeding, import/export, verification and Azure tooling        |
+| [scripts/](scripts/) | Migration, seeding, import/export, verification, backup and restore      |
 | [e2e/](e2e/)         | Playwright browser tests                                                 |
+| [deploy/](deploy/)   | PostgreSQL initialization, Caddy HTTPS proxy and the test database stack |
 
-Built with React 19, TypeScript, Vite, Express, mssql, Azure Identity, Zod, Recharts and Lucide icons.
+Built with React 19, TypeScript, Vite, Express, PostgreSQL 18 (node-postgres), openid-client, Zod, Recharts and Lucide icons.
 
 ## Credits and data sources
 

@@ -437,7 +437,7 @@ export async function assessPlayerInterest(
       ? clublessWageExpectation(
           marketWage({ ...player, age_group: "Senior", age: Math.max(21, player.age), wage: 0 }, scale),
           (await store.get<{ wage: number | null }>(
-            "SELECT avg(CONVERT(float,players.wage)) AS wage FROM clubs JOIN leagues ON leagues.id = clubs.league_id JOIN players ON players.club_id = clubs.id WHERE leagues.country_id = coalesce((SELECT country_id FROM leagues WHERE id = ?),?) AND clubs.type != 'national' AND players.parent_club_id IS NULL AND players.age_group = 'Senior' AND players.role != 'Retired' AND players.ability BETWEEN ? AND ? AND coalesce(JSON_VALUE(players.profile,'$.contract.status'),'professional') = 'professional'",
+            "SELECT avg(players.wage) AS wage FROM clubs JOIN leagues ON leagues.id = clubs.league_id JOIN players ON players.club_id = clubs.id WHERE leagues.country_id = coalesce((SELECT country_id FROM leagues WHERE id = ?),?) AND clubs.type != 'national' AND players.parent_club_id IS NULL AND players.age_group = 'Senior' AND players.role != 'Retired' AND players.ability BETWEEN ? AND ? AND coalesce(players.profile::jsonb #>> '{contract,status}','professional') = 'professional'",
             buyer.league_id ?? -1,
             buyer.country_id,
             player.ability - 2,
@@ -763,7 +763,7 @@ export async function submitMinorApplication(
     : ((JSON.parse(player.profile) as PlayerProfile).registration
         ?.lastAssociationId ?? player.country_id);
   await store.run(
-    "MERGE minor_applications WITH (HOLDLOCK) AS target USING (VALUES (?,?,?,?,?,?,?,?)) AS source(player_id,club_id,source_country_id,destination_country_id,route,requested_date,due_date,data) ON target.player_id = source.player_id AND target.club_id = source.club_id WHEN MATCHED THEN UPDATE SET source_country_id=source.source_country_id,destination_country_id=source.destination_country_id,route=source.route,requested_date=source.requested_date,due_date=source.due_date,status='pending',reason='',data=source.data WHEN NOT MATCHED THEN INSERT (player_id,club_id,source_country_id,destination_country_id,route,requested_date,due_date,data) VALUES (source.player_id,source.club_id,source.source_country_id,source.destination_country_id,source.route,source.requested_date,source.due_date,source.data);",
+    "INSERT INTO minor_applications(player_id,club_id,source_country_id,destination_country_id,route,requested_date,due_date,data) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT (player_id,club_id) DO UPDATE SET source_country_id = EXCLUDED.source_country_id,destination_country_id = EXCLUDED.destination_country_id,route = EXCLUDED.route,requested_date = EXCLUDED.requested_date,due_date = EXCLUDED.due_date,status = 'pending',reason = '',data = EXCLUDED.data",
     player.id,
     buyer.id,
     source,
@@ -801,7 +801,7 @@ export async function processMinorApplications(store: Store) {
     ))!;
     const eligibility = await assessYouthTransfer(store, player, club);
     const support = !!(await store.get(
-      "SELECT TOP (1) staff.id FROM staff WHERE staff.club_id = ? AND staff.role = 'Head of youth' AND EXISTS (SELECT 1 FROM training_plans WHERE training_plans.club_id = staff.club_id)",
+      "SELECT staff.id FROM staff WHERE staff.club_id = ? AND staff.role = 'Head of youth' AND EXISTS (SELECT 1 FROM training_plans WHERE training_plans.club_id = staff.club_id) LIMIT 1",
       club.id,
     ));
     const evidence = JSON.parse(application.data);

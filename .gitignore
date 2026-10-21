@@ -22,6 +22,8 @@ playwright-report/
 coverage/
 .vitest/
 backups/
+reports/
+*.dump
 *.touchline.gz
 .azure/
 .touchline-deployment.json*

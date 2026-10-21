@@ -12,6 +12,16 @@ import { DatabaseUnavailableError, Store } from "./db.ts";
 import { Accounts, type AuthenticatedIdentity } from "./accounts.ts";
 import { createInviteRouter, type InviteRouteOptions } from "./invite-routes.ts";
 import { CONSUMER_TENANT_ID } from "./invite-store.ts";
+import {
+  AuthenticationRequiredError,
+  createAuthenticator,
+  NotAuthorizedError,
+  readAuthConfiguration,
+  readTrustProxy,
+  type AuthConfiguration,
+  type OidcProvider,
+  type TrustProxySetting,
+} from "./auth.ts";
 import { OWNER_EMAIL_DEFAULT } from "./legacy-account.ts";
 import {
   affiliateDesk,
@@ -106,50 +116,26 @@ const saveFileSchema = z
     "Choose a valid portable save slot.",
   );
 const loopbackHosts = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
-const principalSchema = z.object({
-  auth_typ: z.literal("aad"),
-  claims: z
-    .array(
-      z.object({
-        typ: z.string().max(256),
-        val: z.string().max(4096),
-      }),
-    )
-    .max(256),
-});
 const identifier =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const defaultApproverEmail = "sardo.kiko@gmail.com";
 const emailAddressSchema = z.string().trim().toLowerCase().max(320).email();
 
-export class AuthenticationRequiredError extends Error {
-  readonly status = 401;
-
-  constructor() {
-    super("Authentication required.");
-    this.name = "AuthenticationRequiredError";
-  }
-}
-
-export class NotAuthorizedError extends Error {
-  readonly status = 403;
-  readonly code = "not_authorized";
-
-  constructor() {
-    super("This account is not authorized.");
-    this.name = "NotAuthorizedError";
-  }
-}
+export { AuthenticationRequiredError, NotAuthorizedError };
 
 export interface ApiConfiguration {
   host: string;
   port: number;
+  /** REQUIRE_AUTH=true: served publicly behind an HTTPS reverse proxy with OpenID Connect sign-in. */
   hosted: boolean;
   requireAuth: boolean;
   ownerObjectId: string;
   allowedUserObjectIds: Set<string>;
-  tenantId: string;
+  /** Optional organization tenant whose owner/allow-listed object IDs may sign in besides personal Microsoft accounts. */
+  homeTenantId: string;
   appOrigin: string | undefined;
+  trustProxy: TrustProxySetting;
+  auth: AuthConfiguration | undefined;
   approverEmail: string;
   ownerEmail: string;
   maxPlayers: number;
@@ -175,12 +161,14 @@ const parsePositiveNumber = (value: string | undefined, fallback: number, name: 
 export function readApiConfiguration(
   environment: NodeJS.ProcessEnv = process.env,
 ): ApiConfiguration {
-  const hosted = Boolean(environment.CONTAINER_APP_NAME?.trim());
+  const requireAuth = environment.REQUIRE_AUTH === "true";
+  const hosted = requireAuth;
   const host = environment.API_HOST ?? (hosted ? "0.0.0.0" : "127.0.0.1");
   const port = Number(environment.PORT ?? environment.API_PORT ?? 3001);
-  const requireAuth = environment.REQUIRE_AUTH === "true";
-  const ownerObjectId = (environment.OWNER_OBJECT_ID ?? "").toLowerCase();
-  const tenantId = (environment.AZURE_TENANT_ID ?? "").toLowerCase();
+  const ownerObjectId = (environment.OWNER_OBJECT_ID ?? "").trim().toLowerCase();
+  if (requireAuth && environment.AZURE_TENANT_ID && environment.AUTH_HOME_TENANT_ID === undefined)
+    throw new Error("AZURE_TENANT_ID was renamed to AUTH_HOME_TENANT_ID.");
+  const homeTenantId = (environment.AUTH_HOME_TENANT_ID ?? "").trim().toLowerCase();
   const approverEmailResult = emailAddressSchema.safeParse(environment.APPROVER_EMAIL ?? defaultApproverEmail);
   if (!approverEmailResult.success)
     throw new Error("APPROVER_EMAIL must be a valid email address up to 320 characters.");
@@ -210,7 +198,8 @@ export function readApiConfiguration(
   const appOrigin = environment.APP_ORIGIN;
   if (invitedObjectIds.length > 100 || invitedObjectIds.some((value) => !identifier.test(value)))
     throw new Error("ALLOWED_USER_OBJECT_IDS must contain at most 100 comma-separated Entra object UUIDs.");
-  const allowedUserObjectIds = new Set([ownerObjectId, ...invitedObjectIds]);
+  const allowedUserObjectIds = new Set([ownerObjectId, ...invitedObjectIds].filter(Boolean));
+  const trustProxy = readTrustProxy(environment.TRUST_PROXY, hosted);
   if (!host || host.trim() !== host)
     throw new Error("API_HOST must be a hostname or IP address.");
   if (!Number.isInteger(port) || port < 1 || port > 65535)
@@ -220,21 +209,28 @@ export function readApiConfiguration(
     !["true", "false"].includes(environment.REQUIRE_AUTH)
   )
     throw new Error("REQUIRE_AUTH must be true or false.");
-  if ((hosted || !loopbackHosts.has(host)) && !requireAuth)
+  if (!loopbackHosts.has(host) && !requireAuth)
     throw new Error(
       "Public API binding requires explicit REQUIRE_AUTH=true and hosted authentication.",
     );
-  if (
-    requireAuth &&
-    (!hosted || !identifier.test(ownerObjectId) || !identifier.test(tenantId))
-  )
-    throw new Error(
-      "Hosted authentication requires CONTAINER_APP_NAME, OWNER_OBJECT_ID and AZURE_TENANT_ID.",
-    );
-  if (requireAuth && !appOrigin)
-    throw new Error(
-      "Hosted authentication requires APP_ORIGIN as an exact HTTPS origin.",
-    );
+  if (requireAuth) {
+    if (homeTenantId && (!identifier.test(homeTenantId) || homeTenantId === CONSUMER_TENANT_ID))
+      throw new Error(
+        "AUTH_HOME_TENANT_ID must be an organization tenant UUID (not the personal Microsoft account tenant) or unset.",
+      );
+    if (homeTenantId ? !identifier.test(ownerObjectId) : ownerObjectId && !identifier.test(ownerObjectId))
+      throw new Error(
+        homeTenantId
+          ? "AUTH_HOME_TENANT_ID requires OWNER_OBJECT_ID as the owner's object UUID in that tenant."
+          : "OWNER_OBJECT_ID must be an object UUID when set.",
+      );
+    if (!homeTenantId && invitedObjectIds.length)
+      throw new Error("ALLOWED_USER_OBJECT_IDS requires AUTH_HOME_TENANT_ID (the tenant those object IDs belong to).");
+    if (!appOrigin)
+      throw new Error(
+        "REQUIRE_AUTH=true requires APP_ORIGIN as the exact public HTTPS origin (for example https://touchline.example.com).",
+      );
+  }
   if (appOrigin) {
     let origin: URL;
     try {
@@ -260,8 +256,12 @@ export function readApiConfiguration(
     requireAuth,
     ownerObjectId,
     allowedUserObjectIds,
-    tenantId,
+    homeTenantId,
     appOrigin,
+    trustProxy,
+    auth: requireAuth && appOrigin
+      ? readAuthConfiguration(environment, { appOrigin, inviteSigningSecret })
+      : undefined,
     approverEmail,
     ownerEmail,
     maxPlayers,
@@ -269,65 +269,6 @@ export function readApiConfiguration(
     inviteSigningSecret,
     emailTransport,
   };
-}
-
-export function parseClientPrincipal(
-  encoded: unknown,
-  configuration: Pick<ApiConfiguration, "allowedUserObjectIds" | "ownerObjectId" | "tenantId">,
-): AuthenticatedIdentity {
-  if (
-    typeof encoded !== "string" ||
-    encoded.length > 65536 ||
-    !/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)
-  )
-    throw new AuthenticationRequiredError();
-  try {
-    const principal = principalSchema.parse(
-      JSON.parse(Buffer.from(encoded, "base64").toString("utf8")),
-    );
-    const claims = (...types: string[]) =>
-      principal.claims.filter((claim) => types.includes(claim.typ));
-    const singleTrustedClaim = (...types: string[]) => {
-      const values = claims(...types).map((claim) => claim.val.trim()).filter(Boolean);
-      const first = values[0]?.toLowerCase();
-      if (!first || !values.every((value) => value.toLowerCase() === first))
-        throw new NotAuthorizedError();
-      return first;
-    };
-    const tenantId = singleTrustedClaim("tid", "http://schemas.microsoft.com/identity/claims/tenantid");
-    const objectId = singleTrustedClaim("oid", "http://schemas.microsoft.com/identity/claims/objectidentifier");
-    const homeTenant = tenantId === configuration.tenantId;
-    const consumersTenant = tenantId === CONSUMER_TENANT_ID;
-    if (
-      (!homeTenant && !consumersTenant) ||
-      (homeTenant && objectId !== configuration.ownerObjectId && !configuration.allowedUserObjectIds.has(objectId))
-    )
-      throw new NotAuthorizedError();
-    const profileClaim = (...types: string[]) => {
-      for (const type of types) {
-        const value = principal.claims.find((claim) => claim.typ === type)?.val.trim();
-        if (value) return value;
-      }
-      return null;
-    };
-    return {
-      tenantId,
-      objectId,
-      displayName: profileClaim(
-        "name",
-        "http://schemas.microsoft.com/identity/claims/displayname",
-        "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name",
-      ) ?? "Sporting director",
-      email: profileClaim(
-        "email",
-        "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress",
-        "preferred_username",
-      )?.toLowerCase() ?? null,
-    };
-  } catch (error) {
-    if (error instanceof NotAuthorizedError) throw error;
-    throw new AuthenticationRequiredError();
-  }
 }
 
 const positive = z.number().finite().min(0);
@@ -813,7 +754,7 @@ export async function dispatchAction(
         })
         .parse(body);
       await store.run(
-        "MERGE INTO training_plans WITH (HOLDLOCK) AS target USING (VALUES (?, ?, ?, ?)) AS source(club_id, focus, intensity, youth_focus) ON target.club_id = source.club_id WHEN MATCHED THEN UPDATE SET focus = source.focus, intensity = source.intensity, youth_focus = source.youth_focus WHEN NOT MATCHED THEN INSERT (club_id, focus, intensity, youth_focus) VALUES (source.club_id, source.focus, source.intensity, source.youth_focus);",
+        "INSERT INTO training_plans (club_id, focus, intensity, youth_focus) VALUES (?, ?, ?, ?) ON CONFLICT (club_id) DO UPDATE SET focus = EXCLUDED.focus, intensity = EXCLUDED.intensity, youth_focus = EXCLUDED.youth_focus",
         state.clubId,
         data.focus,
         data.intensity,
@@ -835,7 +776,7 @@ export async function dispatchAction(
         })
         .parse(body);
       await store.run(
-        "MERGE INTO set_pieces WITH (HOLDLOCK) AS destination USING (VALUES (?, ?, ?, ?)) AS source(club_id, routine, target, risk) ON destination.club_id = source.club_id WHEN MATCHED THEN UPDATE SET routine = source.routine, target = source.target, risk = source.risk WHEN NOT MATCHED THEN INSERT (club_id, routine, target, risk) VALUES (source.club_id, source.routine, source.target, source.risk);",
+        "INSERT INTO set_pieces (club_id, routine, target, risk) VALUES (?, ?, ?, ?) ON CONFLICT (club_id) DO UPDATE SET routine = EXCLUDED.routine, target = EXCLUDED.target, risk = EXCLUDED.risk",
         state.clubId,
         data.routine,
         data.target,
@@ -956,7 +897,7 @@ export async function dispatchAction(
         .enum(["youth", "back-manager", "budget", "recovery"])
         .parse(body.approach);
       const last = await store.get<{ value: string }>(
-        "SELECT [value] FROM meta WHERE [key] = 'lastBoardMeeting'",
+        "SELECT value FROM meta WHERE key = 'lastBoardMeeting'",
       );
       if (last && daysBetween(JSON.parse(last.value), state.date) < 7)
         throw new GameError("The board will meet with you again next week.");
@@ -1066,7 +1007,7 @@ export async function dispatchAction(
         );
       // Pin the operating reference first, so a slider move never lowers running costs or survives the rollover.
       await store.run(
-        "UPDATE clubs SET transfer_budget = transfer_budget - ?, wage_budget = wage_budget + ?, data = JSON_MODIFY(coalesce(data,'{}'),'$.operatingWageBudget',coalesce(TRY_CONVERT(float,JSON_VALUE(coalesce(data,'{}'),'$.operatingWageBudget')),wage_budget)) WHERE id = ?",
+        "UPDATE clubs SET transfer_budget = transfer_budget - ?, wage_budget = wage_budget + ?, data = jsonb_set(data::jsonb, '{operatingWageBudget}', to_jsonb(coalesce((data::jsonb ->> 'operatingWageBudget')::double precision, wage_budget)))::text WHERE id = ?",
         amount,
         amount / 52,
         club.id,
@@ -1105,8 +1046,9 @@ export async function dispatchAction(
     }
     case "read-news": {
       const id = body.id === undefined ? undefined : idSchema.parse(body.id);
-      if (id) await store.run("UPDATE news SET [read] = 1 WHERE id = ?", id);
-      else await store.run("UPDATE news SET [read] = 1");
+      if (id) await store.run("UPDATE news SET read = 1 WHERE id = ?", id);
+      // Skipping read rows avoids rewriting every news tuple (MVCC) on each "mark all read".
+      else await store.run("UPDATE news SET read = 1 WHERE read = 0");
       return { message: "Inbox updated." };
     }
     default:
@@ -1119,14 +1061,25 @@ export interface AppDatabase {
   accounts?: Pick<Accounts, "resolve">;
 }
 
+export interface AppOptions extends InviteRouteOptions {
+  /** Replaces OpenID Connect discovery and token validation (tests). */
+  oidcProvider?: OidcProvider;
+}
+
 /** `database` is an open store, or a function that opens it on the first request that needs SQL. */
 export function createApp(
   database: Store | (() => Promise<AppDatabase>),
   accounts?: Pick<Accounts, "resolve">,
-  options: InviteRouteOptions = {},
+  options: AppOptions = {},
 ) {
   const configuration = readApiConfiguration();
   const app = express();
+  const authenticator = configuration.auth
+    ? createAuthenticator({ auth: configuration.auth, policy: configuration, provider: options.oidcProvider })
+    : undefined;
+  const authenticate = authenticator?.authenticate ?? (() => {
+    throw new AuthenticationRequiredError();
+  });
   const connection = (store: Store, resolver?: Pick<Accounts, "resolve">) => ({
     store,
     resolver: configuration.requireAuth
@@ -1152,7 +1105,7 @@ export function createApp(
   const worlds = new Map<string, ReturnType<typeof createWorldRouter>>();
   const localUser: AccountUser = { id: "local", displayName: "Local director", email: null };
   app.disable("x-powered-by");
-  app.set("trust proxy", false);
+  app.set("trust proxy", configuration.trustProxy);
   app.use((request, response, next) => {
     response.setHeader("X-Content-Type-Options", "nosniff");
     response.setHeader("Referrer-Policy", "same-origin");
@@ -1163,7 +1116,9 @@ export function createApp(
     );
     response.setHeader(
       "Content-Security-Policy",
-      "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'",
+      "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; " +
+        // Sign-out is a form POST that redirects to the identity provider's logout endpoint.
+        `form-action 'self'${authenticator ? ` ${authenticator.providerOrigin}` : ""}`,
     );
     if (configuration.hosted)
       response.setHeader("Strict-Transport-Security", "max-age=31536000");
@@ -1174,20 +1129,21 @@ export function createApp(
   app.get("/api/health", (_request, response) =>
     response.json({ status: "ok" } satisfies Health),
   );
+  if (authenticator) app.use(authenticator.router);
   app.use(createInviteRouter({
     configuration,
     getStore: async () => (await getConnection()).store,
-    parsePrincipal: parseClientPrincipal,
+    authenticate,
     ...options,
   }));
   app.use("/api", (request, response, next) => {
     if (configuration.requireAuth) {
       try {
-        response.locals.identity = parseClientPrincipal(request.headers["x-ms-client-principal"], configuration);
+        response.locals.identity = authenticate(request);
       } catch (error) {
         if (error instanceof NotAuthorizedError)
           return response.status(error.status).json({ error: error.message, code: error.code });
-        return response.status(401).json({ error: "Authentication required." });
+        return response.status(401).json({ error: "Authentication required.", code: "authentication_required" });
       }
     } else {
       if (
@@ -1254,6 +1210,7 @@ export function createApp(
   app.use("/api", (_request, response) =>
     response.status(404).json({ error: "API route not found." }),
   );
+  if (authenticator) app.use(authenticator.requireBrowserSession);
   const dist = resolve("dist");
   if (existsSync(resolve(dist, "index.html"))) {
     app.use(express.static(dist));
@@ -1275,10 +1232,7 @@ export function createApp(
         error instanceof AuthenticationRequiredError ||
         error instanceof NotAuthorizedError
       ) {
-        const body = error instanceof NotAuthorizedError
-          ? { error: error.message, code: error.code }
-          : { error: error.message };
-        return response.status(error.status).json(body);
+        return response.status(error.status).json({ error: error.message, code: error.code });
       }
       if (error instanceof Error && "code" in error && "status" in error) {
         const status = Number(error.status);
@@ -1419,7 +1373,7 @@ function createWorldRouter(
       async () =>
         ({
           status: "ok",
-          database: "SQL Server",
+          database: "PostgreSQL",
           databaseName: store.database,
           schema: store.schemaName,
           hosted: configuration.hosted,
@@ -1654,8 +1608,8 @@ function createWorldRouter(
         })
         .parse(request.query);
       return store.all<Club>(
-        `SELECT clubs.*, countries.name AS country_name, countries.code AS country_code FROM clubs JOIN countries ON countries.id = clubs.country_id WHERE clubs.type = 'club' AND clubs.name LIKE ? ${filter.country ? "AND country_id = ?" : ""} ORDER BY clubs.reputation DESC, clubs.id OFFSET 0 ROWS FETCH NEXT ? ROWS ONLY`,
-        `%${filter.q}%`,
+        `SELECT clubs.*, countries.name AS country_name, countries.code AS country_code FROM clubs JOIN countries ON countries.id = clubs.country_id WHERE clubs.type = 'club' AND clubs.name ILIKE ? ESCAPE '!' ${filter.country ? "AND country_id = ?" : ""} ORDER BY clubs.reputation DESC, clubs.id LIMIT ?`,
+        query.likePattern(filter.q),
         ...(filter.country ? [filter.country] : []),
         filter.limit,
       );
@@ -1696,8 +1650,8 @@ function createWorldRouter(
           limit: z.coerce.number().int().min(1).max(3000).default(200),
         })
         .parse(request.query);
-      const where = ["leagues.name LIKE ?"];
-      const params: (string | number)[] = [`%${filter.q}%`];
+      const where = ["leagues.name ILIKE ? ESCAPE '!'"];
+      const params: (string | number)[] = [query.likePattern(filter.q)];
       if (filter.country) {
         where.push("leagues.country_id = ?");
         params.push(filter.country);
@@ -1719,10 +1673,10 @@ function createWorldRouter(
           "EXISTS(SELECT 1 FROM competition_favorites WHERE league_id = leagues.id)",
         );
       return store.all(
-        `SELECT leagues.*, countries.name AS country_name FROM leagues LEFT JOIN countries ON countries.id = leagues.country_id WHERE ${where.join(" AND ")} ORDER BY leagues.reputation DESC, leagues.name, leagues.id OFFSET ? ROWS FETCH NEXT ? ROWS ONLY`,
+        `SELECT leagues.*, countries.name AS country_name FROM leagues LEFT JOIN countries ON countries.id = leagues.country_id WHERE ${where.join(" AND ")} ORDER BY leagues.reputation DESC, lower(leagues.name), leagues.id LIMIT ? OFFSET ?`,
         ...params,
-        (filter.page - 1) * filter.limit,
         filter.limit,
+        (filter.page - 1) * filter.limit,
       );
     }),
   );

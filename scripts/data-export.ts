@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import { Writable } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -12,9 +12,9 @@ import {
   validateCheckpoint,
   type CheckpointSummary,
 } from "../server/save-format.ts";
-import { tableName } from "../server/sql-schema.ts";
+import { sqlLiteral, tableName } from "../server/sql-schema.ts";
 
-const SCHEMA_NAME = /^[A-Za-z][A-Za-z0-9_]{0,127}$/;
+const SCHEMA_NAME = /^[A-Za-z][A-Za-z0-9_]{0,62}$/;
 const masked = (text: string) => text.replace(/(touchline_user_)([a-z0-9]{4})[a-z0-9_]*([a-z0-9]{4})/gi, "$1$2***$3");
 
 export function isMain(moduleUrl: string) {
@@ -30,30 +30,28 @@ export interface ReplacementOptions {
   backup?: string;
 }
 
-export async function targetInventory(store: Store, lock = false) {
-  const { checkpointSchema, sqlName } = await import("../server/saves.ts");
+/** Row counts of the world and snapshot tables; inside a Store transaction the world writer lock keeps them current. */
+export async function targetInventory(store: Store) {
+  const { checkpointSchema } = await import("../server/saves.ts");
   const schema = await checkpointSchema(store);
-  const tables: { name: string; rows: number }[] = [];
-  for (const name of [
-    ...schema.tables.map((table) => table.name),
-    "save_slots",
-    "save_chunks",
-  ]) {
-    const result = await store.get<{ total: number | string }>(
-      `SELECT COUNT_BIG(*) AS total FROM ${sqlName(store.schemaName)}.${sqlName(name)}${lock ? " WITH (TABLOCKX,HOLDLOCK)" : ""}`,
-    );
-    const rows = Number(result!.total);
-    if (!Number.isSafeInteger(rows) || rows < 0)
+  const names = [...schema.tables.map((table) => table.name), "save_slots", "save_chunks"];
+  const counts = new Map((await store.all<{ name: string; total: number }>(
+    names.map((name) => `SELECT ${sqlLiteral(name)} AS name, count(*) AS total FROM ${tableName(store.schemaName, name)}`)
+      .join(" UNION ALL "),
+  )).map((row) => [row.name, Number(row.total)]));
+  const tables = names.map((name) => {
+    const rows = counts.get(name);
+    if (rows === undefined || !Number.isSafeInteger(rows) || rows < 0)
       throw new Error("Invalid target row count.");
-    tables.push({ name, rows });
-  }
+    return { name, rows };
+  });
   let nonempty = tables.some((table) => table.rows > 0);
   if (
     nonempty &&
     tables.every((table) => table.rows === (table.name === "meta" ? 1 : 0))
   ) {
     const marker = await store.get<{ key: string; value: string }>(
-      `SELECT [key],[value] FROM ${sqlName(store.schemaName)}.[meta]`,
+      `SELECT key, value FROM ${tableName(store.schemaName, "meta")}`,
     );
     nonempty = marker?.key !== "appearanceIndexVersion" || marker.value !== "1";
   }
@@ -105,70 +103,12 @@ export async function exportData(
   }
 }
 
-export async function verifyImportedData(store: Store, stagingDirectory: string) {
-  const directory = resolve(stagingDirectory);
-  const files = (await readdir(directory)).filter((name) => /^[a-f0-9]{64}\.json$/.test(name));
-  const checkpoints = await Promise.all(files.map(async (name) =>
-    JSON.parse(await readFile(join(directory, name), "utf8")) as {
-      active: boolean;
-      source: string;
-      options: { career?: { id: string; director: string; club: string; date: string; season: number } };
-      summary: CheckpointSummary;
-    },
-  ));
-  const active = checkpoints.filter((checkpoint) => checkpoint.active);
-  if (active.length !== 1 || !checkpoints.length)
-    throw new Error("Verification requires exactly one active checkpoint in the staging inventory.");
-  const inventory = await targetInventory(store);
-  for (const expected of active[0].summary.tables)
-    if (inventory.tables.find((table) => table.name === expected.name)?.rows !== expected.rowCount)
-      throw new Error(`Post-commit row count differs for ${expected.name}.`);
-  const slots = await store.all<{ id: string; sha256: string; byte_length: string | number }>(
-    "SELECT id,sha256,byte_length FROM save_slots WHERE imported = 1 AND complete = 1",
-  );
-  const remaining = [...slots];
-  for (const checkpoint of checkpoints) {
-    const index = remaining.findIndex((slot) => slot.sha256 === checkpoint.summary.sha256 &&
-      Number(slot.byte_length) === checkpoint.summary.byteLength);
-    if (index < 0) throw new Error(`Imported checkpoint missing or incomplete: ${checkpoint.source}`);
-    remaining.splice(index, 1);
-  }
-  const untrusted = await store.all<{ name: string }>(
-    `SELECT name FROM sys.foreign_keys WHERE schema_id = SCHEMA_ID(?) AND (is_disabled = 1 OR is_not_trusted = 1)
-     UNION ALL SELECT name FROM sys.check_constraints WHERE schema_id = SCHEMA_ID(?) AND (is_disabled = 1 OR is_not_trusted = 1)`,
-    store.schemaName,
-    store.schemaName,
-  );
-  if (untrusted.length) throw new Error("Post-commit SQL constraints are disabled or untrusted.");
-  const { bootstrap } = await import("../server/queries.ts");
-  const { state, club, world } = await bootstrap(store);
-  const expected = active[0].options.career;
-  if (expected && (state.careerId !== expected.id || state.date !== expected.date ||
-    state.season !== expected.season || state.director.name !== expected.director || club.name !== expected.club))
-    throw new Error("Imported active career identity differs from its original checkpoint.");
-  return {
-    verified: true,
-    database: store.database,
-    schema: store.schemaName,
-    activeTables: active[0].summary.tables.length,
-    importedCheckpoints: checkpoints.length,
-    constraintsTrusted: true,
-    date: state.date,
-    director: state.director.name,
-    club: club.name,
-    players: world.players,
-    balance: club.balance,
-    transferBudget: club.transfer_budget,
-    wageBudget: club.wage_budget,
-    checks: "Post-commit counts, catalog digests, career identity and constraint status; active row hashes are checked by the import transaction.",
-  };
-}
-
+/** Call inside store.transaction(): its world writer lock keeps the inventory and the backup consistent. */
 export async function backupBeforeReplace(
   store: Store,
   options: ReplacementOptions,
 ) {
-  const inventory = await targetInventory(store, true);
+  const inventory = await targetInventory(store);
   if (!inventory.nonempty) return { inventory, backup: null };
   if (!options.replace || !options.yes || !options.backup)
     throw new Error(
@@ -217,10 +157,10 @@ const RESTORE_NOTE = `Touchline full backup (npm run data:export -- --everything
 manifest.json lists every file with its byte length and SHA-256; "complete": true means nothing failed.
 <schema>/world.touchline.gz is that schema's live world; <schema>/snapshots/<id>.touchline.gz are its saved
 checkpoints, described in <schema>/snapshots.json. accounts-users.json is the account registry: personal data,
-keep it private and never commit it. The world reset keeps the registry in SQL, so it is evidence, not a restore input.
-These checkpoints predate the rebuilt world (version 4) and the rebuilt game refuses them by design. To restore:
-  1. Check out the last commit before the world rebuild (git worktree add ../touchline-restore <commit>), npm ci.
-  2. Point SQL_* at the database and SQL_SCHEMA at the schema, then npm run db:migrate.
+keep it private and never commit it. The world reset keeps the registry in PostgreSQL, so it is evidence, not a restore input.
+To restore a world or snapshot:
+  1. Use a Touchline build with the same save schema version as the checkpoints (npm ci).
+  2. Point SQL_* at the PostgreSQL database and SQL_SCHEMA at the schema, then npm run db:migrate.
   3. Start that build and use Saves -> Import for world.touchline.gz or any snapshot, then load it.
 Re-running the same command with the same --out-dir resumes: finished files are kept, partial files are redone.
 Check a copy offline (no SQL): npm run data:export -- --verify <this directory>
@@ -293,17 +233,15 @@ export async function exportEverything(root: Store, options: EverythingOptions) 
   const accountSchema = options.accountSchema ?? "accounts";
   if (!SCHEMA_NAME.test(accountSchema)) throw new Error("Invalid --account-schema.");
   const registryTable = tableName(accountSchema, "users");
-  if ((await root.get<{ id: number | null }>("SELECT OBJECT_ID(?, N'U') AS [id]", registryTable))?.id)
+  if ((await root.get<{ present: boolean }>("SELECT to_regclass(?) IS NOT NULL AS present", registryTable))?.present)
     await attempt("registry", async () => {
-      const rows = await root.forSchema(accountSchema).all(`SELECT * FROM ${registryTable} ORDER BY [created_at], [id]`);
+      const rows = await root.forSchema(accountSchema).all(`SELECT * FROM ${registryTable} ORDER BY created_at, id`);
       const file = "accounts-users.json";
       await writeJson(join(directory, file), { schema: accountSchema, accounts: rows });
       await record("registry", { kind: "registry", schema: accountSchema, file, rows: { users: rows.length }, ...(await hashFile(join(directory, file))) });
     });
   const schemas = (await root.all<{ name: string }>(
-    `SELECT schema_row.[name] FROM sys.tables AS table_row
-    INNER JOIN sys.schemas AS schema_row ON schema_row.[schema_id] = table_row.[schema_id]
-    WHERE table_row.[name] = N'schema_migrations' ORDER BY schema_row.[name]`,
+    "SELECT schemaname AS name FROM pg_catalog.pg_tables WHERE tablename = 'schema_migrations' ORDER BY schemaname",
   )).map((row) => row.name).filter((name) => SCHEMA_NAME.test(name) && !/^touchline_test_/i.test(name));
   for (const schema of schemas) {
     const world = root.forSchema(schema);
@@ -323,8 +261,8 @@ export async function exportEverything(root: Store, options: EverythingOptions) 
       const slots = await world.all<{ id: string; name: string; career_id: string | null; career_metadata: string | null;
         created_at: Date | string; automatic: boolean; imported: boolean; format_version: number;
         byte_length: number | string; sha256: string | null; complete: boolean }>(
-        `SELECT [id], [name], [career_id], [career_metadata], [created_at], [automatic], [imported], [format_version],
-          [byte_length], [sha256], [complete] FROM ${tableName(schema, "save_slots")} ORDER BY [created_at], [id]`,
+        `SELECT id, name, career_id, career_metadata, created_at, automatic, imported, format_version,
+          byte_length, sha256, complete FROM ${tableName(schema, "save_slots")} ORDER BY created_at, id`,
       );
       await writeJson(join(directory, schema, "snapshots.json"), slots);
       for (const slot of slots) {
@@ -445,7 +383,6 @@ export function exportOptions(args: string[]) {
       database: { type: "string" },
       out: { type: "string" },
       "dry-run": { type: "boolean" },
-      "verify-staging": { type: "string" },
       everything: { type: "boolean" },
       "out-dir": { type: "string" },
       "account-schema": { type: "string" },
@@ -460,8 +397,8 @@ export function exportOptions(args: string[]) {
     throw new Error("--everything requires --out-dir <directory>, and --out-dir is only for --everything.");
   if (!values.everything && (values["account-schema"] || values["skip-snapshots"]))
     throw new Error("--account-schema and --skip-snapshots are only for --everything.");
-  if ([values.out, values["dry-run"], values["verify-staging"], values.everything, values.verify].filter(Boolean).length !== 1)
-    throw new Error("Choose exactly one of --out, --dry-run, --verify-staging, --everything, or --verify.");
+  if ([values.out, values["dry-run"], values.everything, values.verify].filter(Boolean).length !== 1)
+    throw new Error("Choose exactly one of --out, --dry-run, --everything, or --verify.");
   if (values.verify && values.database) throw new Error("--verify reads local files only; it takes no --database.");
   return values;
 }
@@ -470,7 +407,7 @@ export async function main(args = process.argv.slice(2)) {
   const values = exportOptions(args);
   if (!values) {
     console.log(
-      "Usage: tsx scripts/data-export.ts --out <new-file.touchline.gz> [--database NAME]\n       tsx scripts/data-export.ts --dry-run [--database NAME]\n       tsx scripts/data-export.ts --verify-staging <converted-checkpoint-directory>\n       tsx scripts/data-export.ts --everything --out-dir <directory> [--account-schema accounts] [--skip-snapshots]\n       tsx scripts/data-export.ts --verify <backup-directory>\nExports or read-only verifies the active SQL world, without migrating or seeding. Existing output files are refused. Catalog snapshots stay in SQL. Uses SQL_* connection settings.\n--everything backs up every world schema (legacy dbo and each account world), every complete snapshot and the account registry\nto a local directory with manifest.json and RESTORE.txt; re-running it with the same --out-dir resumes. Stop the app first.\n--verify <directory> checks a --everything backup offline, without SQL or SQL_* settings: complete manifest, every file's size and\nSHA-256, every gzip end to end, each world's per-table row counts and the registry's account count. Exit 1 on any problem.",
+      "Usage: tsx scripts/data-export.ts --out <new-file.touchline.gz> [--database NAME]\n       tsx scripts/data-export.ts --dry-run [--database NAME]\n       tsx scripts/data-export.ts --everything --out-dir <directory> [--account-schema accounts] [--skip-snapshots]\n       tsx scripts/data-export.ts --verify <backup-directory>\nExports or read-only verifies the active SQL world, without migrating or seeding. Existing output files are refused. Catalog snapshots stay in SQL. Uses SQL_* connection settings.\n--everything backs up every world schema (the default public world and each account world), every complete snapshot and the account registry\nto a local directory with manifest.json and RESTORE.txt; re-running it with the same --out-dir resumes. Stop the app first.\n--verify <directory> checks a --everything backup offline, without SQL or SQL_* settings: complete manifest, every file's size and\nSHA-256, every gzip end to end, each world's per-table row counts and the registry's account count. Exit 1 on any problem.",
     );
     return;
   }
@@ -492,9 +429,7 @@ export async function main(args = process.argv.slice(2)) {
       console.log(JSON.stringify({ ...result, failures: Object.fromEntries(
         Object.entries(result.failures).map(([key, message]) => [masked(key), masked(message)])) }, null, 2));
       if (!result.complete) process.exitCode = 1;
-    } else if (values["verify-staging"])
-      console.log(JSON.stringify(await verifyImportedData(store, values["verify-staging"]), null, 2));
-    else if (values["dry-run"])
+    } else if (values["dry-run"])
       console.log(JSON.stringify(await targetInventory(store), null, 2));
     else {
       const result = await exportData(store, values.out!);
@@ -518,7 +453,7 @@ export async function main(args = process.argv.slice(2)) {
 
 if (isMain(import.meta.url))
   void main().catch((error: unknown) => {
-    // Usage errors print their message; unexpected failures (TypeError, RequestError, ...) keep their stack.
+    // Usage errors print their message; unexpected failures (TypeError, DatabaseError, ...) keep their stack.
     console.error(error instanceof Error ? (error.constructor === Error ? error.message : error.stack ?? error.message) : String(error));
     process.exitCode = 1;
   });

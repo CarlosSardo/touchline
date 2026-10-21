@@ -213,7 +213,7 @@ describe("youth recruitment registration", () => {
         clubId: buyer.id,
       });
       player = (await store.get<Player>(
-        "SELECT TOP (1) * FROM players WHERE club_id = ? AND country_id = ? AND age_group != 'Senior' ORDER BY id",
+        "SELECT * FROM players WHERE club_id = ? AND country_id = ? AND age_group != 'Senior' ORDER BY id LIMIT 1",
         clubs[0].id,
         clubs[0].country_id,
       ))!;
@@ -580,7 +580,7 @@ describe("youth recruitment registration", () => {
       "recorded amateur",
     );
     const english = (await store.get<Club>(
-      "SELECT TOP (1) clubs.* FROM clubs JOIN countries ON countries.id = clubs.country_id WHERE countries.code = 'EN' AND clubs.type = 'club'",
+      "SELECT clubs.* FROM clubs JOIN countries ON countries.id = clubs.country_id WHERE countries.code = 'EN' AND clubs.type = 'club' ORDER BY clubs.id LIMIT 1",
     ))!;
     await store.run(
       "UPDATE players SET club_id = ? WHERE id = ?",

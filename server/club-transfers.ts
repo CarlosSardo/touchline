@@ -285,7 +285,7 @@ const clubView = (row: ClubRow): ClubTransferClub => ({
 });
 const CLUB_SELECT =
   "SELECT clubs.id,clubs.name,clubs.color,clubs.country_id,countries.name AS country_name,countries.code AS country_code FROM clubs LEFT JOIN countries ON countries.id = clubs.country_id";
-const idList = (ids: Iterable<number>) => JSON.stringify([...new Set(ids)]);
+const idList = (ids: Iterable<number>) => [...new Set(ids)];
 
 // history has no club index. Move rows are append-only (retention prunes only 'appearance'), so a club's
 // rows are scanned once and later requests read only ids above the last one seen.
@@ -328,12 +328,10 @@ async function clubHistoryRows(store: Store, clubId: number, careerKey: string) 
     usable && hit.maxId === latest
       ? []
       : await store.all<ClubHistoryRow>(
-          `SELECT TOP (${CLUB_TRANSFER_ROW_LIMIT + 1}) id,season,date,entity_type,entity_id,data FROM history WHERE id > ? AND id <= ? AND entity_type IN ('transfer','loan','squad') AND (JSON_VALUE(data,'$.to') = ? OR JSON_VALUE(data,'$.from') = ? OR JSON_VALUE(data,'$.toClubId') = ? OR JSON_VALUE(data,'$.fromClubId') = ?) ORDER BY id DESC`,
+          // OFFSET 0 keeps the lateral subquery from being inlined, so each row's JSON is parsed once.
+          `SELECT id,season,date,entity_type,entity_id,data FROM history CROSS JOIN LATERAL (SELECT data::jsonb AS doc OFFSET 0) AS parsed WHERE id > ? AND id <= ? AND entity_type IN ('transfer','loan','squad') AND ? IN (parsed.doc ->> 'to',parsed.doc ->> 'from',parsed.doc ->> 'toClubId',parsed.doc ->> 'fromClubId') ORDER BY id DESC LIMIT ${CLUB_TRANSFER_ROW_LIMIT + 1}`,
           usable ? hit.maxId : 0,
           latest,
-          id,
-          id,
-          id,
           id,
         );
   const entry: ClubScan = {
@@ -371,7 +369,7 @@ export async function clubTransfers(store: Store, clubId: number, rawQuery: unkn
   const players = new Map(
     (playerIds.length
       ? await store.all<{ id: number; name: string; position: string; birth_date: string }>(
-          "SELECT id,name,position,birth_date FROM players WHERE id IN (SELECT [id] FROM OPENJSON(?) WITH ([id] INT '$'))",
+          "SELECT id,name,position,birth_date FROM players WHERE id = ANY(?::integer[])",
           idList(playerIds),
         )
       : []
@@ -381,7 +379,7 @@ export async function clubTransfers(store: Store, clubId: number, rawQuery: unkn
   const clubs = new Map(
     (otherIds.length
       ? await store.all<ClubRow>(
-          `${CLUB_SELECT} WHERE clubs.id IN (SELECT [id] FROM OPENJSON(?) WITH ([id] INT '$'))`,
+          `${CLUB_SELECT} WHERE clubs.id = ANY(?::integer[])`,
           idList(otherIds),
         )
       : []
@@ -390,7 +388,7 @@ export async function clubTransfers(store: Store, clubId: number, rawQuery: unkn
   const dealIds = page.filter((move) => move.kind === "transfer" || move.kind === "free").map((move) => move.playerId);
   const deals = dealIds.length
     ? await store.all<{ player_id: number; buying_club_id: number; selling_club_id: number | null; created: string; terms: string | null }>(
-        "SELECT player_id,buying_club_id,selling_club_id,created,JSON_QUERY(data,'$.transferTerms') AS terms FROM negotiations WHERE stage = 'Completed' AND (buying_club_id = ? OR selling_club_id = ?) AND player_id IN (SELECT [id] FROM OPENJSON(?) WITH ([id] INT '$')) ORDER BY created DESC,id DESC",
+        "SELECT player_id,buying_club_id,selling_club_id,created,(data::jsonb -> 'transferTerms')::text AS terms FROM negotiations WHERE stage = 'Completed' AND (buying_club_id = ? OR selling_club_id = ?) AND player_id = ANY(?::integer[]) ORDER BY created DESC,id DESC",
         clubId,
         clubId,
         idList(dealIds),

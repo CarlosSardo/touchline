@@ -51,7 +51,7 @@ describe("sporting director assistant", () => {
     ).toBe(0);
     expect(
       await count(
-        `SELECT count(*) AS total FROM partnerships JOIN clubs ON clubs.id = partnerships.club_id WHERE JSON_VALUE(partnerships.data,'$.origin') = 'initial' AND ${tier} > ${STARTER_AFFILIATE_MAX_TIER} AND clubs.reputation < 55`,
+        `SELECT count(*) AS total FROM partnerships JOIN clubs ON clubs.id = partnerships.club_id WHERE partnerships.data::jsonb ->> 'origin' = 'initial' AND ${tier} > ${STARTER_AFFILIATE_MAX_TIER} AND clubs.reputation < 55`,
       ),
     ).toBe(0);
     expect(
@@ -76,7 +76,7 @@ describe("sporting director assistant", () => {
     ).toBe(0);
     expect(
       await count(
-        "SELECT count(*) AS total FROM partnerships WHERE JSON_VALUE(data,'$.origin') = 'initial' AND (JSON_VALUE(data,'$.annualFee') != '0' OR JSON_VALUE(data,'$.since') IS NULL)",
+        "SELECT count(*) AS total FROM partnerships WHERE data::jsonb ->> 'origin' = 'initial' AND (data::jsonb ->> 'annualFee' != '0' OR data::jsonb ->> 'since' IS NULL)",
       ),
     ).toBe(0);
   });
@@ -91,9 +91,9 @@ describe("sporting director assistant", () => {
     expect(data.every((row) => typeof row.birthYear === "number" && row.ceiling! >= Math.min(row.ability, 95) - 1)).toBe(true);
     expect(new Set(data.filter((row) => row.club_id !== null).map((row) => row.contractEnd)).size).toBeGreaterThanOrEqual(3);
     const aiClub = data.find((row) => row.club_id !== null && row.club_id !== state.clubId)!;
-    await store.run("UPDATE staff SET data = JSON_MODIFY(data,'$.contractEnd','2026-06-30') WHERE club_id = ?", aiClub.club_id);
+    await store.run("UPDATE staff SET data = jsonb_set(data::jsonb,'{contractEnd}',to_jsonb('2026-06-30'::text))::text WHERE club_id = ?", aiClub.club_id);
     const own = data.find((row) => row.club_id === state.clubId)!;
-    await store.run("UPDATE staff SET data = JSON_MODIFY(JSON_MODIFY(data,'$.contractEnd','2026-06-30'),'$.birthYear',1980) WHERE id = ?", own.id);
+    await store.run("UPDATE staff SET data = (data::jsonb || jsonb_build_object('contractEnd','2026-06-30','birthYear',1980))::text WHERE id = ?", own.id);
     await store.setMeta("state", { ...state, date: "2026-07-02" });
     await store.transaction(() => processStaffCareers(store));
     const after = await store.all<{ role: string; data: string }>("SELECT role,data FROM staff WHERE club_id = ?", aiClub.club_id);
@@ -108,16 +108,16 @@ describe("sporting director assistant", () => {
   it("announces spring retirements and expiring contracts across the club family", async () => {
     const state = await stateOf(store);
     const veteran = (await store.get<Player>(
-      "SELECT TOP (1) * FROM players WHERE club_id = ? AND parent_club_id IS NULL AND age_group = 'Senior' ORDER BY id",
+      "SELECT * FROM players WHERE club_id = ? AND parent_club_id IS NULL AND age_group = 'Senior' ORDER BY id LIMIT 1",
       state.clubId,
     ))!;
     await store.run("UPDATE players SET birth_date = '1984-01-01', contract_end = ? WHERE id = ?", `${state.season + 1}-06-30`, veteran.id);
     const youth = (await store.get<Player>(
-      "SELECT TOP (1) * FROM players WHERE club_id = ? AND age_group = 'U19' ORDER BY id",
+      "SELECT * FROM players WHERE club_id = ? AND age_group = 'U19' ORDER BY id LIMIT 1",
       state.clubId,
     ))!;
     await store.run(
-      "UPDATE players SET contract_end = ?, profile = JSON_MODIFY(profile,'$.contract.status','professional') WHERE id = ?",
+      "UPDATE players SET contract_end = ?, profile = jsonb_set(profile::jsonb,'{contract,status}',to_jsonb('professional'::text))::text WHERE id = ?",
       `${state.season + 1}-06-30`,
       youth.id,
     );
@@ -163,7 +163,7 @@ describe("sporting director assistant", () => {
   it("allows an assistant replacement but never two employed assistants", async () => {
     const original = (await assistantDesk(store)).assistant!;
     const candidate = (await store.get<{ id: number }>(
-      "SELECT TOP (1) id FROM staff WHERE club_id IS NULL",
+      "SELECT id FROM staff WHERE club_id IS NULL ORDER BY id LIMIT 1",
     ))!;
     await store.run(
       "UPDATE staff SET role = 'Sporting director assistant' WHERE id = ?",
@@ -231,7 +231,7 @@ describe("sporting director assistant", () => {
 
   it("prepares a renewal draft but does not sign it or change the player's contract", async () => {
     const player = (await store.get<Player>(
-      "SELECT TOP (1) * FROM players WHERE club_id = 1 AND age >= 18 AND age_group = 'Senior'",
+      "SELECT * FROM players WHERE club_id = 1 AND age >= 18 AND age_group = 'Senior' ORDER BY id LIMIT 1",
     ))!;
     await store.run(
       "UPDATE players SET contract_end = '2027-06-01' WHERE id = ?",
@@ -271,7 +271,7 @@ describe("sporting director assistant", () => {
       partner_id: number;
       data: string;
     }>(
-      "SELECT TOP (1) id,club_id,partner_id,data FROM partnerships ORDER BY id",
+      "SELECT id,club_id,partner_id,data FROM partnerships ORDER BY id LIMIT 1",
     ))!;
     for (const clubId of [agreement.club_id, agreement.partner_id]) {
       const partnerId =
@@ -393,7 +393,7 @@ describe("sporting director assistant", () => {
 
   it("requires the other club's consent for the chosen type even with full board backing", async () => {
     const partner = (await store.get<{ id: number }>(
-      "SELECT TOP (1) id FROM clubs WHERE type = 'club' AND id != 1 AND NOT EXISTS (SELECT 1 FROM partnerships WHERE (club_id = 1 AND partner_id = clubs.id) OR (partner_id = 1 AND club_id = clubs.id))",
+      "SELECT id FROM clubs WHERE type = 'club' AND id != 1 AND NOT EXISTS (SELECT 1 FROM partnerships WHERE (club_id = 1 AND partner_id = clubs.id) OR (partner_id = 1 AND club_id = clubs.id)) ORDER BY id LIMIT 1",
     ))!;
     await store.run(
       "UPDATE clubs SET reputation = 95 WHERE id = ?",
@@ -437,7 +437,7 @@ describe("sporting director assistant", () => {
 
   it("evaluates type-specific benefits and records mutual consent on an accepted agreement", async () => {
     const partner = (await store.get<{ id: number }>(
-      "SELECT TOP (1) id FROM clubs WHERE type = 'club' AND country_id != 1 AND NOT EXISTS (SELECT 1 FROM partnerships WHERE (club_id = 1 AND partner_id = clubs.id) OR (partner_id = 1 AND club_id = clubs.id))",
+      "SELECT id FROM clubs WHERE type = 'club' AND country_id != 1 AND NOT EXISTS (SELECT 1 FROM partnerships WHERE (club_id = 1 AND partner_id = clubs.id) OR (partner_id = 1 AND club_id = clubs.id)) ORDER BY id LIMIT 1",
     ))!;
     await store.run(
       "UPDATE clubs SET reputation = 65 WHERE id = ?",
@@ -556,7 +556,7 @@ describe("unexpected club events", () => {
     const counts: number[] = [];
     for (const frequency of ["low", "medium", "high"]) {
       await store.run("DELETE FROM unexpected_events");
-      await store.run("DELETE FROM meta WHERE [key] LIKE 'unexpectedCheck:%'");
+      await store.run("DELETE FROM meta WHERE key LIKE 'unexpectedCheck:%'");
       await store.setMeta("settings", {
         ...(await store.meta<Record<string, unknown>>("settings")),
         unexpectedEvents: frequency,

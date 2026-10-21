@@ -3,6 +3,7 @@ import { Store } from "../server/db.ts";
 import { createApp } from "../server/app.ts";
 import { createCalendar } from "../server/calendar.ts";
 import { initialInbox } from "../server/systems.ts";
+import { quoteIdentifier } from "../server/sql-schema.ts";
 import { generateWorld } from "../server/world.ts";
 
 const schema = process.env.SQL_SCHEMA;
@@ -33,7 +34,7 @@ async function initialize() {
   if (!store.testMode || store.schemaName !== schemaName)
     throw new Error("Refusing to initialize an unverified E2E SQL schema.");
   if (stopping) return;
-  await store.exec(`CREATE SCHEMA [${schemaName}]`);
+  await store.exec(`CREATE SCHEMA ${quoteIdentifier(schemaName)}`);
   ownsSchema = true;
   if (stopping) return;
   await store.schema();
@@ -66,23 +67,7 @@ async function dropOwnedSchema() {
   if (!store || !ownsSchema) return;
   if (!store.testMode || store.schemaName !== schemaName)
     throw new Error("Refusing cleanup outside the owned E2E schema.");
-  const quote = (name: string) => `[${name.replaceAll("]", "]]")}]`;
-  const constraints = await store.all<{ table_name: string; name: string }>(
-    "SELECT tables.name AS table_name,foreign_keys.name FROM sys.foreign_keys AS foreign_keys JOIN sys.tables AS tables ON tables.object_id = foreign_keys.parent_object_id WHERE tables.schema_id = SCHEMA_ID(?)",
-    schemaName,
-  );
-  for (const constraint of constraints)
-    await store.exec(
-      `ALTER TABLE ${quote(schemaName)}.${quote(constraint.table_name)} DROP CONSTRAINT ${quote(constraint.name)}`,
-    );
-  const tables = await store.all<{ name: string }>(
-    "SELECT name FROM sys.tables WHERE schema_id = SCHEMA_ID(?)",
-    schemaName,
-  );
-  for (const table of tables)
-    await store.exec(`DROP TABLE ${quote(schemaName)}.${quote(table.name)}`);
-  await store.exec(`DROP PROCEDURE IF EXISTS ${quote(schemaName)}.${quote("reseed_world_identity")}`);
-  await store.exec(`DROP SCHEMA ${quote(schemaName)}`);
+  await store.exec(`DROP SCHEMA ${quoteIdentifier(schemaName)} CASCADE`);
   ownsSchema = false;
 }
 

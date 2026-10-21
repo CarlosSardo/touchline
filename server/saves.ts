@@ -6,8 +6,8 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { Readable, Writable } from "node:stream";
 import { finished, pipeline } from "node:stream/promises";
-import type { Store } from "./db.ts";
-import { WORLD_TABLES, schemaMigrations } from "./sql-schema.ts";
+import type { SqlParameter, Store } from "./db.ts";
+import { WORLD_TABLES, quoteIdentifier, schemaMigrations, tableName as qualifiedTable } from "./sql-schema.ts";
 import { ensureClubSupport } from "./club-support.ts";
 import {
   clubOf,
@@ -51,7 +51,6 @@ const CHECKPOINT_PAGE_BYTES = 4 * SQL_CHUNK_BYTES;
 const RESTORE_BATCH_ROWS = 5000;
 const RESTORE_BATCH_BYTES = 4 * SQL_CHUNK_BYTES;
 const CHUNKS_PER_READ = 4;
-const CHUNK_DELETE_BATCH = 64;
 
 /** Per-career checkpoint counts; older ones rotate away oldest first, imported checkpoints never do. */
 export const SAVE_SLOT_LIMITS = Object.freeze({ automatic: 3, manual: 10 });
@@ -93,8 +92,8 @@ interface CatalogRow {
   career_id: string | null;
   career_metadata: string | null;
   created_at: Date | string;
-  automatic: boolean | number;
-  imported: boolean | number;
+  automatic: boolean;
+  imported: boolean;
   format_version: number;
   byte_length: number | string;
   sha256: string | null;
@@ -114,13 +113,14 @@ export interface ValidatedWorldCheckpoint {
 }
 
 export function sqlName(name: string) {
-  if (!/^[A-Za-z][A-Za-z0-9_]{0,127}$/.test(name))
+  if (!/^[A-Za-z][A-Za-z0-9_]{0,62}$/.test(name))
     throw new SaveFormatError("Invalid SQL identifier.");
-  return `[${name}]`;
+  return quoteIdentifier(name);
 }
 
 function tableName(store: Store, table: string) {
-  return `${sqlName(store.schemaName)}.${sqlName(table)}`;
+  sqlName(table);
+  return qualifiedTable(store.schemaName, table);
 }
 
 function slotId(file: string) {
@@ -184,6 +184,70 @@ function slotFromRow(row: CatalogRow): ListedSaveSlot {
   };
 }
 
+/** Generated columns: never stored in a checkpoint, recomputed on restore. */
+const DERIVED_COLUMNS: Readonly<Record<string, readonly string[]>> = {
+  players: ["playing_club_id"],
+  news: ["notification_key"],
+};
+/** Columns that SQL Server checkpoints may name and this schema derives or dropped; accepted and ignored on import. */
+const LEGACY_COLUMNS: Readonly<Record<string, readonly string[]>> = {
+  players: ["playing_club_id"],
+  news: ["notification_key", "notification_unkeyed_id"],
+};
+const VARIABLE_TYPES = new Set<ColumnType>(["nvarchar", "nchar", "varchar", "char", "varbinary", "binary"]);
+
+interface SqlColumn {
+  table_name: string;
+  name: string;
+  data_type: string;
+  max_length: number | null;
+  numeric_precision: number | null;
+  numeric_scale: number | null;
+  nullable: boolean;
+  generated: boolean;
+}
+
+/**
+ * Describes a PostgreSQL column in the portable checkpoint vocabulary. The type names are the SQL Server ones earlier
+ * Touchline versions wrote, so their checkpoints stay comparable: text is nvarchar(max), double precision is float.
+ */
+export function portableColumn(column: SqlColumn): CheckpointColumn {
+  const base = { name: column.name, nullable: column.nullable };
+  switch (column.data_type) {
+    case "integer":
+      return { ...base, type: "int" };
+    case "smallint":
+      return { ...base, type: "smallint" };
+    case "bigint":
+      return { ...base, type: "bigint" };
+    case "double precision":
+      return { ...base, type: "float" };
+    case "real":
+      return { ...base, type: "real" };
+    case "boolean":
+      return { ...base, type: "bit" };
+    case "text":
+      return { ...base, type: "nvarchar", maxLength: -1 };
+    case "character varying":
+      return { ...base, type: "nvarchar", maxLength: column.max_length ?? -1 };
+    case "character":
+      return { ...base, type: "nchar", maxLength: column.max_length ?? 1 };
+    case "bytea":
+      return { ...base, type: "varbinary", maxLength: -1 };
+    case "uuid":
+      return { ...base, type: "uniqueidentifier" };
+    case "date":
+      return { ...base, type: "date" };
+    case "timestamp with time zone":
+    case "timestamp without time zone":
+      return { ...base, type: "datetime2" };
+    case "numeric":
+      if (column.numeric_precision !== null && column.numeric_scale !== null)
+        return { ...base, type: "decimal", precision: column.numeric_precision, scale: column.numeric_scale };
+  }
+  throw new SaveFormatError(`Unsupported SQL column type for ${column.table_name}.${column.name}: ${column.data_type}.`);
+}
+
 export async function checkpointSchema(
   store: Store,
 ): Promise<CheckpointSchema> {
@@ -196,7 +260,7 @@ export async function checkpointSchema(
       "The SQL world table inventory is incomplete or unknown. Run the explicit schema migration first.",
     );
   const actual = await store.all<{ name: string }>(
-    "SELECT name FROM sys.tables WHERE schema_id = SCHEMA_ID(?)",
+    "SELECT tablename AS name FROM pg_catalog.pg_tables WHERE schemaname = ?",
     store.schemaName,
   );
   const known = new Set<string>([
@@ -220,34 +284,25 @@ export async function checkpointSchema(
     throw new SaveFormatError(
       "Unsupported or incomplete SQL schema version. Run the explicit schema migration first.",
     );
+  const described = await store.all<SqlColumn>(
+    `SELECT table_name::text AS table_name, column_name::text AS name, data_type::text AS data_type,
+       character_maximum_length::integer AS max_length, numeric_precision::integer AS numeric_precision,
+       numeric_scale::integer AS numeric_scale, is_nullable = 'YES' AS nullable, is_generated = 'ALWAYS' AS generated
+     FROM information_schema.columns
+     WHERE table_schema = ? AND table_name = ANY(?::text[])
+     ORDER BY table_name, ordinal_position`,
+    store.schemaName,
+    WORLD_TABLES,
+  );
   const tables: CheckpointSchema["tables"] = [];
   for (const name of WORLD_TABLES) {
     identifier(name);
-    const rows = await store.all<{
-      name: string;
-      type: ColumnType;
-      nullable: boolean;
-      max_length: number;
-      precision: number;
-      scale: number;
-      computed: boolean;
-    }>(
-      `SELECT c.name,t.name AS type,c.is_nullable AS nullable,c.max_length,c.precision,c.scale,c.is_computed AS computed
-       FROM sys.columns c JOIN sys.types t ON t.user_type_id = c.user_type_id
-       JOIN sys.tables b ON b.object_id = c.object_id
-       WHERE b.schema_id = SCHEMA_ID(?) AND b.name = ? ORDER BY c.column_id`,
-      store.schemaName,
-      name,
-    );
-    const derived = new Set([
-      "players.playing_club_id",
-      "news.notification_key",
-      "news.notification_unkeyed_id",
-    ]);
-    if (rows.some((row) => row.computed && !derived.has(`${name}.${row.name}`)))
+    const rows = described.filter((row) => row.table_name === name);
+    const derived = DERIVED_COLUMNS[name] ?? [];
+    if (rows.some((row) => row.generated && !derived.includes(row.name)))
       throw new SaveFormatError(`Unknown computed column in ${name}.`);
     const writable = await store.columns(name);
-    const stored = rows.filter((row) => !row.computed);
+    const stored = rows.filter((row) => !row.generated);
     if (
       writable.length !== stored.length ||
       stored.some((row, index) => row.name !== writable[index])
@@ -255,34 +310,8 @@ export async function checkpointSchema(
       throw new SaveFormatError(
         `Inconsistent writable column inventory for ${name}.`,
       );
-    const columns = stored.map((row): CheckpointColumn => {
-      const result: CheckpointColumn = {
-        name: row.name,
-        type: row.type,
-        nullable: Boolean(row.nullable),
-      };
-      if (
-        [
-          "nvarchar",
-          "nchar",
-          "varchar",
-          "char",
-          "varbinary",
-          "binary",
-        ].includes(row.type)
-      )
-        result.maxLength =
-          row.max_length === -1
-            ? -1
-            : row.max_length /
-              (["nvarchar", "nchar"].includes(row.type) ? 2 : 1);
-      if (row.type === "decimal" || row.type === "numeric") {
-        result.precision = row.precision;
-        result.scale = row.scale;
-      }
-      return result;
-    });
-    tables.push({ name, columns });
+    const legacy = LEGACY_COLUMNS[name];
+    tables.push({ name, columns: stored.map(portableColumn), ...(legacy ? { legacyColumns: [...legacy] } : {}) });
   }
   const schema = { version: SAVE_SCHEMA_VERSION, tables };
   validateManifest({
@@ -291,61 +320,57 @@ export async function checkpointSchema(
     formatVersion: SAVE_FORMAT_VERSION,
     schemaVersion: schema.version,
     createdAt: new Date().toISOString(),
-    tables: tables.map((table) => ({ ...table, rowCount: 0 })),
+    tables: tables.map((table) => ({ name: table.name, columns: table.columns, rowCount: 0 })),
   });
   return schema;
 }
 
 async function primaryKey(store: Store, table: string) {
   const keys = await store.all<{ name: string }>(
-    `SELECT c.name FROM sys.indexes i
-     JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id
-     JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
-     JOIN sys.tables t ON t.object_id = i.object_id
-     WHERE i.is_primary_key = 1 AND t.schema_id = SCHEMA_ID(?) AND t.name = ? ORDER BY ic.key_ordinal`,
-    store.schemaName,
-    table,
+    `SELECT a.attname AS name
+     FROM pg_catalog.pg_index AS i
+     CROSS JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS k(attnum, ordinal)
+     JOIN pg_catalog.pg_attribute AS a ON a.attrelid = i.indrelid AND a.attnum = k.attnum
+     WHERE i.indrelid = to_regclass(?) AND i.indisprimary
+     ORDER BY k.ordinal`,
+    tableName(store, table),
   );
   if (!keys.length)
     throw new SaveFormatError(`Cannot stream ${table} without a primary key.`);
   return keys.map((key) => identifier(key.name));
 }
 
+/** Streams a table in primary-key order, one bounded keyset page (rows and bytes) per query. */
 async function* worldRows(store: Store, table: CheckpointTable, progress?: CheckpointProgress) {
   const keys = await primaryKey(store, table.name);
-  const keySql = (key: string) =>
-    `${sqlName(key)}${["nvarchar", "nchar", "varchar", "char"].includes(table.columns.find((column) => column.name === key)!.type) ? " COLLATE Latin1_General_100_BIN2" : ""}`;
   const columns = table.columns.map((column) => sqlName(column.name));
-  const order = keys.map(keySql).join(",");
-  const rowBytes = `${columns.map((column) => `COALESCE(CONVERT(BIGINT,DATALENGTH(${column})),0)`).join(" + ")} + ${columns.length * 8}`;
+  const order = keys.map(sqlName).join(", ");
+  const rowBytes = [
+    ...table.columns
+      .filter((column) => VARIABLE_TYPES.has(column.type))
+      .map((column) => `COALESCE(octet_length(${sqlName(column.name)})::bigint, 0)`),
+    String(columns.length * 8),
+  ].join(" + ");
   let last: Record<string, RestoredValue> | undefined;
   let processed = 0;
   for (;;) {
-    const parameters: RestoredValue[] = [];
-    const after = last
-      ? keys
-          .map((key, index) => {
-            const clauses = keys.slice(0, index).map((previous) => {
-              parameters.push(last![previous]);
-              return `${keySql(previous)} = ?`;
-            });
-            parameters.push(last![key]);
-            clauses.push(`${keySql(key)} > ?`);
-            return `(${clauses.join(" AND ")})`;
-          })
-          .join(" OR ")
-      : "";
+    const parameters = last ? keys.map((key) => last![key]) : [];
     const batch = await store.all<Record<string, RestoredValue>>(
       `WITH checkpoint_page AS (
-         SELECT TOP (${CHECKPOINT_PAGE_ROWS}) ${columns.join(",")},${rowBytes} AS checkpoint_bytes
-         FROM ${tableName(store, table.name)} ${after ? `WHERE ${after}` : ""} ORDER BY ${order}
+         SELECT ${columns.join(", ")}, ${rowBytes} AS checkpoint_bytes
+         FROM ${tableName(store, table.name)}
+         ${last ? `WHERE (${order}) > (${keys.map(() => "?").join(", ")})` : ""}
+         ORDER BY ${order} LIMIT ${CHECKPOINT_PAGE_ROWS}
        ), checkpoint_sized AS (
-         SELECT *,SUM(checkpoint_bytes) OVER (ORDER BY ${order} ROWS UNBOUNDED PRECEDING) AS checkpoint_total,
-           ROW_NUMBER() OVER (ORDER BY ${order}) AS checkpoint_ordinal FROM checkpoint_page
+         SELECT *, sum(checkpoint_bytes) OVER (ORDER BY ${order} ROWS UNBOUNDED PRECEDING) AS checkpoint_total,
+           row_number() OVER (ORDER BY ${order}) AS checkpoint_ordinal
+         FROM checkpoint_page
        )
-       SELECT ${columns.map((column) => `CASE WHEN checkpoint_bytes <= ${SAVE_LIMITS.lineBytes} THEN ${column} ELSE NULL END AS ${column}`).join(",")},checkpoint_bytes
-       FROM checkpoint_sized WHERE checkpoint_total <= ${CHECKPOINT_PAGE_BYTES} OR checkpoint_ordinal = 1 ORDER BY ${order}`,
-      ...parameters,
+       SELECT ${columns.map((column) => `CASE WHEN checkpoint_bytes <= ${SAVE_LIMITS.lineBytes} THEN ${column} END AS ${column}`).join(", ")},
+         checkpoint_bytes
+       FROM checkpoint_sized WHERE checkpoint_total <= ${CHECKPOINT_PAGE_BYTES} OR checkpoint_ordinal = 1
+       ORDER BY ${order}`,
+      ...(parameters as SqlParameter[]),
     );
     if (!batch.length) {
       progress?.(table.name, processed, table.rowCount);
@@ -369,16 +394,20 @@ export async function writeWorldCheckpoint(
   provenance?: CheckpointManifest["provenance"],
   progress?: CheckpointProgress,
 ): Promise<CheckpointSummary> {
+  // The transaction holds the world writer lock, so every page read below sees the same world.
   return withCheckpointDestination(destination, () =>
     store.transaction(async () => {
       const schema = await checkpointSchema(store);
-      const tables: CheckpointTable[] = [];
-      for (const table of schema.tables) {
-        const row = await store.get<{ total: number | string }>(
-          `SELECT COUNT_BIG(*) AS total FROM ${tableName(store, table.name)} WITH (TABLOCKX,HOLDLOCK)`,
-        );
-        tables.push({ ...table, rowCount: Number(row!.total) });
-      }
+      const counts = (await store.get<Record<string, number>>(
+        `SELECT ${schema.tables
+          .map((table) => `(SELECT count(*) FROM ${tableName(store, table.name)}) AS ${sqlName(table.name)}`)
+          .join(", ")}`,
+      ))!;
+      const tables: CheckpointTable[] = schema.tables.map((table) => ({
+        name: table.name,
+        columns: table.columns,
+        rowCount: Number(counts[table.name]),
+      }));
       return writeCheckpoint(
         destination,
         {
@@ -443,14 +472,14 @@ async function createSlot(store: Store, options: CheckpointSlotOptions) {
   await store.run(
     `INSERT INTO ${tableName(store, "save_slots")}
      (id,name,career_id,career_metadata,created_at,automatic,imported,format_version,byte_length,sha256,complete)
-     VALUES (?,?,?,?,?,?,?,?,0,NULL,0)`,
+     VALUES (?,?,?,?,?,?,?,?,0,NULL,false)`,
     id,
     name,
     options.career?.id ?? null,
     options.career ? JSON.stringify(options.career) : null,
     createdAt,
-    options.automatic ? 1 : 0,
-    options.imported ? 1 : 0,
+    Boolean(options.automatic),
+    Boolean(options.imported),
     SAVE_FORMAT_VERSION,
   );
   return { id, name, file: `${id}.touchline.gz`, career: options.career };
@@ -463,7 +492,7 @@ async function completeSlot(
   summary: CheckpointSummary,
 ) {
   await store.run(
-    `UPDATE ${tableName(store, "save_slots")} SET byte_length = ?, sha256 = ?, career_metadata = ?, complete = 1 WHERE id = ?`,
+    `UPDATE ${tableName(store, "save_slots")} SET byte_length = ?, sha256 = ?, career_metadata = ?, complete = true WHERE id = ?`,
     summary.byteLength,
     summary.sha256,
     slot.career ? JSON.stringify({ ...slot.career, worldDigest: worldDigest(summary) }) : null,
@@ -586,10 +615,18 @@ export async function restoreCheckpointFile(
 ) {
   const validated = checkpoint ?? (await validateWorldCheckpoint(store, file));
   return store.transaction(async () => {
+    // NOT VALID constraints, disabled (foreign key) triggers, or replica mode would let invalid rows in unchecked.
     const untrusted = await store.all<{ name: string }>(
-      `SELECT name FROM sys.foreign_keys WHERE schema_id = SCHEMA_ID(?) AND (is_disabled = 1 OR is_not_trusted = 1)
+      `SELECT c.conname AS name FROM pg_catalog.pg_constraint AS c
+         JOIN pg_catalog.pg_namespace AS n ON n.oid = c.connamespace
+       WHERE n.nspname = ? AND c.contype IN ('f', 'c') AND NOT c.convalidated
        UNION ALL
-       SELECT name FROM sys.check_constraints WHERE schema_id = SCHEMA_ID(?) AND (is_disabled = 1 OR is_not_trusted = 1)`,
+       SELECT t.tgname FROM pg_catalog.pg_trigger AS t
+         JOIN pg_catalog.pg_class AS r ON r.oid = t.tgrelid
+         JOIN pg_catalog.pg_namespace AS n ON n.oid = r.relnamespace
+       WHERE n.nspname = ? AND t.tgenabled = 'D'
+       UNION ALL
+       SELECT 'session_replication_role' WHERE current_setting('session_replication_role') <> 'origin'`,
       store.schemaName,
       store.schemaName,
     );
@@ -670,9 +707,9 @@ export async function* storedChunks(store: Store, slot: Pick<CatalogRow, "id" | 
   type StoredChunk = { ordinal: number; data: Buffer | null; byte_length: number };
   const read = (from: number): Promise<StoredChunk[]> => {
     const next = store.all<StoredChunk>(
-      `SELECT TOP (${CHUNKS_PER_READ}) ordinal,CASE WHEN DATALENGTH(data) <= ${SQL_CHUNK_BYTES} THEN data ELSE NULL END AS data,
-        CONVERT(INT,DATALENGTH(data)) AS byte_length FROM ${tableName(store, "save_chunks")}
-       WHERE save_id = ? AND ordinal >= ? ORDER BY ordinal`,
+      `SELECT ordinal, CASE WHEN octet_length(data) <= ${SQL_CHUNK_BYTES} THEN data END AS data,
+        octet_length(data) AS byte_length FROM ${tableName(store, "save_chunks")}
+       WHERE save_id = ? AND ordinal >= ? ORDER BY ordinal LIMIT ${CHUNKS_PER_READ}`,
       slot.id,
       from,
     );
@@ -735,7 +772,7 @@ export class Saves {
   async currentState(): Promise<GameState | null> {
     // An unfinished (or interrupted) world build is not a career yet; prepareCareer discards and rebuilds it.
     const row = await this.store.get<{ value: string }>(
-      "SELECT [value] FROM meta WHERE [key] = 'state' AND NOT EXISTS (SELECT 1 FROM meta WHERE [key] = 'worldBuild')",
+      "SELECT value FROM meta WHERE key = 'state' AND NOT EXISTS (SELECT 1 FROM meta WHERE key = 'worldBuild')",
     );
     return row ? JSON.parse(row.value) as GameState : null;
   }
@@ -748,25 +785,25 @@ export class Saves {
   }
 
   private async buildMarker() {
-    return this.store.get<{ value: string }>("SELECT [value] FROM meta WHERE [key] = 'worldBuild'");
+    return this.store.get<{ value: string }>("SELECT value FROM meta WHERE key = 'worldBuild'");
   }
 
   /** Empties the world tables (committing in batches inside Store.batched) and keeps the migration marker. */
   private async discardBuild() {
     const marker = await this.store.get<{ value: string }>(
-      "SELECT [value] FROM meta WHERE [key] = 'appearanceIndexVersion'",
+      "SELECT value FROM meta WHERE key = 'appearanceIndexVersion'",
     );
     await this.store.discardWorld();
     if (marker)
       await this.store.run(
-        "INSERT INTO meta ([key], [value]) VALUES (?, ?)",
+        "INSERT INTO meta (key, value) VALUES (?, ?)",
         "appearanceIndexVersion",
         marker.value,
       );
   }
 
   /**
-   * Builds a world in committed batches (Azure SQL log limits). meta 'worldBuild' marks it unfinished until the
+   * Builds a world in committed batches (short transactions on a small host). meta 'worldBuild' marks it unfinished until the
    * end; an interrupted or failed build is discarded before the next one starts.
    */
   private async buildWorld(options: Parameters<typeof generateWorld>[1]) {
@@ -790,7 +827,7 @@ export class Saves {
       // Snapshots of other careers may remain after the active career is deleted; only world tables must be empty.
       for (const table of WORLD_TABLES) {
         const existing = await this.store.get(
-          `SELECT TOP (1) 1 AS present FROM ${tableName(this.store, table)}${table === "meta" ? " WHERE [key] <> 'appearanceIndexVersion' OR [value] <> '1'" : ""}`,
+          `SELECT 1 AS present FROM ${tableName(this.store, table)}${table === "meta" ? " WHERE key <> 'appearanceIndexVersion' OR value <> '1'" : ""} LIMIT 1`,
         );
         if (existing)
           throw Object.assign(new GameError("This world contains existing data and cannot be prepared as a new career."), { status: 409 });
@@ -799,7 +836,7 @@ export class Saves {
       const state = await stateOf(this.store);
       state.director.name = displayName.trim().slice(0, 50) || "Sporting director";
       await this.store.setMeta("state", state);
-      await this.store.run("DELETE FROM meta WHERE [key] = 'worldBuild'");
+      await this.store.run("DELETE FROM meta WHERE key = 'worldBuild'");
       // Written last: startCareer reuses a prepared world only when this matches its seed.
       await this.store.setMeta("careerPreparationSeed", state.seed);
       return { created: true };
@@ -809,7 +846,7 @@ export class Saves {
   async list(): Promise<ListedSaveSlot[]> {
     return (
       await this.store.all<CatalogRow>(
-        `SELECT * FROM ${tableName(this.store, "save_slots")} WHERE complete = 1 ORDER BY created_at DESC,id DESC`,
+        `SELECT * FROM ${tableName(this.store, "save_slots")} WHERE complete ORDER BY created_at DESC, id DESC`,
       )
     ).map(slotFromRow);
   }
@@ -818,7 +855,7 @@ export class Saves {
     const id = slotId(file);
     return this.store.transaction(async () => {
       const selected = await this.store.get<CatalogRow>(
-        `SELECT * FROM ${tableName(this.store, "save_slots")} WITH (UPDLOCK,HOLDLOCK) WHERE id = ? AND complete = 1`,
+        `SELECT * FROM ${tableName(this.store, "save_slots")} WHERE id = ? AND complete FOR UPDATE`,
         id,
       );
       if (!selected) throw Object.assign(new GameError("Save slot not found."), { status: 404 });
@@ -827,19 +864,13 @@ export class Saves {
         throw new GameError(
           "The active career cannot be deleted. Load another career first.",
         );
-      const targets = await this.store.all<{ id: string }>(
-        `SELECT id FROM ${tableName(this.store, "save_slots")} WITH (UPDLOCK,HOLDLOCK) WHERE ${selected.career_id ? "career_id COLLATE Latin1_General_100_BIN2 = ? AND DATALENGTH(career_id) = DATALENGTH(?)" : "id = ?"}`,
-        ...(selected.career_id
-          ? [selected.career_id, selected.career_id]
-          : [id]),
+      // Chunks go with their slots (ON DELETE CASCADE).
+      const deleted = await this.store.run(
+        `DELETE FROM ${tableName(this.store, "save_slots")} WHERE ${selected.career_id ? "career_id = ?" : "id = ?"}`,
+        selected.career_id ?? id,
       );
-      for (const target of targets)
-        await this.store.run(
-          `DELETE FROM ${tableName(this.store, "save_slots")} WHERE id = ?`,
-          target.id,
-        );
       return {
-        deleted: targets.length,
+        deleted: deleted.changes,
         message: selected.career_id
           ? "Career and its saved snapshots deleted."
           : "Save deleted.",
@@ -864,45 +895,24 @@ export class Saves {
           new GameError("The active career changed. Reload it before deleting."),
           { status: 409, code: "career_mismatch" },
         );
+      // Chunks go with their slots (ON DELETE CASCADE).
       const slots = careerId
-        ? await this.store.all<{ id: string }>(
-            `SELECT id FROM ${tableName(this.store, "save_slots")} WITH (UPDLOCK,HOLDLOCK)
-             WHERE career_id COLLATE Latin1_General_100_BIN2 = ? AND DATALENGTH(career_id) = DATALENGTH(?)`,
-            careerId,
-            careerId,
-          )
-        : [];
-      for (const slot of slots) {
-        const lastOrdinal = (await this.store.get<{ ordinal: number | null }>(
-          `SELECT MAX(ordinal) AS ordinal FROM ${tableName(this.store, "save_chunks")} WHERE save_id = ?`,
-          slot.id,
-        ))?.ordinal ?? -1;
-        for (let low = 0; low <= lastOrdinal; low += CHUNK_DELETE_BATCH)
-          await this.store.run(
-            `DELETE FROM ${tableName(this.store, "save_chunks")} WHERE save_id = ? AND ordinal >= ? AND ordinal < ?`,
-            slot.id,
-            low,
-            low + CHUNK_DELETE_BATCH,
-          );
-        await this.store.run(
-          `DELETE FROM ${tableName(this.store, "save_slots")} WHERE id = ?`,
-          slot.id,
-        );
-      }
+        ? (await this.store.run(`DELETE FROM ${tableName(this.store, "save_slots")} WHERE career_id = ?`, careerId)).changes
+        : 0;
       const marker = await this.store.get<{ value: string }>(
-        "SELECT [value] FROM meta WHERE [key] = 'appearanceIndexVersion'",
+        "SELECT value FROM meta WHERE key = 'appearanceIndexVersion'",
       );
       await this.store.discardWorld();
       if (marker)
         await this.store.run(
-          "INSERT INTO meta ([key], [value]) VALUES (?, ?)",
+          "INSERT INTO meta (key, value) VALUES (?, ?)",
           "appearanceIndexVersion",
           marker.value,
         );
       return {
         deleted: true,
         careerId,
-        snapshots: slots.length,
+        snapshots: slots,
         message: "Career deleted. Start a new career or load another saved career.",
       };
     });
@@ -954,20 +964,17 @@ export class Saves {
   }
 
   private async rotate(careerId: string, automatic: boolean, id: string, kept?: string) {
-    const obsolete = await this.store.all<{ id: string }>(
-      `SELECT id FROM ${tableName(this.store, "save_slots")} WHERE automatic = ? AND imported = 0 AND complete = 1 AND career_id COLLATE Latin1_General_100_BIN2 = ? AND DATALENGTH(career_id) = DATALENGTH(?)
-       ORDER BY CASE WHEN id IN (?, ?) THEN 0 ELSE 1 END,created_at DESC,id DESC OFFSET ${automatic ? SAVE_SLOT_LIMITS.automatic : SAVE_SLOT_LIMITS.manual} ROWS`,
-      automatic ? 1 : 0,
-      careerId,
+    const slots = tableName(this.store, "save_slots");
+    await this.store.run(
+      `DELETE FROM ${slots} WHERE id IN (
+         SELECT id FROM ${slots} WHERE automatic = ? AND NOT imported AND complete AND career_id = ?
+         ORDER BY CASE WHEN id IN (?, ?) THEN 0 ELSE 1 END, created_at DESC, id DESC
+         OFFSET ${automatic ? SAVE_SLOT_LIMITS.automatic : SAVE_SLOT_LIMITS.manual})`,
+      automatic,
       careerId,
       id,
       kept ?? id,
     );
-    for (const old of obsolete)
-      await this.store.run(
-        `DELETE FROM ${tableName(this.store, "save_slots")} WHERE id = ? AND imported = 0`,
-        old.id,
-      );
   }
 
   /**
@@ -977,10 +984,9 @@ export class Saves {
    */
   private async unchangedSlot(careerId: string, digest: string) {
     const slots = await this.store.all<Pick<CatalogRow, "id" | "name" | "automatic" | "imported" | "format_version" | "byte_length" | "sha256" | "career_metadata">>(
-      `SELECT id,name,automatic,imported,format_version,byte_length,sha256,career_metadata FROM ${tableName(this.store, "save_slots")} WITH (UPDLOCK,HOLDLOCK)
-       WHERE complete = 1 AND career_id COLLATE Latin1_General_100_BIN2 = ? AND DATALENGTH(career_id) = DATALENGTH(?)
-       ORDER BY created_at DESC,id DESC`,
-      careerId,
+      `SELECT id,name,automatic,imported,format_version,byte_length,sha256,career_metadata FROM ${tableName(this.store, "save_slots")}
+       WHERE complete AND career_id = ?
+       ORDER BY created_at DESC, id DESC FOR UPDATE`,
       careerId,
     );
     const newestManual = slots.find((slot) => !slot.automatic && !slot.imported);
@@ -995,8 +1001,8 @@ export class Saves {
         continue;
       // Cheap structural check that the chunks are all there; storedChunks re-verifies them on restore.
       const stored = await this.store.get<{ chunks: number; first: number | null; last: number | null; bytes: number | string | null; largest: number | null }>(
-        `SELECT COUNT(*) AS chunks,MIN(ordinal) AS first,MAX(ordinal) AS last,SUM(CONVERT(BIGINT,DATALENGTH(data))) AS bytes,
-          MAX(CONVERT(BIGINT,DATALENGTH(data))) AS largest FROM ${tableName(this.store, "save_chunks")} WHERE save_id = ?`,
+        `SELECT count(*) AS chunks, min(ordinal) AS first, max(ordinal) AS last, sum(octet_length(data)) AS bytes,
+          max(octet_length(data)) AS largest FROM ${tableName(this.store, "save_chunks")} WHERE save_id = ?`,
         slot.id,
       );
       if (
@@ -1078,7 +1084,7 @@ export class Saves {
       throw new GameError("Choose a valid director background.");
     const oldState = await this.requireState();
     const preparation = oldState.started === false
-      ? await this.store.get<{ value: string }>("SELECT value FROM meta WHERE [key] = 'careerPreparationSeed'")
+      ? await this.store.get<{ value: string }>("SELECT value FROM meta WHERE key = 'careerPreparationSeed'")
       : undefined;
     const prepared = Boolean(preparation && JSON.parse(preparation.value) === oldState.seed);
     const seed = input.seed ?? (prepared
@@ -1115,13 +1121,13 @@ export class Saves {
         await this.buildWorld({ seed, ...regenerationOptions(world) });
       });
     return this.store.transaction(async () => {
-      await this.store.run("DELETE FROM meta WHERE [key] = 'worldBuild'");
+      await this.store.run("DELETE FROM meta WHERE key = 'worldBuild'");
       const state = await stateOf(this.store);
       state.clubId = reusePrepared
         ? input.clubId
         : ((
             await this.store.get<{ id: number }>(
-              "SELECT id FROM clubs WHERE type = 'club' AND JSON_VALUE(data,'$.worldKey') = ?",
+              "SELECT id FROM clubs WHERE type = 'club' AND data::jsonb ->> 'worldKey' = ?",
               selectedKey as string,
             )
           )?.id ?? 0);
@@ -1150,7 +1156,7 @@ export class Saves {
         [skill]: 2,
       };
       await this.store.setMeta("state", state);
-      await this.store.run("DELETE FROM meta WHERE [key] = 'careerPreparationSeed'");
+      await this.store.run("DELETE FROM meta WHERE key = 'careerPreparationSeed'");
       const settings = await settingsOf(this.store);
       for (const definition of SETTING_DEFINITIONS.filter((setting) =>
         ["Interface", "Appearance", "Accessibility", "Saves"].includes(
@@ -1183,7 +1189,7 @@ export class Saves {
       await this.store.transaction(async () => {
         if (savedFile) {
           const slot = await this.store.get<CatalogRow>(
-            `SELECT * FROM ${tableName(this.store, "save_slots")} WITH (HOLDLOCK) WHERE id = ? AND complete = 1`,
+            `SELECT * FROM ${tableName(this.store, "save_slots")} WHERE id = ? AND complete`,
             slotId(savedFile),
           );
           if (!slot) throw Object.assign(new GameError("Save slot not found."), { status: 404 });
@@ -1221,7 +1227,7 @@ export class Saves {
     try {
       const validated = await this.store.transaction(async () => {
         const slot = await this.store.get<CatalogRow>(
-          `SELECT * FROM ${tableName(this.store, "save_slots")} WITH (HOLDLOCK) WHERE id = ? AND complete = 1`,
+          `SELECT * FROM ${tableName(this.store, "save_slots")} WHERE id = ? AND complete`,
           id,
         );
         if (!slot) throw Object.assign(new GameError("Save slot not found."), { status: 404 });
@@ -1318,7 +1324,7 @@ export class Saves {
         String(error.code).startsWith("Z_")
       )
         throw new GameError(
-          "Choose a logical .touchline.gz checkpoint. Legacy SQLite saves require the explicit data-migrate CLI.",
+          "Choose a logical .touchline.gz checkpoint. Legacy SQLite saves are no longer supported.",
         );
       throw error;
     } finally {

@@ -132,7 +132,7 @@ export async function playerOf(store: Store, id: number) {
 export async function clubSquads(store: Store) {
   const clubId = (await stateOf(store)).clubId;
   return await store.all<Club>(
-    "SELECT * FROM clubs WHERE id = ? OR (parent_id = ? AND type = 'bteam') ORDER BY parent_id,id",
+    "SELECT * FROM clubs WHERE id = ? OR (parent_id = ? AND type = 'bteam') ORDER BY parent_id NULLS FIRST,id",
     clubId,
     clubId,
   );
@@ -169,8 +169,7 @@ export async function squadDestinations(store: Store, player: Player) {
     overage.set(
       club.id,
       (await store.get<{ count: number }>(
-        "SELECT count(*) AS count FROM players WHERE (squad_club_id = ? OR (club_id = ? AND squad_club_id IS NULL)) AND id != ? AND age_group = 'Senior' AND role != 'Retired' AND birth_date <= ?",
-        club.id,
+        "SELECT count(*) AS count FROM players WHERE playing_club_id = ? AND id != ? AND age_group = 'Senior' AND role != 'Retired' AND birth_date <= ?",
         club.id,
         player.id,
         `${state.season - rule.maxAge - 1}-07-01`,
@@ -344,7 +343,7 @@ export async function weeklyWages(store: Store, clubId: number) {
     clubId,
   ))!.total;
   const adjustments = (await store.get<{ total: number }>(
-    `SELECT coalesce(sum(CASE WHEN loans.parent_id = ? THEN players.wage * (1 - TRY_CONVERT(float, JSON_VALUE(loans.terms,'$.salarySplit')) / 100.0) ELSE -players.wage * (1 - TRY_CONVERT(float, JSON_VALUE(loans.terms,'$.salarySplit')) / 100.0) END),0) AS total FROM loans JOIN players ON players.id = loans.player_id WHERE loans.status = 'active' AND (loans.parent_id = ? OR loans.destination_id = ?)`,
+    `SELECT coalesce(sum(CASE WHEN loans.parent_id = ? THEN players.wage * (1 - (loans.terms::jsonb ->> 'salarySplit')::double precision / 100.0) ELSE -players.wage * (1 - (loans.terms::jsonb ->> 'salarySplit')::double precision / 100.0) END),0) AS total FROM loans JOIN players ON players.id = loans.player_id WHERE loans.status = 'active' AND (loans.parent_id = ? OR loans.destination_id = ?)`,
     clubId,
     clubId,
     clubId,
@@ -562,7 +561,7 @@ export async function processTransferPayments(store: Store) {
     );
     if (payment.sell_on_clause_id !== null) {
       await store.run(
-        "UPDATE sell_on_clauses SET paid = ROUND(paid + ?, 2) WHERE id = ?",
+        "UPDATE sell_on_clauses SET paid = round((paid + ?)::numeric, 2) WHERE id = ?",
         payment.amount,
         payment.sell_on_clause_id,
       );
@@ -832,7 +831,7 @@ export async function experience(store: Store, amount: number, reputation = 0) {
 export async function initialInbox(store: Store) {
   if (
     !(await store.get(
-      "SELECT [key] FROM meta WHERE [key] = 'mediaCoverageVersion'",
+      "SELECT key FROM meta WHERE key = 'mediaCoverageVersion'",
     ))
   ) {
     await publishPlayerCoverage(store);
@@ -840,7 +839,7 @@ export async function initialInbox(store: Store) {
   }
   if (
     await store.get(
-      "SELECT [key] FROM meta WHERE [key] = ?",
+      "SELECT key FROM meta WHERE key = ?",
       "inboxInitialized",
     )
   )
@@ -848,11 +847,11 @@ export async function initialInbox(store: Store) {
   const club = await clubOf(store);
   // Worlds made only of home-pool nations (db:seed --nations FO) start at a national team without staff.
   const scout = await store.get<Staff>(
-    "SELECT TOP (1) * FROM staff WHERE club_id = ? AND role = 'Scout' ORDER BY id",
+    "SELECT * FROM staff WHERE club_id = ? AND role = 'Scout' ORDER BY id LIMIT 1",
     club.id,
   );
   const prospects = !scout ? [] : await store.all<Player>(
-    "SELECT TOP (5) * FROM players WHERE club_id != ? AND age BETWEEN 18 AND 23 AND ability BETWEEN 65 AND 77 AND potential >= 82 ORDER BY potential DESC, value ASC,id",
+    "SELECT * FROM players WHERE club_id != ? AND age BETWEEN 18 AND 23 AND ability BETWEEN 65 AND 77 AND potential >= 82 ORDER BY potential DESC, value ASC,id LIMIT 5",
     club.id,
   );
   for (const player of prospects) {
@@ -1083,7 +1082,7 @@ export async function finishScouting(store: Store) {
     const players = assignment.player_id
       ? [await playerOf(store, assignment.player_id)]
       : await store.all<Player>(
-          `SELECT TOP (5) * FROM players WHERE club_id != ? AND age <= ? AND value <= ? ${assignment.country_id ? "AND country_id = ?" : ""} ${assignment.position ? "AND position = ?" : ""} ORDER BY potential - ability + potential / 4 DESC,id`,
+          `SELECT * FROM players WHERE club_id != ? AND age <= ? AND value <= ? ${assignment.country_id ? "AND country_id = ?" : ""} ${assignment.position ? "AND position = ?" : ""} ORDER BY potential - ability + potential / 4 DESC,id LIMIT 5`,
           state.clubId,
           assignment.max_age,
           assignment.budget,
@@ -2135,7 +2134,7 @@ export async function declareInterest(store: Store, id: number) {
   });
   data.declared = true;
   await store.run(
-    "UPDATE negotiations SET [public] = 1, tension = LEAST(100, tension + 12), interest = LEAST(100, interest + 8), asking_price = ROUND(asking_price * 1.08, 0), data = ? WHERE id = ?",
+    "UPDATE negotiations SET public = 1, tension = LEAST(100, tension + 12), interest = LEAST(100, interest + 8), asking_price = round(asking_price * 1.08), data = ? WHERE id = ?",
     JSON.stringify(data),
     id,
   );
@@ -2877,7 +2876,7 @@ export async function completeNegotiation(
     return;
   }
   await store.run(
-    "MERGE registration_records WITH (HOLDLOCK) AS target USING (VALUES (?,?,'approved',?,?)) AS source(player_id,country_id,status,date,data) ON target.player_id = source.player_id AND target.country_id = source.country_id WHEN MATCHED THEN UPDATE SET status = source.status,date = source.date,data = source.data WHEN NOT MATCHED THEN INSERT (player_id,country_id,status,date,data) VALUES (source.player_id,source.country_id,source.status,source.date,source.data);",
+    "INSERT INTO registration_records(player_id,country_id,status,date,data) VALUES (?,?,'approved',?,?) ON CONFLICT (player_id,country_id) DO UPDATE SET status = EXCLUDED.status,date = EXCLUDED.date,data = EXCLUDED.data",
     player.id,
     buyer.country_id,
     state.date,
@@ -3257,7 +3256,7 @@ export async function recallLoan(store: Store, id: number, injury = false) {
       "A standard recall must take place within a registration window.",
     );
   await store.run(
-    "UPDATE loans SET status = 'recalled', relationship = GREATEST(0, relationship - 12), data = JSON_MODIFY(data,'$.endedOn',?) WHERE id = ?",
+    "UPDATE loans SET status = 'recalled', relationship = GREATEST(0, relationship - 12), data = (data::jsonb || jsonb_build_object('endedOn', ?::text))::text WHERE id = ?",
     state.date,
     id,
   );
@@ -3357,7 +3356,7 @@ export async function exerciseOption(
     loan.player_id,
   );
   await store.run(
-    "UPDATE loans SET status = 'purchased', data = JSON_MODIFY(data,'$.endedOn',?) WHERE id = ?",
+    "UPDATE loans SET status = 'purchased', data = (data::jsonb || jsonb_build_object('endedOn', ?::text))::text WHERE id = ?",
     (await stateOf(store)).date,
     id,
   );
@@ -3398,7 +3397,7 @@ export async function reviewLoans(store: Store) {
       correct: number;
       minutes: number;
     }>(
-      "SELECT count(*) AS total, coalesce(sum(CASE WHEN JSON_VALUE(data,'$.position') = ? THEN 1 ELSE 0 END),0) AS correct, coalesce(sum(TRY_CONVERT(float, JSON_VALUE(data,'$.minutes'))),0) AS minutes FROM history WHERE entity_type = 'appearance' AND entity_id = ? AND date >= ? AND TRY_CONVERT(int, JSON_VALUE(data,'$.clubId')) = ?",
+      "SELECT count(*) AS total, coalesce(sum(CASE WHEN appearance.data ->> 'position' = ? THEN 1 ELSE 0 END),0) AS correct, coalesce(sum((appearance.data ->> 'minutes')::double precision),0) AS minutes FROM history CROSS JOIN LATERAL (SELECT history.data::jsonb AS data) AS appearance WHERE history.entity_type = 'appearance' AND history.entity_id = ? AND history.date >= ? AND (appearance.data ->> 'clubId')::integer = ?",
       terms.position,
       player.id,
       loan.start_date,
@@ -3479,7 +3478,7 @@ export async function reviewLoans(store: Store) {
           loan.destination_id,
         );
         await store.run(
-          "UPDATE clubs SET data = JSON_MODIFY(data,'$.loanTrust',GREATEST(0,coalesce(TRY_CONVERT(float, JSON_VALUE(data,'$.loanTrust')),65) - 12)) WHERE id = ?",
+          "UPDATE clubs SET data = (data::jsonb || jsonb_build_object('loanTrust', GREATEST(0, coalesce((data::jsonb ->> 'loanTrust')::double precision, 65) - 12)))::text WHERE id = ?",
           loan.parent_id,
         );
         loan.relationship = Math.max(0, loan.relationship - 15);
@@ -3604,7 +3603,7 @@ export async function reviewLoans(store: Store) {
           player.id,
         );
         await store.run(
-          "UPDATE loans SET status = 'completed', data = JSON_MODIFY(data,'$.endedOn',?) WHERE id = ?",
+          "UPDATE loans SET status = 'completed', data = (data::jsonb || jsonb_build_object('endedOn', ?::text))::text WHERE id = ?",
           state.date,
           loan.id,
         );
@@ -3637,7 +3636,7 @@ export async function expireLoans(store: Store) {
     const terms = JSON.parse(loan.terms) as LoanTerms;
     const details = JSON.parse(loan.data);
     const minutes = (await store.get<{ total: number }>(
-      "SELECT coalesce(sum(TRY_CONVERT(float, JSON_VALUE(data,'$.minutes'))),0) AS total FROM history WHERE entity_type = 'appearance' AND entity_id = ? AND date >= ? AND TRY_CONVERT(int, JSON_VALUE(data,'$.clubId')) = ?",
+      "SELECT coalesce(sum((appearance.data ->> 'minutes')::double precision),0) AS total FROM history CROSS JOIN LATERAL (SELECT history.data::jsonb AS data) AS appearance WHERE history.entity_type = 'appearance' AND history.entity_id = ? AND history.date >= ? AND (appearance.data ->> 'clubId')::integer = ?",
       loan.player_id,
       loan.start_date,
       loan.destination_id,
@@ -3658,7 +3657,7 @@ export async function expireLoans(store: Store) {
         loan.player_id,
       );
       await store.run(
-        "UPDATE loans SET status = 'completed', data = JSON_MODIFY(data,'$.endedOn',?) WHERE id = ?",
+        "UPDATE loans SET status = 'completed', data = (data::jsonb || jsonb_build_object('endedOn', ?::text))::text WHERE id = ?",
         state.date,
         loan.id,
       );
@@ -3712,7 +3711,7 @@ export async function mentorPlayer(
     player.id,
   );
   await store.run(
-    "MERGE relationships WITH (HOLDLOCK) AS target USING (VALUES (?, 'player', ?, 'player', ?, 65, 'Mentorship')) AS source(club_id,source_type,source_id,target_type,target_id,strength,kind) ON target.source_type = source.source_type AND target.source_id = source.source_id AND target.target_type = source.target_type AND target.target_id = source.target_id WHEN MATCHED THEN UPDATE SET strength = 65,kind = 'Mentorship' WHEN NOT MATCHED THEN INSERT (club_id,source_type,source_id,target_type,target_id,strength,kind) VALUES (source.club_id,source.source_type,source.source_id,source.target_type,source.target_id,source.strength,source.kind);",
+    "INSERT INTO relationships(club_id,source_type,source_id,target_type,target_id,strength,kind) VALUES (?, 'player', ?, 'player', ?, 65, 'Mentorship') ON CONFLICT (source_type,source_id,target_type,target_id) DO UPDATE SET strength = 65,kind = 'Mentorship'",
     (await stateOf(store)).clubId,
     mentor.id,
     player.id,
@@ -3726,7 +3725,7 @@ export async function squadRole(store: Store, playerId: number, role: string) {
     throw new GameError("The loan agreement controls this player's role.");
   if (role === "Captain")
     await store.run(
-      "UPDATE players SET role = 'Regular starter' WHERE coalesce(squad_club_id,club_id) = ? AND age_group = ? AND role = 'Captain'",
+      "UPDATE players SET role = 'Regular starter' WHERE playing_club_id = ? AND age_group = ? AND role = 'Captain'",
       player.squad_club_id ?? player.club_id,
       player.age_group,
     );
@@ -3786,13 +3785,13 @@ export async function staffAction(
       id,
     );
     const peer = await store.get<Staff>(
-      "SELECT TOP (1) * FROM staff WHERE club_id = ? AND id != ? ORDER BY influence DESC,id",
+      "SELECT * FROM staff WHERE club_id = ? AND id != ? ORDER BY influence DESC,id LIMIT 1",
       club.id,
       id,
     );
     if (peer)
       await store.run(
-        "MERGE relationships WITH (HOLDLOCK) AS target USING (VALUES (?, 'staff', ?, 'staff', ?, ?, ?)) AS source(club_id,source_type,source_id,target_type,target_id,strength,kind) ON target.source_type = source.source_type AND target.source_id = source.source_id AND target.target_type = source.target_type AND target.target_id = source.target_id WHEN NOT MATCHED THEN INSERT (club_id,source_type,source_id,target_type,target_id,strength,kind) VALUES (source.club_id,source.source_type,source.source_id,source.target_type,source.target_id,source.strength,source.kind);",
+        "INSERT INTO relationships(club_id,source_type,source_id,target_type,target_id,strength,kind) VALUES (?, 'staff', ?, 'staff', ?, ?, ?) ON CONFLICT (source_type,source_id,target_type,target_id) DO NOTHING",
         club.id,
         id,
         peer.id,
@@ -3863,7 +3862,7 @@ export async function staffAction(
 export async function mediaResponse(store: Store, approach: string) {
   const state = await stateOf(store);
   const last = await store.get<{ value: string }>(
-    "SELECT value FROM meta WHERE [key] = ?",
+    "SELECT value FROM meta WHERE key = ?",
     "lastMediaResponse",
   );
   if (last && JSON.parse(last.value) === state.date)

@@ -8,7 +8,7 @@ import {
 } from "../server/accounts.ts";
 import { Store } from "../server/db.ts";
 import { Saves } from "../server/saves.ts";
-import { tableName } from "../server/sql-schema.ts";
+import { quoteIdentifier, tableName } from "../server/sql-schema.ts";
 import type { GameState } from "../shared/types.ts";
 import { isMain } from "./data-export.ts";
 
@@ -31,9 +31,10 @@ export interface CareerDeleteDependencies {
 const USAGE = `Usage: tsx scripts/career-delete.ts (--oid OBJECT_ID | --email ADDRESS | --list) [--account-schema accounts] [--apply --yes]
 Resolves exactly one account in the account registry by Entra object ID or by its exact stored email/UPN claim,
 prints a dry-run summary of its active career by default, and deletes that career's world and snapshots only
-with --apply --yes, through Saves.deleteActiveCareer under the account's world lock. The legacy dbo world is refused.
+with --apply --yes, through Saves.deleteActiveCareer under the account's world lock. The account and its (now empty)
+world schema stay registered. The legacy dbo world is refused.
 --list prints a masked registry listing and opens no world. Identifiers are always masked in the output.
-Run it through scripts/azure-sql.sh; large worlds need SQL_REQUEST_TIMEOUT_MS=900000.`;
+Uses SQL_* connection settings; large worlds need SQL_REQUEST_TIMEOUT_MS=900000.`;
 
 export function careerDeleteOptions(args: string[]): CareerDeleteOptions | undefined {
   const { values } = parseArgs({
@@ -127,32 +128,27 @@ export function selectAccount(records: AccountRecord[], options: CareerDeleteOpt
 }
 
 export async function careerSummary(world: Store) {
-  return world.transaction(async () => {
-    const row = await world.get<{ value: string }>("SELECT [value] FROM meta WHERE [key] = 'state'");
+  return world.readTransaction(async () => {
+    const row = await world.get<{ value: string }>("SELECT value FROM meta WHERE key = 'state'");
     const state = row ? (JSON.parse(row.value) as GameState) : null;
-    const worldMeta = await world.get<{ value: string }>("SELECT [value] FROM meta WHERE [key] = 'world'");
+    const worldMeta = await world.get<{ value: string }>("SELECT value FROM meta WHERE key = 'world'");
     const shape = worldMeta ? (JSON.parse(worldMeta.value) as { expanded?: boolean; version?: number }) : null;
     const club = state
-      ? await world.get<{ name: string }>("SELECT [name] FROM clubs WHERE [id] = ?", state.clubId)
+      ? await world.get<{ name: string }>("SELECT name FROM clubs WHERE id = ?", state.clubId)
       : undefined;
-    const players = await world.get<{ total: number | string }>("SELECT COUNT_BIG(*) AS [total] FROM players");
-    const snapshots = await world.all<{ career_id: string | null; slots: number; complete: number; bytes: number | string | null }>(
-      `SELECT [career_id], COUNT(*) AS [slots], SUM(CASE WHEN [complete] = 1 THEN 1 ELSE 0 END) AS [complete],
-        SUM([byte_length]) AS [bytes] FROM ${tableName(world.schemaName, "save_slots")} GROUP BY [career_id]`,
+    const players = await world.get<{ total: number }>("SELECT count(*) AS total FROM players");
+    const snapshots = await world.all<{ career_id: string | null; slots: number; complete: number; bytes: number | null }>(
+      `SELECT career_id, count(*) AS slots, count(*) FILTER (WHERE complete) AS complete,
+        sum(byte_length) AS bytes FROM ${tableName(world.schemaName, "save_slots")} GROUP BY career_id`,
     );
-    const permitted = await world.get<{ allowed: number | null }>(
-      "SELECT HAS_PERMS_BY_NAME(DB_NAME(), N'DATABASE', N'VIEW DATABASE STATE') AS [allowed]",
+    // Tables plus their indexes and TOAST data.
+    const size = await world.get<{ total_mb: number | null; table_mb: number | null }>(
+      `SELECT sum(pg_total_relation_size(relation.oid)) / 1048576.0 AS total_mb,
+        sum(pg_table_size(relation.oid)) / 1048576.0 AS table_mb
+      FROM pg_catalog.pg_class AS relation
+      WHERE relation.relnamespace = to_regnamespace(?) AND relation.relkind IN ('r', 'p')`,
+      quoteIdentifier(world.schemaName),
     );
-    const size = permitted?.allowed === 1
-      ? await world.get<{ reserved_mb: number | null; used_mb: number | null }>(
-          `SELECT SUM(partition_row.[reserved_page_count]) * 8 / 1024.0 AS [reserved_mb],
-            SUM(partition_row.[used_page_count]) * 8 / 1024.0 AS [used_mb]
-          FROM sys.dm_db_partition_stats AS partition_row
-          INNER JOIN sys.tables AS table_row ON table_row.[object_id] = partition_row.[object_id]
-          WHERE table_row.[schema_id] = SCHEMA_ID(?)`,
-          world.schemaName,
-        )
-      : undefined;
     return {
       active: state
         ? {
@@ -176,8 +172,8 @@ export async function careerSummary(world: Store) {
         deletedWithActiveCareer: Boolean(state?.careerId) && snapshot.career_id === state?.careerId,
       })),
       approximateSizeMB: size
-        ? { reserved: Math.round(Number(size.reserved_mb ?? 0)), used: Math.round(Number(size.used_mb ?? 0)) }
-        : "unavailable (VIEW DATABASE STATE is not granted)",
+        ? { total: Math.round(Number(size.total_mb ?? 0)), tables: Math.round(Number(size.table_mb ?? 0)) }
+        : "unavailable",
     };
   });
 }
@@ -200,8 +196,8 @@ export async function main(
     const registry = root.forSchema(options.accountSchema);
     await assertAccountRegistry(registry);
     const records = await registry.all<AccountRecord>(
-      `SELECT [id], [tenant_id], [object_id], [display_name], [email], [game_schema]
-       FROM ${tableName(options.accountSchema, "users")} ORDER BY [created_at], [id]`,
+      `SELECT id, tenant_id, object_id, display_name, email, game_schema
+       FROM ${tableName(options.accountSchema, "users")} ORDER BY created_at, id`,
     );
     if (options.list) {
       dependencies.log(JSON.stringify({ registry: maskedRegistry(records) }, null, 2));

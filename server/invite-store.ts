@@ -6,6 +6,9 @@ import { tableName } from "./sql-schema.ts";
 
 export const CONSUMER_TENANT_ID = "9188040d-6c67-4c5b-b112-36a304b66dad";
 
+/** Transaction-scoped advisory lock that serializes invite decisions, claims and rebinds. */
+export const ACCOUNT_REGISTRY_LOCK = "touchline:account-registry";
+
 export type InviteStatus = "pending" | "accepted" | "denied" | "claimed";
 
 export interface InviteRequest {
@@ -40,6 +43,13 @@ export interface InviteLimits {
   ownerEmail?: string;
 }
 
+export interface CapacityLimits {
+  maxPlayers: number;
+  sizeLimitGb: number;
+  ownerObjectId?: string | null;
+  ownerEmail: string;
+}
+
 interface InviteRow {
   id: string;
   email: string;
@@ -53,17 +63,19 @@ interface InviteRow {
 }
 
 interface CapacityRow {
-  players: number | string;
-  reserved: number | string;
-  database_size_gb: number | string;
-  max_players?: number | string;
-  size_limit_gb?: number | string;
-  reason: string | null;
+  players: number;
+  reserved: number;
+  database_size_gb: number;
 }
+
+type Decision = "accepted" | "denied" | "unchanged" | "capacity" | "not_found";
 
 const DEFAULT_PER_IP_PER_DAY = 3;
 const DEFAULT_GLOBAL_PER_DAY = 20;
 const DEFAULT_MAX_PENDING = 50;
+const BYTES_PER_GB = 1024 ** 3;
+const INVITE_COLUMNS = `id, email, note, status, requested_at, decided_at, decided_by,
+  approval_email_sent, accepted_email_sent`;
 
 function normalizeEmail(email: string): string {
   const normalized = email.trim().toLowerCase();
@@ -72,8 +84,8 @@ function normalizeEmail(email: string): string {
   return normalized;
 }
 
-function normalizeUuid(value: string): string | null {
-  return /^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i.test(value) ? value.toLowerCase() : null;
+function normalizeUuid(value: string | null | undefined): string | null {
+  return value && /^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i.test(value) ? value.toLowerCase() : null;
 }
 
 function normalizeNote(note: string | null): string | null {
@@ -96,25 +108,49 @@ function mapRequest(row: InviteRow): InviteRequest {
   };
 }
 
-function capacityFromRow(row: CapacityRow | undefined, limits: Required<Pick<InviteLimits, "maxPlayers" | "sizeLimitGb">>): Capacity {
+function capacityFromRow(row: CapacityRow | undefined, limits: Pick<CapacityLimits, "maxPlayers" | "sizeLimitGb">): Capacity {
   const players = Number(row?.players ?? 0);
   const reserved = Number(row?.reserved ?? 0);
   const databaseSizeGb = Number(row?.database_size_gb ?? 0);
-  const maxPlayers = Number(row?.max_players ?? limits.maxPlayers);
-  const sizeLimitGb = Number(row?.size_limit_gb ?? limits.sizeLimitGb);
-  const reason = row?.reason ?? (
-    players + reserved >= maxPlayers ? "player_limit" :
-      databaseSizeGb >= sizeLimitGb ? "database_size" : null
-  );
+  const reason = players + reserved >= limits.maxPlayers ? "player_limit" :
+    databaseSizeGb >= limits.sizeLimitGb ? "database_size" : null;
   return {
     players,
     reserved,
-    maxPlayers,
+    maxPlayers: limits.maxPlayers,
     databaseSizeGb,
-    sizeLimitGb,
+    sizeLimitGb: limits.sizeLimitGb,
     available: reason === null,
     reason,
   };
+}
+
+/**
+ * Registered players (excluding the platform owner) plus accepted, unclaimed invites against MAX_PLAYERS, and the
+ * whole database size against INVITE_DB_SIZE_LIMIT_GB. `excludeRequestId` leaves the invite being claimed out of
+ * the reservations, since it is about to become a player. `store` may be any Store on the database: the registry
+ * tables are named explicitly so the check can join a world-creating transaction.
+ */
+export async function registryCapacity(
+  store: Store,
+  accountSchema: string,
+  limits: CapacityLimits,
+  excludeRequestId: string | null = null,
+): Promise<Capacity> {
+  const row = await store.get<CapacityRow>(
+    `SELECT
+      (SELECT count(*) FROM ${tableName(accountSchema, "users")}
+        WHERE object_id IS DISTINCT FROM ?::uuid
+          AND NOT (tenant_id = ?::uuid AND COALESCE(email, '') = ?)) AS players,
+      (SELECT count(*) FROM ${tableName(accountSchema, "invite_requests")}
+        WHERE status = 'accepted' AND id IS DISTINCT FROM ?::uuid) AS reserved,
+      pg_database_size(current_database()) / ${BYTES_PER_GB}.0 AS database_size_gb`,
+    normalizeUuid(limits.ownerObjectId),
+    CONSUMER_TENANT_ID,
+    limits.ownerEmail,
+    normalizeUuid(excludeRequestId),
+  );
+  return capacityFromRow(row, limits);
 }
 
 export class InviteStore {
@@ -148,20 +184,15 @@ export class InviteStore {
     const id = randomUUID();
     try {
       const outcome = await this.registry.transaction(async () => {
-        await this.registry.run(
-          `DELETE FROM ${this.attemptsTable} WHERE [attempted_at] < DATEADD(day, -1, SYSUTCDATETIME())`,
-        );
-        await this.registry.run(
-          `INSERT INTO ${this.attemptsTable} ([ip_hash], [attempted_at]) VALUES (?, SYSUTCDATETIME())`,
-          input.ipHash,
-        );
+        await this.registry.run(`DELETE FROM ${this.attemptsTable} WHERE attempted_at < now() - interval '1 day'`);
+        await this.registry.run(`INSERT INTO ${this.attemptsTable} (ip_hash) VALUES (?)`, input.ipHash);
         const limit = await this.registry.get<{ ip_count: number; global_count: number; pending_count: number }>(
           `SELECT
-            (SELECT COUNT_BIG(*) FROM ${this.attemptsTable}
-              WHERE [ip_hash] = ? AND [attempted_at] >= DATEADD(day, -1, SYSUTCDATETIME())) AS [ip_count],
-            (SELECT COUNT_BIG(*) FROM ${this.attemptsTable}
-              WHERE [attempted_at] >= DATEADD(day, -1, SYSUTCDATETIME())) AS [global_count],
-            (SELECT COUNT_BIG(*) FROM ${this.table} WHERE [status] = N'pending') AS [pending_count]`,
+            (SELECT count(*) FROM ${this.attemptsTable}
+              WHERE ip_hash = ? AND attempted_at >= now() - interval '1 day') AS ip_count,
+            (SELECT count(*) FROM ${this.attemptsTable}
+              WHERE attempted_at >= now() - interval '1 day') AS global_count,
+            (SELECT count(*) FROM ${this.table} WHERE status = 'pending') AS pending_count`,
           input.ipHash,
         );
         if (
@@ -173,8 +204,7 @@ export class InviteStore {
         const existing = await this.activeByEmail(email);
         if (existing) return { status: "duplicate" as const, request: existing };
         await this.registry.run(
-          `EXEC ${tableName(this.registry.schemaName, "create_invite")}
-            @id = ?, @email = ?, @note = ?, @ip_hash = ?`,
+          `INSERT INTO ${this.table} (id, email, note, status, ip_hash) VALUES (?, ?, ?, 'pending', ?)`,
           id,
           email,
           note,
@@ -184,6 +214,7 @@ export class InviteStore {
       });
       if (outcome.status !== "created") return outcome;
     } catch (error) {
+      // A concurrent request for the same email loses on the active-email unique index.
       const duplicate = await this.activeByEmail(email);
       if (duplicate) return { status: "duplicate", request: duplicate };
       throw error;
@@ -192,95 +223,86 @@ export class InviteStore {
   }
 
   async get(id: string): Promise<InviteRequest | undefined> {
+    const uuid = normalizeUuid(id);
+    if (!uuid) return undefined;
     const row = await this.registry.get<InviteRow>(
-      `SELECT [id], [email], [note], [status], [requested_at], [decided_at], [decided_by],
-        [approval_email_sent], [accepted_email_sent]
-       FROM ${this.table} WHERE [id] = CONVERT(uniqueidentifier, ?)`,
-      id,
+      `SELECT ${INVITE_COLUMNS} FROM ${this.table} WHERE id = ?::uuid`,
+      uuid,
     );
     return row ? mapRequest(row) : undefined;
   }
 
   async list(): Promise<InviteRequest[]> {
     const rows = await this.registry.all<InviteRow>(
-      `SELECT TOP (200) [id], [email], [note], [status], [requested_at], [decided_at], [decided_by],
-        [approval_email_sent], [accepted_email_sent]
-       FROM ${this.table} ORDER BY [requested_at] DESC`,
+      `SELECT ${INVITE_COLUMNS} FROM ${this.table} ORDER BY requested_at DESC LIMIT 200`,
     );
     return rows.map(mapRequest);
   }
 
   async capacity(): Promise<Capacity> {
-    const row = await this.registry.get<CapacityRow>(
-      `EXEC ${tableName(this.registry.schemaName, "invite_capacity")}`,
-    ).catch(async () => {
-      const ownerObjectId = normalizeUuid(this.limits.ownerObjectId);
-      return this.registry.get<CapacityRow>(
-        `SELECT
-          (SELECT COUNT_BIG(*) FROM ${tableName(this.registry.schemaName, "users")}
-            WHERE ${ownerObjectId ? "[object_id] <> CONVERT(uniqueidentifier, ?) AND" : ""}
-              NOT ([tenant_id] = CONVERT(uniqueidentifier, ?) AND LOWER(COALESCE([email], N'')) = ?)) AS [players],
-          (SELECT COUNT_BIG(*) FROM ${this.table} WHERE [status] = N'accepted') AS [reserved],
-          (SELECT COALESCE(SUM(CAST([size] AS FLOAT(53))) * 8 / 1024 / 1024, 0) FROM sys.database_files) AS [database_size_gb],
-          CAST(? AS int) AS [max_players],
-          CAST(? AS float) AS [size_limit_gb],
-          CAST(NULL AS nvarchar(32)) AS [reason]`,
-        ...(ownerObjectId ? [ownerObjectId] : []),
-        CONSUMER_TENANT_ID,
-        this.limits.ownerEmail,
-        this.limits.maxPlayers,
-        this.limits.sizeLimitGb,
-      );
-    });
-    return capacityFromRow(row, this.limits);
+    return registryCapacity(this.registry, this.registry.schemaName, this.limits);
   }
 
   async decide(id: string, action: "accept" | "deny", decidedBy: string):
-    Promise<{ outcome: "accepted" | "denied" | "unchanged" | "capacity" | "not_found"; request?: InviteRequest; capacity?: Capacity }> {
+    Promise<{ outcome: Decision; request?: InviteRequest; capacity?: Capacity }> {
     const actor = normalizeEmail(decidedBy);
     const request = await this.get(id);
-    if (!request) return { outcome: "not_found" };
+    if (!request || (action !== "accept" && action !== "deny")) return { outcome: "not_found" };
     if (request.status !== "pending") return { outcome: "unchanged", request };
-    const [decision] = await this.registry.all<{ outcome: "accepted" | "denied" | "unchanged" | "capacity" | "not_found"; reason: string | null }>(
-      `EXEC ${tableName(this.registry.schemaName, "decide_invite")}
-        @id = ?, @action = ?, @decided_by = ?`,
-      id,
-      action,
-      actor,
-    );
-    const updated = await this.get(id);
-    if (decision?.outcome === "capacity")
-      return { outcome: "capacity", request: updated ?? request, capacity: await this.capacity() };
-    if (decision?.outcome === "not_found") return { outcome: "not_found" };
-    if (decision?.outcome === "accepted" || decision?.outcome === "denied")
-      return { outcome: decision.outcome, request: updated ?? request };
-    return { outcome: "unchanged", request: updated ?? request };
+    const decision = await this.registry.transaction(async (): Promise<Decision> => {
+      await this.registry.advisoryLock(ACCOUNT_REGISTRY_LOCK);
+      const current = await this.registry.get<{ status: InviteStatus }>(
+        `SELECT status FROM ${this.table} WHERE id = ?::uuid FOR UPDATE`,
+        request.id,
+      );
+      if (!current) return "not_found";
+      if (current.status !== "pending") return "unchanged";
+      if (action === "accept" && (await registryCapacity(this.registry, this.registry.schemaName, this.limits)).reason) return "capacity";
+      const result = await this.registry.run(
+        `UPDATE ${this.table}
+         SET ${action === "accept"
+           ? "status = 'accepted', account_id = COALESCE(account_id, gen_random_uuid())"
+           : "status = 'denied'"},
+           decided_at = now(), decided_by = ?, updated_at = now()
+         WHERE id = ?::uuid AND status = 'pending'`,
+        actor,
+        request.id,
+      );
+      if (result.changes !== 1) return "unchanged";
+      return action === "accept" ? "accepted" : "denied";
+    });
+    if (decision === "not_found") return { outcome: "not_found" };
+    const updated = await this.get(request.id) ?? request;
+    if (decision === "capacity") return { outcome: "capacity", request: updated, capacity: await this.capacity() };
+    return { outcome: decision, request: updated };
   }
 
   async markEmailSent(id: string, kind: "approval" | "accepted"): Promise<void> {
+    const uuid = normalizeUuid(id);
+    if (!uuid) return;
     await this.registry.run(
       `UPDATE ${this.table}
-       SET ${kind === "approval" ? "[approval_email_sent]" : "[accepted_email_sent]"} = 1,
-         [updated_at] = SYSUTCDATETIME()
-       WHERE [id] = CONVERT(uniqueidentifier, ?)`,
-      id,
+       SET ${kind === "approval" ? "approval_email_sent" : "accepted_email_sent"} = true, updated_at = now()
+       WHERE id = ?::uuid`,
+      uuid,
     );
   }
 
+  /** Forgets denied requests after 30 days and undecided ones after 60 days. */
   async purgeExpired(): Promise<number> {
-    const row = await this.registry.get<{ purged: number | string }>(
-      `EXEC ${tableName(this.registry.schemaName, "purge_expired_invites")}`,
+    const result = await this.registry.run(
+      `DELETE FROM ${this.table}
+       WHERE (status = 'denied' AND updated_at < now() - interval '30 days')
+          OR (status = 'pending' AND requested_at < now() - interval '60 days')`,
     );
-    return Number(row?.purged ?? 0);
+    return result.changes;
   }
 
   private async activeByEmail(email: string): Promise<InviteRequest | undefined> {
     const row = await this.registry.get<InviteRow>(
-      `SELECT TOP (1) [id], [email], [note], [status], [requested_at], [decided_at], [decided_by],
-        [approval_email_sent], [accepted_email_sent]
-       FROM ${this.table}
-       WHERE [email] = ? AND [status] IN (N'pending', N'accepted', N'claimed')
-       ORDER BY [requested_at] DESC`,
+      `SELECT ${INVITE_COLUMNS} FROM ${this.table}
+       WHERE email = ? AND status IN ('pending', 'accepted', 'claimed')
+       ORDER BY requested_at DESC LIMIT 1`,
       email,
     );
     return row ? mapRequest(row) : undefined;

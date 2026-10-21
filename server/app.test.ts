@@ -8,6 +8,7 @@ import { processCompetitionNotifications } from "./notifications.ts";
 import { generateWorld } from "./world.ts";
 import { createCalendar } from "./calendar.ts";
 import { createApp, isCalendarDate, loanDurationError, MAX_LOAN_DAYS, readApiConfiguration } from "./app.ts";
+import { sessionCookieName, signSession } from "./auth.ts";
 import { CONSUMER_TENANT_ID } from "./invite-store.ts";
 import { OWNER_EMAIL_DEFAULT } from "./legacy-account.ts";
 import { playerSearchChanged } from "./queries.ts";
@@ -24,22 +25,33 @@ const owner = "11111111-1111-1111-1111-111111111111";
 const guest = "22222222-2222-2222-2222-222222222222";
 const secondGuest = "33333333-3333-3333-3333-333333333333";
 const tenant = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+const sessionSecret = "session-secret-abcdefghijklmnopqrstuvwxyz";
 const configuration = {
-  CONTAINER_APP_NAME: "touchline",
   API_HOST: "0.0.0.0",
   REQUIRE_AUTH: "true",
   OWNER_OBJECT_ID: owner,
   ALLOWED_USER_OBJECT_IDS: `${guest}, ${secondGuest}`,
-  AZURE_TENANT_ID: tenant,
+  AUTH_HOME_TENANT_ID: tenant,
   APP_ORIGIN: "https://touchline.example.com",
+  OIDC_CLIENT_ID: "touchline-client",
+  SESSION_SECRET: sessionSecret,
   INVITE_SIGNING_SECRET: "12345678901234567890123456789012",
   EMAIL_TRANSPORT: "gmail",
   OWNER_EMAIL: OWNER_EMAIL_DEFAULT,
 };
-const principal = (objectId: string, tenantId = tenant, additional: { typ: string; val: string }[] = []) =>
-  Buffer.from(JSON.stringify({ auth_typ: "aad", claims: [
-    { typ: "oid", val: objectId }, { typ: "tid", val: tenantId }, ...additional,
-  ] })).toString("base64");
+/** Cookie header for a signed-in session, as issued by GET /auth/callback (see auth.test.ts for the OIDC flow). */
+const signedIn = (
+  objectId: string,
+  tenantId = tenant,
+  profile: { email?: string; name?: string } = {},
+  options: { secret?: string; issuedAt?: Date } = {},
+) =>
+  `${sessionCookieName(true)}=${signSession({
+    tenantId,
+    objectId,
+    displayName: profile.name ?? "Sporting director",
+    email: profile.email ?? null,
+  }, { sessionSecret: options.secret ?? sessionSecret, sessionTtlSeconds: 3600 }, options.issuedAt)}`;
 const sqlIntegration = process.env.SQL_INTEGRATION_TESTS === "true";
 
 describe("action input validation (no database)", () => {
@@ -78,7 +90,7 @@ describe("hosted invitation access (no database)", () => {
 
   it.each([owner, guest, secondGuest])("admits the configured account %s", async (objectId) => {
     const response = await request(app()).get("/api/access-probe")
-      .set("x-ms-client-principal", principal(objectId, tenant.toUpperCase()));
+      .set("Cookie", signedIn(objectId, tenant.toUpperCase()));
     expect(response.status).toBe(404);
     expect(response.body.error).toBe("API route not found.");
   });
@@ -87,7 +99,7 @@ describe("hosted invitation access (no database)", () => {
     const application = app();
     expect((await request(application).get("/api/access-probe")).status).toBe(401);
     const response = await request(application).get("/api/access-probe")
-      .set("x-ms-client-principal", principal("44444444-4444-4444-4444-444444444444"));
+      .set("Cookie", signedIn("44444444-4444-4444-4444-444444444444"));
     expect(response.status).toBe(403);
     expect(response.body.code).toBe("not_authorized");
   });
@@ -97,9 +109,7 @@ describe("hosted invitation access (no database)", () => {
       return { user: { id: identity.objectId, displayName: identity.displayName, email: identity.email }, store: Object.create(Store.prototype) as Store };
     });
     const response = await request(app("", { resolve })).get("/api/access-probe")
-      .set("x-ms-client-principal", principal(guest, CONSUMER_TENANT_ID, [
-        { typ: "preferred_username", val: "Player@Example.TEST" },
-      ]));
+      .set("Cookie", signedIn(guest, CONSUMER_TENANT_ID, { email: "player@example.test" }));
     expect(response.status).toBe(404);
     expect(resolve).toHaveBeenCalledWith(expect.objectContaining({
       tenantId: CONSUMER_TENANT_ID,
@@ -113,10 +123,7 @@ describe("hosted invitation access (no database)", () => {
       return { user: { id: "owner-account", displayName: identity.displayName, email: identity.email }, store: Object.create(Store.prototype) as Store };
     });
     const response = await request(app("", { resolve })).get("/api/access-probe")
-      .set("x-ms-client-principal", principal(guest, CONSUMER_TENANT_ID, [
-        { typ: "email", val: OWNER_EMAIL_DEFAULT.toUpperCase() },
-        { typ: "name", val: "Owner Director" },
-      ]));
+      .set("Cookie", signedIn(guest, CONSUMER_TENANT_ID, { email: OWNER_EMAIL_DEFAULT, name: "Owner Director" }));
     expect(response.status).toBe(404);
     expect(resolve).toHaveBeenCalledWith(expect.objectContaining({
       tenantId: CONSUMER_TENANT_ID,
@@ -128,38 +135,59 @@ describe("hosted invitation access (no database)", () => {
   it("rejects other tenants even when the email is the approver", async () => {
     const resolve = vi.fn(async () => { throw new Error("Must not resolve unauthorized tenants"); });
     const response = await request(app("", { resolve })).get("/api/access-probe")
-      .set("x-ms-client-principal", principal(guest, owner, [
-        { typ: "email", val: "sardo.kiko@gmail.com" },
-      ]));
+      .set("Cookie", signedIn(guest, owner, { email: "sardo.kiko@gmail.com" }));
     expect(response.status).toBe(403);
     expect(response.body.code).toBe("not_authorized");
     expect(resolve).not.toHaveBeenCalled();
   });
 
-  it("rejects conflicting identity claims even when both accounts are allowed", async () => {
-    const identity = principal(owner, tenant, [{
-      typ: "http://schemas.microsoft.com/identity/claims/objectidentifier", val: guest,
-    }]);
-    expect((await request(app()).get("/api/access-probe")
-      .set("x-ms-client-principal", identity)).status).toBe(403);
-  });
-
-  it("rejects conflicting tenant claims before resolving an account", async () => {
+  it("rejects forged, tampered, expired and legacy identity headers before resolving an account", async () => {
     const resolve = vi.fn(async () => { throw new AccountNotProvisionedError(); });
     const application = app(undefined, { resolve });
-    const response = await request(application).get("/api/me")
-      .set("x-ms-client-principal", principal(owner, tenant, [{
-        typ: "http://schemas.microsoft.com/identity/claims/tenantid", val: guest,
-      }]));
-    expect(response.status).toBe(403);
+    const valid = signedIn(guest).split("=")[1];
+    const [body, signature] = valid.split(".");
+    const tampered = Buffer.from(JSON.stringify({
+      ...JSON.parse(Buffer.from(body, "base64url").toString("utf8")), oid: owner,
+    })).toString("base64url");
+    const legacyHeader = Buffer.from(JSON.stringify({ auth_typ: "aad", claims: [
+      { typ: "oid", val: owner }, { typ: "tid", val: tenant },
+    ] })).toString("base64");
+    for (const attempt of [
+      { cookie: `${sessionCookieName(true)}=${tampered}.${signature}` },
+      { cookie: signedIn(owner, tenant, {}, { secret: "another-secret-abcdefghijklmnopqrstuvwxyz" }) },
+      { cookie: signedIn(owner, tenant, {}, { issuedAt: new Date(Date.now() - 2 * 3600_000) }) },
+      { cookie: `touchline_session=${valid}` },
+      { header: legacyHeader },
+    ]) {
+      const probe = request(application).get("/api/me");
+      if (attempt.cookie) probe.set("Cookie", attempt.cookie);
+      if (attempt.header) probe.set("x-ms-client-principal", attempt.header);
+      const response = await probe;
+      expect(response.status).toBe(401);
+      expect(response.body).toEqual({ error: "Authentication required.", code: "authentication_required" });
+    }
     expect(resolve).not.toHaveBeenCalled();
+  });
+
+  it("redirects anonymous browser navigations to sign-in and keeps sign-in routes public", async () => {
+    const application = app();
+    const page = await request(application).get("/squad?tab=1");
+    expect(page.status).toBe(302);
+    expect(page.headers.location).toBe("/auth/login?returnTo=%2Fsquad%3Ftab%3D1");
+    expect((await request(application).get("/")).headers.location).toBe("/auth/login");
+    const signedOut = await request(application).get("/auth/signed-out");
+    expect(signedOut.status).toBe(200);
+    expect(signedOut.text).toContain("You're signed out");
+    expect((await request(application).get("/invite")).status).toBe(200);
+    expect((await request(application).get("/squad").set("Cookie", signedIn(owner))).status).not.toBe(302);
+    expect((await request(application).post("/squad")).status).toBe(401);
   });
 
   it.each([owner, guest])("denies an unprovisioned allowed account without an owner fallback: %s", async (objectId) => {
     const resolve = vi.fn(async () => { throw new AccountNotProvisionedError(); });
     const application = app(undefined, { resolve });
     const response = await request(application).get("/api/me")
-      .set("x-ms-client-principal", principal(objectId));
+      .set("Cookie", signedIn(objectId));
     expect(response.status).toBe(403);
     expect(response.body.code).toBe("account_not_provisioned");
     expect(resolve).toHaveBeenCalledOnce();
@@ -176,9 +204,9 @@ describe("hosted invitation access (no database)", () => {
   it("keeps owner-only access when no guest IDs are configured", async () => {
     const application = app("");
     expect((await request(application).get("/api/access-probe")
-      .set("x-ms-client-principal", principal(guest))).status).toBe(403);
+      .set("Cookie", signedIn(guest))).status).toBe(403);
     expect((await request(application).get("/api/access-probe")
-      .set("x-ms-client-principal", principal(owner))).status).toBe(404);
+      .set("Cookie", signedIn(owner))).status).toBe(404);
   });
 
   it("refuses email addresses and malformed object IDs in the allowlist", () => {
@@ -209,6 +237,60 @@ describe("hosted invitation access (no database)", () => {
       .toThrow("OWNER_EMAIL");
   });
 
+  it("validates hosted sign-in configuration strictly", () => {
+    const hosted = readApiConfiguration(configuration);
+    expect(hosted).toEqual(expect.objectContaining({
+      hosted: true,
+      homeTenantId: tenant,
+      trustProxy: "loopback",
+    }));
+    expect(hosted.auth).toEqual(expect.objectContaining({
+      issuer: `https://login.microsoftonline.com/${CONSUMER_TENANT_ID}/v2.0`,
+      clientId: "touchline-client",
+      clientSecret: undefined,
+      sessionTtlSeconds: 8 * 3600,
+      redirectUri: "https://touchline.example.com/auth/callback",
+      postLogoutRedirectUri: "https://touchline.example.com/auth/signed-out",
+      secureCookies: true,
+    }));
+    const { AUTH_HOME_TENANT_ID: _home, ALLOWED_USER_OBJECT_IDS: _allowed, OWNER_OBJECT_ID: _owner, ...consumersOnly } = configuration;
+    expect(readApiConfiguration(consumersOnly)).toEqual(expect.objectContaining({ homeTenantId: "", ownerObjectId: "" }));
+    expect(readApiConfiguration({ ...consumersOnly, OWNER_OBJECT_ID: owner }).ownerObjectId).toBe(owner);
+    expect(readApiConfiguration({ ...configuration, REQUIRE_AUTH: "false", API_HOST: "127.0.0.1", APP_ORIGIN: undefined }))
+      .toEqual(expect.objectContaining({ hosted: false, auth: undefined, trustProxy: false }));
+    expect(readApiConfiguration({ ...configuration, TRUST_PROXY: "1" }).trustProxy).toBe(1);
+    expect(readApiConfiguration({ ...configuration, TRUST_PROXY: "loopback, 172.18.0.0/16" }).trustProxy).toBe("loopback,172.18.0.0/16");
+    expect(readApiConfiguration({ ...configuration, SESSION_TTL_HOURS: "24" }).auth?.sessionTtlSeconds).toBe(24 * 3600);
+    expect(readApiConfiguration({ ...configuration, OIDC_ISSUER: "https://accounts.example.com", OIDC_CLIENT_SECRET: "s3cret" }).auth)
+      .toEqual(expect.objectContaining({ issuer: "https://accounts.example.com", clientSecret: "s3cret" }));
+    for (const [overrides, message] of [
+      [{ API_HOST: "0.0.0.0", REQUIRE_AUTH: undefined }, "Public API binding requires explicit REQUIRE_AUTH=true"],
+      [{ REQUIRE_AUTH: "yes" }, "REQUIRE_AUTH must be true or false"],
+      [{ APP_ORIGIN: undefined }, "REQUIRE_AUTH=true requires APP_ORIGIN"],
+      [{ APP_ORIGIN: "http://touchline.example.com" }, "APP_ORIGIN must be an exact HTTPS hosted origin"],
+      [{ APP_ORIGIN: "https://touchline.example.com/" }, "APP_ORIGIN must be an exact HTTPS hosted origin"],
+      [{ OIDC_CLIENT_ID: undefined }, "OIDC_CLIENT_ID"],
+      [{ OIDC_CLIENT_ID: undefined, AUTH_CLIENT_ID: "old" }, "AUTH_CLIENT_ID was renamed to OIDC_CLIENT_ID"],
+      [{ AUTH_HOME_TENANT_ID: undefined, AZURE_TENANT_ID: tenant }, "AZURE_TENANT_ID was renamed to AUTH_HOME_TENANT_ID"],
+      [{ OIDC_ISSUER: "http://login.example.com" }, "OIDC_ISSUER"],
+      [{ OIDC_ISSUER: "https://login.example.com/?tenant=x" }, "OIDC_ISSUER"],
+      [{ SESSION_SECRET: undefined }, "SESSION_SECRET"],
+      [{ SESSION_SECRET: "too-short" }, "SESSION_SECRET"],
+      [{ SESSION_SECRET: configuration.INVITE_SIGNING_SECRET }, "SESSION_SECRET must differ from INVITE_SIGNING_SECRET"],
+      [{ SESSION_TTL_HOURS: "0" }, "SESSION_TTL_HOURS"],
+      [{ SESSION_TTL_HOURS: "1.5" }, "SESSION_TTL_HOURS"],
+      [{ TRUST_PROXY: "true" }, "TRUST_PROXY=true"],
+      [{ TRUST_PROXY: "proxy.example" }, "TRUST_PROXY must be"],
+      [{ TRUST_PROXY: "10.0.0.0/33" }, "TRUST_PROXY must be"],
+      [{ AUTH_HOME_TENANT_ID: "not-a-tenant" }, "AUTH_HOME_TENANT_ID"],
+      [{ AUTH_HOME_TENANT_ID: CONSUMER_TENANT_ID }, "AUTH_HOME_TENANT_ID"],
+      [{ OWNER_OBJECT_ID: undefined }, "AUTH_HOME_TENANT_ID requires OWNER_OBJECT_ID"],
+      [{ AUTH_HOME_TENANT_ID: undefined }, "ALLOWED_USER_OBJECT_IDS requires AUTH_HOME_TENANT_ID"],
+      [{ AUTH_HOME_TENANT_ID: undefined, ALLOWED_USER_OBJECT_IDS: "", OWNER_OBJECT_ID: "owner" }, "OWNER_OBJECT_ID must be an object UUID"],
+    ] as const)
+      expect(() => readApiConfiguration({ ...configuration, ...overrides }), message).toThrow(message);
+  });
+
   it("preserves same-origin referrers for hosted cookie CSRF validation", async () => {
     const response = await request(app()).get("/");
     expect(response.headers["referrer-policy"]).toBe("same-origin");
@@ -216,7 +298,7 @@ describe("hosted invitation access (no database)", () => {
 
   it.each([owner, guest, secondGuest])("admits same-origin mutations for %s", async (objectId) => {
     const response = await request(app()).post("/api/access-probe")
-      .set("x-ms-client-principal", principal(objectId))
+      .set("Cookie", signedIn(objectId))
       .set("Origin", configuration.APP_ORIGIN)
       .set("Referer", `${configuration.APP_ORIGIN}/`)
       .send({ type: "read-news" });
@@ -227,7 +309,7 @@ describe("hosted invitation access (no database)", () => {
   it.each([undefined, "null", "https://other.example.com"])("rejects mutations with untrusted origin %s", async (origin) => {
     const resolve = vi.fn(async () => { throw new Error("Untrusted origins must not resolve accounts"); });
     const mutation = request(app(undefined, { resolve })).post("/api/careers/prepare")
-      .set("x-ms-client-principal", principal(guest))
+      .set("Cookie", signedIn(guest))
       .set("Referer", `${configuration.APP_ORIGIN}/`);
     if (origin) mutation.set("Origin", origin);
     expect((await mutation.send({ type: "read-news" })).status).toBe(403);
@@ -259,11 +341,11 @@ describe("SQL opened on the first request that needs it (no database)", () => {
     expect(health.status).toBe(200);
     expect(health.body).toEqual({ status: "ok" });
     expect((await request(application).get("/api/bootstrap")).status).toBe(401);
-    expect((await request(application).get("/api/me").set("x-ms-client-principal", "not a principal")).status).toBe(401);
+    expect((await request(application).get("/api/me").set("Cookie", `${sessionCookieName(true)}=not.a-session`)).status).toBe(401);
     expect((await request(application).get("/api/me")
-      .set("x-ms-client-principal", principal("44444444-4444-4444-4444-444444444444"))).status).toBe(403);
+      .set("Cookie", signedIn("44444444-4444-4444-4444-444444444444"))).status).toBe(403);
     expect((await request(application).post("/api/careers/prepare")
-      .set("x-ms-client-principal", principal(owner)).send({})).status).toBe(403);
+      .set("Cookie", signedIn(owner)).send({})).status).toBe(403);
     expect((await request(application).get("/")).status).toBeLessThan(500);
     expect(open).not.toHaveBeenCalled();
   });
@@ -272,7 +354,7 @@ describe("SQL opened on the first request that needs it (no database)", () => {
     const open = vi.fn<() => Promise<ReturnType<typeof fakeDatabase>>>()
       .mockRejectedValueOnce(new Error("Database is not currently available (40613)"));
     const application = createApp(openOnFirstUse(open, { retryFor: 0 }).get);
-    const unavailable = await request(application).get("/api/me").set("x-ms-client-principal", principal(owner));
+    const unavailable = await request(application).get("/api/me").set("Cookie", signedIn(owner));
     expect(unavailable.status).toBe(503);
     expect(unavailable.headers["retry-after"]).toBe("5");
     expect(unavailable.body).toEqual({
@@ -282,14 +364,14 @@ describe("SQL opened on the first request that needs it (no database)", () => {
     let finish: (database: ReturnType<typeof fakeDatabase>) => void = () => {};
     open.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
     const pending = [owner, guest, secondGuest].map((objectId) =>
-      request(application).get("/api/access-probe").set("x-ms-client-principal", principal(objectId)).then((response) => response));
+      request(application).get("/api/access-probe").set("Cookie", signedIn(objectId)).then((response) => response));
     await vi.waitFor(() => expect(open).toHaveBeenCalledTimes(2));
     finish(fakeDatabase());
     for (const response of await Promise.all(pending)) {
       expect(response.status).toBe(404);
       expect(response.body.error).toBe("API route not found.");
     }
-    expect((await request(application).get("/api/access-probe").set("x-ms-client-principal", principal(guest))).status).toBe(404);
+    expect((await request(application).get("/api/access-probe").set("Cookie", signedIn(guest))).status).toBe(404);
     expect(open).toHaveBeenCalledTimes(2);
   });
 });
@@ -303,10 +385,10 @@ describe.skipIf(!sqlIntegration)("per-user HTTP isolation (two isolated SQL sche
   let baseline: { file: string; name: string };
   const access = (method: "get" | "post" | "patch" | "delete", path: string, objectId = owner) =>
     request(app)[method](path)
-      .set("x-ms-client-principal", principal(objectId, tenant, [
-        { typ: "name", val: objectId === owner ? "Owner Director" : "Guest Director" },
-        { typ: "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress", val: "shared@example.test" },
-      ]))
+      .set("Cookie", signedIn(objectId, tenant, {
+        name: objectId === owner ? "Owner Director" : "Guest Director",
+        email: "shared@example.test",
+      }))
       .set("Origin", configuration.APP_ORIGIN);
 
   beforeAll(async () => {
@@ -384,10 +466,7 @@ describe.skipIf(!sqlIntegration)("per-user HTTP isolation (two isolated SQL sche
     });
     expect((await access("get", "/api/bootstrap", guest)).body.state.director.name).toBe("Existing guest director");
     const renamed = await access("get", "/api/me")
-      .set("x-ms-client-principal", principal(owner, tenant, [
-        { typ: "http://schemas.microsoft.com/identity/claims/displayname", val: "Updated owner" },
-        { typ: "email", val: "updated@example.test" },
-      ]));
+      .set("Cookie", signedIn(owner, tenant, { name: "Updated owner", email: "updated@example.test" }));
     expect(renamed.body.user).toEqual({ id: "owner-account", displayName: "Updated owner", email: "updated@example.test" });
     expect(await new Saves(ownerWorld).currentState()).toBeNull();
     expect(generate).not.toHaveBeenCalled();
@@ -640,9 +719,9 @@ describe.skipIf(!sqlIntegration)("per-user HTTP isolation (two isolated SQL sche
     expect((await access("get", "/api/saves")).body.map((slot: SaveSlot) => slot.file)).toEqual([kept.file]);
     expect(await ownerWorld.all(chunkQuery, "kept-owner-career")).toEqual(keptChunks);
     expect(await ownerWorld.all(chunkQuery, "deleted-owner-career")).toEqual([]);
-    expect(await ownerWorld.all("SELECT [key], [value] FROM meta")).toEqual([{ key: "appearanceIndexVersion", value: "1" }]);
+    expect(await ownerWorld.all("SELECT key, value FROM meta")).toEqual([{ key: "appearanceIndexVersion", value: "1" }]);
     const counts = await ownerWorld.all<{ rows: number }>(WORLD_TABLES.filter((table) => table !== "meta").map((table) =>
-      `SELECT COUNT(*) AS [rows] FROM ${tableName(ownerWorld.schemaName, table)}`).join(" UNION ALL "));
+      `SELECT count(*) AS rows FROM ${tableName(ownerWorld.schemaName, table)}`).join(" UNION ALL "));
     expect(counts).toHaveLength(WORLD_TABLES.length - 1);
     expect(counts.every((count) => count.rows === 0)).toBe(true);
     expect(await stateOf(root)).toEqual(guestState);
@@ -677,7 +756,7 @@ describe.skipIf(!sqlIntegration)("per-user HTTP isolation (two isolated SQL sche
       },
     });
     const countsQuery = WORLD_TABLES.map((table) =>
-      `SELECT '${table}' AS [table], COUNT(*) AS [rows] FROM ${tableName(ownerWorld.schemaName, table)}`).join(" UNION ALL ");
+      `SELECT '${table}' AS "table", count(*) AS rows FROM ${tableName(ownerWorld.schemaName, table)}`).join(" UNION ALL ");
     const chunkQuery = "SELECT chunks.save_id, chunks.ordinal, chunks.data FROM save_chunks AS chunks ORDER BY chunks.save_id, chunks.ordinal";
     const before = {
       state: await stateOf(ownerWorld),
@@ -763,42 +842,40 @@ describe.skipIf(!sqlIntegration)("per-user HTTP isolation (two isolated SQL sche
   }, 300_000);
 
   it("uses an explicit local identity and ignores forged identity headers and resolver injection in no-auth mode", async () => {
-    vi.stubEnv("CONTAINER_APP_NAME", "");
     vi.stubEnv("API_HOST", "127.0.0.1");
     vi.stubEnv("REQUIRE_AUTH", "false");
     vi.stubEnv("APP_ORIGIN", undefined);
     const resolve = vi.fn(async () => { throw new Error("Local mode must not use a hosted identity"); });
     const local = createApp(ownerWorld, { resolve });
-    const response = await request(local).get("/api/me").set("x-ms-client-principal", principal(guest));
+    const response = await request(local).get("/api/me").set("Cookie", signedIn(guest));
     expect(response.status).toBe(200);
     expect(response.body).toEqual({ user: { id: "local", displayName: "Local director", email: null }, hasWorld: false, activity: null });
     expect(resolve).not.toHaveBeenCalled();
     expect((await request(local).get("/api/me").set("Host", "untrusted.example")
-      .set("x-ms-client-principal", principal(owner))).status).toBe(403);
+      .set("Cookie", signedIn(owner))).status).toBe(403);
   });
 });
 
 async function expectSchemaIntegrity(store: Store) {
-  const tables = await store.all<{ id: number; name: string }>(
-    "SELECT object_id AS id,name FROM sys.tables WHERE schema_id = SCHEMA_ID(?) ORDER BY name",
+  const tables = await store.all<{ name: string }>(
+    "SELECT tablename AS name FROM pg_catalog.pg_tables WHERE schemaname = ? ORDER BY tablename",
     store.schemaName,
   );
   expect(tables.length).toBeGreaterThan(0);
+  // PostgreSQL keeps every validated constraint true for all rows; only NOT VALID constraints
+  // or disabled (foreign-key) triggers could let inconsistent rows in.
   expect(
     await store.all(
-      "SELECT name FROM sys.foreign_keys WHERE schema_id = SCHEMA_ID(?) AND (is_disabled = 1 OR is_not_trusted = 1)",
+      "SELECT conrelid::regclass::text AS table_name, conname FROM pg_catalog.pg_constraint WHERE connamespace = ?::regnamespace AND NOT convalidated",
       store.schemaName,
     ),
   ).toEqual([]);
-  for (const table of tables) {
-    expect(Number.isSafeInteger(table.id)).toBe(true);
-    expect(
-      await store.all(
-        `DBCC CHECKCONSTRAINTS (${table.id}) WITH ALL_CONSTRAINTS, ALL_ERRORMSGS`,
-      ),
-      table.name,
-    ).toEqual([]);
-  }
+  expect(
+    await store.all(
+      "SELECT tgrelid::regclass::text AS table_name, tgname FROM pg_catalog.pg_trigger JOIN pg_catalog.pg_class ON pg_class.oid = pg_trigger.tgrelid WHERE pg_class.relnamespace = ?::regnamespace AND pg_trigger.tgenabled = 'D'",
+      store.schemaName,
+    ),
+  ).toEqual([]);
 }
 
 describe.skipIf(!sqlIntegration)("game HTTP API and SQL saves", () => {
@@ -915,7 +992,7 @@ describe.skipIf(!sqlIntegration)("game HTTP API and SQL saves", () => {
     expect(ordered).toEqual([...ordered].sort((left, right) => right - left));
     // Same filter, other sort and page: the cached match set must give the same total and disjoint pages.
     const expected = await store.all<{ id: number }>(
-      "SELECT TOP (20) id FROM players WHERE role <> 'Retired' AND position = 'ST' ORDER BY value ASC, name COLLATE Latin1_General_100_CI_AI ASC, id ASC",
+      "SELECT id FROM players WHERE role <> 'Retired' AND position = 'ST' ORDER BY value ASC, lower(name) ASC, id ASC LIMIT 20",
     );
     const first = await request(app).get("/api/players").query({ position: "ST", sort: "value", direction: "asc", pageSize: 10 });
     const second = await request(app).get("/api/players").query({ position: "ST", sort: "value", direction: "asc", pageSize: 10, page: 2 });
@@ -988,7 +1065,7 @@ describe.skipIf(!sqlIntegration)("game HTTP API and SQL saves", () => {
       profile: string;
       country_id: number;
     }>(
-      "SELECT TOP (1) id,profile,country_id FROM players WHERE country_id != 1",
+      "SELECT id,profile,country_id FROM players WHERE country_id <> 1 ORDER BY id LIMIT 1",
     ))!;
     const profile = JSON.parse(player.profile);
     try {
@@ -1049,7 +1126,7 @@ describe.skipIf(!sqlIntegration)("game HTTP API and SQL saves", () => {
       home_goals: number | null;
       away_goals: number | null;
     }>(
-      "SELECT TOP (1) id,date,league_id,status,home_goals,away_goals FROM fixtures WHERE league_id = 1 ORDER BY date",
+      "SELECT id,date,league_id,status,home_goals,away_goals FROM fixtures WHERE league_id = 1 ORDER BY date LIMIT 1",
     ))!;
     try {
       expect(
@@ -1153,7 +1230,7 @@ describe.skipIf(!sqlIntegration)("game HTTP API and SQL saves", () => {
   it("orders career clubs by country, division and name with consistent pagination and league labels", async () => {
     const original = await stateOf(store);
     const expected = await store.all<{ id: number }>(
-      "SELECT TOP (20) clubs.id FROM clubs JOIN countries ON countries.id = clubs.country_id JOIN leagues ON leagues.id = clubs.league_id WHERE clubs.type = 'club' ORDER BY countries.name COLLATE Latin1_General_100_CI_AS,leagues.tier,clubs.name COLLATE Latin1_General_100_CI_AS,clubs.id",
+      "SELECT clubs.id FROM clubs JOIN countries ON countries.id = clubs.country_id JOIN leagues ON leagues.id = clubs.league_id WHERE clubs.type = 'club' ORDER BY lower(countries.name),leagues.tier,lower(clubs.name),clubs.id LIMIT 20",
     );
     const ids: number[] = [];
     for (const page of [1, 2]) {
@@ -1203,7 +1280,7 @@ describe.skipIf(!sqlIntegration)("game HTTP API and SQL saves", () => {
       squad_club_id: number | null;
       country_id: number;
     }>(
-      "SELECT TOP (1) players.id,players.profile,players.age,players.birth_date,players.club_id,players.squad_club_id,players.country_id FROM players JOIN countries ON countries.id = players.country_id WHERE countries.code = 'SCO' AND players.club_id IS NOT NULL AND players.parent_club_id IS NULL AND players.age_group != 'Senior' ORDER BY players.id",
+      "SELECT players.id,players.profile,players.age,players.birth_date,players.club_id,players.squad_club_id,players.country_id FROM players JOIN countries ON countries.id = players.country_id WHERE countries.code = 'SCO' AND players.club_id IS NOT NULL AND players.parent_club_id IS NULL AND players.age_group <> 'Senior' ORDER BY players.id LIMIT 1",
     ))!;
     const profile = JSON.parse(player.profile);
     delete profile.registration;
@@ -1306,7 +1383,7 @@ describe.skipIf(!sqlIntegration)("game HTTP API and SQL saves", () => {
     const before = await store.all(
       "SELECT id,club_id,wage,morale FROM players ORDER BY id",
     );
-    const negotiations = await store.all("SELECT * FROM negotiations");
+    const negotiations = await store.all("SELECT * FROM negotiations ORDER BY id");
     const result = await request(app)
       .get("/api/players/1/interest")
       .query({
@@ -1338,7 +1415,7 @@ describe.skipIf(!sqlIntegration)("game HTTP API and SQL saves", () => {
           .query({ negotiationId: 999999 })
       ).status,
     ).toBe(400);
-    expect(await store.all("SELECT * FROM negotiations")).toEqual(negotiations);
+    expect(await store.all("SELECT * FROM negotiations ORDER BY id")).toEqual(negotiations);
     expect(
       await store.all("SELECT id,club_id,wage,morale FROM players ORDER BY id"),
     ).toEqual(before);
@@ -1348,11 +1425,11 @@ describe.skipIf(!sqlIntegration)("game HTTP API and SQL saves", () => {
   it("shows rival pursuits on the transfer desk and interest preview only as fogged views", async () => {
     const state = await stateOf(store);
     const target = (await store.get<{ id: number; club_id: number; wage: number; profile: string }>(
-      "SELECT TOP (1) id,club_id,wage,profile FROM players WHERE club_id IS NOT NULL AND club_id <> ? AND role <> 'Retired' AND age_group = 'Senior' ORDER BY ability DESC,id",
+      "SELECT id,club_id,wage,profile FROM players WHERE club_id IS NOT NULL AND club_id <> ? AND role <> 'Retired' AND age_group = 'Senior' ORDER BY ability DESC,id LIMIT 1",
       state.clubId,
     ))!;
     const rival = (await store.get<{ id: number }>(
-      "SELECT TOP (1) id FROM clubs WHERE type = 'club' AND id NOT IN (?,?) ORDER BY id",
+      "SELECT id FROM clubs WHERE type = 'club' AND id NOT IN (?,?) ORDER BY id LIMIT 1",
       state.clubId,
       target.club_id,
     ))!;
@@ -1664,7 +1741,7 @@ describe.skipIf(!sqlIntegration)("game HTTP API and SQL saves", () => {
       "DELETE FROM staff WHERE role = 'Sporting director assistant'",
     );
     await store.run(
-      "DELETE FROM partnerships WHERE JSON_VALUE(data,'$.origin') = 'initial'",
+      "DELETE FROM partnerships WHERE data::jsonb ->> 'origin' = 'initial'",
     );
     const originalPlayers = await store.all(
       "SELECT id,club_id,wage,contract_end FROM players ORDER BY id",
@@ -1966,11 +2043,11 @@ describe.skipIf(!sqlIntegration)("game HTTP API and SQL saves", () => {
   it("lists a club's recorded transfers in and out by season with fees, terms and totals", async () => {
     const state = await stateOf(store);
     const [home, away] = await store.all<{ id: number; name: string }>(
-      "SELECT TOP (2) id,name FROM clubs WHERE type = 'club' AND id != ? ORDER BY id",
+      "SELECT id,name FROM clubs WHERE type = 'club' AND id <> ? ORDER BY id LIMIT 2",
       state.clubId,
     );
     const player = (await store.get<{ id: number; name: string; birth_date: string; position: string }>(
-      "SELECT TOP (1) id,name,birth_date,position FROM players WHERE club_id = ? ORDER BY id",
+      "SELECT id,name,birth_date,position FROM players WHERE club_id = ? ORDER BY id LIMIT 1",
       home.id,
     ))!;
     const season = state.season - 3;
@@ -2083,7 +2160,7 @@ describe.skipIf(!sqlIntegration)("game HTTP API and SQL saves", () => {
         expect((await request(app).get(`/api/clubs/${home.id}/transfers?${query}`)).status, query).toBe(400);
       expect((await request(app).get("/api/clubs/abc/transfers")).status).toBe(400);
     } finally {
-      await store.run("DELETE FROM history WHERE id IN (SELECT [id] FROM OPENJSON(?) WITH ([id] INT '$'))", JSON.stringify(history));
+      await store.run("DELETE FROM history WHERE id = ANY(?::int[])", history);
       await store.run("DELETE FROM negotiations WHERE id = ?", negotiation);
       // The scan cache assumes append-only move rows.
       clubTransfersChanged(store);
@@ -2093,7 +2170,7 @@ describe.skipIf(!sqlIntegration)("game HTTP API and SQL saves", () => {
   it("rejects impossible call-up end dates and loans longer than a year between countries", async () => {
     const state = await stateOf(store);
     const own = (await store.get<{ id: number }>(
-      "SELECT TOP (1) id FROM players WHERE club_id = ? AND role != 'Retired' ORDER BY id",
+      "SELECT id FROM players WHERE club_id = ? AND role <> 'Retired' ORDER BY id LIMIT 1",
       state.clubId,
     ))!;
     const callUp = (date: string) =>
@@ -2109,7 +2186,7 @@ describe.skipIf(!sqlIntegration)("game HTTP API and SQL saves", () => {
     expect(tooLong.status).toBe(400);
     expect(tooLong.body.error).toMatch(new RegExp(`at most ${CALL_UP_RULES.maxDays} days`));
     const foreign = await store.get<{ id: number }>(
-      "SELECT TOP (1) players.id FROM players JOIN clubs ON clubs.id = players.club_id WHERE clubs.type = 'club' AND clubs.country_id <> (SELECT country_id FROM clubs WHERE id = ?) AND players.role != 'Retired' AND players.parent_club_id IS NULL ORDER BY players.id",
+      "SELECT players.id FROM players JOIN clubs ON clubs.id = players.club_id WHERE clubs.type = 'club' AND clubs.country_id <> (SELECT country_id FROM clubs WHERE id = ?) AND players.role <> 'Retired' AND players.parent_club_id IS NULL ORDER BY players.id LIMIT 1",
       state.clubId,
     );
     expect(foreign).toBeTruthy();

@@ -388,6 +388,12 @@ export function schemaMigrations(schema: string): SqlMigration[] {
           $$;`,
         `CREATE OR REPLACE TRIGGER clear_transferred_squad BEFORE UPDATE OF club_id ON ${ref("players")}
           FOR EACH ROW EXECUTE FUNCTION ${ref("clear_transferred_squad")}();`,
+        // The daily simulation rewrites these rows constantly: leave page room for HOT updates and vacuum early.
+        ...["players", "standings", "clubs", "fixtures"].map(
+          (table) =>
+            `ALTER TABLE ${ref(table)} SET (fillfactor = ${table === "fixtures" ? 90 : 85},
+              autovacuum_vacuum_scale_factor = 0.02, autovacuum_analyze_scale_factor = 0.02);`,
+        ),
         `ALTER TABLE ${ref("news")} ADD COLUMN IF NOT EXISTS notification_key TEXT
           GENERATED ALWAYS AS (data::jsonb ->> 'notificationKey') STORED;`,
         index("news_notification_key", "news", "notification_key", "notification_key IS NOT NULL", true),
@@ -402,6 +408,7 @@ export function schemaMigrations(schema: string): SqlMigration[] {
         index("player_nationality", "players", "country_id, age, ability"),
         index("player_filter", "players", "position, age, ability, potential, value"),
         index("player_name", "players", "lower(name)"),
+        index("player_ability", "players", "ability DESC"),
         index("player_shortlist", "players", "shortlisted", "shortlisted = 1"),
         index("player_playing_squad", "players", "playing_club_id, age_group, ability"),
         index("player_parent_club", "players", "parent_club_id", "parent_club_id IS NOT NULL"),
@@ -427,6 +434,10 @@ export function schemaMigrations(schema: string): SqlMigration[] {
         index("transfer_payment_due", "transfer_payments", "paid_date, due_date"),
         index("transfer_payment_club", "transfer_payments", "payer_id, payee_id, paid_date"),
         index("transfer_payment_player", "transfer_payments", "player_id"),
+        index("transfer_payment_negotiation", "transfer_payments", "negotiation_id"),
+        index("transfer_payment_sell_on", "transfer_payments", "sell_on_clause_id", "sell_on_clause_id IS NOT NULL"),
+        index("sell_on_source_loan", "sell_on_clauses", "source_loan_id", "source_loan_id IS NOT NULL"),
+        index("relationship_target", "relationships", "target_type, target_id"),
         index("buy_back_player", "buy_back_clauses", "player_id, owner_id, status"),
         index("sell_on_player", "sell_on_clauses", "player_id"),
         index("negotiation_player", "negotiations", "player_id"),

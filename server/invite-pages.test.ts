@@ -5,6 +5,8 @@ import {
   renderInvitePage,
   renderNotInvitedPage,
   renderReviewPage,
+  renderSignedOutPage,
+  renderSignInErrorPage,
   type InviteCapacityView,
   type InviteRequestView,
 } from "./invite-pages.ts";
@@ -31,7 +33,9 @@ const capacity: InviteCapacityView = {
 const pages = () => [
   renderInvitePage({ state: "form", email: request.email, note: request.note ?? "" }),
   renderInvitePage({ state: "submitted" }),
-  renderNotInvitedPage({ inviteUrl: "/invite", logoutUrl: "/.auth/logout?post_logout_redirect_uri=/", email: request.email }),
+  renderNotInvitedPage({ inviteUrl: "/invite", logoutAction: "/auth/logout", email: request.email }),
+  renderSignedOutPage({ signInUrl: "/auth/login?prompt=select_account" }),
+  renderSignInErrorPage({ title: "Sign-in failed", message: "Start again.", retryUrl: "/auth/login" }),
   renderAdminListPage({
     requests: [request],
     capacity,
@@ -61,7 +65,8 @@ describe("invite pages", () => {
     }
     const unsafePages = [
       renderInvitePage({ state: "form", email: request.email, note: request.note ?? "" }),
-      renderNotInvitedPage({ inviteUrl: "/invite", logoutUrl: "/", email: request.email }),
+      renderNotInvitedPage({ inviteUrl: "/invite", logoutAction: "/auth/logout", email: request.email }),
+      renderSignInErrorPage({ title: request.email, message: request.note ?? "", retryUrl: "/auth/login" }),
       renderAdminListPage({ requests: [request], capacity, reviewUrl: (id, action) => `/admin/invites/${id}?action=${action}` }),
       renderReviewPage({ request, action: "accept", token: "tok", formAction: "/admin/invites/abc/decision", capacity }),
       renderDecisionPage({ outcome: "accepted", email: request.email, listUrl: "/admin/invites", emailSent: true }),
@@ -81,6 +86,31 @@ describe("invite pages", () => {
     expect(page).toContain("Already invited? Sign in");
   });
 
+  it("signs out with a POST form and allows only the provider origin as an extra form target", () => {
+    const page = renderNotInvitedPage({
+      inviteUrl: "/invite",
+      logoutAction: "/auth/logout",
+      providerOrigin: "https://login.microsoftonline.com",
+      email: null,
+    });
+    expect(page).toContain('<form class="inline-form" method="post" action="/auth/logout">');
+    expect(page).toContain("form-action 'self' https://login.microsoftonline.com;");
+    expect(page).not.toContain("/.auth/");
+    expect(renderNotInvitedPage({ inviteUrl: "/invite", logoutAction: "/auth/logout", email: null }))
+      .toContain("form-action 'self';");
+  });
+
+  it("renders signed-out and sign-in error pages with a sign-in link", () => {
+    const signedOut = renderSignedOutPage({ signInUrl: "/auth/login?prompt=select_account" });
+    expect(signedOut).toContain("You're signed out");
+    expect(signedOut).toContain('href="/auth/login?prompt=select_account"');
+    expect(signedOut).toContain("personal Microsoft account");
+    const failed = renderSignInErrorPage({ title: "Sign-in expired", message: "Start <again>.", retryUrl: "/auth/login" });
+    expect(failed).toContain("<h1>Sign-in expired</h1>");
+    expect(failed).toContain("Start &lt;again&gt;.");
+    expect(failed).toContain('href="/auth/login"');
+  });
+
   it("keeps submitted invite state neutral", () => {
     expect(renderInvitePage({ state: "submitted", email: "duplicate@example.com" }))
       .toContain("Thanks — if approved you'll get an email at that address");
@@ -88,7 +118,7 @@ describe("invite pages", () => {
 
   it("puts required personal Microsoft account wording on invite and not-invited pages", () => {
     const invite = renderInvitePage({ state: "form" });
-    const notInvited = renderNotInvitedPage({ inviteUrl: "/invite", logoutUrl: "/", email: "player@example.com" });
+    const notInvited = renderNotInvitedPage({ inviteUrl: "/invite", logoutAction: "/auth/logout", email: "player@example.com" });
     for (const page of [invite, notInvited]) {
       expect(page).toContain("personal Microsoft account");
       expect(page).toContain("Outlook.com, Hotmail, Live.com, MSN");

@@ -300,7 +300,7 @@ describe("generated world (SQL)", () => {
     expect((world as Record<string, unknown>).options).toEqual({ nations: NATIONS, squads: "minimum" });
     const state = await store.meta<GameState>("state");
     const top = await store.get<{ id: number }>(
-      "SELECT TOP (1) clubs.id FROM clubs JOIN leagues ON leagues.id = clubs.league_id JOIN countries ON countries.id = clubs.country_id WHERE countries.code = 'EN' AND leagues.tier = 1 AND clubs.type = 'club' ORDER BY clubs.reputation DESC, clubs.id",
+      "SELECT clubs.id FROM clubs JOIN leagues ON leagues.id = clubs.league_id JOIN countries ON countries.id = clubs.country_id WHERE countries.code = 'EN' AND leagues.tier = 1 AND clubs.type = 'club' ORDER BY clubs.reputation DESC, clubs.id LIMIT 1",
     );
     expect(state.clubId).toBe(top!.id);
   });
