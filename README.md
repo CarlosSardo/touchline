@@ -1,4 +1,28 @@
-# Touchline
+<div align="center">
+
+# ⚽ Touchline
+
+**A football sporting-director simulation, self-hosted on a Raspberry Pi**
+
+[![Verify](https://github.com/CarlosSardo/touchline/actions/workflows/verify.yml/badge.svg)](https://github.com/CarlosSardo/touchline/actions/workflows/verify.yml)
+[![Image](https://github.com/CarlosSardo/touchline/actions/workflows/image.yml/badge.svg)](https://github.com/CarlosSardo/touchline/actions/workflows/image.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-22c55e.svg)](LICENSE)
+
+[![Node.js 22](https://img.shields.io/badge/Node.js-22-5FA04E?logo=nodedotjs&logoColor=white)](.nvmrc)
+[![TypeScript](https://img.shields.io/badge/TypeScript-6-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
+[![React 19](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)](https://react.dev/)
+[![Vite](https://img.shields.io/badge/Vite-8-646CFF?logo=vite&logoColor=white)](https://vite.dev/)
+[![Express 5](https://img.shields.io/badge/Express-5-000000?logo=express&logoColor=white)](https://expressjs.com/)
+[![PostgreSQL 18](https://img.shields.io/badge/PostgreSQL-18-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
+
+[![Docker multi-arch](https://img.shields.io/badge/Docker-arm64%20%7C%20amd64-2496ED?logo=docker&logoColor=white)](Dockerfile)
+[![Raspberry Pi 4](https://img.shields.io/badge/Raspberry%20Pi-4B%208GB-A22846?logo=raspberrypi&logoColor=white)](#hosting-on-a-raspberry-pi)
+[![OpenID Connect](https://img.shields.io/badge/sign--in-OpenID%20Connect-F78C40?logo=openid&logoColor=white)](#sign-in-and-access)
+[![Authelia](https://img.shields.io/badge/Authelia-2FA-113155?logo=authelia&logoColor=white)](https://www.authelia.com)
+[![Vitest](https://img.shields.io/badge/tested%20with-Vitest-6E9F18?logo=vitest&logoColor=white)](#testing)
+[![Playwright](https://img.shields.io/badge/e2e-Playwright-2EAD33?logo=playwright&logoColor=white)](#testing)
+
+</div>
 
 Touchline is a football sporting-director simulation. You take charge of a club's long-term project on **1 July 2026**: recruitment, contracts, squad planning, the academy, staff, facilities and finances. The manager picks the team and plays the matches; your job is to give them the right players and keep the club healthy for years to come.
 
