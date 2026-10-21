@@ -87,7 +87,11 @@ describe("season footprint budget", () => {
         });
         const grown = await reportFootprint(store, "grown", start.accumulatedMB - MIN_SEASON_BUDGET_MB - 1, 1000);
         expect(grown).toMatchObject({ over: true, budgetMB: MIN_SEASON_BUDGET_MB });
-        expect(log.mock.calls.at(-1)?.[0]).toMatch(/other tables \+\d+(\.\d)? MB this season \(budget 32 MB for 1000 fixtures\) OVER BUDGET/);
+        // On GitHub Actions an ::error annotation follows the plain line, so search every logged line.
+        const logged = () => log.mock.calls.map((call) => String(call[0]));
+        expect(logged()).toContainEqual(
+          expect.stringMatching(/other tables \+\d+(\.\d)? MB this season \(budget 32 MB for 1000 fixtures\) OVER BUDGET/),
+        );
         // Issue 1: whole-squad rewrites of an indexed column inside one transaction leave every old version behind.
         await store.transaction(async () => {
           for (let round = 0; round < 30; round++) await store.run("UPDATE players SET ability = ability + 0");
@@ -95,7 +99,9 @@ describe("season footprint budget", () => {
         const bloated = await reportFootprint(store, "bloated", start.accumulatedMB, 1000);
         expect(bloated.playerBytesPerRow).toBeGreaterThan(PLAYER_ROW_BUDGET_BYTES);
         expect(bloated).toMatchObject({ seasonMB: 0, over: true });
-        expect(log.mock.calls.at(-1)?.[0]).toContain(`bytes per row (budget ${PLAYER_ROW_BUDGET_BYTES}) OVER BUDGET`);
+        expect(logged()).toContainEqual(
+          expect.stringContaining(`bytes per row (budget ${PLAYER_ROW_BUDGET_BYTES}) OVER BUDGET`),
+        );
       } finally {
         log.mockRestore();
         await store.close();
