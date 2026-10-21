@@ -532,13 +532,13 @@ describe("SQL pool configuration (no database)", () => {
       idleTimeoutMillis: 60_000,
       keepAlive: true,
       statement_timeout: 5000,
-      idle_in_transaction_session_timeout: 60_000,
+      idle_in_transaction_session_timeout: 900_000,
       application_name: "Touchline",
       options: "-c TimeZone=UTC",
     });
     expect(sqlPoolConfig(readSqlSettings({ SQL_REQUEST_TIMEOUT_MS: "900000" }))).toMatchObject({
       statement_timeout: 900000,
-      idle_in_transaction_session_timeout: 1_800_000,
+      idle_in_transaction_session_timeout: 9_000_000,
     });
   });
 
@@ -890,7 +890,7 @@ describe("SQL Store transactions (fake pool, no database)", () => {
     await fake.store.close();
   });
 
-  it("batched() commits each statement on its own while one idle transaction holds the world lock", async () => {
+  it("batched() commits each statement on its own while a session-level lock (no open transaction) holds the world", async () => {
     const fake = fakeStore();
     await fake.store.batched(() =>
       fake.store.transaction(async () => {
@@ -901,16 +901,18 @@ describe("SQL Store transactions (fake pool, no database)", () => {
     );
     const holder = fake.queries[0].client;
     expect(fake.texts(holder)).toEqual([
-      "BEGIN",
-      expect.stringContaining(`pg_advisory_xact_lock(${worldKey()})`),
-      "ROLLBACK",
+      "SET lock_timeout = '30s'",
+      `SELECT pg_advisory_lock(${worldKey()})`,
+      "RESET lock_timeout",
+      `SELECT pg_advisory_unlock(${worldKey()})`,
     ]);
     const statements = fake.queries.filter((query) => query.text.startsWith("UPDATE"));
     expect(statements).toHaveLength(3);
     expect(statements.every((query) => query.client !== holder)).toBe(true);
-    expect(fake.queries.filter((query) => isLock(query.text)).map((query) => query.client)).toEqual([holder]);
+    expect(fake.queries.filter((query) => /pg_advisory_(?:xact_)?lock/.test(query.text)).map((query) => query.client))
+      .toEqual([holder]);
     expect(fake.texts().filter((text) => text === "COMMIT")).toHaveLength(3);
-    expect(fake.texts().at(-1)).toBe("ROLLBACK");
+    expect(fake.texts().at(-1)).toBe(`SELECT pg_advisory_unlock(${worldKey()})`);
     await fake.store.close();
   });
 
@@ -1814,6 +1816,28 @@ describe.skipIf(!integration)("SQL Store integration (explicit opt-in, real Post
       await holding;
       await writing;
       expect(await store.meta<number>("probe")).toBe(9);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it("batched() holds the world lock outside any transaction, so idle-in-transaction timeouts can't end it", async () => {
+    // Regression: the holder sat idle in a transaction; on a Raspberry Pi a world build outlasted
+    // idle_in_transaction_session_timeout, PostgreSQL ended the session and the process crashed.
+    const store = await Store.createTest("batched_idle");
+    try {
+      const holder = await store.batched(async () => {
+        await store.setMeta("slow", 1);
+        return store.get<{ state: string; in_transaction: boolean }>(
+          `SELECT activity.state, activity.xact_start IS NOT NULL AS in_transaction
+           FROM pg_locks AS lock JOIN pg_stat_activity AS activity ON activity.pid = lock.pid
+           WHERE lock.locktype = 'advisory' AND lock.granted AND activity.pid <> pg_backend_pid()
+             AND activity.datname = current_database()`,
+        );
+      });
+      expect(holder).toEqual({ state: "idle", in_transaction: false });
+      const locks = await store.get<{ n: number }>("SELECT count(*) AS n FROM pg_locks WHERE locktype = 'advisory' AND pid <> pg_backend_pid()");
+      expect(locks?.n).toBe(0);
     } finally {
       await store.close();
     }

@@ -270,7 +270,9 @@ export function sqlPoolConfig(settings: SqlSettings): pg.PoolConfig {
     connectionTimeoutMillis: 60_000,
     keepAlive: true,
     statement_timeout: settings.requestTimeout,
-    idle_in_transaction_session_timeout: Math.max(settings.requestTimeout * 2, 60_000),
+    // Simulation transactions can compute in JavaScript for minutes between statements on a Raspberry Pi; only a
+    // genuinely leaked transaction should be ended.
+    idle_in_transaction_session_timeout: Math.max(settings.requestTimeout * 10, 15 * 60_000),
     application_name: settings.applicationName,
     options: "-c TimeZone=UTC",
     types,
@@ -339,6 +341,10 @@ export class Store {
   private static async connect(settings: SqlSettings): Promise<Store> {
     const pool = new pg.Pool(sqlPoolConfig(settings));
     pool.on("error", (error: Error) => console.error("SQL connection pool error:", error.message));
+    // A server-side disconnect of a checked-out client (restart, timeout) must fail its query, not crash the process.
+    pool.on("connect", (client) =>
+      client.on("error", (error: Error) => console.error("SQL connection error:", error.message)),
+    );
     try {
       const client = await pool.connect();
       client.release();
@@ -585,9 +591,10 @@ export class Store {
 
   /**
    * Runs a large write, such as building a new career world, as many short transactions instead of one, so a
-   * full world never needs one huge transaction. One idle transaction holds the world writer lock
-   * for the whole callback, so no other writer interleaves; the callback must mark its result complete last and
-   * clean up if it fails, because statements already committed stay committed.
+   * full world never needs one huge transaction. A dedicated connection holds the world writer lock as a
+   * session-level advisory lock (outside any transaction, so idle-in-transaction timeouts never end it) for the
+   * whole callback, so no other writer interleaves; the callback must mark its result complete last and clean up
+   * if it fails, because statements already committed stay committed.
    */
   async batched<Result>(callback: () => Promise<Result>): Promise<Result> {
     this.assertOpen();
@@ -595,16 +602,27 @@ export class Store {
     if (this.context.getStore() || this.batchContext.getStore()) return callback();
     return this.track((async () => {
       const holder = await this.pool.connect();
-      let broken: Error | undefined;
+      const key = advisoryLockKey(this.worldLock());
+      let broken: Error | boolean | undefined;
       try {
-        await holder.query("BEGIN");
         try {
-          await this.lock(holder, this.worldLock(), false, WORLD_LOCK_TIMEOUT);
+          await holder.query(`SET lock_timeout = '${WORLD_LOCK_TIMEOUT}'`);
+          await holder.query(`SELECT pg_advisory_lock(${key})`);
+        } catch (error) {
+          if (isLockTimeout(error))
+            throw new Error(`Touchline lock ${this.worldLock()} could not be acquired.`, { cause: error });
+          throw error;
+        } finally {
+          await holder.query("RESET lock_timeout").catch(() => {
+            broken = true;
+          });
+        }
+        try {
           return await this.batchContext.run(true, callback);
         } finally {
-          // The holder wrote nothing; ending it only releases the lock (a dropped connection releases it too).
-          await holder.query("ROLLBACK").catch((error: Error) => {
-            broken = error;
+          // Ending the session also releases the lock, so a failed unlock just discards the connection.
+          await holder.query(`SELECT pg_advisory_unlock(${key})`).catch(() => {
+            broken = true;
           });
         }
       } finally {
