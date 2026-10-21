@@ -13,7 +13,8 @@ import type { GameState } from "../shared/types.ts";
 import { isMain } from "./data-export.ts";
 
 export interface CareerDeleteOptions {
-  objectId?: string;
+  accountId?: string;
+  username?: string;
   email?: string;
   accountSchema: string;
   apply: boolean;
@@ -28,11 +29,11 @@ export interface CareerDeleteDependencies {
   log: (line: string) => void;
 }
 
-const USAGE = `Usage: tsx scripts/career-delete.ts (--oid OBJECT_ID | --email ADDRESS | --list) [--account-schema accounts] [--apply --yes]
-Resolves exactly one account in the account registry by Entra object ID or by its exact stored email/UPN claim,
+const USAGE = `Usage: tsx scripts/career-delete.ts (--account ACCOUNT_ID | --username NAME | --email ADDRESS | --list) [--account-schema accounts] [--apply --yes]
+Resolves exactly one account in the account registry by account ID, sign-in username or exact stored email,
 prints a dry-run summary of its active career by default, and deletes that career's world and snapshots only
 with --apply --yes, through Saves.deleteActiveCareer under the account's world lock. The account and its (now empty)
-world schema stay registered. The legacy dbo world is refused.
+world schema stay registered.
 --list prints a masked registry listing and opens no world. Identifiers are always masked in the output.
 Uses SQL_* connection settings; large worlds need SQL_REQUEST_TIMEOUT_MS=900000.`;
 
@@ -41,7 +42,8 @@ export function careerDeleteOptions(args: string[]): CareerDeleteOptions | undef
     args,
     options: {
       help: { type: "boolean" },
-      oid: { type: "string" },
+      account: { type: "string" },
+      username: { type: "string" },
       email: { type: "string" },
       "account-schema": { type: "string" },
       "dry-run": { type: "boolean" },
@@ -52,21 +54,28 @@ export function careerDeleteOptions(args: string[]): CareerDeleteOptions | undef
   });
   if (values.help) return undefined;
   if (values.list) {
-    if (values.oid !== undefined || values.email !== undefined || values.apply || values.yes || values["dry-run"])
+    if (
+      values.account !== undefined || values.username !== undefined || values.email !== undefined ||
+      values.apply || values.yes || values["dry-run"]
+    )
       throw new Error("--list takes no account identifier and never deletes.");
     return { accountSchema: validateAccountSchema(values["account-schema"] ?? "accounts"), apply: false, list: true };
   }
-  if ((values.oid === undefined) === (values.email === undefined))
-    throw new Error("Choose exactly one account identifier: --oid or --email.");
+  if ([values.account, values.username, values.email].filter((value) => value !== undefined).length !== 1)
+    throw new Error("Choose exactly one account identifier: --account, --username or --email.");
   if (values.apply && !values.yes)
     throw new Error("Deleting a career requires --apply --yes.");
   if (values.apply && values["dry-run"])
     throw new Error("Choose --apply or --dry-run, not both.");
   const email = values.email?.trim();
   if (email !== undefined && (!/^[^\s@]+@[^\s@]+$/.test(email) || email.length > 320))
-    throw new Error("--email must be one complete stored email or UPN claim.");
+    throw new Error("--email must be one complete stored email address.");
+  const username = values.username?.trim();
+  if (username !== undefined && (!username || username.length > 255))
+    throw new Error("--username must be one complete sign-in username.");
   return {
-    objectId: values.oid === undefined ? undefined : accountUuid(values.oid.trim(), "--oid"),
+    accountId: values.account === undefined ? undefined : accountUuid(values.account.trim(), "--account"),
+    username,
     email,
     accountSchema: validateAccountSchema(values["account-schema"] ?? "accounts"),
     apply: Boolean(values.apply),
@@ -104,7 +113,7 @@ export function maskedRegistry(records: AccountRecord[]) {
     ...registryCounts(records),
     registered: records.map((record) => ({
       accountId: maskIdentifier(record.id),
-      objectId: maskIdentifier(record.object_id),
+      username: maskText(record.username),
       schema: maskSchema(record.game_schema),
       email: maskEmail(record.email),
     })),
@@ -112,17 +121,17 @@ export function maskedRegistry(records: AccountRecord[]) {
 }
 
 export function selectAccount(records: AccountRecord[], options: CareerDeleteOptions) {
-  const matchedBy = options.objectId ? "oid" : "email";
-  const matches = options.objectId
-    ? records.filter((record) => record.object_id.toLowerCase() === options.objectId)
-    : records.filter((record) => record.email?.trim().toLowerCase() === options.email!.toLowerCase());
+  const matchedBy = options.accountId ? "account" : options.username !== undefined ? "username" : "email";
+  const matches = options.accountId
+    ? records.filter((record) => record.id.toLowerCase() === options.accountId)
+    : options.username !== undefined
+      ? records.filter((record) => record.username === options.username)
+      : records.filter((record) => record.email?.toLowerCase() === options.email!.toLowerCase());
   if (!matches.length)
-    throw new Error(`No registered account has that ${matchedBy === "oid" ? "object ID" : "exact stored email claim"}.`);
+    throw new Error(`No registered account has that ${matchedBy === "account" ? "account ID" : matchedBy === "username" ? "username" : "exact stored email"}.`);
   if (matches.length > 1)
-    throw new Error(`That ${matchedBy} matches ${matches.length} accounts; choose one with --oid.`);
+    throw new Error(`That ${matchedBy} matches ${matches.length} accounts; choose one with --account.`);
   const [account] = matches;
-  if (account.game_schema.trim().toLowerCase() === "dbo")
-    throw new Error("The legacy dbo world is refused by this tool; it is not deleted or modified.");
   validateAccountWorldSchema(account.game_schema, options.accountSchema);
   return { account, matchedBy };
 }
@@ -196,7 +205,7 @@ export async function main(
     const registry = root.forSchema(options.accountSchema);
     await assertAccountRegistry(registry);
     const records = await registry.all<AccountRecord>(
-      `SELECT id, tenant_id, object_id, display_name, email, game_schema
+      `SELECT id, issuer, subject, username, display_name, email, game_schema
        FROM ${tableName(options.accountSchema, "users")} ORDER BY created_at, id`,
     );
     if (options.list) {
@@ -218,12 +227,12 @@ export async function main(
       requestTimeoutMs: Number(process.env.SQL_REQUEST_TIMEOUT_MS ?? 120000),
       account: {
         id: maskIdentifier(account.id),
-        tenantId: maskIdentifier(account.tenant_id),
-        objectId: maskIdentifier(account.object_id),
+        username: maskText(account.username),
+        subject: maskIdentifier(account.subject),
         displayName: maskText(account.display_name),
         email: maskEmail(account.email),
         matchedBy,
-        identifiers: { objectId: true, storedEmail: Boolean(account.email) },
+        identifiers: { username: true, storedEmail: Boolean(account.email) },
       },
       ...(await careerSummary(world)),
     };

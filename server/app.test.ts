@@ -3,14 +3,12 @@ import request from "supertest";
 import { randomUUID } from "node:crypto";
 import { readFile, rm } from "node:fs/promises";
 import { openOnFirstUse, Store } from "./db.ts";
-import { AccountNotProvisionedError, type AuthenticatedIdentity } from "./accounts.ts";
+import { AccessDeniedError, AccessPendingError } from "./accounts.ts";
 import { processCompetitionNotifications } from "./notifications.ts";
 import { generateWorld } from "./world.ts";
 import { createCalendar } from "./calendar.ts";
 import { createApp, isCalendarDate, loanDurationError, MAX_LOAN_DAYS, readApiConfiguration } from "./app.ts";
-import { sessionCookieName, signSession } from "./auth.ts";
-import { CONSUMER_TENANT_ID } from "./invite-store.ts";
-import { OWNER_EMAIL_DEFAULT } from "./legacy-account.ts";
+import { sessionCookieName, signSession, type AuthenticatedIdentity } from "./auth.ts";
 import { playerSearchChanged } from "./queries.ts";
 import { initialInbox, stateOf } from "./systems.ts";
 import { Saves } from "./saves.ts";
@@ -21,37 +19,46 @@ import { clubTransfersChanged } from "./club-transfers.ts";
 import type { AccountUser, SaveSlot } from "../shared/api.ts";
 import { createUnexpectedEvent } from "./events.ts";
 
+// Authelia subjects are opaque per-user UUIDs.
 const owner = "11111111-1111-1111-1111-111111111111";
 const guest = "22222222-2222-2222-2222-222222222222";
 const secondGuest = "33333333-3333-3333-3333-333333333333";
-const tenant = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+const issuer = "https://auth.example.com";
 const sessionSecret = "session-secret-abcdefghijklmnopqrstuvwxyz";
 const configuration = {
   API_HOST: "0.0.0.0",
   REQUIRE_AUTH: "true",
-  OWNER_OBJECT_ID: owner,
-  ALLOWED_USER_OBJECT_IDS: `${guest}, ${secondGuest}`,
-  AUTH_HOME_TENANT_ID: tenant,
   APP_ORIGIN: "https://touchline.example.com",
-  OIDC_CLIENT_ID: "touchline-client",
+  OIDC_ISSUER: issuer,
+  OIDC_CLIENT_ID: "touchline",
+  OIDC_CLIENT_SECRET: "client-secret-value",
   SESSION_SECRET: sessionSecret,
-  INVITE_SIGNING_SECRET: "12345678901234567890123456789012",
-  EMAIL_TRANSPORT: "gmail",
-  OWNER_EMAIL: OWNER_EMAIL_DEFAULT,
 };
+type Profile = { email?: string; name?: string; username?: string; admin?: boolean };
+const identityOf = (subject: string, profile: Profile = {}): AuthenticatedIdentity => ({
+  issuer,
+  subject,
+  username: profile.username ?? "director",
+  displayName: profile.name ?? "Sporting director",
+  email: profile.email ?? null,
+  groups: profile.admin ? ["admins", "family"] : ["family"],
+  admin: profile.admin ?? false,
+});
+/** The account user an Accounts resolver would return for the identity. */
+const userOf = (identity: AuthenticatedIdentity, id = identity.subject): AccountUser => ({
+  id, username: identity.username, displayName: identity.displayName, email: identity.email, admin: identity.admin,
+});
 /** Cookie header for a signed-in session, as issued by GET /auth/callback (see auth.test.ts for the OIDC flow). */
 const signedIn = (
-  objectId: string,
-  tenantId = tenant,
-  profile: { email?: string; name?: string } = {},
-  options: { secret?: string; issuedAt?: Date } = {},
+  subject: string,
+  profile: Profile = {},
+  options: { secret?: string; issuedAt?: Date; issuer?: string } = {},
 ) =>
-  `${sessionCookieName(true)}=${signSession({
-    tenantId,
-    objectId,
-    displayName: profile.name ?? "Sporting director",
-    email: profile.email ?? null,
-  }, { sessionSecret: options.secret ?? sessionSecret, sessionTtlSeconds: 3600 }, options.issuedAt)}`;
+  `${sessionCookieName(true)}=${signSession(
+    { ...identityOf(subject, profile), issuer: options.issuer ?? issuer },
+    { sessionSecret: options.secret ?? sessionSecret, sessionTtlSeconds: 3600 },
+    options.issuedAt,
+  )}`;
 const sqlIntegration = process.env.SQL_INTEGRATION_TESTS === "true";
 
 describe("action input validation (no database)", () => {
@@ -72,96 +79,81 @@ describe("action input validation (no database)", () => {
   });
 });
 
-describe("hosted invitation access (no database)", () => {
-  const app = (
-    allowed = configuration.ALLOWED_USER_OBJECT_IDS,
-    resolver?: Parameters<typeof createApp>[1],
-  ) => {
-    for (const [name, value] of Object.entries({ ...configuration, ALLOWED_USER_OBJECT_IDS: allowed }))
-      vi.stubEnv(name, value);
+describe("hosted access (no database)", () => {
+  const app = (resolver?: Parameters<typeof createApp>[1]) => {
+    for (const [name, value] of Object.entries(configuration)) vi.stubEnv(name, value);
     const store = Object.create(Store.prototype) as Store;
     return createApp(store, resolver ?? {
       async resolve(identity) {
-        return { user: { id: identity.objectId, displayName: identity.displayName, email: identity.email }, store };
+        return { user: userOf(identity), store };
       },
     });
   };
   afterEach(() => vi.unstubAllEnvs());
 
-  it.each([owner, guest, secondGuest])("admits the configured account %s", async (objectId) => {
-    const response = await request(app()).get("/api/access-probe")
-      .set("Cookie", signedIn(objectId, tenant.toUpperCase()));
+  it.each([owner, guest, secondGuest])("admits the signed-in identity %s", async (subject) => {
+    const response = await request(app()).get("/api/access-probe").set("Cookie", signedIn(subject));
     expect(response.status).toBe(404);
     expect(response.body.error).toBe("API route not found.");
   });
 
-  it("rejects anonymous and unlisted home-tenant accounts", async () => {
-    const application = app();
+  it("rejects anonymous requests and sessions issued for another provider", async () => {
+    const resolve = vi.fn(async () => { throw new Error("Must not resolve"); });
+    const application = app({ resolve });
     expect((await request(application).get("/api/access-probe")).status).toBe(401);
-    const response = await request(application).get("/api/access-probe")
-      .set("Cookie", signedIn("44444444-4444-4444-4444-444444444444"));
-    expect(response.status).toBe(403);
-    expect(response.body.code).toBe("not_authorized");
-  });
-
-  it("passes consumers-tenant identities to account resolution with lowercased email", async () => {
-    const resolve = vi.fn(async (identity: AuthenticatedIdentity) => {
-      return { user: { id: identity.objectId, displayName: identity.displayName, email: identity.email }, store: Object.create(Store.prototype) as Store };
-    });
-    const response = await request(app("", { resolve })).get("/api/access-probe")
-      .set("Cookie", signedIn(guest, CONSUMER_TENANT_ID, { email: "player@example.test" }));
-    expect(response.status).toBe(404);
-    expect(resolve).toHaveBeenCalledWith(expect.objectContaining({
-      tenantId: CONSUMER_TENANT_ID,
-      objectId: guest,
-      email: "player@example.test",
-    }));
-  });
-
-  it("passes the MSA owner identity to account resolution", async () => {
-    const resolve = vi.fn(async (identity: AuthenticatedIdentity) => {
-      return { user: { id: "owner-account", displayName: identity.displayName, email: identity.email }, store: Object.create(Store.prototype) as Store };
-    });
-    const response = await request(app("", { resolve })).get("/api/access-probe")
-      .set("Cookie", signedIn(guest, CONSUMER_TENANT_ID, { email: OWNER_EMAIL_DEFAULT, name: "Owner Director" }));
-    expect(response.status).toBe(404);
-    expect(resolve).toHaveBeenCalledWith(expect.objectContaining({
-      tenantId: CONSUMER_TENANT_ID,
-      objectId: guest,
-      email: OWNER_EMAIL_DEFAULT,
-    }));
-  });
-
-  it("rejects other tenants even when the email is the approver", async () => {
-    const resolve = vi.fn(async () => { throw new Error("Must not resolve unauthorized tenants"); });
-    const response = await request(app("", { resolve })).get("/api/access-probe")
-      .set("Cookie", signedIn(guest, owner, { email: "sardo.kiko@gmail.com" }));
-    expect(response.status).toBe(403);
-    expect(response.body.code).toBe("not_authorized");
+    const other = await request(application).get("/api/access-probe")
+      .set("Cookie", signedIn(owner, { admin: true }, { issuer: "https://other.example.com" }));
+    expect(other.status).toBe(401);
+    expect(other.body).toEqual({ error: "Authentication required.", code: "authentication_required" });
     expect(resolve).not.toHaveBeenCalled();
   });
 
-  it("rejects forged, tampered, expired and legacy identity headers before resolving an account", async () => {
-    const resolve = vi.fn(async () => { throw new AccountNotProvisionedError(); });
-    const application = app(undefined, { resolve });
+  it("passes the signed-in identity to account resolution", async () => {
+    const store = Object.create(Store.prototype) as Store;
+    const resolve = vi.fn(async (identity: AuthenticatedIdentity) => ({ user: userOf(identity), store }));
+    const profile = { email: "player@example.test", name: "Player One", username: "player1" };
+    const response = await request(app({ resolve })).get("/api/access-probe").set("Cookie", signedIn(guest, profile));
+    expect(response.status).toBe(404);
+    expect(resolve).toHaveBeenCalledWith({
+      issuer, subject: guest, username: "player1", displayName: "Player One", email: "player@example.test",
+      groups: ["family"], admin: false,
+    } satisfies AuthenticatedIdentity);
+    await request(app({ resolve })).get("/api/access-probe").set("Cookie", signedIn(owner, { admin: true }));
+    expect(resolve).toHaveBeenLastCalledWith(expect.objectContaining({ subject: owner, groups: ["admins", "family"], admin: true }));
+  });
+
+  it.each([
+    [new AccessPendingError(), "access_pending"],
+    [new AccessDeniedError(), "access_denied"],
+  ] as const)("answers 403 %s without opening a world", async (error, code) => {
+    const resolve = vi.fn(async () => { throw error; });
+    const response = await request(app({ resolve })).get("/api/me").set("Cookie", signedIn(guest));
+    expect(response.status).toBe(403);
+    expect(response.headers["retry-after"]).toBeUndefined();
+    expect(response.body).toEqual({ error: error.message, code });
+    expect(resolve).toHaveBeenCalledOnce();
+  });
+
+  it("rejects forged, tampered, expired and proxy identity headers before resolving an account", async () => {
+    const resolve = vi.fn(async () => { throw new AccessPendingError(); });
+    const application = app({ resolve });
     const valid = signedIn(guest).split("=")[1];
     const [body, signature] = valid.split(".");
-    const tampered = Buffer.from(JSON.stringify({
-      ...JSON.parse(Buffer.from(body, "base64url").toString("utf8")), oid: owner,
+    const forge = (changes: object) => Buffer.from(JSON.stringify({
+      ...JSON.parse(Buffer.from(body, "base64url").toString("utf8")), ...changes,
     })).toString("base64url");
-    const legacyHeader = Buffer.from(JSON.stringify({ auth_typ: "aad", claims: [
-      { typ: "oid", val: owner }, { typ: "tid", val: tenant },
-    ] })).toString("base64");
     for (const attempt of [
-      { cookie: `${sessionCookieName(true)}=${tampered}.${signature}` },
-      { cookie: signedIn(owner, tenant, {}, { secret: "another-secret-abcdefghijklmnopqrstuvwxyz" }) },
-      { cookie: signedIn(owner, tenant, {}, { issuedAt: new Date(Date.now() - 2 * 3600_000) }) },
+      { cookie: `${sessionCookieName(true)}=${forge({ sub: owner })}.${signature}` },
+      { cookie: `${sessionCookieName(true)}=${forge({ adm: true, groups: ["admins"] })}.${signature}` },
+      { cookie: signedIn(owner, {}, { secret: "another-secret-abcdefghijklmnopqrstuvwxyz" }) },
+      { cookie: signedIn(owner, {}, { issuedAt: new Date(Date.now() - 2 * 3600_000) }) },
       { cookie: `touchline_session=${valid}` },
-      { header: legacyHeader },
+      // Forward-auth headers (Caddy + Authelia) are never trusted: only the signed OIDC session counts.
+      { headers: { "Remote-User": "owner", "Remote-Groups": "admins", "Remote-Email": "owner@example.test" } },
     ]) {
       const probe = request(application).get("/api/me");
       if (attempt.cookie) probe.set("Cookie", attempt.cookie);
-      if (attempt.header) probe.set("x-ms-client-principal", attempt.header);
+      if (attempt.headers) probe.set(attempt.headers);
       const response = await probe;
       expect(response.status).toBe(401);
       expect(response.body).toEqual({ error: "Authentication required.", code: "authentication_required" });
@@ -178,117 +170,130 @@ describe("hosted invitation access (no database)", () => {
     const signedOut = await request(application).get("/auth/signed-out");
     expect(signedOut.status).toBe(200);
     expect(signedOut.text).toContain("You're signed out");
-    expect((await request(application).get("/invite")).status).toBe(200);
+    expect((await request(application).get("/invite")).headers.location).toBe("/auth/login?returnTo=%2Finvite");
+    expect((await request(application).get("/admin")).headers.location).toBe("/auth/login?returnTo=%2Fadmin");
+    const retiredInvites = await request(application).get("/admin/invites");
+    expect(retiredInvites.status).toBe(301);
+    expect(retiredInvites.headers.location).toBe("/admin");
     expect((await request(application).get("/squad").set("Cookie", signedIn(owner))).status).not.toBe(302);
     expect((await request(application).post("/squad")).status).toBe(401);
   });
 
-  it.each([owner, guest])("denies an unprovisioned allowed account without an owner fallback: %s", async (objectId) => {
-    const resolve = vi.fn(async () => { throw new AccountNotProvisionedError(); });
-    const application = app(undefined, { resolve });
-    const response = await request(application).get("/api/me")
-      .set("Cookie", signedIn(objectId));
-    expect(response.status).toBe(403);
-    expect(response.body.code).toBe("account_not_provisioned");
-    expect(resolve).toHaveBeenCalledOnce();
-  });
-
   it("keeps anonymous health public without invoking account resolution", async () => {
     const resolve = vi.fn(async () => { throw new Error("Must not resolve health"); });
-    const response = await request(app(undefined, { resolve })).get("/api/health");
+    const response = await request(app({ resolve })).get("/api/health");
     expect(response.status).toBe(200);
     expect(response.body).toEqual({ status: "ok" });
     expect(resolve).not.toHaveBeenCalled();
   });
 
-  it("keeps owner-only access when no guest IDs are configured", async () => {
-    const application = app("");
-    expect((await request(application).get("/api/access-probe")
-      .set("Cookie", signedIn(guest))).status).toBe(403);
-    expect((await request(application).get("/api/access-probe")
-      .set("Cookie", signedIn(owner))).status).toBe(404);
+  it("fails on removed security variables and only warns about removed email variables", () => {
+    for (const name of ["OWNER_OBJECT_ID", "ALLOWED_USER_OBJECT_IDS", "AUTH_HOME_TENANT_ID", "AZURE_TENANT_ID"]) {
+      expect(() => readApiConfiguration({ ...configuration, [name]: owner }), name).toThrow(`removed: ${name}`);
+      expect(() => readApiConfiguration({ API_HOST: "127.0.0.1", [name]: owner }), name).toThrow(`removed: ${name}`);
+    }
+    expect(readApiConfiguration({ ...configuration, OWNER_OBJECT_ID: " " }).warnings).toEqual([]);
+    expect(() => readApiConfiguration({ ...configuration, INVITE_DB_SIZE_LIMIT_GB: "8" }))
+      .toThrow("INVITE_DB_SIZE_LIMIT_GB was renamed to DB_SIZE_LIMIT_GB");
+    expect(readApiConfiguration(configuration).warnings).toEqual([]);
+    expect(readApiConfiguration({
+      ...configuration,
+      INVITE_SIGNING_SECRET: "12345678901234567890123456789012",
+      EMAIL_TRANSPORT: "gmail",
+      SMTP_USER: "touchline@example.test",
+      SMTP_PASS: "app-password",
+      APPROVER_EMAIL: "owner@example.test",
+      OWNER_EMAIL: "owner@example.test",
+    }).warnings).toEqual([
+      "removed and ignored (email delivery no longer exists): INVITE_SIGNING_SECRET, EMAIL_TRANSPORT, APPROVER_EMAIL, OWNER_EMAIL, SMTP_PASS, SMTP_USER.",
+    ]);
   });
 
-  it("refuses email addresses and malformed object IDs in the allowlist", () => {
-    expect(() => readApiConfiguration({ ...configuration, ALLOWED_USER_OBJECT_IDS: "guest@example.com" }))
-      .toThrow("Entra object UUIDs");
-    expect(() => readApiConfiguration({ ...configuration, ALLOWED_USER_OBJECT_IDS: "not-an-id" }))
-      .toThrow("Entra object UUIDs");
-  });
-
-  it("validates invite and mail configuration", () => {
+  it("reads access capacity and the admin group", () => {
     expect(readApiConfiguration(configuration)).toEqual(expect.objectContaining({
-      approverEmail: "sardo.kiko@gmail.com",
-      ownerEmail: OWNER_EMAIL_DEFAULT,
+      adminGroup: "admins",
       maxPlayers: 10,
-      inviteDbSizeLimitGb: 24,
-      emailTransport: "gmail",
+      dbSizeLimitGb: 24,
+      warnings: [],
     }));
-    expect(readApiConfiguration({ ...configuration, EMAIL_TRANSPORT: "disabled" }).emailTransport).toBe("disabled");
-    expect(() => readApiConfiguration({ ...configuration, INVITE_SIGNING_SECRET: "short" }))
-      .toThrow("INVITE_SIGNING_SECRET");
-    expect(() => readApiConfiguration({ ...configuration, EMAIL_TRANSPORT: "log" }))
-      .toThrow("EMAIL_TRANSPORT must be gmail or disabled when hosted");
-    expect(() => readApiConfiguration({ ...configuration, MAX_PLAYERS: "0" }))
-      .toThrow("MAX_PLAYERS");
-    expect(() => readApiConfiguration({ ...configuration, APPROVER_EMAIL: "not-an-email" }))
-      .toThrow("APPROVER_EMAIL");
-    expect(() => readApiConfiguration({ ...configuration, OWNER_EMAIL: "not-an-email" }))
-      .toThrow("OWNER_EMAIL");
+    expect(readApiConfiguration({ ...configuration, MAX_PLAYERS: "4", DB_SIZE_LIMIT_GB: "2.5", ADMIN_GROUP: " touchline-admins " }))
+      .toEqual(expect.objectContaining({ maxPlayers: 4, dbSizeLimitGb: 2.5, adminGroup: "touchline-admins" }));
+    expect(readApiConfiguration({ ...configuration, ADMIN_GROUP: "touchline-admins" }).auth?.adminGroup).toBe("touchline-admins");
+    for (const [overrides, message] of [
+      [{ MAX_PLAYERS: "0" }, "MAX_PLAYERS"],
+      [{ MAX_PLAYERS: "2.5" }, "MAX_PLAYERS"],
+      [{ DB_SIZE_LIMIT_GB: "0" }, "DB_SIZE_LIMIT_GB"],
+      [{ DB_SIZE_LIMIT_GB: "lots" }, "DB_SIZE_LIMIT_GB"],
+      [{ ADMIN_GROUP: "touchline admins" }, "ADMIN_GROUP"],
+      [{ ADMIN_GROUP: "a".repeat(65) }, "ADMIN_GROUP"],
+    ] as const)
+      expect(() => readApiConfiguration({ ...configuration, ...overrides }), message).toThrow(message);
   });
 
   it("validates hosted sign-in configuration strictly", () => {
     const hosted = readApiConfiguration(configuration);
-    expect(hosted).toEqual(expect.objectContaining({
-      hosted: true,
-      homeTenantId: tenant,
-      trustProxy: "loopback",
-    }));
-    expect(hosted.auth).toEqual(expect.objectContaining({
-      issuer: `https://login.microsoftonline.com/${CONSUMER_TENANT_ID}/v2.0`,
-      clientId: "touchline-client",
-      clientSecret: undefined,
+    expect(hosted).toEqual(expect.objectContaining({ hosted: true, trustProxy: "loopback" }));
+    expect(hosted.auth).toEqual({
+      issuer,
+      clientId: "touchline",
+      clientSecret: "client-secret-value",
+      logoutUrl: undefined,
+      adminGroup: "admins",
+      sessionSecret,
       sessionTtlSeconds: 8 * 3600,
+      appOrigin: "https://touchline.example.com",
       redirectUri: "https://touchline.example.com/auth/callback",
       postLogoutRedirectUri: "https://touchline.example.com/auth/signed-out",
       secureCookies: true,
-    }));
-    const { AUTH_HOME_TENANT_ID: _home, ALLOWED_USER_OBJECT_IDS: _allowed, OWNER_OBJECT_ID: _owner, ...consumersOnly } = configuration;
-    expect(readApiConfiguration(consumersOnly)).toEqual(expect.objectContaining({ homeTenantId: "", ownerObjectId: "" }));
-    expect(readApiConfiguration({ ...consumersOnly, OWNER_OBJECT_ID: owner }).ownerObjectId).toBe(owner);
+    });
     expect(readApiConfiguration({ ...configuration, REQUIRE_AUTH: "false", API_HOST: "127.0.0.1", APP_ORIGIN: undefined }))
       .toEqual(expect.objectContaining({ hosted: false, auth: undefined, trustProxy: false }));
+    expect(readApiConfiguration({ API_HOST: "127.0.0.1" }).auth).toBeUndefined();
     expect(readApiConfiguration({ ...configuration, TRUST_PROXY: "1" }).trustProxy).toBe(1);
     expect(readApiConfiguration({ ...configuration, TRUST_PROXY: "loopback, 172.18.0.0/16" }).trustProxy).toBe("loopback,172.18.0.0/16");
     expect(readApiConfiguration({ ...configuration, SESSION_TTL_HOURS: "24" }).auth?.sessionTtlSeconds).toBe(24 * 3600);
-    expect(readApiConfiguration({ ...configuration, OIDC_ISSUER: "https://accounts.example.com", OIDC_CLIENT_SECRET: "s3cret" }).auth)
-      .toEqual(expect.objectContaining({ issuer: "https://accounts.example.com", clientSecret: "s3cret" }));
+    expect(readApiConfiguration({ ...configuration, OIDC_LOGOUT_URL: `${issuer}/logout?rd=https%3A%2F%2Ftouchline.example.com` }).auth?.logoutUrl)
+      .toBe(`${issuer}/logout?rd=https%3A%2F%2Ftouchline.example.com`);
     for (const [overrides, message] of [
       [{ API_HOST: "0.0.0.0", REQUIRE_AUTH: undefined }, "Public API binding requires explicit REQUIRE_AUTH=true"],
       [{ REQUIRE_AUTH: "yes" }, "REQUIRE_AUTH must be true or false"],
       [{ APP_ORIGIN: undefined }, "REQUIRE_AUTH=true requires APP_ORIGIN"],
       [{ APP_ORIGIN: "http://touchline.example.com" }, "APP_ORIGIN must be an exact HTTPS hosted origin"],
       [{ APP_ORIGIN: "https://touchline.example.com/" }, "APP_ORIGIN must be an exact HTTPS hosted origin"],
+      [{ OIDC_ISSUER: undefined }, "REQUIRE_AUTH=true requires OIDC_ISSUER"],
+      [{ OIDC_ISSUER: " " }, "REQUIRE_AUTH=true requires OIDC_ISSUER"],
+      [{ OIDC_ISSUER: "http://auth.example.com" }, "OIDC_ISSUER"],
+      [{ OIDC_ISSUER: "auth.example.com" }, "OIDC_ISSUER"],
+      [{ OIDC_ISSUER: "https://user:pass@auth.example.com" }, "OIDC_ISSUER"],
+      [{ OIDC_ISSUER: "https://auth.example.com/?client=x" }, "OIDC_ISSUER"],
       [{ OIDC_CLIENT_ID: undefined }, "OIDC_CLIENT_ID"],
-      [{ OIDC_CLIENT_ID: undefined, AUTH_CLIENT_ID: "old" }, "AUTH_CLIENT_ID was renamed to OIDC_CLIENT_ID"],
-      [{ AUTH_HOME_TENANT_ID: undefined, AZURE_TENANT_ID: tenant }, "AZURE_TENANT_ID was renamed to AUTH_HOME_TENANT_ID"],
-      [{ OIDC_ISSUER: "http://login.example.com" }, "OIDC_ISSUER"],
-      [{ OIDC_ISSUER: "https://login.example.com/?tenant=x" }, "OIDC_ISSUER"],
+      [{ OIDC_CLIENT_ID: "touch line" }, "OIDC_CLIENT_ID"],
+      [{ OIDC_CLIENT_SECRET: undefined }, "OIDC_CLIENT_SECRET"],
+      [{ OIDC_LOGOUT_URL: "http://auth.example.com/logout" }, "OIDC_LOGOUT_URL"],
+      [{ OIDC_LOGOUT_URL: "/logout" }, "OIDC_LOGOUT_URL"],
       [{ SESSION_SECRET: undefined }, "SESSION_SECRET"],
       [{ SESSION_SECRET: "too-short" }, "SESSION_SECRET"],
-      [{ SESSION_SECRET: configuration.INVITE_SIGNING_SECRET }, "SESSION_SECRET must differ from INVITE_SIGNING_SECRET"],
+      [{ OIDC_CLIENT_SECRET: sessionSecret }, "SESSION_SECRET must differ from OIDC_CLIENT_SECRET"],
       [{ SESSION_TTL_HOURS: "0" }, "SESSION_TTL_HOURS"],
       [{ SESSION_TTL_HOURS: "1.5" }, "SESSION_TTL_HOURS"],
       [{ TRUST_PROXY: "true" }, "TRUST_PROXY=true"],
       [{ TRUST_PROXY: "proxy.example" }, "TRUST_PROXY must be"],
       [{ TRUST_PROXY: "10.0.0.0/33" }, "TRUST_PROXY must be"],
-      [{ AUTH_HOME_TENANT_ID: "not-a-tenant" }, "AUTH_HOME_TENANT_ID"],
-      [{ AUTH_HOME_TENANT_ID: CONSUMER_TENANT_ID }, "AUTH_HOME_TENANT_ID"],
-      [{ OWNER_OBJECT_ID: undefined }, "AUTH_HOME_TENANT_ID requires OWNER_OBJECT_ID"],
-      [{ AUTH_HOME_TENANT_ID: undefined }, "ALLOWED_USER_OBJECT_IDS requires AUTH_HOME_TENANT_ID"],
-      [{ AUTH_HOME_TENANT_ID: undefined, ALLOWED_USER_OBJECT_IDS: "", OWNER_OBJECT_ID: "owner" }, "OWNER_OBJECT_ID must be an object UUID"],
     ] as const)
       expect(() => readApiConfiguration({ ...configuration, ...overrides }), message).toThrow(message);
+  });
+
+  it("allows sign-out redirects only to the provider in the CSP form-action", async () => {
+    const csp = async (environment: Record<string, string>) => {
+      for (const [name, value] of Object.entries({ ...configuration, ...environment })) vi.stubEnv(name, value);
+      const store = Object.create(Store.prototype) as Store;
+      const application = createApp(store, { resolve: async (identity) => ({ user: userOf(identity), store }) });
+      return (await request(application).get("/api/health")).headers["content-security-policy"];
+    };
+    expect(await csp({})).toMatch(/form-action 'self' https:\/\/auth\.example\.com$/);
+    expect(await csp({ OIDC_LOGOUT_URL: `${issuer}/logout` })).toMatch(/form-action 'self' https:\/\/auth\.example\.com$/);
+    expect(await csp({ OIDC_LOGOUT_URL: "https://sso.example.net/logout" }))
+      .toMatch(/form-action 'self' https:\/\/auth\.example\.com https:\/\/sso\.example\.net$/);
   });
 
   it("preserves same-origin referrers for hosted cookie CSRF validation", async () => {
@@ -296,9 +301,9 @@ describe("hosted invitation access (no database)", () => {
     expect(response.headers["referrer-policy"]).toBe("same-origin");
   });
 
-  it.each([owner, guest, secondGuest])("admits same-origin mutations for %s", async (objectId) => {
+  it.each([owner, guest, secondGuest])("admits same-origin mutations for %s", async (subject) => {
     const response = await request(app()).post("/api/access-probe")
-      .set("Cookie", signedIn(objectId))
+      .set("Cookie", signedIn(subject))
       .set("Origin", configuration.APP_ORIGIN)
       .set("Referer", `${configuration.APP_ORIGIN}/`)
       .send({ type: "read-news" });
@@ -308,7 +313,7 @@ describe("hosted invitation access (no database)", () => {
 
   it.each([undefined, "null", "https://other.example.com"])("rejects mutations with untrusted origin %s", async (origin) => {
     const resolve = vi.fn(async () => { throw new Error("Untrusted origins must not resolve accounts"); });
-    const mutation = request(app(undefined, { resolve })).post("/api/careers/prepare")
+    const mutation = request(app({ resolve })).post("/api/careers/prepare")
       .set("Cookie", signedIn(guest))
       .set("Referer", `${configuration.APP_ORIGIN}/`);
     if (origin) mutation.set("Origin", origin);
@@ -328,7 +333,7 @@ describe("SQL opened on the first request that needs it (no database)", () => {
       store,
       accounts: {
         async resolve(identity: AuthenticatedIdentity) {
-          return { user: { id: identity.objectId, displayName: identity.displayName, email: identity.email }, store };
+          return { user: userOf(identity), store };
         },
       },
     };
@@ -343,7 +348,7 @@ describe("SQL opened on the first request that needs it (no database)", () => {
     expect((await request(application).get("/api/bootstrap")).status).toBe(401);
     expect((await request(application).get("/api/me").set("Cookie", `${sessionCookieName(true)}=not.a-session`)).status).toBe(401);
     expect((await request(application).get("/api/me")
-      .set("Cookie", signedIn("44444444-4444-4444-4444-444444444444"))).status).toBe(403);
+      .set("Cookie", signedIn(owner, {}, { issuer: "https://other.example.com" }))).status).toBe(401);
     expect((await request(application).post("/api/careers/prepare")
       .set("Cookie", signedIn(owner)).send({})).status).toBe(403);
     expect((await request(application).get("/")).status).toBeLessThan(500);
@@ -363,8 +368,8 @@ describe("SQL opened on the first request that needs it (no database)", () => {
     });
     let finish: (database: ReturnType<typeof fakeDatabase>) => void = () => {};
     open.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
-    const pending = [owner, guest, secondGuest].map((objectId) =>
-      request(application).get("/api/access-probe").set("Cookie", signedIn(objectId)).then((response) => response));
+    const pending = [owner, guest, secondGuest].map((subject) =>
+      request(application).get("/api/access-probe").set("Cookie", signedIn(subject)).then((response) => response));
     await vi.waitFor(() => expect(open).toHaveBeenCalledTimes(2));
     finish(fakeDatabase());
     for (const response of await Promise.all(pending)) {
@@ -383,11 +388,13 @@ describe.skipIf(!sqlIntegration)("per-user HTTP isolation (two isolated SQL sche
   let ownerWorld: Store;
   let app: ReturnType<typeof createApp>;
   let baseline: { file: string; name: string };
-  const access = (method: "get" | "post" | "patch" | "delete", path: string, objectId = owner) =>
+  const access = (method: "get" | "post" | "patch" | "delete", path: string, subject = owner) =>
     request(app)[method](path)
-      .set("Cookie", signedIn(objectId, tenant, {
-        name: objectId === owner ? "Owner Director" : "Guest Director",
+      .set("Cookie", signedIn(subject, {
+        name: subject === owner ? "Owner Director" : "Guest Director",
+        username: subject === owner ? "owner" : "guest",
         email: "shared@example.test",
+        admin: subject === owner,
       }))
       .set("Origin", configuration.APP_ORIGIN);
 
@@ -416,13 +423,10 @@ describe.skipIf(!sqlIntegration)("per-user HTTP isolation (two isolated SQL sche
     const worlds = new Map([[owner, ownerWorld], [guest, root]]);
     app = createApp(root, {
       async resolve(identity: AuthenticatedIdentity) {
-        const store = worlds.get(identity.objectId);
-        if (identity.tenantId !== tenant || !store) throw new AccountNotProvisionedError();
-        const user: AccountUser = {
-          id: identity.objectId === owner ? "owner-account" : "guest-account",
-          displayName: identity.displayName,
-          email: identity.email,
-        };
+        const store = worlds.get(identity.subject);
+        if (identity.issuer !== issuer || !store) throw new AccessPendingError();
+        // The admin flag in /api/me must follow the session's groups, not the stored account.
+        const user = { ...userOf(identity, identity.subject === owner ? "owner-account" : "guest-account"), admin: false };
         return { user, store };
       },
     });
@@ -445,7 +449,7 @@ describe.skipIf(!sqlIntegration)("per-user HTTP isolation (two isolated SQL sche
       .query({ schema: root.schemaName, userId: guest, email: "shared@example.test" });
     expect(session.status).toBe(200);
     expect(session.body).toEqual({
-      user: { id: "owner-account", displayName: "Owner Director", email: "shared@example.test" },
+      user: { id: "owner-account", username: "owner", displayName: "Owner Director", email: "shared@example.test", admin: true },
       hasWorld: false,
       activity: null,
     });
@@ -460,25 +464,27 @@ describe.skipIf(!sqlIntegration)("per-user HTTP isolation (two isolated SQL sche
       careerName: "Not prepared", background: "Former scout", clubId: 1,
     })).status).toBe(409);
     expect((await access("get", "/api/me", guest)).body).toEqual({
-      user: { id: "guest-account", displayName: "Guest Director", email: "shared@example.test" },
+      user: { id: "guest-account", username: "guest", displayName: "Guest Director", email: "shared@example.test", admin: false },
       hasWorld: true,
       activity: null,
     });
     expect((await access("get", "/api/bootstrap", guest)).body.state.director.name).toBe("Existing guest director");
     const renamed = await access("get", "/api/me")
-      .set("Cookie", signedIn(owner, tenant, { name: "Updated owner", email: "updated@example.test" }));
-    expect(renamed.body.user).toEqual({ id: "owner-account", displayName: "Updated owner", email: "updated@example.test" });
+      .set("Cookie", signedIn(owner, { name: "Updated owner", username: "owner2", email: "updated@example.test" }));
+    expect(renamed.body.user).toEqual({
+      id: "owner-account", username: "owner2", displayName: "Updated owner", email: "updated@example.test", admin: false,
+    });
     expect(await new Saves(ownerWorld).currentState()).toBeNull();
     expect(generate).not.toHaveBeenCalled();
   });
 
   it("denies foreign save export, restore, load and deletion in both directions", async () => {
-    const deny = async (objectId: string, file: string) => {
-      expect((await access("get", "/api/saves/export", objectId).query({ file })).status).toBe(404);
+    const deny = async (subject: string, file: string) => {
+      expect((await access("get", "/api/saves/export", subject).query({ file })).status).toBe(404);
       for (const [method, path] of [
         ["post", "/api/saves/restore"], ["post", "/api/careers/load"], ["delete", "/api/careers"],
       ] as const) {
-        const response = await access(method, path, objectId)
+        const response = await access(method, path, subject)
           .send({ file, schema: root.schemaName, userId: guest });
         expect(response.status, path).toBe(404);
       }
@@ -513,7 +519,7 @@ describe.skipIf(!sqlIntegration)("per-user HTTP isolation (two isolated SQL sche
       const session = await access("get", "/api/me").timeout({ response: 20_000 });
       expect(session.status).toBe(200);
       expect(session.body).toEqual({
-        user: { id: "owner-account", displayName: "Owner Director", email: "shared@example.test" },
+        user: { id: "owner-account", username: "owner", displayName: "Owner Director", email: "shared@example.test", admin: true },
         hasWorld: null,
         activity: { operation: "prepare_world", startedAt: expect.any(String) },
       });
@@ -736,57 +742,6 @@ describe.skipIf(!sqlIntegration)("per-user HTTP isolation (two isolated SQL sche
     expect((await ownerSaves.list()).map((slot) => slot.file)).toEqual([kept.file]);
   }, 300_000);
 
-  it("refuses to delete the protected legacy dbo career without reading or changing its world or snapshots", async () => {
-    await generateWorld(ownerWorld, { ...fixture, seed: "protected-legacy-world" });
-    const initial = await stateOf(ownerWorld);
-    await ownerWorld.setMeta("state", { ...initial, started: true, careerId: "legacy-career", careerName: "Legacy career" });
-    const snapshot = await new Saves(ownerWorld).create("Legacy snapshot");
-    // Test mode forbids a real dbo store, so the isolated world is presented under the legacy schema name.
-    const legacy = new Proxy(Object.create(ownerWorld) as Store, {
-      get(_target, property) {
-        if (property === "schemaName") return "dbo";
-        const value = Reflect.get(ownerWorld, property, ownerWorld);
-        return typeof value === "function" ? value.bind(ownerWorld) : value;
-      },
-    });
-    app = createApp(root, {
-      async resolve(identity: AuthenticatedIdentity) {
-        if (identity.tenantId !== tenant || identity.objectId !== secondGuest) throw new AccountNotProvisionedError();
-        return { user: { id: "legacy-account", displayName: identity.displayName, email: identity.email }, store: legacy };
-      },
-    });
-    const countsQuery = WORLD_TABLES.map((table) =>
-      `SELECT '${table}' AS "table", count(*) AS rows FROM ${tableName(ownerWorld.schemaName, table)}`).join(" UNION ALL ");
-    const chunkQuery = "SELECT chunks.save_id, chunks.ordinal, chunks.data FROM save_chunks AS chunks ORDER BY chunks.save_id, chunks.ordinal";
-    const before = {
-      state: await stateOf(ownerWorld),
-      slots: await new Saves(ownerWorld).list(),
-      chunks: await ownerWorld.all(chunkQuery),
-      counts: await ownerWorld.all(countsQuery),
-      guest: await stateOf(root),
-    };
-    expect(before.slots.map((slot) => slot.file)).toEqual([snapshot.file]);
-    expect(before.chunks.length).toBeGreaterThan(0);
-    const spies = (["get", "all", "run", "exec", "transaction", "discardWorld"] as const)
-      .map((method) => vi.spyOn(ownerWorld, method).mockImplementation(() => {
-        throw new Error("A protected career must not reach SQL.");
-      }));
-
-    const refused = await access("delete", "/api/careers/active", secondGuest)
-      .send({ careerId: "legacy-career", seed: before.state.seed });
-    expect(refused.status).toBe(409);
-    expect(refused.headers["retry-after"]).toBeUndefined();
-    expect(refused.body).toEqual({ error: "This career is protected and can't be deleted here.", code: "career_protected" });
-    for (const spy of spies) expect(spy).not.toHaveBeenCalled();
-
-    vi.restoreAllMocks();
-    expect(await stateOf(ownerWorld)).toEqual(before.state);
-    expect(await new Saves(ownerWorld).list()).toEqual(before.slots);
-    expect(await ownerWorld.all(chunkQuery)).toEqual(before.chunks);
-    expect(await ownerWorld.all(countsQuery)).toEqual(before.counts);
-    expect(await stateOf(root)).toEqual(before.guest);
-  }, 300_000);
-
   it("does not make another user's mutation wait for an in-flight reader", async () => {
     let release!: () => void;
     let entered!: () => void;
@@ -849,7 +804,9 @@ describe.skipIf(!sqlIntegration)("per-user HTTP isolation (two isolated SQL sche
     const local = createApp(ownerWorld, { resolve });
     const response = await request(local).get("/api/me").set("Cookie", signedIn(guest));
     expect(response.status).toBe(200);
-    expect(response.body).toEqual({ user: { id: "local", displayName: "Local director", email: null }, hasWorld: false, activity: null });
+    expect(response.body).toEqual({
+      user: { id: "local", username: "local", displayName: "Local director", email: null, admin: false },
+      hasWorld: false, activity: null });
     expect(resolve).not.toHaveBeenCalled();
     expect((await request(local).get("/api/me").set("Host", "untrusted.example")
       .set("Cookie", signedIn(owner))).status).toBe(403);

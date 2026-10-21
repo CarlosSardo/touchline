@@ -1,17 +1,14 @@
-import type { WorldActivity } from "../shared/api.ts";
+import type { AccessIssueCode as ForbiddenCode, WorldActivity } from "../shared/api.ts";
 
-export type AccessIssueCode =
-  | "authentication_required"
-  | "invite_required"
-  | "account_not_provisioned"
-  | "not_authorized"
-  | "capacity_unavailable";
+/** 401 authentication_required, or one of the 403 codes for a signed-in identity without access. */
+export type AccessIssueCode = "authentication_required" | ForbiddenCode;
 
 export interface AccessIssue {
   code: AccessIssueCode;
   status: number;
   message: string;
-  retryAfter?: number;
+  /** Set when an explicit re-check from the access screen ended on this refusal again. */
+  rechecked?: boolean;
 }
 
 export class ApiError extends Error {
@@ -35,11 +32,10 @@ export class ApiError extends Error {
 
 const accessIssueCodes = new Set<string>([
   "authentication_required",
-  "invite_required",
-  "account_not_provisioned",
+  "access_pending",
+  "access_denied",
   "not_authorized",
-  "capacity_unavailable",
-]);
+] satisfies AccessIssueCode[]);
 
 export function isAccessIssueCode(code: string | undefined): code is AccessIssueCode {
   return typeof code === "string" && accessIssueCodes.has(code);
@@ -51,9 +47,8 @@ export function isAccessIssue(failure: unknown): failure is ApiError & {
   return (
     failure instanceof ApiError &&
     isAccessIssueCode(failure.code) &&
-    ((failure.status === 401 && failure.code === "authentication_required") ||
-      (failure.status === 403 && failure.code !== "capacity_unavailable" && failure.code !== "authentication_required") ||
-      (failure.status === 503 && failure.code === "capacity_unavailable"))
+    (failure.status === 401) === (failure.code === "authentication_required") &&
+    (failure.status === 401 || failure.status === 403)
   );
 }
 
@@ -63,7 +58,6 @@ export function accessIssueFromFailure(failure: unknown): AccessIssue | null {
     code: failure.code,
     status: failure.status,
     message: failure.message,
-    retryAfter: failure.retryAfter,
   };
 }
 

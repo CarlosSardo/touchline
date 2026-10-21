@@ -21,16 +21,16 @@ import {
   validateSqlSchema,
 } from "./sql-config.ts";
 import {
-  accountsTableSql,
+  accessRequestsTableSql,
   appearanceBackfill,
   IDENTITY_TABLES,
-  inviteRequestsTableSql,
   migrationTableSql,
   quoteIdentifier,
   schemaMigrations,
   sqlLiteral,
   STORE_TABLES,
   tableName,
+  usersTableSql,
   WORLD_TABLES,
 } from "./sql-schema.ts";
 
@@ -314,8 +314,8 @@ describe("SQL binding (no database)", () => {
     const schema = "touchline_test_review";
     for (const query of [
       migrationTableSql(schema),
-      accountsTableSql("accounts"),
-      inviteRequestsTableSql("accounts"),
+      usersTableSql("accounts"),
+      accessRequestsTableSql("accounts"),
       ...schemaMigrations(schema).flatMap((migration) => migration.statements),
       ...appearanceBackfill(schema),
     ]) {

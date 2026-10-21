@@ -100,6 +100,8 @@ interface GameContextValue {
     message?: string,
   ) => Promise<ActionResult | undefined>;
   refresh: () => Promise<Bootstrap | null | undefined>;
+  /** Re-fetches /api/me from an access screen; a refusal comes back with `rechecked` set. */
+  checkAccess: () => Promise<void>;
   advance: (days: number) => Promise<void>;
   changeSettings: (settings: Settings) => Promise<void>;
   confirm: (title: string, message: string, action: () => void) => void;
@@ -378,6 +380,7 @@ export function GameProvider({ children }: { children: ReactNode }) {
   const [bootstrap, setBootstrap] = useState<Bootstrap | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [accessIssue, setAccessIssue] = useState<AccessIssue | null>(null);
+  const accessRecheck = useRef(false);
   const [revision, setRevision] = useState(0);
   const [page, setPage] = useState<Page>(() =>
     pages.includes(location.hash.slice(1).split("/")[0] as Page)
@@ -615,7 +618,7 @@ export function GameProvider({ children }: { children: ReactNode }) {
       resetAccount();
       setLoading(false);
       if (access) {
-        setAccessIssue(access);
+        setAccessIssue({ ...access, rechecked: accessRecheck.current });
         setError(null);
       } else {
         setError(
@@ -636,6 +639,14 @@ export function GameProvider({ children }: { children: ReactNode }) {
       return await loadSession();
     } catch {
       return undefined;
+    }
+  }
+  async function checkAccess() {
+    accessRecheck.current = true;
+    try {
+      await refresh();
+    } finally {
+      accessRecheck.current = false;
     }
   }
   async function refreshAfterAction() {
@@ -695,7 +706,7 @@ export function GameProvider({ children }: { children: ReactNode }) {
       resetAccount();
       setLoading(false);
       if (access) {
-        setAccessIssue(access);
+        setAccessIssue({ ...access, rechecked: accessRecheck.current });
         setError(null);
       } else {
         setError(failure.message);
@@ -1019,6 +1030,7 @@ export function GameProvider({ children }: { children: ReactNode }) {
         dismissToast: () => setToast(null),
         act,
         refresh,
+        checkAccess,
         advance: advanceDays,
         changeSettings,
         confirm: (title, message, action) => {

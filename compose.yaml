@@ -1,5 +1,5 @@
 # Touchline on a single host (Raspberry Pi 4 / 8 GB / SSD, arm64; also works on amd64).
-#   cp .env.example .env    # set POSTGRES_PASSWORD, SQL_PASSWORD and the auth settings
+#   cp .env.example .env    # set POSTGRES_PASSWORD, SQL_PASSWORD and the sign-in settings (OIDC_*, SESSION_SECRET)
 #   docker compose up -d --wait                  # PostgreSQL 18 + app on 127.0.0.1:3001
 #   docker compose --profile https up -d --wait  # also Caddy with automatic HTTPS (TOUCHLINE_DOMAIN)
 # Development only needs the database: docker compose up -d --wait postgres

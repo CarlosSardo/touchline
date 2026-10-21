@@ -1008,6 +1008,12 @@
   min-width: 0;
   overflow-wrap: anywhere;
 }
+.account-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 12px;
+}
 .career-start-content {
   position: relative;
   max-width: 1150px;

@@ -1,7 +1,6 @@
 import { parseArgs } from "node:util";
 import { registeredAccountSchemas, validateAccountSchema } from "../server/accounts.ts";
 import { isMain } from "./data-export.ts";
-import { inviteRequestsTableSql } from "../server/sql-schema.ts";
 
 export async function main(args = process.argv.slice(2)) {
   const { values } = parseArgs({
@@ -18,7 +17,7 @@ export async function main(args = process.argv.slice(2)) {
   });
   if (values.help) {
     console.log(
-      "Usage: tsx scripts/db-migrate.ts [--dry-run] [--database NAME] [--registered --account-schema accounts]\n       tsx scripts/db-migrate.ts --apply --yes [--database NAME] [--registered --account-schema accounts]\nApplies versioned SQL schema migrations only. Never seeds a world. Startup does neither. Uses SQL_* connection settings.\nDefault: only SQL_SCHEMA (public when unset). --registered: every existing world in the separate account registry; missing registries/worlds fail closed.\nAccount registry initialization and new users require accounts-migrate.ts, never world migrations.",
+      "Usage: tsx scripts/db-migrate.ts [--dry-run] [--database NAME] [--registered --account-schema accounts]\n       tsx scripts/db-migrate.ts --apply --yes [--database NAME] [--registered --account-schema accounts]\nApplies versioned SQL schema migrations only. Never seeds a world. Startup does neither. Uses SQL_* connection settings.\nDefault: only SQL_SCHEMA (public when unset). --registered: every existing world in the separate account registry (none yet is fine); a missing registry or a missing registered world fails closed.\nThe registry itself is created by accounts-migrate.ts; accounts and their worlds are created by sign-in and /admin approvals, never by world migrations.",
     );
     return;
   }
@@ -56,16 +55,8 @@ export async function main(args = process.argv.slice(2)) {
   const { Store } = await import("../server/db.ts");
   const store = await Store.open(values.database);
   try {
-    if (accountSchema) {
-      const registry = store.forSchema(accountSchema);
-      try {
-        await registry.exec(inviteRequestsTableSql(accountSchema));
-      } finally {
-        await registry.close();
-      }
-    }
     const schemas = values.registered
-      ? await registeredAccountSchemas(store, accountSchema, { allowLegacyRegistry: false })
+      ? await registeredAccountSchemas(store, accountSchema)
       : [store.schemaName];
     for (const schema of schemas) {
       const scoped = schema === store.schemaName ? store : store.forSchema(schema);

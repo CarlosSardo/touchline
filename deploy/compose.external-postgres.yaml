@@ -3,7 +3,9 @@
 #   cp deploy/compose.external-postgres.yaml compose.yaml   # next to a .env (see .env.example)
 #   docker compose run --rm app npm run accounts:migrate -- --apply --yes   # once, creates the account registry
 #   docker compose up -d --wait
+#   then sign in as a member of ADMIN_GROUP and approve players at https://<host>/admin
 # The database and its owner role (SQL_DATABASE / SQL_USER) must exist; the role needs no superuser rights.
+# The container must reach OIDC_ISSUER (for example Authelia behind the same proxy) over HTTPS.
 name: touchline
 
 services:
@@ -30,6 +32,9 @@ services:
       # Loopback only: the reverse proxy on the host forwards HTTPS traffic here.
       - "${TOUCHLINE_BIND:-127.0.0.1}:${TOUCHLINE_PORT:-3001}:3001"
     networks: [postgres]
+    # When the provider's hostname resolves only on the host (for example Tailscale MagicDNS), map it to the host:
+    # extra_hosts:
+    #   - "auth.example.com:host-gateway"
     deploy:
       resources:
         limits:

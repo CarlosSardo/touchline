@@ -1,5 +1,6 @@
 import { expect, test as base, type Page, type Route } from "@playwright/test";
 import type {
+  AccessIssueCode,
   AccountSession,
   Bootstrap,
   SaveSlot,
@@ -12,8 +13,10 @@ import { DEFAULT_SETTINGS } from "../shared/rules.ts";
 
 const accountUser: AccountSession["user"] = {
   id: "ui-account-one",
+  username: "morgan",
   displayName: "Morgan Account",
   email: "morgan@example.test",
+  admin: false,
 };
 
 function preparedBootstrap(): Bootstrap {
@@ -115,6 +118,8 @@ interface AccountApi {
   /** Mirrors the server router slot: while set, every gated read answers 409 world_busy. */
   activity: WorldActivity | null;
   meStatus?: number;
+  /** With meStatus 403: the access code /api/me and /api/bootstrap refuse with. */
+  meCode?: AccessIssueCode;
   toleratedReads?: boolean;
   prepare?: (route: Route) => Promise<void>;
   start?: (route: Route) => Promise<void>;
@@ -144,15 +149,18 @@ const test = base.extend<{ accountApi: AccountApi }>({
       const request = route.request();
       const key = `${request.method()} ${new URL(request.url()).pathname}`;
       accountApi.requests.push(key);
+      if (accountApi.meStatus === 403 && accountApi.meCode && request.method() === "GET")
+        return route.fulfill({
+          status: 403,
+          json: { error: "Touchline access has not been granted.", code: accountApi.meCode },
+        });
       if (key === "GET /api/me") {
         if (accountApi.meStatus)
           return route.fulfill({
             status: accountApi.meStatus,
-            json: {
-              error: accountApi.meStatus === 401
-                ? "Your session has expired. Sign in again to continue."
-                : "Account lookup failed.",
-            },
+            json: accountApi.meStatus === 401
+              ? { error: "Authentication required.", code: "authentication_required" }
+              : { error: "Account lookup failed." },
           });
         const { user, hasWorld } = accountApi.session;
         return route.fulfill({
@@ -293,7 +301,10 @@ test("empty account profile does not prepare a world automatically", async ({
   const profile = page.getByRole("dialog", { name: "Account profile", exact: true });
   const identity = profile.getByRole("region", { name: "Signed-in account", exact: true });
   await expect(identity).toContainText(accountUser.displayName);
+  await expect(identity).toContainText(accountUser.username);
   await expect(identity).toContainText(accountUser.email!);
+  await expect(identity.getByRole("link", { name: "Admin", exact: true })).toHaveCount(0);
+  await expect(identity.getByRole("button", { name: "Sign out", exact: true })).toBeVisible();
   await expect(profile.getByLabel("Director name", { exact: true })).toHaveCount(0);
   await expect(profile.getByRole("button", { name: "Update profile", exact: true })).toHaveCount(0);
   await profile.locator(".sheet-footer").getByRole("button", { name: "Close", exact: true }).click();
@@ -303,6 +314,76 @@ test("empty account profile does not prepare a world automatically", async ({
   expect(accountApi.requests).toEqual(expect.arrayContaining([
     "GET /api/me", "GET /api/bootstrap", "GET /api/saves",
   ]));
+  expect(mutations(accountApi)).toEqual([]);
+});
+
+test("admins see an Admin link to /admin in the account profile and Settings", async ({
+  page, accountApi,
+}) => {
+  accountApi.session.user = { ...accountUser, admin: true };
+  await page.goto("/#start");
+  await page.getByRole("button", { name: `Account profile for ${accountUser.displayName}`, exact: true }).click();
+  const profile = page.getByRole("dialog", { name: "Account profile", exact: true });
+  const identity = profile.getByRole("region", { name: "Signed-in account", exact: true });
+  await expect(identity.getByRole("link", { name: "Admin", exact: true })).toHaveAttribute("href", "/admin");
+  await expect(identity.getByRole("button", { name: "Sign out", exact: true })).toBeVisible();
+  await profile.locator(".sheet-footer").getByRole("button", { name: "Close", exact: true }).click();
+
+  prepareWorld(accountApi);
+  accountApi.bootstrap!.state.started = true;
+  accountApi.toleratedReads = true;
+  await page.goto("/#settings");
+  await page.reload();
+  const settings = page.getByRole("region", { name: "Signed-in account", exact: true });
+  await expect(page.getByRole("heading", { name: "Settings", exact: true })).toBeVisible();
+  await expect(settings).toContainText(accountUser.username);
+  await expect(settings.getByRole("link", { name: "Admin", exact: true })).toHaveAttribute("href", "/admin");
+  await expect(settings.locator('form[method="post"][action="/auth/logout"]')
+    .getByRole("button", { name: "Sign out", exact: true })).toBeVisible();
+  expect(mutations(accountApi)).toEqual([]);
+});
+
+test("a pending access request waits for approval and Check again re-fetches the account", async ({
+  page, accountApi,
+}) => {
+  accountApi.meStatus = 403;
+  accountApi.meCode = "access_pending";
+  await page.goto("/#start");
+  const screen = page.getByRole("main").filter({ has: page.getByRole("heading", { name: "Waiting for approval", exact: true }) });
+  await expect(screen).toBeVisible();
+  await expect(screen).toContainText("an admin approves every new player");
+  await expect(screen).not.toContainText(/microsoft|invite/i);
+  await expect(screen.getByRole("link")).toHaveCount(0);
+  await expect(screen.locator('form[method="post"][action="/auth/logout"]')
+    .getByRole("button", { name: "Sign out", exact: true })).toBeVisible();
+
+  const before = count(accountApi, "GET /api/me");
+  await screen.getByRole("button", { name: "Check again", exact: true }).click();
+  await expect(screen.getByRole("status")).toHaveText("Not approved yet. Check again a little later.");
+  expect(count(accountApi, "GET /api/me")).toBe(before + 1);
+  await expect(page.getByRole("heading", { name: "Waiting for approval", exact: true })).toBeVisible();
+
+  accountApi.meStatus = undefined;
+  accountApi.meCode = undefined;
+  await screen.getByRole("button", { name: "Check again", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "No career started", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Waiting for approval", exact: true })).toHaveCount(0);
+  expect(mutations(accountApi)).toEqual([]);
+});
+
+test("a denied access request shows Access not granted with only Sign out", async ({
+  page, accountApi,
+}) => {
+  accountApi.meStatus = 403;
+  accountApi.meCode = "access_denied";
+  await page.goto("/#start");
+  const screen = page.getByRole("main").filter({ has: page.getByRole("heading", { name: "Access not granted", exact: true }) });
+  await expect(screen).toBeVisible();
+  await expect(screen).not.toContainText(/microsoft|invite/i);
+  await expect(screen.getByRole("link")).toHaveCount(0);
+  await expect(screen.getByRole("button")).toHaveText(["Sign out"]);
+  await expect(screen.locator("form")).toHaveAttribute("action", "/auth/logout");
+  await expect(page.getByRole("button", { name: "Reconnect to account", exact: true })).toHaveCount(0);
   expect(mutations(accountApi)).toEqual([]);
 });
 
@@ -402,8 +483,10 @@ test("account changes on focus refresh and reload clear the previous identity an
 }) => {
   const nextUser: AccountSession["user"] = {
     id: "ui-account-two",
+    username: "casey",
     displayName: "Casey Account",
     email: "casey@example.test",
+    admin: false,
   };
   for (const action of ["focus refresh", "reload"] as const) {
     await test.step(action, async () => {
@@ -635,6 +718,8 @@ for (const width of [1440, 390, 320]) {
         await expect(page.getByRole("heading", { name: "Sign in to continue", exact: true })).toBeVisible();
         await expect(page.getByRole("link", { name: "Sign in", exact: true }))
           .toHaveAttribute("href", /^\/auth\/login\?returnTo=%2F/);
+        await expect(page.getByRole("link", { name: /invite/i })).toHaveCount(0);
+        await expect(page.locator(".access-state")).not.toContainText(/microsoft|invite/i);
         const polls = count(accountApi, "GET /api/me");
         await page.waitForTimeout(3000);
         expect(count(accountApi, "GET /api/me")).toBe(polls);

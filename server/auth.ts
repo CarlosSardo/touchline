@@ -1,28 +1,43 @@
-import { createHash, createHmac, hkdfSync, timingSafeEqual } from "node:crypto";
+import { createHmac, hkdfSync, timingSafeEqual } from "node:crypto";
 import { isIP } from "node:net";
 import express, { type NextFunction, type Request, type Response } from "express";
 import * as oidc from "openid-client";
 import { z } from "zod";
-import type { AuthenticatedIdentity } from "./accounts.ts";
-import { renderSignedOutPage, renderSignInErrorPage } from "./invite-pages.ts";
-import { CONSUMER_TENANT_ID } from "./invite-store.ts";
+import { renderSignedOutPage, renderSignInErrorPage } from "./admin-pages.ts";
 
-/** Microsoft identity platform issuer for personal Microsoft accounts (the "consumers" tenant). */
-export const DEFAULT_OIDC_ISSUER = `https://login.microsoftonline.com/${CONSUMER_TENANT_ID}/v2.0`;
-/** UUIDv5 namespace for identities from non-Microsoft OpenID Connect providers (see identityFromClaims). */
-export const OIDC_IDENTITY_NAMESPACE = "047c7acb-0a8d-4d9b-a891-85e48a9804b9";
-export const OIDC_SCOPE = "openid profile email";
+export const OIDC_SCOPE = "openid profile email groups";
+export const DEFAULT_ADMIN_GROUP = "admins";
 export const LOGIN_PATH = "/auth/login";
 export const CALLBACK_PATH = "/auth/callback";
 export const LOGOUT_PATH = "/auth/logout";
 export const SIGNED_OUT_PATH = "/auth/signed-out";
 
-const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const microsoftIssuer = /^https:\/\/login\.microsoftonline\.com\/([0-9a-f-]{36})\/v2\.0$/;
 const transactionLifetimeSeconds = 10 * 60;
 const maxCookieLength = 4096;
 const clockSkewSeconds = 60;
+const maxSubjectLength = 255;
+const maxUsernameLength = 200;
+const maxDisplayNameLength = 200;
+const maxGroups = 16;
+const maxGroupLength = 64;
 const emailSchema = z.string().trim().toLowerCase().max(320).email();
+
+/** The signed-in person, as passed to account resolution and the admin pages. */
+export interface AuthenticatedIdentity {
+  /** The configured OIDC_ISSUER, exactly. */
+  issuer: string;
+  /** OIDC `sub` (Authelia: an opaque per-user UUID). */
+  subject: string;
+  /** `preferred_username`, falling back to `sub`. */
+  username: string;
+  /** `name`, falling back to the username (trimmed, at most 200 characters). */
+  displayName: string;
+  /** Lowercased, at most 320 characters. */
+  email: string | null;
+  groups: string[];
+  /** Member of the configured ADMIN_GROUP. */
+  admin: boolean;
+}
 
 export class AuthenticationRequiredError extends Error {
   readonly status = 401;
@@ -47,20 +62,16 @@ export class NotAuthorizedError extends Error {
 export interface AuthConfiguration {
   issuer: string;
   clientId: string;
-  clientSecret: string | undefined;
+  clientSecret: string;
+  /** Provider sign-out page used when the discovery metadata has no end_session_endpoint (Authelia: {issuer}/logout). */
+  logoutUrl: string | undefined;
+  adminGroup: string;
   sessionSecret: string;
   sessionTtlSeconds: number;
   appOrigin: string;
   redirectUri: string;
   postLogoutRedirectUri: string;
   secureCookies: boolean;
-}
-
-/** The parts of the API configuration that decide which signed-in identities may use the API. */
-export interface AuthorizationPolicy {
-  homeTenantId: string;
-  ownerObjectId: string;
-  allowedUserObjectIds: ReadonlySet<string>;
 }
 
 export type TrustProxySetting = false | number | string;
@@ -94,42 +105,55 @@ export function readTrustProxy(value: string | undefined, hosted: boolean): Trus
   return entries.join(",");
 }
 
-/** Reads the OpenID Connect and session settings; only called when REQUIRE_AUTH=true. */
-export function readAuthConfiguration(
-  environment: NodeJS.ProcessEnv,
-  context: { appOrigin: string; inviteSigningSecret: string },
-): AuthConfiguration {
-  for (const [legacy, current] of [
-    ["AUTH_CLIENT_ID", "OIDC_CLIENT_ID"],
-    ["AUTH_CLIENT_SECRET", "OIDC_CLIENT_SECRET"],
-  ] as const)
-    if (environment[legacy] && !environment[current])
-      throw new Error(`${legacy} was renamed to ${current}.`);
-  const issuerText = environment.OIDC_ISSUER?.trim() || DEFAULT_OIDC_ISSUER;
-  let issuer: URL;
+/** ADMIN_GROUP: the identity provider group whose members may approve access at /admin. */
+export function readAdminGroup(value: string | undefined): string {
+  const group = value?.trim() || DEFAULT_ADMIN_GROUP;
+  if (group.length > maxGroupLength || /[\s\p{Cc}]/u.test(group))
+    throw new Error(`ADMIN_GROUP must be a group name without whitespace, up to ${maxGroupLength} characters.`);
+  return group;
+}
+
+function httpsUrl(text: string, name: string, description: string): URL {
+  let url: URL;
   try {
-    issuer = new URL(issuerText);
+    url = new URL(text);
   } catch {
-    throw new Error("OIDC_ISSUER must be the provider's HTTPS issuer URL.");
+    throw new Error(`${name} must be ${description}.`);
   }
-  if (issuer.protocol !== "https:" || issuer.username || issuer.password || issuer.search || issuer.hash)
-    throw new Error("OIDC_ISSUER must be the provider's HTTPS issuer URL without credentials, query or fragment.");
+  if (url.protocol !== "https:" || url.username || url.password || url.hash)
+    throw new Error(`${name} must be ${description} (HTTPS, without credentials or fragment).`);
+  return url;
+}
+
+/** Reads the OpenID Connect and session settings; only called when REQUIRE_AUTH=true. */
+export function readAuthConfiguration(environment: NodeJS.ProcessEnv, context: { appOrigin: string }): AuthConfiguration {
+  const issuer = environment.OIDC_ISSUER?.trim() ?? "";
+  if (!issuer || issuer.length > 255)
+    throw new Error("REQUIRE_AUTH=true requires OIDC_ISSUER (the OpenID Connect provider's issuer URL, for example https://auth.example.com).");
+  if (httpsUrl(issuer, "OIDC_ISSUER", "the provider's HTTPS issuer URL").search)
+    throw new Error("OIDC_ISSUER must be the provider's HTTPS issuer URL without a query.");
   const clientId = environment.OIDC_CLIENT_ID?.trim() ?? "";
   if (!clientId || clientId.length > 255 || /\s/.test(clientId))
-    throw new Error("REQUIRE_AUTH=true requires OIDC_CLIENT_ID (the application/client ID registered with the OpenID Connect provider).");
-  const clientSecret = environment.OIDC_CLIENT_SECRET || undefined;
+    throw new Error("REQUIRE_AUTH=true requires OIDC_CLIENT_ID (the client ID registered with the OpenID Connect provider).");
+  const clientSecret = environment.OIDC_CLIENT_SECRET ?? "";
+  if (!clientSecret)
+    throw new Error("REQUIRE_AUTH=true requires OIDC_CLIENT_SECRET (the client secret, sent with client_secret_basic).");
+  const logoutText = environment.OIDC_LOGOUT_URL?.trim();
+  const logoutUrl = logoutText ? httpsUrl(logoutText, "OIDC_LOGOUT_URL", "the provider's HTTPS sign-out URL").href : undefined;
   const sessionSecret = environment.SESSION_SECRET ?? "";
   if (sessionSecret.length < 32)
     throw new Error("REQUIRE_AUTH=true requires SESSION_SECRET with at least 32 characters (for example `openssl rand -base64 48`).");
-  if (sessionSecret === context.inviteSigningSecret)
-    throw new Error("SESSION_SECRET must differ from INVITE_SIGNING_SECRET.");
+  if (sessionSecret === clientSecret)
+    throw new Error("SESSION_SECRET must differ from OIDC_CLIENT_SECRET.");
   const ttlHours = Number(environment.SESSION_TTL_HOURS ?? 8);
   if (!Number.isInteger(ttlHours) || ttlHours < 1 || ttlHours > 720)
     throw new Error("SESSION_TTL_HOURS must be an integer between 1 and 720.");
   return {
-    issuer: issuerText,
+    issuer,
     clientId,
     clientSecret,
+    logoutUrl,
+    adminGroup: readAdminGroup(environment.ADMIN_GROUP),
     sessionSecret,
     sessionTtlSeconds: ttlHours * 60 * 60,
     appOrigin: context.appOrigin,
@@ -139,87 +163,65 @@ export function readAuthConfiguration(
   };
 }
 
-/** Throws NotAuthorizedError unless the identity is a personal Microsoft account or an allow-listed home-tenant account. */
-export function authorizeIdentity(identity: AuthenticatedIdentity, policy: AuthorizationPolicy): AuthenticatedIdentity {
-  const homeTenant = !!policy.homeTenantId && identity.tenantId === policy.homeTenantId;
-  const consumersTenant = identity.tenantId === CONSUMER_TENANT_ID;
-  if (
-    (!homeTenant && !consumersTenant) ||
-    (homeTenant && identity.objectId !== policy.ownerObjectId && !policy.allowedUserObjectIds.has(identity.objectId))
-  )
-    throw new NotAuthorizedError();
-  return identity;
-}
-
-/** RFC 9562 name-based UUID (version 5, SHA-1). */
-export function uuidV5(name: string, namespace: string): string {
-  if (!uuidPattern.test(namespace)) throw new Error("Invalid UUID namespace.");
-  const hash = createHash("sha1")
-    .update(Buffer.from(namespace.replaceAll("-", ""), "hex"))
-    .update(name, "utf8")
-    .digest();
-  hash[6] = (hash[6] & 0x0f) | 0x50;
-  hash[8] = (hash[8] & 0x3f) | 0x80;
-  const hex = hash.subarray(0, 16).toString("hex");
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
-}
-
-/** Derived account keys for a non-Microsoft provider: tenant = UUIDv5(issuer), object = UUIDv5(sub) inside that tenant. */
-export function derivedIdentityKeys(issuer: string, subject: string) {
-  const tenantId = uuidV5(`oidc-issuer:${issuer}`, OIDC_IDENTITY_NAMESPACE);
-  return { tenantId, objectId: uuidV5(subject, tenantId) };
-}
-
 const stringClaim = (value: unknown) => typeof value === "string" && value.trim() ? value.trim() : null;
 const emailClaim = (value: unknown) => {
   const parsed = emailSchema.safeParse(value);
   return parsed.success ? parsed.data : null;
 };
 
+/** Keeps string groups that fit the session cookie; the admin group is never dropped. */
+function groupsClaim(value: unknown, adminGroup: string): string[] {
+  if (!Array.isArray(value)) return [];
+  const groups = [...new Set(value.filter((group): group is string =>
+    typeof group === "string" && group.length > 0 && group.length <= maxGroupLength && !/\p{Cc}/u.test(group)))];
+  if (groups.length <= maxGroups) return groups;
+  const kept = groups.filter((group) => group !== adminGroup).slice(0, groups.includes(adminGroup) ? maxGroups - 1 : maxGroups);
+  return groups.includes(adminGroup) ? [adminGroup, ...kept] : kept;
+}
+
 /**
- * Maps validated ID token claims to the account key.
- * Microsoft identity platform tokens (iss = https://login.microsoftonline.com/{tid}/v2.0) keep their (tid, oid) pair,
- * so accounts created behind Azure Easy Auth resolve to the same users. Any other provider gets a stable UUIDv5 pair
- * derived from (iss, sub), and only an `email` with `email_verified: true` is trusted.
+ * Maps validated ID token + UserInfo claims (sub, preferred_username, name, email, groups) to the identity.
+ * `issuer` is the configured OIDC_ISSUER: openid-client already checked the token's `iss` against the discovered issuer.
  */
-export function identityFromClaims(claims: Record<string, unknown>): AuthenticatedIdentity {
-  const issuer = stringClaim(claims.iss);
-  const subject = stringClaim(claims.sub);
-  if (!issuer || !subject) throw new AuthenticationRequiredError();
-  const displayName = (stringClaim(claims.name) ?? "Sporting director").slice(0, 200).trim() || "Sporting director";
-  const microsoft = microsoftIssuer.exec(issuer);
-  if (microsoft) {
-    const tenantId = stringClaim(claims.tid)?.toLowerCase();
-    const objectId = stringClaim(claims.oid)?.toLowerCase();
-    if (!tenantId || !objectId || !uuidPattern.test(tenantId) || !uuidPattern.test(objectId) ||
-        microsoft[1].toLowerCase() !== tenantId)
-      throw new NotAuthorizedError();
-    return {
-      tenantId,
-      objectId,
-      displayName,
-      email: emailClaim(claims.email) ?? emailClaim(claims.preferred_username),
-    };
-  }
+export function identityFromClaims(
+  claims: Record<string, unknown>,
+  context: Pick<AuthConfiguration, "issuer" | "adminGroup">,
+): AuthenticatedIdentity {
+  const subject = typeof claims.sub === "string" ? claims.sub : "";
+  if (!subject || subject.length > maxSubjectLength || subject.trim() !== subject || /\p{Cc}/u.test(subject))
+    throw new AuthenticationRequiredError();
+  const username = (stringClaim(claims.preferred_username) ?? subject).slice(0, maxUsernameLength).trim() || subject;
+  const displayName = (stringClaim(claims.name) ?? username).slice(0, maxDisplayNameLength).trim() || username;
+  const groups = groupsClaim(claims.groups, context.adminGroup);
   return {
-    ...derivedIdentityKeys(issuer, subject),
+    issuer: context.issuer,
+    subject,
+    username,
     displayName,
-    email: claims.email_verified === true ? emailClaim(claims.email) : null,
+    email: claims.email_verified === false ? null : emailClaim(claims.email),
+    groups,
+    admin: groups.includes(context.adminGroup),
   };
 }
 
 /** The relying-party operations Touchline needs from an OpenID Connect provider. */
 export interface OidcProvider {
   authorizationUrl(input: { state: string; nonce: string; codeChallenge: string; prompt?: string }): Promise<URL>;
-  /** Validates the authorization response (state, PKCE, ID token signature, issuer, audience, nonce) and returns ID token claims. */
+  /**
+   * Validates the authorization response (state, PKCE, ID token signature, issuer, audience, nonce), fetches UserInfo
+   * (its `sub` must equal the ID token's) and returns the ID token claims overlaid with the UserInfo claims.
+   */
   callback(currentUrl: URL, checks: { state: string; nonce: string; codeVerifier: string }): Promise<Record<string, unknown>>;
+  /** The provider's RP-initiated logout URL when its metadata advertises a same-origin end_session_endpoint. */
   endSessionUrl(): Promise<URL | null>;
 }
 
 export interface OpenIdProviderOptions {
-  /** Test seam: a fetch implementation for discovery, JWKS and token requests. */
+  /** Test seam: a fetch implementation for discovery, JWKS, token and UserInfo requests. */
   fetch?: oidc.CustomFetch;
 }
+
+const userInfoClaims = ["preferred_username", "name", "email", "email_verified", "groups"] as const;
 
 export function createOpenIdProvider(auth: AuthConfiguration, options: OpenIdProviderOptions = {}): OidcProvider {
   let discovered: Promise<oidc.Configuration> | undefined;
@@ -227,8 +229,8 @@ export function createOpenIdProvider(auth: AuthConfiguration, options: OpenIdPro
     discovered ??= oidc.discovery(
       new URL(auth.issuer),
       auth.clientId,
-      auth.clientSecret,
       undefined,
+      oidc.ClientSecretBasic(auth.clientSecret),
       {
         ...(options.fetch ? { [oidc.customFetch]: options.fetch } : {}),
         timeout: 15,
@@ -256,7 +258,8 @@ export function createOpenIdProvider(auth: AuthConfiguration, options: OpenIdPro
       });
     },
     async callback(currentUrl, checks) {
-      const tokens = await oidc.authorizationCodeGrant(await configuration(), currentUrl, {
+      const config = await configuration();
+      const tokens = await oidc.authorizationCodeGrant(config, currentUrl, {
         pkceCodeVerifier: checks.codeVerifier,
         expectedState: checks.state,
         expectedNonce: checks.nonce,
@@ -264,7 +267,12 @@ export function createOpenIdProvider(auth: AuthConfiguration, options: OpenIdPro
       });
       const claims = tokens.claims();
       if (!claims) throw new AuthenticationRequiredError();
-      return { ...claims };
+      if (!config.serverMetadata().userinfo_endpoint) return { ...claims };
+      // Authelia may release profile, email and groups only through UserInfo; fetchUserInfo enforces sub equality.
+      const userInfo: Record<string, unknown> = await oidc.fetchUserInfo(config, tokens.access_token, claims.sub);
+      const merged: Record<string, unknown> = { ...claims };
+      for (const name of userInfoClaims) if (userInfo[name] !== undefined) merged[name] = userInfo[name];
+      return merged;
     },
     async endSessionUrl() {
       const config = await configuration();
@@ -279,11 +287,14 @@ export function createOpenIdProvider(auth: AuthConfiguration, options: OpenIdPro
 }
 
 const sessionPayloadSchema = z.object({
-  v: z.literal(1),
-  tid: z.string().regex(uuidPattern),
-  oid: z.string().regex(uuidPattern),
-  name: z.string().min(1).max(200),
+  v: z.literal(2),
+  iss: z.string().min(1),
+  sub: z.string().min(1).max(maxSubjectLength),
+  usr: z.string().min(1).max(maxUsernameLength),
+  name: z.string().min(1).max(maxDisplayNameLength),
   email: z.string().max(320).nullable(),
+  groups: z.array(z.string().min(1).max(maxGroupLength)).max(maxGroups),
+  adm: z.boolean(),
   iat: z.number().int(),
   exp: z.number().int(),
 }).strict();
@@ -349,11 +360,14 @@ export function signSession(
 ): string {
   const iat = Math.floor(now.getTime() / 1000);
   const payload: SessionPayload = {
-    v: 1,
-    tid: identity.tenantId,
-    oid: identity.objectId,
+    v: 2,
+    iss: identity.issuer,
+    sub: identity.subject,
+    usr: identity.username,
     name: identity.displayName,
     email: identity.email,
+    groups: identity.groups,
+    adm: identity.admin,
     iat,
     exp: iat + auth.sessionTtlSeconds,
   };
@@ -394,23 +408,22 @@ export function loginUrl(returnTo: string) {
 
 export interface Authenticator {
   router: express.Router;
-  /** Origin of the identity provider, allowed as a CSP form-action target for the sign-out redirect. */
-  providerOrigin: string;
-  /** The signed-in identity (signature and expiry checked), or null. Does not apply the authorization policy. */
+  /** Identity provider origins the sign-out form POST may be redirected to (CSP form-action). */
+  formActionOrigins: string[];
+  /** The signed-in identity (signature, expiry and issuer checked), or null. */
   session(request: Request): AuthenticatedIdentity | null;
-  /** Throws AuthenticationRequiredError without a valid session and NotAuthorizedError outside the policy. */
+  /** Throws AuthenticationRequiredError without a valid session. Access approval is decided by Accounts.resolve. */
   authenticate(request: Request): AuthenticatedIdentity;
-  /** Redirects anonymous browser requests to sign-in (the old Easy Auth "RedirectToLoginPage" behaviour). */
+  /** Redirects anonymous browser requests to sign-in. */
   requireBrowserSession(request: Request, response: Response, next: NextFunction): void;
 }
 
 export function createAuthenticator(options: {
   auth: AuthConfiguration;
-  policy: AuthorizationPolicy;
   provider?: OidcProvider;
   now?: () => Date;
 }): Authenticator {
-  const { auth, policy } = options;
+  const { auth } = options;
   const provider = options.provider ?? createOpenIdProvider(auth);
   const now = options.now ?? (() => new Date());
   const seconds = () => Math.floor(now().getTime() / 1000);
@@ -425,12 +438,16 @@ export function createAuthenticator(options: {
     const parsed = sessionPayloadSchema.safeParse(sessions.verify(readCookie(request, sessionCookie)));
     if (!parsed.success) return null;
     const time = seconds();
-    if (parsed.data.exp <= time || parsed.data.iat > time + clockSkewSeconds) return null;
+    const payload = parsed.data;
+    if (payload.exp <= time || payload.iat > time + clockSkewSeconds || payload.iss !== auth.issuer) return null;
     return {
-      tenantId: parsed.data.tid.toLowerCase(),
-      objectId: parsed.data.oid.toLowerCase(),
-      displayName: parsed.data.name,
-      email: parsed.data.email,
+      issuer: payload.iss,
+      subject: payload.sub,
+      username: payload.usr,
+      displayName: payload.name,
+      email: payload.email,
+      groups: payload.groups,
+      admin: payload.adm,
     };
   };
   const readTransaction = (request: Request): TransactionPayload | null => {
@@ -449,7 +466,7 @@ export function createAuthenticator(options: {
   router.get(LOGIN_PATH, async (request, response, next) => {
     try {
       const returnTo = safeReturnTo(request.query.returnTo);
-      const prompt = request.query.prompt === "select_account" ? "select_account" : undefined;
+      const prompt = request.query.prompt === "login" ? "login" : undefined;
       noStore(response);
       if (!prompt && session(request)) return response.redirect(303, returnTo);
       const verifier = oidc.randomPKCECodeVerifier();
@@ -495,8 +512,13 @@ export function createAuthenticator(options: {
         nonce: transaction.nonce,
         codeVerifier: transaction.verifier,
       });
-      const identity = identityFromClaims(claims);
-      response.cookie(sessionCookie, signSession(identity, auth, now()), {
+      const identity = identityFromClaims(claims, auth);
+      let value = signSession(identity, auth, now());
+      // Only the admin group matters to Touchline; drop the others if non-ASCII names overflow the cookie.
+      if (value.length > maxCookieLength)
+        value = signSession({ ...identity, groups: identity.admin ? [auth.adminGroup] : [] }, auth, now());
+      if (value.length > maxCookieLength) throw new Error("The session cookie would exceed the browser limit.");
+      response.cookie(sessionCookie, value, {
         ...cookieOptions,
         maxAge: auth.sessionTtlSeconds * 1000,
       });
@@ -525,21 +547,21 @@ export function createAuthenticator(options: {
     } catch (error) {
       console.error(`Touchline: provider sign-out unavailable (${describeAuthError(error)}); signed out locally.`);
     }
-    return response.redirect(303, target?.href ?? SIGNED_OUT_PATH);
+    return response.redirect(303, target?.href ?? auth.logoutUrl ?? SIGNED_OUT_PATH);
   });
 
   router.get(SIGNED_OUT_PATH, (_request, response) =>
     noStore(response).status(200).type("text/html; charset=utf-8")
-      .send(renderSignedOutPage({ signInUrl: `${LOGIN_PATH}?prompt=select_account` })));
+      .send(renderSignedOutPage({ signInUrl: `${LOGIN_PATH}?prompt=login` })));
 
   return {
     router,
-    providerOrigin: new URL(auth.issuer).origin,
+    formActionOrigins: [...new Set([auth.issuer, ...(auth.logoutUrl ? [auth.logoutUrl] : [])].map((url) => new URL(url).origin))],
     session,
     authenticate(request) {
       const identity = session(request);
       if (!identity) throw new AuthenticationRequiredError();
-      return authorizeIdentity(identity, policy);
+      return identity;
     },
     requireBrowserSession(request, response, next) {
       if (session(request)) return next();
@@ -553,7 +575,7 @@ export function createAuthenticator(options: {
 
 function describeAuthError(error: unknown) {
   if (error instanceof oidc.AuthorizationResponseError) return `authorization error ${error.error}`;
-  if (error instanceof oidc.ResponseBodyError) return `token endpoint error ${error.error} (HTTP ${error.status})`;
+  if (error instanceof oidc.ResponseBodyError) return `provider error ${error.error} (HTTP ${error.status})`;
   if (error instanceof oidc.ClientError) {
     const cause = error.cause instanceof Error ? ` (${error.cause.message})` : "";
     return `${error.code ?? "client error"}: ${error.message}${cause}`;

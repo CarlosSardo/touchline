@@ -27,8 +27,12 @@ export const PORTABLE_SAVE_EXTENSION = ".touchline.gz";
 
 export interface AccountUser {
   id: string;
+  /** Authelia login name (OIDC preferred_username). */
+  username: string;
   displayName: string;
   email: string | null;
+  /** Member of the configured admin group: may approve access requests at /admin. */
+  admin: boolean;
 }
 
 export type WorldOperation =
@@ -89,11 +93,11 @@ export interface HealthDetails extends Health {
   date: string;
 }
 
-export type AccessIssueCode =
-  | "invite_required"
-  | "account_not_provisioned"
-  | "not_authorized"
-  | "capacity_unavailable";
+/**
+ * 403 reasons for a signed-in identity without a Touchline world: the first sign-in files an access request that an
+ * admin approves or denies at /admin; not_authorized is any other refusal.
+ */
+export type AccessIssueCode = "access_pending" | "access_denied" | "not_authorized";
 
 export interface AccessIssueResponse {
   error: string;

@@ -262,6 +262,7 @@ function Shell() {
     confirmation,
     closeConfirm,
     refresh,
+    checkAccess,
   } = useGame();
   const [menu, setMenu] = useState(false);
   const [globalSearch, setGlobalSearch] = useState(false);
@@ -302,7 +303,7 @@ function Shell() {
           touchline.
         </span>
         {accessIssue ? (
-          <AccessState issue={accessIssue} onRetry={() => void refresh()} />
+          <AccessState issue={accessIssue} onRetry={checkAccess} />
         ) : error ? (
           <>
             <ErrorState message={error} />
@@ -819,38 +820,63 @@ function AccessState({
   onRetry,
 }: {
   issue: AccessIssue;
-  onRetry: () => void;
+  onRetry: () => Promise<void>;
 }) {
+  // The provider remounts this screen after every failed check, so only `checking` is local.
+  const [checking, setChecking] = useState(false);
   const content = accessStateContent(
     issue,
     `${location.pathname}${location.search}${location.hash}`,
   );
+  async function retry() {
+    setChecking(true);
+    try {
+      await onRetry();
+    } finally {
+      setChecking(false);
+    }
+  }
+  const unchanged = issue.rechecked
+    ? content.actions.find((action) => action.kind === "retry")?.unchanged
+    : undefined;
   return (
     <main className="access-state" aria-labelledby="access-state-title">
       <span className="eyebrow">{content.eyebrow}</span>
       <h1 id="access-state-title">{content.heading}</h1>
       <p>{content.explanation}</p>
-      {content.reminder && <p className="access-reminder">{content.reminder}</p>}
       <div className="access-actions">
-        {content.primary ? (
-          <a className="button button-primary" href={content.primary.href}>
-            {content.primary.label}
-          </a>
-        ) : (
-          <Button onClick={onRetry}>Try again</Button>
-        )}
-        {"action" in content.secondary ? (
-          <form method="post" action={content.secondary.action} style={{ display: "contents" }}>
-            <button type="submit" className="button button-secondary">
-              {content.secondary.label}
-            </button>
-          </form>
-        ) : (
-          <a className="button button-secondary" href={content.secondary.href}>
-            {content.secondary.label}
-          </a>
-        )}
+        {content.actions.map((action, index) => {
+          const variant = index === 0 ? "primary" : "secondary";
+          if (action.kind === "link")
+            return (
+              <a key={action.label} className={`button button-${variant}`} href={action.href}>
+                {action.label}
+              </a>
+            );
+          if (action.kind === "form")
+            return (
+              <form key={action.label} method="post" action={action.action} style={{ display: "contents" }}>
+                <button type="submit" className={`button button-${variant}`}>
+                  {action.label}
+                </button>
+              </form>
+            );
+          return (
+            <Button
+              key={action.label}
+              variant={variant}
+              disabled={checking}
+              aria-busy={checking || undefined}
+              onClick={() => void retry()}
+            >
+              {checking ? "Checking..." : action.label}
+            </Button>
+          );
+        })}
       </div>
+      <p role="status" className="access-status">
+        {checking ? "" : unchanged}
+      </p>
     </main>
   );
 }

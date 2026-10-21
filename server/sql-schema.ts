@@ -96,52 +96,44 @@ export function migrationTableSql(schema: string): string {
     applied_at TIMESTAMPTZ NOT NULL DEFAULT now());`;
 }
 
-/** Account registry: one row per signed-in identity, each owning one world schema. Emails are stored lowercase. */
-export function accountsTableSql(schema: string): string {
-  const table = tableName(schema, "users");
-  return `CREATE TABLE IF NOT EXISTS ${table} (
-      id UUID NOT NULL PRIMARY KEY,
-      tenant_id UUID NOT NULL,
-      object_id UUID NOT NULL,
+const IDENTITY_COLUMNS = `issuer TEXT NOT NULL CHECK (length(issuer) BETWEEN 1 AND 2048),
+      subject TEXT NOT NULL CHECK (length(subject) BETWEEN 1 AND 255),
+      username TEXT NOT NULL CHECK (length(username) BETWEEN 1 AND 255),
       display_name TEXT NOT NULL CHECK (length(display_name) BETWEEN 1 AND 200),
-      email TEXT NULL CHECK (email IS NULL OR (length(email) <= 320 AND email = lower(email))),
+      email TEXT NULL CHECK (email IS NULL OR (length(email) BETWEEN 1 AND 320 AND email = lower(email)))`;
+
+/**
+ * Account registry: one row per approved OIDC identity (issuer, subject), each owning one world schema.
+ * Emails are stored lowercase.
+ */
+export function usersTableSql(schema: string): string {
+  return `CREATE TABLE IF NOT EXISTS ${tableName(schema, "users")} (
+      id UUID NOT NULL PRIMARY KEY,
+      ${IDENTITY_COLUMNS},
       game_schema TEXT NOT NULL CHECK (game_schema ~ '^[a-z][a-z0-9_]{0,62}$'),
       created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-      CONSTRAINT users_identity_key UNIQUE (tenant_id, object_id),
+      CONSTRAINT users_identity_key UNIQUE (issuer, subject),
       CONSTRAINT users_game_schema_key UNIQUE (game_schema),
       CHECK (game_schema <> ${sqlLiteral(schema.toLowerCase())}
         AND game_schema NOT IN ('accounts', 'public', 'information_schema') AND game_schema NOT LIKE 'pg\\_%')
     );`;
 }
 
-export function inviteRequestsTableSql(schema: string): string {
-  const table = tableName(schema, "invite_requests");
-  const attempts = tableName(schema, "invite_attempts");
-  return `CREATE TABLE IF NOT EXISTS ${table} (
+/** Sign-ins awaiting (or after) an administrator's decision; approved requests point at their account. */
+export function accessRequestsTableSql(schema: string): string {
+  return `CREATE TABLE IF NOT EXISTS ${tableName(schema, "access_requests")} (
       id UUID NOT NULL PRIMARY KEY,
-      email TEXT NOT NULL CHECK (length(email) <= 320 AND email = lower(email)),
-      note TEXT NULL CHECK (note IS NULL OR length(note) <= 500),
-      status TEXT NOT NULL CONSTRAINT invite_requests_status_check
-        CHECK (status IN ('pending', 'accepted', 'denied', 'claimed')),
-      ip_hash TEXT NULL,
+      ${IDENTITY_COLUMNS},
+      status TEXT NOT NULL CONSTRAINT access_requests_status_check
+        CHECK (status IN ('pending', 'approved', 'denied')),
       requested_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       decided_at TIMESTAMPTZ NULL,
-      decided_by TEXT NULL,
-      account_id UUID NULL,
-      approval_email_sent BOOLEAN NOT NULL DEFAULT false,
-      accepted_email_sent BOOLEAN NOT NULL DEFAULT false,
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-    );
-  CREATE UNIQUE INDEX IF NOT EXISTS invite_requests_email_active ON ${table} (email)
-    WHERE status IN ('pending', 'accepted', 'claimed');
-  CREATE TABLE IF NOT EXISTS ${attempts} (
-      id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-      ip_hash TEXT NULL,
-      attempted_at TIMESTAMPTZ NOT NULL DEFAULT now()
-    );
-  CREATE INDEX IF NOT EXISTS invite_attempts_attempted_at ON ${attempts} (attempted_at);
-  CREATE INDEX IF NOT EXISTS invite_attempts_ip_hash_attempted_at ON ${attempts} (ip_hash, attempted_at);`;
+      decided_by TEXT NULL CHECK (decided_by IS NULL OR length(decided_by) BETWEEN 1 AND 320),
+      account_id UUID NULL CONSTRAINT access_requests_account_fkey REFERENCES ${tableName(schema, "users")} (id),
+      CONSTRAINT access_requests_identity_key UNIQUE (issuer, subject),
+      CONSTRAINT access_requests_account_check CHECK ((status = 'approved') = (account_id IS NOT NULL))
+    );`;
 }
 
 export function schemaMigrations(schema: string): SqlMigration[] {

@@ -156,8 +156,9 @@ interface BackupManifest {
 const RESTORE_NOTE = `Touchline full backup (npm run data:export -- --everything).
 manifest.json lists every file with its byte length and SHA-256; "complete": true means nothing failed.
 <schema>/world.touchline.gz is that schema's live world; <schema>/snapshots/<id>.touchline.gz are its saved
-checkpoints, described in <schema>/snapshots.json. accounts-users.json is the account registry: personal data,
-keep it private and never commit it. The world reset keeps the registry in PostgreSQL, so it is evidence, not a restore input.
+checkpoints, described in <schema>/snapshots.json. accounts-users.json is the account registry (accounts and access
+requests): personal data, keep it private and never commit it. The world reset keeps the registry in PostgreSQL, so it is
+evidence, not a restore input.
 To restore a world or snapshot:
   1. Use a Touchline build with the same save schema version as the checkpoints (npm ci).
   2. Point SQL_* at the PostgreSQL database and SQL_SCHEMA at the schema, then npm run db:migrate.
@@ -233,12 +234,21 @@ export async function exportEverything(root: Store, options: EverythingOptions) 
   const accountSchema = options.accountSchema ?? "accounts";
   if (!SCHEMA_NAME.test(accountSchema)) throw new Error("Invalid --account-schema.");
   const registryTable = tableName(accountSchema, "users");
+  const requestsTable = tableName(accountSchema, "access_requests");
   if ((await root.get<{ present: boolean }>("SELECT to_regclass(?) IS NOT NULL AS present", registryTable))?.present)
     await attempt("registry", async () => {
-      const rows = await root.forSchema(accountSchema).all(`SELECT * FROM ${registryTable} ORDER BY created_at, id`);
+      const registry = root.forSchema(accountSchema);
+      const { accounts, accessRequests } = await registry.readTransaction(async () => ({
+        accounts: await registry.all(`SELECT * FROM ${registryTable} ORDER BY created_at, id`),
+        accessRequests: await registry.all(`SELECT * FROM ${requestsTable} ORDER BY requested_at, id`),
+      }));
       const file = "accounts-users.json";
-      await writeJson(join(directory, file), { schema: accountSchema, accounts: rows });
-      await record("registry", { kind: "registry", schema: accountSchema, file, rows: { users: rows.length }, ...(await hashFile(join(directory, file))) });
+      await writeJson(join(directory, file), { schema: accountSchema, accounts, accessRequests });
+      await record("registry", {
+        kind: "registry", schema: accountSchema, file,
+        rows: { users: accounts.length, access_requests: accessRequests.length },
+        ...(await hashFile(join(directory, file))),
+      });
     });
   const schemas = (await root.all<{ name: string }>(
     "SELECT schemaname AS name FROM pg_catalog.pg_tables WHERE tablename = 'schema_migrations' ORDER BY schemaname",
@@ -318,8 +328,12 @@ export async function exportEverything(root: Store, options: EverythingOptions) 
 /** What a matching SHA-256 cannot show: each world's per-table row counts, every gzip end to end, the registry size. */
 async function contentProblem(path: string, item: BackupItem) {
   if (item.kind === "registry") {
-    const { accounts } = JSON.parse(await readFile(path, "utf8")) as { accounts?: unknown };
-    return Array.isArray(accounts) && accounts.length === item.rows?.users ? undefined : "account count differs from the manifest";
+    const { accounts, accessRequests } = JSON.parse(await readFile(path, "utf8")) as { accounts?: unknown; accessRequests?: unknown };
+    if (!Array.isArray(accounts) || accounts.length !== item.rows?.users) return "account count differs from the manifest";
+    if (item.rows.access_requests !== undefined &&
+      (!Array.isArray(accessRequests) || accessRequests.length !== item.rows.access_requests))
+      return "access request count differs from the manifest";
+    return undefined;
   }
   if (item.kind === "snapshot") {
     await pipeline(createReadStream(path), createGunzip(), new Writable({ write: (_chunk, _encoding, done) => done() }));

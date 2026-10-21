@@ -121,9 +121,14 @@ async function run() {
     // Only a throwaway server may host tests that create cluster-wide objects such as roles or databases.
     TOUCHLINE_DISPOSABLE_SQL: target.disposable ? "true" : "false",
   };
+  // Tests run without hosted sign-in: a developer's sourced .env must not configure OIDC, access or removed settings.
   for (const key of [
-    "SQL_SERVER", "SQL_ENCRYPT", "SQL_TRUST_SERVER_CERTIFICATE", "AZURE_SQL_SERVER", "AZURE_CLIENT_ID",
-    "GAME_DB", "SAVE_DIR", "REQUIRE_AUTH", "APP_ORIGIN",
+    "SQL_SERVER", "SQL_ENCRYPT", "SQL_TRUST_SERVER_CERTIFICATE", "AZURE_SQL_SERVER", "AZURE_CLIENT_ID", "AZURE_TENANT_ID",
+    "GAME_DB", "SAVE_DIR", "REQUIRE_AUTH", "APP_ORIGIN", "TRUST_PROXY",
+    "OIDC_ISSUER", "OIDC_CLIENT_ID", "OIDC_CLIENT_SECRET", "OIDC_LOGOUT_URL", "SESSION_SECRET", "SESSION_TTL_HOURS",
+    "ADMIN_GROUP", "MAX_PLAYERS", "DB_SIZE_LIMIT_GB",
+    // Removed settings that make startup fail when an old .env still sets them.
+    "OWNER_OBJECT_ID", "ALLOWED_USER_OBJECT_IDS", "AUTH_HOME_TENANT_ID",
   ])
     delete environment[key];
   const command = args.length ? args : ["npm", "test"];

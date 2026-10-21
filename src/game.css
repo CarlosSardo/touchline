@@ -4339,11 +4339,12 @@ table {
   color: var(--muted);
   font-size: 0.94rem;
 }
-.access-reminder {
-  padding: 13px 15px;
-  border: 1px solid color-mix(in srgb, var(--accent) 18%, var(--line));
-  border-radius: 9px;
-  background: color-mix(in srgb, var(--accent) 7%, var(--surface));
+.access-state .access-status {
+  font-weight: 600;
+  color: var(--text);
+}
+.access-status:empty {
+  display: none;
 }
 .access-actions {
   display: flex;

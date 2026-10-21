@@ -221,7 +221,7 @@ interface BattleApi {
 
 async function mockApi(page: Page, api: BattleApi) {
   const session: AccountSession = {
-    user: { id: "battle-ui-account", displayName: "Morgan", email: "morgan@example.test" },
+    user: { id: "battle-ui-account", username: "morgan", displayName: "Morgan", email: "morgan@example.test", admin: false },
     hasWorld: true,
     activity: null,
   };

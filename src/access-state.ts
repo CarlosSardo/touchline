@@ -1,26 +1,38 @@
-import type { AccessIssue, AccessIssueCode } from "./api-error.ts";
+import type { AccessIssue } from "./api-error.ts";
 
 export interface AccessStateLink {
+  kind: "link";
   label: string;
   href: string;
 }
 
 /** A same-origin POST form (sign-out must not be a GET link). */
 export interface AccessStateForm {
+  kind: "form";
   label: string;
   action: string;
 }
+
+/** Re-runs the /api/me session check in place. */
+export interface AccessStateRetry {
+  kind: "retry";
+  label: string;
+  /** Shown after a check that still ends on this screen. */
+  unchanged: string;
+}
+
+export type AccessStateAction = AccessStateLink | AccessStateForm | AccessStateRetry;
 
 export interface AccessStateContent {
   eyebrow: string;
   heading: string;
   explanation: string;
-  reminder?: string;
-  primary?: AccessStateLink;
-  secondary: AccessStateLink | AccessStateForm;
+  /** The first action is the primary one. */
+  actions: [AccessStateAction, ...AccessStateAction[]];
 }
 
 export const signOutAction = "/auth/logout";
+export const adminHref = "/admin";
 
 /** Sign-in URL that returns to `returnTo` (a same-origin path) afterwards. */
 export function signInHref(returnTo = "/") {
@@ -29,52 +41,54 @@ export function signInHref(returnTo = "/") {
     : "/auth/login";
 }
 
-export const microsoftAccountReminder =
-  "Touchline sign-in requires a personal Microsoft account: Outlook.com, Hotmail, Live.com, MSN, or any email address registered as a Microsoft account.";
-
-const requestInvite = { label: "Request an invite", href: "/invite" };
-const logout: AccessStateForm = {
-  label: "Signed in with the wrong account?",
-  action: signOutAction,
-};
-
-const inviteContent: AccessStateContent = {
-  eyebrow: "Invite-only access",
-  heading: "You're not on the team sheet yet",
-  explanation:
-    "Touchline is private while the early squad is forming. Request an invite and sign in again with the exact personal Microsoft account that gets approved.",
-  reminder: microsoftAccountReminder,
-  primary: requestInvite,
-  secondary: logout,
-};
-
-const contentByCode: Record<Exclude<AccessIssueCode, "authentication_required">, AccessStateContent> = {
-  invite_required: inviteContent,
-  account_not_provisioned: inviteContent,
-  not_authorized: inviteContent,
-  capacity_unavailable: {
-    eyebrow: "Capacity unavailable",
-    heading: "Touchline is full right now",
-    explanation:
-      "Touchline is full right now — your invite is safe; try again later.",
-    reminder: microsoftAccountReminder,
-    secondary: logout,
-  },
-};
+const signOut: AccessStateForm = { kind: "form", label: "Sign out", action: signOutAction };
 
 export function accessStateContent(
   issue: Pick<AccessIssue, "code">,
   returnTo = "/",
 ): AccessStateContent {
-  if (issue.code === "authentication_required")
-    return {
-      eyebrow: "Signed out",
-      heading: "Sign in to continue",
-      explanation:
-        "Your Touchline session has ended. Sign in again to pick up where you left off.",
-      reminder: microsoftAccountReminder,
-      primary: { label: "Sign in", href: signInHref(returnTo) },
-      secondary: requestInvite,
-    };
-  return contentByCode[issue.code];
+  switch (issue.code) {
+    case "authentication_required":
+      return {
+        eyebrow: "Signed out",
+        heading: "Sign in to continue",
+        explanation:
+          "Your Touchline session has ended. Sign in again to pick up where you left off.",
+        actions: [{ kind: "link", label: "Sign in", href: signInHref(returnTo) }],
+      };
+    case "access_pending":
+      return {
+        eyebrow: "Access requested",
+        heading: "Waiting for approval",
+        explanation:
+          "Touchline is a small private group, so an admin approves every new player. Your request is in — once it is approved, check again to start your career.",
+        actions: [
+          {
+            kind: "retry",
+            label: "Check again",
+            unchanged: "Not approved yet. Check again a little later.",
+          },
+          signOut,
+        ],
+      };
+    case "access_denied":
+      return {
+        eyebrow: "Private group",
+        heading: "Access not granted",
+        explanation:
+          "An admin has not granted this account access to Touchline. If you think that is a mistake, ask the admin who runs it.",
+        actions: [signOut],
+      };
+    case "not_authorized":
+      return {
+        eyebrow: "Private group",
+        heading: "You're not on the team sheet yet",
+        explanation:
+          "This account cannot open Touchline. Sign out and sign in with the account an admin approved.",
+        actions: [
+          { kind: "retry", label: "Try again", unchanged: "This account still cannot open Touchline." },
+          { ...signOut, label: "Signed in with the wrong account?" },
+        ],
+      };
+  }
 }

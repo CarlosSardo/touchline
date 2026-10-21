@@ -9,20 +9,20 @@ import { rm } from "node:fs/promises";
 import { pipeline } from "node:stream/promises";
 import { z } from "zod";
 import { DatabaseUnavailableError, Store } from "./db.ts";
-import { Accounts, type AuthenticatedIdentity } from "./accounts.ts";
-import { createInviteRouter, type InviteRouteOptions } from "./invite-routes.ts";
-import { CONSUMER_TENANT_ID } from "./invite-store.ts";
+import { Accounts } from "./accounts.ts";
+import { createAdminRouter, isAccessAdministration, type AccessAdministration } from "./admin-routes.ts";
 import {
   AuthenticationRequiredError,
   createAuthenticator,
   NotAuthorizedError,
+  readAdminGroup,
   readAuthConfiguration,
   readTrustProxy,
   type AuthConfiguration,
+  type AuthenticatedIdentity,
   type OidcProvider,
   type TrustProxySetting,
 } from "./auth.ts";
-import { OWNER_EMAIL_DEFAULT } from "./legacy-account.ts";
 import {
   affiliateDesk,
   affiliateInterest,
@@ -116,32 +116,30 @@ const saveFileSchema = z
     "Choose a valid portable save slot.",
   );
 const loopbackHosts = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
-const identifier =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const defaultApproverEmail = "sardo.kiko@gmail.com";
-const emailAddressSchema = z.string().trim().toLowerCase().max(320).email();
-
 export { AuthenticationRequiredError, NotAuthorizedError };
+
+/** Removed with the move to Authelia; a stale value must not silently change who may sign in. */
+const removedSecurityVariables = ["OWNER_OBJECT_ID", "ALLOWED_USER_OBJECT_IDS", "AUTH_HOME_TENANT_ID", "AZURE_TENANT_ID"];
+/** Removed with the email/invite flows; harmless leftovers. */
+const removedEmailVariables = ["INVITE_SIGNING_SECRET", "EMAIL_TRANSPORT", "APPROVER_EMAIL", "OWNER_EMAIL"];
 
 export interface ApiConfiguration {
   host: string;
   port: number;
-  /** REQUIRE_AUTH=true: served publicly behind an HTTPS reverse proxy with OpenID Connect sign-in. */
+  /** REQUIRE_AUTH=true: served behind an HTTPS reverse proxy with OpenID Connect sign-in and approved access. */
   hosted: boolean;
   requireAuth: boolean;
-  ownerObjectId: string;
-  allowedUserObjectIds: Set<string>;
-  /** Optional organization tenant whose owner/allow-listed object IDs may sign in besides personal Microsoft accounts. */
-  homeTenantId: string;
   appOrigin: string | undefined;
   trustProxy: TrustProxySetting;
   auth: AuthConfiguration | undefined;
-  approverEmail: string;
-  ownerEmail: string;
+  /** ADMIN_GROUP: identity provider group whose members approve access at /admin. */
+  adminGroup: string;
+  /** MAX_PLAYERS: approved non-admin players. */
   maxPlayers: number;
-  inviteDbSizeLimitGb: number;
-  inviteSigningSecret: string;
-  emailTransport: "gmail" | "log" | "disabled";
+  /** DB_SIZE_LIMIT_GB: approvals stop when the database reaches this size. */
+  dbSizeLimitGb: number;
+  /** Non-fatal configuration notices for the startup log (removed variables that are still set). */
+  warnings: string[];
 }
 
 const parsePositiveInteger = (value: string | undefined, fallback: number, name: string) => {
@@ -161,44 +159,29 @@ const parsePositiveNumber = (value: string | undefined, fallback: number, name: 
 export function readApiConfiguration(
   environment: NodeJS.ProcessEnv = process.env,
 ): ApiConfiguration {
+  const isSet = (name: string) => (environment[name] ?? "").trim() !== "";
+  const removed = removedSecurityVariables.filter(isSet);
+  if (removed.length)
+    throw new Error(
+      `removed: ${removed.join(", ")} (Microsoft sign-in and object-ID allow-lists no longer exist; access is approved by an ADMIN_GROUP member at /admin). Unset ${removed.length === 1 ? "it" : "them"}.`,
+    );
+  if (isSet("INVITE_DB_SIZE_LIMIT_GB"))
+    throw new Error("removed: INVITE_DB_SIZE_LIMIT_GB was renamed to DB_SIZE_LIMIT_GB.");
+  const ignored = [
+    ...removedEmailVariables.filter(isSet),
+    ...Object.keys(environment).filter((name) => name.startsWith("SMTP_") && isSet(name)).sort(),
+  ];
+  const warnings = ignored.length
+    ? [`removed and ignored (email delivery no longer exists): ${ignored.join(", ")}.`]
+    : [];
   const requireAuth = environment.REQUIRE_AUTH === "true";
   const hosted = requireAuth;
   const host = environment.API_HOST ?? (hosted ? "0.0.0.0" : "127.0.0.1");
   const port = Number(environment.PORT ?? environment.API_PORT ?? 3001);
-  const ownerObjectId = (environment.OWNER_OBJECT_ID ?? "").trim().toLowerCase();
-  if (requireAuth && environment.AZURE_TENANT_ID && environment.AUTH_HOME_TENANT_ID === undefined)
-    throw new Error("AZURE_TENANT_ID was renamed to AUTH_HOME_TENANT_ID.");
-  const homeTenantId = (environment.AUTH_HOME_TENANT_ID ?? "").trim().toLowerCase();
-  const approverEmailResult = emailAddressSchema.safeParse(environment.APPROVER_EMAIL ?? defaultApproverEmail);
-  if (!approverEmailResult.success)
-    throw new Error("APPROVER_EMAIL must be a valid email address up to 320 characters.");
-  const approverEmail = approverEmailResult.data;
-  const ownerEmailResult = emailAddressSchema.safeParse(environment.OWNER_EMAIL ?? OWNER_EMAIL_DEFAULT);
-  if (!ownerEmailResult.success)
-    throw new Error("OWNER_EMAIL must be a valid email address up to 320 characters.");
-  const ownerEmail = ownerEmailResult.data;
   const maxPlayers = parsePositiveInteger(environment.MAX_PLAYERS, 10, "MAX_PLAYERS");
-  const inviteDbSizeLimitGb = parsePositiveNumber(environment.INVITE_DB_SIZE_LIMIT_GB, 24, "INVITE_DB_SIZE_LIMIT_GB");
-  const inviteSigningSecret =
-    environment.INVITE_SIGNING_SECRET ??
-    (requireAuth ? "" : "local-development-invite-signing-secret");
-  if (requireAuth && inviteSigningSecret.length < 32)
-    throw new Error("INVITE_SIGNING_SECRET is required and must be at least 32 characters when REQUIRE_AUTH=true.");
-  if (!requireAuth && inviteSigningSecret.length < 32)
-    throw new Error("INVITE_SIGNING_SECRET must be at least 32 characters when set.");
-  const emailTransport = (environment.EMAIL_TRANSPORT ?? (hosted ? "gmail" : "log")).toLowerCase();
-  if (emailTransport !== "gmail" && emailTransport !== "log" && emailTransport !== "disabled")
-    throw new Error("EMAIL_TRANSPORT must be gmail, log or disabled.");
-  if (hosted && emailTransport === "log")
-    throw new Error("EMAIL_TRANSPORT must be gmail or disabled when hosted.");
-  const invitedObjectIds = (environment.ALLOWED_USER_OBJECT_IDS ?? "")
-    .split(",")
-    .map((value) => value.trim().toLowerCase())
-    .filter(Boolean);
+  const dbSizeLimitGb = parsePositiveNumber(environment.DB_SIZE_LIMIT_GB, 24, "DB_SIZE_LIMIT_GB");
+  const adminGroup = readAdminGroup(environment.ADMIN_GROUP);
   const appOrigin = environment.APP_ORIGIN;
-  if (invitedObjectIds.length > 100 || invitedObjectIds.some((value) => !identifier.test(value)))
-    throw new Error("ALLOWED_USER_OBJECT_IDS must contain at most 100 comma-separated Entra object UUIDs.");
-  const allowedUserObjectIds = new Set([ownerObjectId, ...invitedObjectIds].filter(Boolean));
   const trustProxy = readTrustProxy(environment.TRUST_PROXY, hosted);
   if (!host || host.trim() !== host)
     throw new Error("API_HOST must be a hostname or IP address.");
@@ -213,24 +196,10 @@ export function readApiConfiguration(
     throw new Error(
       "Public API binding requires explicit REQUIRE_AUTH=true and hosted authentication.",
     );
-  if (requireAuth) {
-    if (homeTenantId && (!identifier.test(homeTenantId) || homeTenantId === CONSUMER_TENANT_ID))
-      throw new Error(
-        "AUTH_HOME_TENANT_ID must be an organization tenant UUID (not the personal Microsoft account tenant) or unset.",
-      );
-    if (homeTenantId ? !identifier.test(ownerObjectId) : ownerObjectId && !identifier.test(ownerObjectId))
-      throw new Error(
-        homeTenantId
-          ? "AUTH_HOME_TENANT_ID requires OWNER_OBJECT_ID as the owner's object UUID in that tenant."
-          : "OWNER_OBJECT_ID must be an object UUID when set.",
-      );
-    if (!homeTenantId && invitedObjectIds.length)
-      throw new Error("ALLOWED_USER_OBJECT_IDS requires AUTH_HOME_TENANT_ID (the tenant those object IDs belong to).");
-    if (!appOrigin)
-      throw new Error(
-        "REQUIRE_AUTH=true requires APP_ORIGIN as the exact public HTTPS origin (for example https://touchline.example.com).",
-      );
-  }
+  if (requireAuth && !appOrigin)
+    throw new Error(
+      "REQUIRE_AUTH=true requires APP_ORIGIN as the exact public HTTPS origin (for example https://touchline.example.com).",
+    );
   if (appOrigin) {
     let origin: URL;
     try {
@@ -254,20 +223,13 @@ export function readApiConfiguration(
     port,
     hosted,
     requireAuth,
-    ownerObjectId,
-    allowedUserObjectIds,
-    homeTenantId,
     appOrigin,
     trustProxy,
-    auth: requireAuth && appOrigin
-      ? readAuthConfiguration(environment, { appOrigin, inviteSigningSecret })
-      : undefined,
-    approverEmail,
-    ownerEmail,
+    auth: requireAuth && appOrigin ? readAuthConfiguration(environment, { appOrigin }) : undefined,
+    adminGroup,
     maxPlayers,
-    inviteDbSizeLimitGb,
-    inviteSigningSecret,
-    emailTransport,
+    dbSizeLimitGb,
+    warnings,
   };
 }
 
@@ -1061,9 +1023,11 @@ export interface AppDatabase {
   accounts?: Pick<Accounts, "resolve">;
 }
 
-export interface AppOptions extends InviteRouteOptions {
+export interface AppOptions {
   /** Replaces OpenID Connect discovery and token validation (tests). */
   oidcProvider?: OidcProvider;
+  /** Admin page operations; defaults to the account registry when it implements them. */
+  adminAccounts?: AccessAdministration;
 }
 
 /** `database` is an open store, or a function that opens it on the first request that needs SQL. */
@@ -1075,7 +1039,7 @@ export function createApp(
   const configuration = readApiConfiguration();
   const app = express();
   const authenticator = configuration.auth
-    ? createAuthenticator({ auth: configuration.auth, policy: configuration, provider: options.oidcProvider })
+    ? createAuthenticator({ auth: configuration.auth, provider: options.oidcProvider })
     : undefined;
   const authenticate = authenticator?.authenticate ?? (() => {
     throw new AuthenticationRequiredError();
@@ -1084,12 +1048,7 @@ export function createApp(
     store,
     resolver: configuration.requireAuth
       ? resolver ?? new Accounts(store, "accounts", {
-        limits: {
-          maxPlayers: configuration.maxPlayers,
-          sizeLimitGb: configuration.inviteDbSizeLimitGb,
-          ownerObjectId: configuration.ownerObjectId,
-          ownerEmail: configuration.ownerEmail,
-        },
+        limits: { maxPlayers: configuration.maxPlayers, sizeLimitGb: configuration.dbSizeLimitGb },
       })
       : undefined,
   });
@@ -1103,7 +1062,7 @@ export function createApp(
     return connected;
   };
   const worlds = new Map<string, ReturnType<typeof createWorldRouter>>();
-  const localUser: AccountUser = { id: "local", displayName: "Local director", email: null };
+  const localUser: AccountUser = { id: "local", username: "local", displayName: "Local director", email: null, admin: false };
   app.disable("x-powered-by");
   app.set("trust proxy", configuration.trustProxy);
   app.use((request, response, next) => {
@@ -1118,7 +1077,7 @@ export function createApp(
       "Content-Security-Policy",
       "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; " +
         // Sign-out is a form POST that redirects to the identity provider's logout endpoint.
-        `form-action 'self'${authenticator ? ` ${authenticator.providerOrigin}` : ""}`,
+        ["form-action 'self'", ...(authenticator?.formActionOrigins ?? [])].join(" "),
     );
     if (configuration.hosted)
       response.setHeader("Strict-Transport-Security", "max-age=31536000");
@@ -1130,11 +1089,13 @@ export function createApp(
     response.json({ status: "ok" } satisfies Health),
   );
   if (authenticator) app.use(authenticator.router);
-  app.use(createInviteRouter({
+  app.use(createAdminRouter({
     configuration,
-    getStore: async () => (await getConnection()).store,
     authenticate,
-    ...options,
+    accounts: options.adminAccounts ?? (async () => {
+      const { resolver } = await getConnection();
+      return isAccessAdministration(resolver) ? resolver : undefined;
+    }),
   }));
   app.use("/api", (request, response, next) => {
     if (configuration.requireAuth) {
@@ -1192,10 +1153,12 @@ export function createApp(
     if (request.path !== "/api" && !request.path.startsWith("/api/")) return next();
     try {
       const { store, resolver } = await getConnection();
-      const account = resolver
-        ? await resolver.resolve(response.locals.identity as AuthenticatedIdentity)
+      const identity = response.locals.identity as AuthenticatedIdentity | undefined;
+      const account = resolver && identity
+        ? await resolver.resolve(identity)
         : { user: localUser, store };
-      response.locals.user = account.user;
+      // Admin rights follow the signed-in identity's groups, not anything stored with the account.
+      response.locals.user = identity ? { ...account.user, admin: identity.admin } : account.user;
       const key = `${account.store.database}:${account.store.schemaName}`.toLowerCase();
       let world = worlds.get(key);
       if (!world) {
@@ -1241,10 +1204,8 @@ export function createApp(
           Number.isInteger(status) &&
           status >= 400 &&
           status < 600 &&
-          ["account_not_provisioned", "invite_required", "capacity_unavailable"].includes(code)
+          ["access_pending", "access_denied"].includes(code)
         ) {
-          if (code === "capacity_unavailable")
-            response.set("Retry-After", "300");
           return response.status(status).json({ error: error.message, code });
         }
       }

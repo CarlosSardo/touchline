@@ -879,12 +879,6 @@ export class Saves {
   }
 
   async deleteActiveCareer(confirmation: DeleteActiveCareerRequest): Promise<DeleteActiveCareerResult> {
-    // The legacy dbo world is the migrated live career; refuse before any read or lock.
-    if (this.store.schemaName.toLowerCase() === "dbo")
-      throw Object.assign(
-        new GameError("This career is protected and can't be deleted here."),
-        { status: 409, code: "career_protected" },
-      );
     return this.store.transaction(async () => {
       const state = await this.currentState();
       if (!state)
