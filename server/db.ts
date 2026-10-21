@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { randomUUID } from "node:crypto";
-import type * as Sql from "mssql";
+import { createHash, randomUUID } from "node:crypto";
+import pg from "pg";
 import { readSqlSettings, validateSqlSchema, type SqlSettings } from "./sql-config.ts";
 import {
   appearanceBackfill,
@@ -8,7 +8,6 @@ import {
   migrationTableSql,
   quoteIdentifier,
   schemaMigrations,
-  sqlLiteral,
   STORE_TABLES,
   tableName,
   WORLD_TABLES,
@@ -16,13 +15,32 @@ import {
 
 export { WORLD_TABLES } from "./sql-schema.ts";
 
-const DISCARD_BATCH_ROWS = 10_000;
+/** Rows per bulk INSERT ... SELECT FROM unnest(...) statement; bounds memory on a small host. */
+const BULK_BATCH_ROWS = 5_000;
+const WORLD_LOCK_TIMEOUT = "30s";
+const MAINTENANCE_LOCK_TIMEOUT = "120s";
+const MAX_PARAMETERS = 65_535;
 
-export type SqlParameter =
-  string | number | bigint | boolean | Date | Buffer | null | undefined;
+type SqlScalar = string | number | bigint | boolean | Date | Buffer | null | undefined;
+export type SqlParameter = SqlScalar | readonly SqlScalar[];
 export interface RunResult {
   changes: number;
   lastInsertRowid: number | null;
+}
+
+/** PostgreSQL SQLSTATE of a driver error, if any. */
+export function sqlErrorCode(error: unknown): string | undefined {
+  const code = (error as { code?: unknown } | null)?.code;
+  return typeof code === "string" && /^[0-9A-Z]{5}$/.test(code) ? code : undefined;
+}
+
+export const isUniqueViolation = (error: unknown) => sqlErrorCode(error) === "23505";
+export const isForeignKeyViolation = (error: unknown) => sqlErrorCode(error) === "23503";
+export const isLockTimeout = (error: unknown) => sqlErrorCode(error) === "55P03";
+
+/** A stable signed 64-bit advisory lock key for a lock name. */
+export function advisoryLockKey(name: string): bigint {
+  return createHash("sha256").update(name).digest().readBigInt64BE(0);
 }
 
 const WRITING_KEYWORDS = new Set([
@@ -30,18 +48,27 @@ const WRITING_KEYWORDS = new Set([
   "update",
   "delete",
   "merge",
-  "into",
   "create",
   "alter",
   "drop",
   "truncate",
-  "exec",
-  "execute",
-  "dbcc",
   "grant",
-  "deny",
   "revoke",
+  "call",
+  "do",
+  "copy",
   "set",
+  "reset",
+  "lock",
+  "vacuum",
+  "analyze",
+  "refresh",
+  "reindex",
+  "cluster",
+  "comment",
+  "security",
+  "nextval",
+  "setval",
 ]);
 
 interface Token {
@@ -79,46 +106,47 @@ function tokenize(source: string): Token[] {
         } else offset++;
       }
       if (depth) throw new Error("Unterminated SQL comment.");
-    } else if (character === "'" || character === '"' || character === "[") {
+    } else if (character === "'" || character === '"') {
       kind = character === "'" ? "literal" : "identifier";
-      const closing = character === "[" ? "]" : character;
+      // E'...' strings allow backslash escapes; the E is the previous word token.
+      const previous = tokens.at(-1);
+      const escapes = kind === "literal" && previous?.end === start && /^[eE]$/.test(previous.text);
       offset++;
       let closed = false;
       while (offset < source.length) {
-        if (source[offset++] !== closing) continue;
-        if (source[offset] === closing) {
+        const current = source[offset++];
+        if (escapes && current === "\\") {
+          offset++;
+          continue;
+        }
+        if (current !== character) continue;
+        if (source[offset] === character) {
           offset++;
           continue;
         }
         closed = true;
         break;
       }
-      if (!closed)
-        throw new Error("Unterminated SQL quoted value or identifier.");
-    } else if (/[\p{L}\p{N}_@#$]/u.test(character)) {
+      if (!closed) throw new Error("Unterminated SQL quoted value or identifier.");
+    } else if (character === "$" && /^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/.test(source.slice(offset, offset + 64))) {
+      const tag = /^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/.exec(source.slice(offset, offset + 64))![0];
+      kind = "literal";
+      const close = source.indexOf(tag, offset + tag.length);
+      if (close < 0) throw new Error("Unterminated SQL dollar-quoted string.");
+      offset = close + tag.length;
+    } else if (/[\p{L}\p{N}_]/u.test(character)) {
       kind = "word";
-      while (offset < source.length && /[\p{L}\p{N}_@#$]/u.test(source[offset]))
-        offset++;
+      while (offset < source.length && /[\p{L}\p{N}_$]/u.test(source[offset])) offset++;
     } else offset++;
     const text = source.slice(start, offset);
-    const name =
-      kind === "identifier"
-        ? text
-            .slice(1, -1)
-            .replaceAll(
-              character === "[" ? "]]" : '""',
-              character === "[" ? "]" : '"',
-            )
-        : text;
+    const name = kind === "identifier" ? text.slice(1, -1).replaceAll('""', '"') : text;
     tokens.push({ text, name: name.toLowerCase(), start, end: offset, kind });
   }
   return tokens;
 }
 
 function significant(tokens: Token[]): Token[] {
-  return tokens.filter(
-    (token) => token.kind !== "space" && token.kind !== "comment",
-  );
+  return tokens.filter((token) => token.kind !== "space" && token.kind !== "comment");
 }
 
 function keyword(token: Token | undefined, word: string): boolean {
@@ -134,399 +162,126 @@ function afterParentheses(tokens: Token[], start: number): number {
   throw new Error("Unbalanced SQL parentheses.");
 }
 
-function cteNames(tokens: Token[]): Map<string, number> {
-  const names = new Map<string, number>();
-  if (!keyword(tokens[0], "with")) return names;
-  let cursor = 1;
-  while (
-    tokens[cursor]?.kind === "word" ||
-    tokens[cursor]?.kind === "identifier"
-  ) {
-    const token = tokens[cursor++];
-    if (tokens[cursor]?.text === "(")
-      cursor = afterParentheses(tokens, cursor);
-    if (!keyword(tokens[cursor], "as") || tokens[cursor + 1]?.text !== "(")
-      break;
-    names.set(token.name, token.start);
-    cursor = afterParentheses(tokens, cursor + 1);
-    if (tokens[cursor]?.text !== ",") break;
-    cursor++;
-  }
-  return names;
+export interface BoundSql {
+  sql: string;
+  values: unknown[];
+  writes: boolean;
+  statements: number;
+  /** Set for a single INSERT into a world identity table. */
+  insert?: { table: string; explicitId: boolean; returning: boolean };
 }
 
-function assertStatementScope(tokens: Token[]): void {
-  let depth = 0;
-  let command = "";
-  let insertSelect = false;
-  let values = false;
-  let setOperation = false;
-  for (const [offset, token] of tokens.entries()) {
-    if (token.text === "(") depth++;
-    if (token.text === ")") depth--;
-    if (depth < 0) throw new Error("Unbalanced SQL parentheses.");
-    if (depth !== 0 || token.kind !== "word") continue;
-    if (["union", "except", "intersect"].includes(token.name))
-      setOperation = true;
-    if (keyword(token, "values")) values = true;
-    if (keyword(token, "update") && tokens[offset + 1]?.text === "(") continue;
-    if (!["select", "insert", "update", "delete", "merge"].includes(token.name))
-      continue;
-    if (
-      command === "merge" &&
-      keyword(tokens[offset - 1], "then") &&
-      ["insert", "update", "delete"].includes(token.name)
-    )
-      continue;
-    if (
-      command &&
-      !(token.name === "select" && (
-        (command === "insert" && !insertSelect && !values) ||
-        (setOperation && (command === "select" || insertSelect))
-      ))
-    )
-      throw new Error(
-        "Unsupported or ambiguous SQL batch for schema isolation; separate statements with semicolons.",
-      );
-    if (command === "insert" && token.name === "select") insertSelect = true;
-    command ||= token.name;
-    setOperation = false;
-  }
-  if (depth !== 0) throw new Error("Unbalanced SQL parentheses.");
-}
-
-function tableReplacements(
-  tokens: Token[],
-  schema: string,
-): Map<number, string> {
-  const replacements = new Map<number, string>();
-  const clauses = new Set([
-    "where",
-    "group",
-    "order",
-    "having",
-    "union",
-    "except",
-    "intersect",
-    "set",
-    "values",
-    "output",
-    "option",
-    "when",
-  ]);
-  let statementStart = 0;
-  while (statementStart < tokens.length) {
-    let statementEnd = statementStart;
-    while (statementEnd < tokens.length && tokens[statementEnd].text !== ";")
-      statementEnd++;
-    const statement = tokens.slice(statementStart, statementEnd);
-    const ctes = cteNames(statement);
-    const isolated = schema.toLowerCase() !== "dbo";
-    const writes = statement.some(
-      (token) => token.kind === "word" && WRITING_KEYWORDS.has(token.name),
-    );
-    const aliases = new Map<number, Set<string>>();
-    const targets: { token: Token; update: boolean; depth: number }[] = [];
-    const fromDepths = new Set<number>();
-    const scopes = [0];
-    let nextScope = 0;
-    let depth = 0;
-    let expectTable = false;
-    let update = false;
-    let ddlTarget = false;
-    for (let offset = 0; offset < statement.length; offset++) {
-      const token = statement[offset];
-      if (expectTable) {
-        if (
-          keyword(token, "if") ||
-          keyword(token, "exists") ||
-          keyword(token, "into") ||
-          (update && keyword(token, "from"))
-        )
-          continue;
-        if (keyword(token, "top") && statement[offset + 1]?.text === "(") {
-          offset = afterParentheses(statement, offset + 1) - 1;
-          continue;
-        }
-        if (keyword(token, "percent")) continue;
-        expectTable = false;
-        if (token.kind === "word" || token.kind === "identifier" || token.text === "(") {
-          let end = token.text === "(" ? afterParentheses(statement, offset) - 1 : offset;
-          while (statement[end + 1]?.text === ".") end += 2;
-          if (
-            isolated && writes && end > offset &&
-            STORE_TABLES.has(statement[end]?.name) &&
-            !(end === offset + 2 && token.name === schema.toLowerCase())
-          )
-            throw new Error("Unsupported cross-schema game write for schema isolation.");
-          if (
-            end === offset &&
-            STORE_TABLES.has(token.name) &&
-            (ctes.get(token.name) ?? Infinity) > token.start
-          )
-            targets.push({ token, update, depth });
-          let alias = end + 1;
-          if (
-            keyword(statement[alias], "with") &&
-            statement[alias + 1]?.text === "("
-          )
-            alias = afterParentheses(statement, alias + 1);
-          if (keyword(statement[alias], "as")) alias++;
-          const candidate = statement[alias];
-          if (
-            !update &&
-            candidate &&
-            (candidate.kind === "identifier" ||
-              (candidate.kind === "word" &&
-                !clauses.has(candidate.name) &&
-                ![
-                  "join",
-                  "left",
-                  "right",
-                  "inner",
-                  "outer",
-                  "cross",
-                  "full",
-                  "on",
-                  "with",
-                  "using",
-                  "from",
-                  "select",
-                  "insert",
-                  "update",
-                  "delete",
-                ].includes(candidate.name)))
-          ) {
-            if (!aliases.has(depth)) aliases.set(depth, new Set());
-            aliases.get(depth)!.add(candidate.name);
-          }
-        }
-      }
-      if (token.text === "(") {
-        scopes.push(++nextScope);
-        depth = nextScope;
-        continue;
-      }
-      if (token.text === ")") {
-        fromDepths.delete(depth);
-        scopes.pop();
-        depth = scopes.at(-1) ?? 0;
-        continue;
-      }
-      if (token.kind !== "word" && token.text !== ",") continue;
-      if (clauses.has(token.name)) fromDepths.delete(depth);
-      if (keyword(token, "index") || keyword(token, "trigger"))
-        ddlTarget = true;
-      if (keyword(token, "from")) fromDepths.add(depth);
-      if (
-        [
-          "from",
-          "join",
-          "apply",
-          "references",
-          "using",
-          "into",
-          "update",
-          "insert",
-          "merge",
-          "table",
-        ].some((word) => keyword(token, word)) ||
-        (keyword(token, "delete") && !keyword(statement[offset + 1], "from")) ||
-        (keyword(token, "on") && ddlTarget) ||
-        (token.text === "," && fromDepths.has(depth))
-      ) {
-        expectTable = true;
-        update = keyword(token, "update") || keyword(token, "delete") ||
-          (keyword(token, "from") && keyword(statement[offset - 1], "delete"));
-        if (keyword(token, "on")) ddlTarget = false;
-      }
-    }
-    if (isolated && (targets.length || ctes.size || !statement.some(
-      (token) => ["create", "alter", "drop"].some((word) => keyword(token, word)),
-    )))
-      assertStatementScope(statement);
-    for (const target of targets)
-      if (!target.update || !aliases.get(target.depth)?.has(target.token.name))
-        replacements.set(
-          target.token.start,
-          `${quoteIdentifier(schema)}.${target.token.text}`,
-        );
-    statementStart = statementEnd + 1;
-  }
-  return replacements;
-}
-
-export function bindSql(
-  source: string,
-  params: readonly SqlParameter[] = [],
-  schema = "dbo",
-) {
+/** Rewrites `?` placeholders as `$1..$n` and classifies the statement. */
+export function bindSql(source: string, params: readonly SqlParameter[] = []): BoundSql {
   const tokens = tokenize(source);
   const meaningful = significant(tokens);
-  const replacements = tableReplacements(meaningful, schema);
-  const used = new Set(
-    meaningful
-      .filter((token) => token.kind === "word")
-      .map((token) => token.name),
-  );
-  const parameters: { name: string; value: SqlParameter }[] = [];
+  let index = 0;
   const sql = tokens
-    .map((token) => {
-      if (token.kind !== "symbol" || token.text !== "?")
-        return replacements.get(token.start) ?? token.text;
-      let name = `__touchline_arg_${parameters.length}`;
-      while (used.has(`@${name}`)) name += "_";
-      used.add(`@${name}`);
-      parameters.push({ name, value: params[parameters.length] });
-      return `@${name}`;
+    .map((token, offset) => {
+      if (token.kind !== "symbol" || token.text !== "?") return token.text;
+      const next = tokens[offset + 1];
+      if (next?.kind === "symbol" && (next.text === "|" || next.text === "&"))
+        throw new Error("Use jsonb_exists_any/jsonb_exists_all instead of the ?| and ?& operators.");
+      return `$${++index}`;
     })
     .join("");
-  if (parameters.length !== params.length)
-    throw new Error(
-      `SQL parameter count mismatch: expected ${parameters.length}, received ${params.length}.`,
-    );
-  if (parameters.length > 2100)
-    throw new Error(
-      "SQL Server supports at most 2100 parameters; use bulkInsert for large inputs.",
-    );
-  const writes = meaningful.some(
-    (token) => token.kind === "word" && WRITING_KEYWORDS.has(token.name),
-  );
-  return { sql, parameters, writes };
+  if (index !== params.length)
+    throw new Error(`SQL parameter count mismatch: expected ${index}, received ${params.length}.`);
+  if (index > MAX_PARAMETERS)
+    throw new Error("PostgreSQL supports at most 65535 parameters; pass an array or use bulkInsert.");
+  if (meaningful.some((token) => token.kind === "symbol" && token.text === "$"))
+    throw new Error("Use ? placeholders, not $n, in Touchline SQL.");
+  const values = params.map((value) => {
+    if (typeof value === "number" && !Number.isFinite(value))
+      throw new Error("SQL numbers must be finite.");
+    if (Array.isArray(value))
+      for (const item of value)
+        if (typeof item === "number" && !Number.isFinite(item))
+          throw new Error("SQL numbers must be finite.");
+    return typeof value === "bigint" ? value.toString() : (value ?? null);
+  });
+  const statementEnds = meaningful.filter((token) => token.text === ";");
+  const trailing = meaningful.at(-1)?.text === ";" ? 1 : 0;
+  const statements = meaningful.length ? statementEnds.length + 1 - trailing : 0;
+  const writes = meaningful.some((token) => token.kind === "word" && WRITING_KEYWORDS.has(token.name));
+  return { sql, values, writes, statements, insert: statements === 1 ? identityInsert(meaningful) : undefined };
 }
 
-function identityInsertBatch(target: string, statement: string): string {
-  return `SET IDENTITY_INSERT ${target} ON;
-    BEGIN TRY
-      ${statement}
-      SET IDENTITY_INSERT ${target} OFF;
-    END TRY
-    BEGIN CATCH
-      SET IDENTITY_INSERT ${target} OFF;
-      THROW;
-    END CATCH;`;
-}
-
-export function runSql(source: string): string {
-  const tokens = significant(tokenize(source));
+function identityInsert(tokens: Token[]): BoundSql["insert"] {
   let offset = 0;
-  while (tokens[offset]?.text === ";") offset++;
   if (keyword(tokens[offset], "with")) {
     let depth = 0;
     for (; offset < tokens.length; offset++) {
       if (tokens[offset].text === "(") depth++;
       if (tokens[offset].text === ")") depth--;
-      if (
-        depth === 0 &&
-        ["insert", "update", "delete", "select", "merge"].some((word) =>
-          keyword(tokens[offset], word),
-        )
-      )
+      if (depth === 0 && ["insert", "update", "delete", "select", "merge"].some((word) => keyword(tokens[offset], word)))
         break;
     }
   }
-  const ordinary = () =>
-    `${source}\n;SELECT @@ROWCOUNT AS [__touchline_changes], CAST(NULL AS INT) AS [__touchline_identity];`;
-  if (!keyword(tokens[offset++], "insert")) return ordinary();
-  if (keyword(tokens[offset], "top")) {
-    offset = afterParentheses(tokens, offset + 1);
-    if (keyword(tokens[offset], "percent")) offset++;
-  }
-  if (keyword(tokens[offset], "into")) offset++;
-  const targetStart = offset;
+  if (!keyword(tokens[offset++], "insert") || !keyword(tokens[offset++], "into")) return undefined;
   while (tokens[offset + 1]?.text === ".") offset += 2;
-  if (!tokens[offset] || !IDENTITY_TABLES.has(tokens[offset].name))
-    return ordinary();
-  const target = source.slice(tokens[targetStart].start, tokens[offset].end);
+  const table = tokens[offset];
+  if (!table || !IDENTITY_TABLES.has(table.name)) return undefined;
   offset++;
-  if (keyword(tokens[offset], "with") && tokens[offset + 1]?.text === "(")
-    offset = afterParentheses(tokens, offset + 1);
+  if (keyword(tokens[offset], "as")) offset += 2;
   let explicitId = false;
   if (tokens[offset]?.text === "(") {
     const end = afterParentheses(tokens, offset);
-    explicitId = tokens
-      .slice(offset + 1, end - 1)
-      .some((token) => token.name === "id");
-    offset = end;
+    explicitId = tokens.slice(offset + 1, end - 1).some((token) => token.name === "id");
   }
-  let outputStart: Token | undefined;
-  let outputInto = false;
   let depth = 0;
+  let returning = false;
   for (; offset < tokens.length; offset++) {
-    const token = tokens[offset];
-    if (token.text === "(") depth++;
-    if (token.text === ")") depth--;
-    if (depth !== 0) continue;
-    if (
-      ["values", "select", "default", "exec", "execute"].some((word) =>
-        keyword(token, word),
-      )
-    )
-      break;
-    if (keyword(token, "output")) outputStart = token;
-    if (outputStart && keyword(token, "into")) outputInto = true;
+    if (tokens[offset].text === "(") depth++;
+    if (tokens[offset].text === ")") depth--;
+    if (depth === 0 && keyword(tokens[offset], "returning")) returning = true;
   }
-  const payload = tokens[offset];
-  if (!payload) return ordinary();
-  const capture =
-    !outputInto && !keyword(payload, "exec") && !keyword(payload, "execute");
-  let suffix = "";
-  const used = new Set(tokens.map((token) => token.name));
-  while (
-    used.has(`@__touchline_inserted${suffix}`) ||
-    used.has(`@__touchline_changed${suffix}`)
-  )
-    suffix += "_";
-  const inserted = `@__touchline_inserted${suffix}`;
-  const changed = `@__touchline_changed${suffix}`;
-  const statement = capture
-    ? `${source.slice(0, outputStart?.start ?? payload.start)} OUTPUT INSERTED.[id] INTO ${inserted} ([id]) ${source.slice(payload.start)}`
-    : source;
-  const mutation = `${statement}\n;SET ${changed} = @@ROWCOUNT;`;
-  return `DECLARE ${changed} INT;
-    ${capture ? `DECLARE ${inserted} TABLE ([ordinal] INT IDENTITY(1,1), [id] INT NOT NULL);` : ""}
-    ${explicitId ? identityInsertBatch(target, mutation) : mutation}
-    SELECT ${changed} AS [__touchline_changes],
-      ${capture ? `(SELECT TOP (1) [id] FROM ${inserted} ORDER BY [ordinal] DESC)` : `CASE WHEN ${changed} > 0 THEN CONVERT(INT, SCOPE_IDENTITY()) END`} AS [__touchline_identity];`;
+  return { table: table.name, explicitId, returning };
 }
 
-export function sqlPoolConfig(settings: SqlSettings): Sql.config {
+const BIGINT_OID = 20;
+const NUMERIC_OID = 1700;
+const TIMESTAMP_OID = 1114;
+const DATE_OID = 1082;
+
+const parseNumber = (value: string) => Number(value);
+/** COUNT and SUM return bigint/numeric; Touchline values stay well inside double precision. */
+const types = {
+  getTypeParser(oid: number, format?: "text" | "binary") {
+    if (oid === BIGINT_OID || oid === NUMERIC_OID) return parseNumber;
+    if (oid === DATE_OID) return (value: string) => value;
+    if (oid === TIMESTAMP_OID) return (value: string) => new Date(`${value.replace(" ", "T")}Z`);
+    return pg.types.getTypeParser(oid, format);
+  },
+} as pg.CustomTypesConfig;
+
+export function sqlPoolConfig(settings: SqlSettings): pg.PoolConfig {
   return {
-    server: settings.server,
+    host: settings.host,
     port: settings.port,
     database: settings.database,
-    ...(settings.user
-      ? { user: settings.user, password: settings.password }
-      : {
-          authentication: {
-            type: "azure-active-directory-default" as const,
-            options: { clientId: settings.managedIdentityClientId },
-          },
-        }),
-    // Each new connection pays TLS, login and a fresh Entra token; keep one warm while a player reads a screen.
-    // 10 shared by all accounts: parallel readers must not queue behind a few slow scans (GP_S_Gen5_2 allows 150 workers).
-    pool: { min: 0, max: 10, idleTimeoutMillis: 60000 },
-    connectionTimeout: 60000,
-    requestTimeout: settings.requestTimeout,
-    options: {
-      encrypt: settings.encrypt,
-      trustServerCertificate: settings.trustServerCertificate,
-      abortTransactionOnError: true,
-      enableArithAbort: true,
-      useUTC: true,
-      appName: "Touchline",
-      enableQuotedIdentifier: true,
-    },
+    user: settings.user,
+    password: settings.password,
+    ssl: settings.ssl === "disable" ? false : { rejectUnauthorized: settings.ssl === "verify-full" },
+    // A Raspberry Pi serves a handful of players: a small warm pool avoids reconnect cost without starving PostgreSQL.
+    max: settings.poolSize,
+    idleTimeoutMillis: 60_000,
+    connectionTimeoutMillis: 60_000,
+    keepAlive: true,
+    statement_timeout: settings.requestTimeout,
+    idle_in_transaction_session_timeout: Math.max(settings.requestTimeout * 2, 60_000),
+    application_name: settings.applicationName,
+    options: "-c TimeZone=UTC",
+    types,
   };
 }
 
 interface TransactionContext {
-  transaction: Sql.Transaction;
+  client: pg.PoolClient;
   tail: Promise<void>;
   active: boolean;
   locked: boolean;
   readOnly: boolean;
-  rolledBack: boolean;
   failed: boolean;
   failure?: unknown;
 }
@@ -534,12 +289,13 @@ interface TransactionContext {
 interface ColumnInfo {
   name: string;
   type: string;
-  max_length: number;
-  scale: number;
-  is_nullable: boolean;
-  is_identity: boolean;
-  is_computed: boolean;
+  nullable: boolean;
+  identity: boolean;
+  generated: boolean;
 }
+
+/** Schema each pooled connection's search_path currently names; shared by every Store on one pool. */
+type SearchPaths = WeakMap<pg.PoolClient, string>;
 
 export class Store {
   readonly database: string;
@@ -556,8 +312,8 @@ export class Store {
 
   private constructor(
     settings: Pick<SqlSettings, "database" | "schema" | "testMode">,
-    private readonly pool: Sql.ConnectionPool,
-    private readonly driver: Omit<typeof Sql, "default">,
+    private readonly pool: pg.Pool,
+    private readonly searchPaths: SearchPaths,
     private readonly poolOwner?: Store,
   ) {
     this.database = settings.database;
@@ -572,7 +328,7 @@ export class Store {
     const store = new Store(
       { database: this.database, schema, testMode: this.testMode },
       this.pool,
-      this.driver,
+      this.searchPaths,
       owner,
     );
     owner.scopedStores.add(store);
@@ -580,35 +336,30 @@ export class Store {
   }
 
   private static async connect(settings: SqlSettings): Promise<Store> {
-    const { default: driver } = await import("mssql");
-    const pool = new driver.ConnectionPool(sqlPoolConfig(settings));
-    pool.on("error", (error: Error) =>
-      console.error("SQL connection pool error:", error.message),
-    );
+    const pool = new pg.Pool(sqlPoolConfig(settings));
+    pool.on("error", (error: Error) => console.error("SQL connection pool error:", error.message));
     try {
-      await pool.connect();
-      return new Store(settings, pool, driver);
+      const client = await pool.connect();
+      client.release();
+      return new Store(settings, pool, new WeakMap());
     } catch (error) {
-      await pool.close();
+      await pool.end();
       throw error;
     }
   }
 
   static async open(database?: string): Promise<Store> {
     return Store.connect(
-      readSqlSettings(
-        database === undefined
-          ? process.env
-          : { ...process.env, SQL_DATABASE: database },
-      ),
+      readSqlSettings(database === undefined ? process.env : { ...process.env, SQL_DATABASE: database }),
     );
   }
 
   static async createTest(label?: string, database?: string): Promise<Store> {
     if (database && database !== process.env.SQL_DATABASE &&
-      !["localhost", "127.0.0.1", "::1", "sql"].includes(process.env.SQL_SERVER ?? "127.0.0.1"))
-      throw new Error("Alternate test databases are allowed only on local SQL Server.");
-    const suffix = label?.replace(/[^A-Za-z0-9_]/g, "_").slice(0, 32);
+      !["localhost", "127.0.0.1", "::1"].includes(process.env.SQL_HOST ?? "127.0.0.1"))
+      throw new Error("Alternate test databases are allowed only on local PostgreSQL.");
+    // touchline_test_ + 32 hex + _ + 15 label characters = 63, PostgreSQL's identifier limit.
+    const suffix = label?.replace(/[^A-Za-z0-9_]/g, "_").toLowerCase().slice(0, 15);
     const schema = `touchline_test_${randomUUID().replaceAll("-", "")}${suffix ? `_${suffix}` : ""}`;
     const settings = readSqlSettings({
       ...process.env,
@@ -626,10 +377,7 @@ export class Store {
       try {
         await store.close();
       } catch (cleanupError) {
-        throw new AggregateError(
-          [error, cleanupError],
-          `Test setup failed; schema ${schema} cleanup also failed.`,
-        );
+        throw new AggregateError([error, cleanupError], `Test setup failed; schema ${schema} cleanup also failed.`);
       }
       throw error;
     }
@@ -642,21 +390,41 @@ export class Store {
       ((this.closing || this.poolOwner?.closing) && !context?.active)
     )
       throw new Error("SQL store is closed or closing.");
-    if (context && !context.active)
-      throw new Error("The SQL transaction has already completed.");
+    if (context && !context.active) throw new Error("The SQL transaction has already completed.");
   }
 
-  private async request<Result>(
-    callback: (request: Sql.Request) => Promise<Result>,
-  ): Promise<Result> {
+  /** Points a connection at this store's schema; only called outside a transaction, so it is never rolled back. */
+  private async useSchema(client: pg.PoolClient): Promise<void> {
+    if (this.searchPaths.get(client) === this.schemaName) return;
+    this.searchPaths.delete(client);
+    await client.query(`SET search_path TO ${quoteIdentifier(this.schemaName)}`);
+    this.searchPaths.set(client, this.schemaName);
+  }
+
+  private async withClient<Result>(callback: (client: pg.PoolClient) => Promise<Result>): Promise<Result> {
+    const client = await this.pool.connect();
+    let broken: Error | undefined;
+    try {
+      await this.useSchema(client);
+      return await callback(client);
+    } catch (error) {
+      // A connection-level failure must not return the client to the pool.
+      if (!sqlErrorCode(error)) broken = error instanceof Error ? error : new Error(String(error));
+      throw error;
+    } finally {
+      if (broken) this.searchPaths.delete(client);
+      client.release(broken);
+    }
+  }
+
+  private async request<Result>(callback: (client: pg.PoolClient) => Promise<Result>): Promise<Result> {
     this.assertOpen();
     const context = this.context.getStore();
-    if (!context) return callback(new this.driver.Request(this.pool));
+    if (!context) return this.withClient(callback);
     const operation = context.tail.then(() => {
-      if (!context.active || context.rolledBack)
-        throw new Error("The SQL transaction is no longer active.");
+      if (!context.active) throw new Error("The SQL transaction is no longer active.");
       if (context.failed) throw context.failure;
-      return callback(new this.driver.Request(context.transaction));
+      return callback(context.client);
     });
     context.tail = operation.then(
       () => {},
@@ -670,70 +438,49 @@ export class Store {
     return operation;
   }
 
-  private bind(
-    request: Sql.Request,
-    parameters: ReturnType<typeof bindSql>["parameters"],
-  ): void {
-    for (const { name, value } of parameters) {
-      if (typeof value === "number" && !Number.isFinite(value))
-        throw new Error("SQL numbers must be finite.");
-      if (typeof value === "string" || value === null || value === undefined)
-        request.input(
-          name,
-          this.driver.NVarChar(this.driver.MAX),
-          value ?? null,
-        );
-      else if (Buffer.isBuffer(value))
-        request.input(name, this.driver.VarBinary(this.driver.MAX), value);
-      else if (value instanceof Date)
-        request.input(name, this.driver.DateTime2(7), value);
-      else if (typeof value === "number")
-        request.input(
-          name,
-          Number.isInteger(value) && value >= -2147483648 && value <= 2147483647
-            ? this.driver.Int
-            : this.driver.Float,
-          value,
-        );
-      else request.input(name, value);
+  private async query(client: pg.PoolClient, prepared: BoundSql): Promise<pg.QueryResult[]> {
+    if (!prepared.values.length) {
+      // The simple protocol runs several statements in one round trip.
+      const result = (await client.query(prepared.sql)) as pg.QueryResult | pg.QueryResult[];
+      return Array.isArray(result) ? result : [result];
     }
+    if (prepared.statements > 1)
+      throw new Error("A parameterized SQL call must contain exactly one statement.");
+    return [await client.query({ text: prepared.sql, values: prepared.values })];
   }
 
   async all<Result>(sql: string, ...params: SqlParameter[]): Promise<Result[]> {
-    const prepared = bindSql(sql, params, this.schemaName);
+    const prepared = bindSql(sql, params);
     const execute = () =>
-      this.request(async (request) => {
-        this.bind(request, prepared.parameters);
-        return (await request.query<Result>(prepared.sql)).recordset ?? [];
+      this.request(async (client) => {
+        const results = await this.query(client, prepared);
+        if (prepared.insert?.explicitId) await this.reseed(client, prepared.insert.table);
+        return (results.at(-1)?.rows ?? []) as Result[];
       });
     if (!prepared.writes) return execute();
     this.assertWritable();
     return this.atomic(execute);
   }
 
-  async get<Result>(
-    sql: string,
-    ...params: SqlParameter[]
-  ): Promise<Result | undefined> {
+  async get<Result>(sql: string, ...params: SqlParameter[]): Promise<Result | undefined> {
     return (await this.all<Result>(sql, ...params))[0];
   }
 
   async run(sql: string, ...params: SqlParameter[]): Promise<RunResult> {
     this.assertWritable();
-    const prepared = bindSql(sql, params, this.schemaName);
+    const prepared = bindSql(sql, params);
+    const insert = prepared.insert;
+    if (insert && !insert.returning)
+      prepared.sql = `${prepared.sql.replace(/[\s;]+$/, "")} RETURNING id`;
     return this.atomic(async () =>
-      this.request(async (request) => {
-        this.bind(request, prepared.parameters);
-        const result = await request.query<{
-          __touchline_changes: number;
-          __touchline_identity: number | null;
-        }>(runSql(prepared.sql));
-        const row = Object.values(result.recordsets).at(-1)?.[0];
-        if (!row)
-          throw new Error("SQL mutation did not return its result metadata.");
+      this.request(async (client) => {
+        const result = (await this.query(client, prepared)).at(-1);
+        if (insert?.explicitId) await this.reseed(client, insert.table);
+        const rows = result?.rows as { id?: unknown }[] | undefined;
+        const last = insert && rows?.length ? rows.at(-1)!.id : null;
         return {
-          changes: row.__touchline_changes,
-          lastInsertRowid: row.__touchline_identity,
+          changes: result?.rowCount ?? 0,
+          lastInsertRowid: typeof last === "number" ? last : last == null ? null : Number(last),
         };
       }),
     );
@@ -741,34 +488,36 @@ export class Store {
 
   async exec(sql: string, ...params: SqlParameter[]): Promise<void> {
     this.assertWritable();
-    const prepared = bindSql(sql, params, this.schemaName);
+    const prepared = bindSql(sql, params);
     await this.atomic(async () =>
-      this.request(async (request) => {
-        this.bind(request, prepared.parameters);
-        if (prepared.parameters.length) await request.query(prepared.sql);
-        else await request.batch(prepared.sql);
+      this.request(async (client) => {
+        await this.query(client, prepared);
+        if (prepared.insert?.explicitId) await this.reseed(client, prepared.insert.table);
       }),
     );
   }
 
+  /** After explicit ids were inserted, moves the identity sequence past the highest id. */
+  private async reseed(client: pg.PoolClient, table: string): Promise<void> {
+    if (!IDENTITY_TABLES.has(table)) throw new Error("Unknown world identity table.");
+    const target = tableName(this.schemaName, table);
+    await client.query({
+      text: `SELECT setval(pg_get_serial_sequence($1, 'id'), COALESCE(MAX(id), 1), MAX(id) IS NOT NULL) FROM ${target}`,
+      values: [target],
+    });
+  }
+
   async meta<Result>(key: string): Promise<Result> {
-    const row = await this.get<{ value: string }>(
-      "SELECT [value] FROM meta WHERE [key] = ?",
-      key,
-    );
+    const row = await this.get<{ value: string }>("SELECT value FROM meta WHERE key = ?", key);
     if (!row) throw new Error(`Missing game metadata: ${key}`);
     return JSON.parse(row.value) as Result;
   }
 
   async setMeta(key: string, value: unknown): Promise<void> {
     const serialized = JSON.stringify(value);
-    if (serialized === undefined)
-      throw new Error("Game metadata must be JSON serializable.");
+    if (serialized === undefined) throw new Error("Game metadata must be JSON serializable.");
     await this.exec(
-      `UPDATE meta SET [value] = ? WHERE [key] = ?;
-      IF @@ROWCOUNT = 0 INSERT INTO meta ([key], [value]) VALUES (?, ?);`,
-      serialized,
-      key,
+      "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
       key,
       serialized,
     );
@@ -791,7 +540,18 @@ export class Store {
   async readTransaction<Result>(callback: () => Promise<Result>): Promise<Result> {
     this.assertOpen();
     if (this.context.getStore() || this.batchContext.getStore()) return callback();
-    const operation = this.startTransaction(callback, true, true);
+    return this.track(this.startTransaction(callback, true, true));
+  }
+
+  private assertWritable(): void {
+    if (this.context.getStore()?.readOnly) throw new Error("A read-only SQL transaction cannot write.");
+  }
+
+  private worldLock(): string {
+    return `touchline:world:${this.schemaName.toLowerCase()}`;
+  }
+
+  private async track<Result>(operation: Promise<Result>): Promise<Result> {
     this.activeTransactions.add(operation);
     try {
       return await operation;
@@ -800,14 +560,31 @@ export class Store {
     }
   }
 
-  private assertWritable(): void {
-    if (this.context.getStore()?.readOnly)
-      throw new Error("A read-only SQL transaction cannot write.");
+  /**
+   * Takes a transaction-scoped advisory lock inside the current transaction, waiting at most `timeout`.
+   * Use for cross-world coordination such as the account registry.
+   */
+  async advisoryLock(name: string, { shared = false, timeout = WORLD_LOCK_TIMEOUT } = {}): Promise<void> {
+    const context = this.context.getStore();
+    if (!context?.active) throw new Error("advisoryLock() requires an active Store.transaction().");
+    if (!/^\d+(?:ms|s|min)$/.test(timeout)) throw new Error("Invalid lock timeout.");
+    await this.request((client) => this.lock(client, name, shared, timeout));
+  }
+
+  private async lock(client: pg.PoolClient, name: string, shared: boolean, timeout: string): Promise<void> {
+    try {
+      await client.query(`SET LOCAL lock_timeout = '${timeout}';
+        SELECT pg_advisory_xact_lock${shared ? "_shared" : ""}(${advisoryLockKey(name)});
+        SET LOCAL lock_timeout = DEFAULT;`);
+    } catch (error) {
+      if (isLockTimeout(error)) throw new Error(`Touchline lock ${name} could not be acquired.`, { cause: error });
+      throw error;
+    }
   }
 
   /**
    * Runs a large write, such as building a new career world, as many short transactions instead of one, so a
-   * full world never needs a single multi-hundred-megabyte log. One idle transaction holds the world writer lock
+   * full world never needs one huge transaction. One idle transaction holds the world writer lock
    * for the whole callback, so no other writer interleaves; the callback must mark its result complete last and
    * clean up if it fails, because statements already committed stay committed.
    */
@@ -815,28 +592,24 @@ export class Store {
     this.assertOpen();
     // Already inside a transaction (one atomic unit, as before) or another batched() call: just run it.
     if (this.context.getStore() || this.batchContext.getStore()) return callback();
-    const holder = new this.driver.Transaction(this.pool);
-    const operation = (async () => {
-      await holder.begin(this.driver.ISOLATION_LEVEL.READ_COMMITTED);
+    return this.track((async () => {
+      const holder = await this.pool.connect();
+      let broken: Error | undefined;
       try {
-        const request = new this.driver.Request(holder);
-        request.input("worldLock", this.driver.NVarChar(255), `touchline:world:${this.schemaName.toLowerCase()}`);
-        await request.query(`DECLARE @lockResult INT;
-          EXEC @lockResult = sys.sp_getapplock @Resource = @worldLock, @LockMode = N'Exclusive',
-            @LockOwner = N'Transaction', @LockTimeout = 30000;
-          IF @lockResult < 0 THROW 51000, N'Touchline world writer lock could not be acquired.', 1;`);
-        return await this.batchContext.run(true, callback);
+        await holder.query("BEGIN");
+        try {
+          await this.lock(holder, this.worldLock(), false, WORLD_LOCK_TIMEOUT);
+          return await this.batchContext.run(true, callback);
+        } finally {
+          // The holder wrote nothing; ending it only releases the lock (a dropped connection releases it too).
+          await holder.query("ROLLBACK").catch((error: Error) => {
+            broken = error;
+          });
+        }
       } finally {
-        // The holder wrote nothing; ending it only releases the lock (a dropped connection releases it too).
-        await holder.rollback().catch(() => undefined);
+        holder.release(broken);
       }
-    })();
-    this.activeTransactions.add(operation);
-    try {
-      return await operation;
-    } finally {
-      this.activeTransactions.delete(operation);
-    }
+    })());
   }
 
   /** One SQL transaction: joins the current one, or starts one under the world writer lock. */
@@ -844,10 +617,7 @@ export class Store {
     this.assertOpen();
     const existing = this.context.getStore();
     if (existing) {
-      if (existing.failed || existing.rolledBack)
-        throw (
-          existing.failure ?? new Error("The SQL transaction was rolled back.")
-        );
+      if (existing.failed) throw existing.failure ?? new Error("The SQL transaction was rolled back.");
       try {
         return await callback();
       } catch (error) {
@@ -858,13 +628,7 @@ export class Store {
         throw error;
       }
     }
-    const operation = this.startTransaction(callback, !this.batchContext.getStore());
-    this.activeTransactions.add(operation);
-    try {
-      return await operation;
-    } finally {
-      this.activeTransactions.delete(operation);
-    }
+    return this.track(this.startTransaction(callback, !this.batchContext.getStore()));
   }
 
   private async startTransaction<Result>(
@@ -872,65 +636,50 @@ export class Store {
     acquireLock = true,
     shared = false,
   ): Promise<Result> {
-    const transaction = new this.driver.Transaction(this.pool);
+    const client = await this.pool.connect();
+    // The connection returns to the pool only after a confirmed COMMIT or ROLLBACK; otherwise it is destroyed.
+    let clean = false;
     const context: TransactionContext = {
-      transaction,
+      client,
       tail: Promise.resolve(),
       active: true,
       locked: false,
       readOnly: shared,
-      rolledBack: false,
       failed: false,
     };
-    transaction.on("rollback", () => {
-      context.rolledBack = true;
-    });
-    await transaction.begin(this.driver.ISOLATION_LEVEL.READ_COMMITTED);
-    return this.context.run(context, async () => {
-      try {
-        await this.request(async (request) => {
-          if (!acquireLock) {
-            await request.batch("SET XACT_ABORT ON;");
-            return;
-          }
-          request.input(
-            "worldLock",
-            this.driver.NVarChar(255),
-            `touchline:world:${this.schemaName.toLowerCase()}`,
-          );
-          await request.query(`SET XACT_ABORT ON;
-            DECLARE @lockResult INT;
-            EXEC @lockResult = sys.sp_getapplock @Resource = @worldLock, @LockMode = N'${shared ? "Shared" : "Exclusive"}',
-              @LockOwner = N'Transaction', @LockTimeout = 30000;
-            IF @lockResult < 0 THROW 51000, N'Touchline world ${shared ? "reader" : "writer"} lock could not be acquired.', 1;`);
-        });
-        // Only the exclusive lock is a writer lock (clearWorld requires one).
-        context.locked = !shared;
-        const result = await callback();
-        await context.tail;
-        if (context.failed) throw context.failure;
-        if (context.rolledBack)
-          throw new Error("The SQL transaction was rolled back.");
-        await transaction.commit();
-        return result;
-      } catch (error) {
-        await context.tail;
-        if (!context.rolledBack) {
+    try {
+      await this.useSchema(client);
+      await client.query(shared ? "BEGIN READ ONLY" : "BEGIN");
+      return await this.context.run(context, async () => {
+        try {
+          if (acquireLock) await this.lock(client, this.worldLock(), shared, WORLD_LOCK_TIMEOUT);
+          // Only the exclusive lock is a writer lock (clearWorld requires one).
+          context.locked = acquireLock && !shared;
+          const result = await callback();
+          await context.tail;
+          if (context.failed) throw context.failure;
+          await client.query("COMMIT");
+          clean = true;
+          return result;
+        } catch (error) {
+          await context.tail;
+          if (clean) throw error;
           try {
-            await transaction.rollback();
+            await client.query("ROLLBACK");
+            clean = true;
           } catch (rollbackError) {
-            throw new AggregateError(
-              [error, rollbackError],
-              "SQL operation and rollback both failed.",
-            );
+            throw new AggregateError([error, rollbackError], "SQL operation and rollback both failed.");
           }
+          throw error;
+        } finally {
+          context.active = false;
+          context.locked = false;
         }
-        throw error;
-      } finally {
-        context.active = false;
-        context.locked = false;
-      }
-    });
+      });
+    } finally {
+      if (!clean) this.searchPaths.delete(client);
+      client.release(clean ? undefined : true);
+    }
   }
 
   async schema(): Promise<void> {
@@ -938,42 +687,31 @@ export class Store {
       await this.lockSchemaMaintenance();
       if (
         this.schemaName.toLowerCase() === "accounts" ||
-        await this.get("SELECT [name] FROM sys.tables WHERE [schema_id] = SCHEMA_ID(?) AND [name] = N'users'", this.schemaName)
+        (await this.get(
+          "SELECT 1 AS present FROM pg_catalog.pg_tables WHERE schemaname = ? AND tablename = 'users'",
+          this.schemaName,
+        ))
       )
         throw new Error("World migrations cannot run in an account registry schema.");
-      await this.exec(`IF SCHEMA_ID(${sqlLiteral(this.schemaName)}) IS NULL
-        EXEC(${sqlLiteral(`CREATE SCHEMA ${quoteIdentifier(this.schemaName)};`)});`);
+      await this.exec(`CREATE SCHEMA IF NOT EXISTS ${quoteIdentifier(this.schemaName)};`);
       await this.exec(migrationTableSql(this.schemaName));
       const applied = new Set(
-        (
-          await this.all<{ version: number }>(
-            "SELECT [version] FROM schema_migrations",
-          )
-        ).map((row) => row.version),
+        (await this.all<{ version: number }>("SELECT version FROM schema_migrations")).map((row) => row.version),
       );
       const migrations = schemaMigrations(this.schemaName);
       if ([...applied].some((version) => version > migrations.at(-1)!.version))
-        throw new Error(
-          "This database was migrated by a newer version of Touchline.",
-        );
+        throw new Error("This database was migrated by a newer version of Touchline.");
       for (const migration of migrations) {
         if (applied.has(migration.version)) continue;
-        for (const statement of migration.statements)
-          await this.exec(statement);
+        for (const statement of migration.statements) await this.exec(statement);
         await this.run(
-          "INSERT INTO schema_migrations ([version], [name]) VALUES (?, ?)",
+          "INSERT INTO schema_migrations (version, name) VALUES (?, ?)",
           migration.version,
           migration.name,
         );
       }
-      if (
-        !(await this.get(
-          "SELECT [key] FROM meta WHERE [key] = ?",
-          "appearanceIndexVersion",
-        ))
-      ) {
-        for (const statement of appearanceBackfill(this.schemaName))
-          await this.exec(statement);
+      if (!(await this.get("SELECT key FROM meta WHERE key = ?", "appearanceIndexVersion"))) {
+        for (const statement of appearanceBackfill(this.schemaName)) await this.exec(statement);
         await this.setMeta("appearanceIndexVersion", 1);
       }
       this.columnCache.clear();
@@ -982,9 +720,7 @@ export class Store {
 
   async worldTables(): Promise<string[]> {
     const rows = await this.all<{ name: string }>(
-      `SELECT table_row.[name] FROM sys.tables AS table_row
-      INNER JOIN sys.schemas AS schema_row ON schema_row.[schema_id] = table_row.[schema_id]
-      WHERE schema_row.[name] = ?`,
+      "SELECT tablename AS name FROM pg_catalog.pg_tables WHERE schemaname = ?",
       this.schemaName,
     );
     const existing = new Set(rows.map((row) => row.name));
@@ -993,8 +729,7 @@ export class Store {
 
   private knownTable(table: string): string {
     const name = table.toLowerCase();
-    if (!STORE_TABLES.has(name))
-      throw new Error(`Unknown Touchline table: ${table}`);
+    if (!STORE_TABLES.has(name)) throw new Error(`Unknown Touchline table: ${table}`);
     return name;
   }
 
@@ -1003,141 +738,62 @@ export class Store {
     const cached = this.columnCache.get(table);
     if (cached) return cached;
     const columns = await this.all<ColumnInfo>(
-      `SELECT column_row.[name], type_row.[name] AS [type],
-      column_row.[max_length], column_row.[scale], column_row.[is_nullable], column_row.[is_identity], column_row.[is_computed]
-      FROM sys.columns AS column_row
-      INNER JOIN sys.types AS type_row ON type_row.[user_type_id] = column_row.[user_type_id]
-      INNER JOIN sys.tables AS table_row ON table_row.[object_id] = column_row.[object_id]
-      INNER JOIN sys.schemas AS schema_row ON schema_row.[schema_id] = table_row.[schema_id]
-      WHERE schema_row.[name] = ? AND table_row.[name] = ? ORDER BY column_row.[column_id]`,
-      this.schemaName,
-      table,
+      `SELECT attribute.attname AS name, format_type(attribute.atttypid, attribute.atttypmod) AS type,
+        NOT attribute.attnotnull AS nullable, attribute.attidentity <> '' AS identity,
+        attribute.attgenerated <> '' AS generated
+      FROM pg_catalog.pg_attribute AS attribute
+      WHERE attribute.attrelid = to_regclass(?) AND attribute.attnum > 0 AND NOT attribute.attisdropped
+      ORDER BY attribute.attnum`,
+      tableName(this.schemaName, table),
     );
     if (!columns.length)
-      throw new Error(
-        `SQL table ${this.schemaName}.${table} does not exist; call schema() first.`,
-      );
+      throw new Error(`SQL table ${this.schemaName}.${table} does not exist; call schema() first.`);
     this.columnCache.set(table, columns);
     return columns;
   }
 
   async columns(table: string): Promise<string[]> {
-    return (await this.columnInfo(table))
-      .filter((column) => !column.is_computed)
-      .map((column) => column.name);
+    return (await this.columnInfo(table)).filter((column) => !column.generated).map((column) => column.name);
   }
 
-  private bulkType(column: ColumnInfo): Sql.ISqlType | (() => Sql.ISqlType) {
-    const length =
-      column.max_length === -1 ? this.driver.MAX : column.max_length;
-    switch (column.type) {
-      case "int":
-        return this.driver.Int;
-      case "bigint":
-        return this.driver.BigInt;
-      case "float":
-        return this.driver.Float;
-      case "bit":
-        return this.driver.Bit;
-      case "nvarchar":
-        return this.driver.NVarChar(
-          length === this.driver.MAX ? length : length / 2,
-        );
-      case "varchar":
-        return this.driver.VarChar(length);
-      case "char":
-        return this.driver.Char(length);
-      case "varbinary":
-        return this.driver.VarBinary(length);
-      case "datetime2":
-        return this.driver.DateTime2(column.scale);
-      case "uniqueidentifier":
-        return this.driver.UniqueIdentifier;
-      default:
-        throw new Error(
-          `Unsupported bulk SQL type ${column.type} for ${column.name}.`,
-        );
-    }
-  }
-
+  /** Inserts many rows with one `INSERT ... SELECT FROM unnest(...)` per batch: one array parameter per column. */
   async bulkInsert(table: string, rows: readonly object[]): Promise<void> {
     this.assertWritable();
     table = this.knownTable(table);
     if (!rows.length) return;
     await this.atomic(async () => {
       const metadata = await this.columnInfo(table);
-      const known = new Set(metadata.map((column) => column.name));
+      const known = new Map(metadata.map((column) => [column.name, column]));
       const keys = Object.keys(rows[0]);
-      for (const key of keys)
-        if (!known.has(key))
-          throw new Error(`Unknown SQL column ${table}.${key}.`);
-      const columns = metadata.filter(
-        (column) => !column.is_computed && keys.includes(column.name),
-      );
-      if (!columns.length)
-        throw new Error("Bulk insert requires at least one writable column.");
+      for (const key of keys) if (!known.has(key)) throw new Error(`Unknown SQL column ${table}.${key}.`);
+      const columns = metadata.filter((column) => !column.generated && keys.includes(column.name));
+      if (!columns.length) throw new Error("Bulk insert requires at least one writable column.");
       const selected = new Set(columns.map((column) => column.name));
       for (const row of rows) {
         const rowKeys = Object.keys(row);
         if (
           rowKeys.some((key) => !known.has(key)) ||
           columns.some((column) => !Object.hasOwn(row, column.name)) ||
-          rowKeys.some(
-            (key) =>
-              !selected.has(key) &&
-              !metadata.find((column) => column.name === key)?.is_computed,
-          )
+          rowKeys.some((key) => !selected.has(key) && !known.get(key)?.generated)
         )
           throw new Error("All bulk rows must have the same writable columns.");
       }
       const target = tableName(this.schemaName, table);
-      const identity = columns.some((column) => column.is_identity);
-      await this.request(async (request) => {
-        const bulk = new this.driver.Table(target);
-        bulk.create = false;
-        for (const column of columns)
-          bulk.columns.add(column.name, this.bulkType(column), {
-            nullable: column.is_nullable,
-          });
-        if (identity) await request.batch("SET XACT_ABORT OFF;");
-        let bulkFailure: unknown;
-        try {
-          for (let offset = 0; offset < rows.length; offset += 1000) {
-            bulk.rows.clear();
-            for (const row of rows.slice(offset, offset + 1000))
-              bulk.rows.add(
-                ...columns.map((column) => {
-                  const value =
-                    (row as Record<string, SqlParameter>)[column.name] ?? null;
-                  return typeof value === "bigint" ? value.toString() : value;
-                }),
-              );
-            const options = {
-              keepNulls: true,
-              checkConstraints: true,
-              fireTriggers: true,
-              lockTable: true,
-            };
-            await request.bulk(bulk, options);
-          }
-        } catch (error) {
-          bulkFailure = error;
-          throw error;
-        } finally {
-          if (identity) {
-            try {
-              await request.batch(`SET IDENTITY_INSERT ${target} OFF; SET XACT_ABORT ON;`);
-            } catch (cleanupError) {
-              if (bulkFailure)
-                throw new AggregateError([bulkFailure, cleanupError], `SQL bulk insert and session cleanup failed for ${table}.`);
-              throw cleanupError;
-            }
-          }
-        }
-        if (identity)
-          await request.batch(
-            `EXEC ${tableName(this.schemaName, "reseed_world_identity")} @table = ${sqlLiteral(table)};`,
+      const statement = `INSERT INTO ${target} (${columns.map((column) => quoteIdentifier(column.name)).join(", ")})
+        SELECT * FROM unnest(${columns.map((column, index) => `$${index + 1}::${column.type}[]`).join(", ")})`;
+      await this.request(async (client) => {
+        for (let offset = 0; offset < rows.length; offset += BULK_BATCH_ROWS) {
+          const batch = rows.slice(offset, offset + BULK_BATCH_ROWS) as readonly Record<string, SqlParameter>[];
+          const values = columns.map((column) =>
+            batch.map((row) => {
+              const value = row[column.name] ?? null;
+              if (typeof value === "number" && !Number.isFinite(value)) throw new Error("SQL numbers must be finite.");
+              return typeof value === "bigint" ? value.toString() : value;
+            }),
           );
+          await client.query({ text: statement, values });
+        }
+        if (IDENTITY_TABLES.has(table) && selected.has("id")) await this.reseed(client, table);
       });
     });
   }
@@ -1146,83 +802,22 @@ export class Store {
     this.assertOpen();
     const context = this.context.getStore();
     if (!context?.active || !context.locked)
-      throw new Error(
-        "clearWorld() requires an active Store.transaction() writer lock.",
-      );
+      throw new Error("clearWorld() requires an active Store.transaction() writer lock.");
     await this.discardWorld();
   }
 
-  /** Empties the world: TRUNCATE where nothing references a table (deallocation-only logging), range deletes elsewhere. */
+  /** Empties every world table with one TRUNCATE, which also restarts identity sequences. */
   async discardWorld(): Promise<{ truncated: string[]; deleted: string[] }> {
     this.assertOpen();
     const context = this.context.getStore();
-    // Inside batched() every TRUNCATE and range delete commits on its own under the holder's writer lock.
     if (!this.batchContext.getStore() && (!context?.active || !context.locked))
-      throw new Error(
-        "discardWorld() requires an active Store.transaction() writer lock.",
-      );
+      throw new Error("discardWorld() requires an active Store.transaction() writer lock.");
     const tables = await this.worldTables();
-    const metadata = new Map(
-      (
-        await this.all<{ name: string; referenced: number; self_referenced: number; can_alter: number | null }>(
-          `SELECT table_row.[name],
-            CASE WHEN EXISTS (SELECT 1 FROM sys.foreign_keys AS foreign_key
-              WHERE foreign_key.[referenced_object_id] = table_row.[object_id]
-                AND foreign_key.[parent_object_id] <> table_row.[object_id]) THEN 1 ELSE 0 END AS [referenced],
-            CASE WHEN EXISTS (SELECT 1 FROM sys.foreign_keys AS foreign_key
-              WHERE foreign_key.[referenced_object_id] = table_row.[object_id]
-                AND foreign_key.[parent_object_id] = table_row.[object_id]) THEN 1 ELSE 0 END AS [self_referenced],
-            HAS_PERMS_BY_NAME(QUOTENAME(SCHEMA_NAME(table_row.[schema_id])) + N'.' + QUOTENAME(table_row.[name]),
-              N'OBJECT', N'ALTER') AS [can_alter]
-          FROM sys.tables AS table_row WHERE table_row.[schema_id] = SCHEMA_ID(?)`,
-          this.schemaName,
-        )
-      ).map((row) => [row.name, row]),
-    );
-    const truncated: string[] = [];
-    const deleted: string[] = [];
-    for (const table of tables) {
-      const row = metadata.get(table);
-      if (table === "meta" || !row || row.referenced || row.can_alter !== 1) continue;
-      await this.exec(`TRUNCATE TABLE ${tableName(this.schemaName, table)};`);
-      truncated.push(table);
-    }
-    for (const table of [...tables].reverse()) {
-      if (table === "meta" || truncated.includes(table)) continue;
-      const target = tableName(this.schemaName, table);
-      // A self-referencing table must be emptied in one statement so no range deletes a parent before its child.
-      if (IDENTITY_TABLES.has(table) && !metadata.get(table)?.self_referenced) {
-        const range = await this.get<{ low: number | null; high: number | null }>(
-          `SELECT MIN([id]) AS [low], MAX([id]) AS [high] FROM ${target};`,
-        );
-        if (range && range.low !== null && range.high !== null)
-          for (let low = range.low; low <= range.high; low += DISCARD_BATCH_ROWS)
-            await this.exec(
-              `DELETE FROM ${target} WHERE [id] >= ? AND [id] < ?;`,
-              low,
-              low + DISCARD_BATCH_ROWS,
-            );
-      } else await this.exec(`DELETE FROM ${target};`);
-      if (IDENTITY_TABLES.has(table))
-        await this.exec(
-          `EXEC ${tableName(this.schemaName, "reseed_world_identity")} @table = ?;`,
-          table,
-        );
-      deleted.push(table);
-    }
-    // meta goes last, so an interrupted batched() discard keeps its 'worldBuild' marker and is retried.
-    if (tables.includes("meta")) {
-      const row = metadata.get("meta");
-      const target = tableName(this.schemaName, "meta");
-      if (row && !row.referenced && row.can_alter === 1) {
-        await this.exec(`TRUNCATE TABLE ${target};`);
-        truncated.push("meta");
-      } else {
-        await this.exec(`DELETE FROM ${target};`);
-        deleted.push("meta");
-      }
-    }
-    return { truncated, deleted };
+    if (tables.length)
+      await this.exec(
+        `TRUNCATE TABLE ${tables.map((table) => tableName(this.schemaName, table)).join(", ")} RESTART IDENTITY;`,
+      );
+    return { truncated: tables, deleted: [] };
   }
 
   private async dropTestSchema(): Promise<void> {
@@ -1231,44 +826,14 @@ export class Store {
       !this.testMode ||
       !/^touchline_test_[a-f0-9]{32}(?:_|$)/.test(this.schemaName)
     )
-      throw new Error(
-        "Refusing to drop a schema not owned by this test store.",
-      );
+      throw new Error("Refusing to drop a schema not owned by this test store.");
     await this.lockSchemaMaintenance();
-    const foreignKeys = await this.all<{ table_name: string; name: string }>(
-      `SELECT table_row.[name] AS [table_name], foreign_key.[name]
-      FROM sys.foreign_keys AS foreign_key
-      INNER JOIN sys.tables AS table_row ON table_row.[object_id] = foreign_key.[parent_object_id]
-      INNER JOIN sys.schemas AS schema_row ON schema_row.[schema_id] = table_row.[schema_id]
-      WHERE schema_row.[name] = ?`,
-      this.schemaName,
-    );
-    for (const foreignKey of foreignKeys)
-      await this.exec(
-        `ALTER TABLE ${tableName(this.schemaName, foreignKey.table_name)} DROP CONSTRAINT ${quoteIdentifier(foreignKey.name)};`,
-      );
-    const tables = await this.all<{ name: string }>(
-      `SELECT table_row.[name] FROM sys.tables AS table_row
-      INNER JOIN sys.schemas AS schema_row ON schema_row.[schema_id] = table_row.[schema_id]
-      WHERE schema_row.[name] = ?`,
-      this.schemaName,
-    );
-    for (const table of tables)
-      await this.exec(`DROP TABLE ${tableName(this.schemaName, table.name)};`);
-    await this.exec(
-      `DROP PROCEDURE IF EXISTS ${tableName(this.schemaName, "reseed_world_identity")};`,
-    );
-    await this.exec(`DROP SCHEMA ${quoteIdentifier(this.schemaName)};`);
+    await this.exec(`DROP SCHEMA IF EXISTS ${quoteIdentifier(this.schemaName)} CASCADE;`);
     this.ownsTestSchema = false;
   }
 
   private async lockSchemaMaintenance(): Promise<void> {
-    await this.request(async (request) => {
-      await request.query(`DECLARE @maintenanceLock int;
-        EXEC @maintenanceLock = sys.sp_getapplock @Resource = N'touchline:schema-maintenance',
-          @LockMode = N'Exclusive', @LockOwner = N'Transaction', @LockTimeout = 120000;
-        IF @maintenanceLock < 0 THROW 51000, N'SQL schema maintenance lock could not be acquired.', 1;`);
-    });
+    await this.request((client) => this.lock(client, "touchline:schema-maintenance", false, MAINTENANCE_LOCK_TIMEOUT));
   }
 
   async close(): Promise<void> {
@@ -1283,11 +848,10 @@ export class Store {
       try {
         await Promise.all([...this.scopedStores].map((store) => store.close()));
         await Promise.allSettled([...this.activeTransactions]);
-        if (this.ownsTestSchema)
-          await this.startTransaction(async () => this.dropTestSchema());
+        if (this.ownsTestSchema) await this.startTransaction(async () => this.dropTestSchema(), false);
       } finally {
         try {
-          if (!this.poolOwner) await this.pool.close();
+          if (!this.poolOwner) await this.pool.end();
         } finally {
           this.closed = true;
           this.poolOwner?.scopedStores.delete(this);
@@ -1310,9 +874,9 @@ export class DatabaseUnavailableError extends Error {
 }
 
 /**
- * Opens the database on the first call instead of at boot, so requests that never need SQL never wake it.
- * Concurrent callers share one attempt. Retryable failures are retried for `retryFor` ms (a paused serverless
- * database takes about a minute to resume), then the call rejects with DatabaseUnavailableError and the next
+ * Opens the database on the first call instead of at boot, so requests that never need SQL never wait on it.
+ * Concurrent callers share one attempt. Retryable failures are retried for `retryFor` ms (PostgreSQL may still
+ * be starting next to the app after a reboot), then the call rejects with DatabaseUnavailableError and the next
  * call starts a new attempt.
  */
 export function openOnFirstUse<Resource>(
