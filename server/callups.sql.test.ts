@@ -20,14 +20,14 @@ describe.skipIf(process.env.SQL_INTEGRATION_TESTS !== "true")("call-ups in the u
   const setDate = async (date: string) => store.setMeta("state", { ...(await stateOf(store)), date });
   const nextFixture = async (ageGroup: string) =>
     (await store.get<Fixture>(
-      "SELECT TOP (1) fixtures.* FROM fixtures LEFT JOIN leagues ON leagues.id = fixtures.league_id WHERE fixtures.status = 'scheduled' AND (home_id = ? OR away_id = ?) AND coalesce(leagues.age_group,'Senior') = ? ORDER BY date,id",
+      "SELECT fixtures.* FROM fixtures LEFT JOIN leagues ON leagues.id = fixtures.league_id WHERE fixtures.status = 'scheduled' AND (home_id = ? OR away_id = ?) AND coalesce(leagues.age_group,'Senior') = ? ORDER BY date,id LIMIT 1",
       clubId,
       clubId,
       ageGroup,
     ))!;
   const bestOf = async (ageGroup: string) =>
     (await store.get<Player>(
-      "SELECT TOP (1) * FROM players WHERE club_id = ? AND squad_club_id IS NULL AND age_group = ? AND role != 'Retired' AND parent_club_id IS NULL ORDER BY ability DESC,id",
+      "SELECT * FROM players WHERE club_id = ? AND squad_club_id IS NULL AND age_group = ? AND role != 'Retired' AND parent_club_id IS NULL ORDER BY ability DESC,id LIMIT 1",
       clubId,
       ageGroup,
     ))!;
@@ -83,12 +83,12 @@ describe.skipIf(process.env.SQL_INTEGRATION_TESTS !== "true")("call-ups in the u
 
   it("flags an academy debut only for an academy-age player without first-team senior games anywhere", async () => {
     const [prospect, veteran, travelled] = await store.all<Player>(
-      "SELECT TOP (3) * FROM players WHERE club_id = ? AND squad_club_id IS NULL AND age_group = 'U19' AND role != 'Retired' AND parent_club_id IS NULL ORDER BY ability DESC,id",
+      "SELECT * FROM players WHERE club_id = ? AND squad_club_id IS NULL AND age_group = 'U19' AND role != 'Retired' AND parent_club_id IS NULL ORDER BY ability DESC,id LIMIT 3",
       clubId,
     );
     await store.run("UPDATE players SET birth_date = '2003-01-01' WHERE id = ?", veteran.id);
     const other = (await store.get<{ id: number; league_id: number }>(
-      "SELECT TOP (1) clubs.id,clubs.league_id FROM clubs JOIN leagues ON leagues.id = clubs.league_id WHERE clubs.type = 'club' AND clubs.id != ? AND leagues.age_group = 'Senior' ORDER BY clubs.id",
+      "SELECT clubs.id,clubs.league_id FROM clubs JOIN leagues ON leagues.id = clubs.league_id WHERE clubs.type = 'club' AND clubs.id != ? AND leagues.age_group = 'Senior' ORDER BY clubs.id LIMIT 1",
       clubId,
     ))!;
     await store.run(
@@ -105,9 +105,9 @@ describe.skipIf(process.env.SQL_INTEGRATION_TESTS !== "true")("call-ups in the u
     ))!;
     if (count > 29)
       await store.run(
-        "UPDATE TOP (?) players SET role = 'Retired' WHERE playing_club_id = ? AND age_group = 'Senior' AND role != 'Retired'",
-        count - 29,
+        "UPDATE players SET role = 'Retired' WHERE id IN (SELECT id FROM players WHERE playing_club_id = ? AND age_group = 'Senior' AND role != 'Retired' LIMIT ?)",
         clubId,
+        count - 29,
       );
     for (const player of [prospect, veteran, travelled])
       await store.transaction(() => callUpPlayer(store, { playerId: player.id, clubId, ageGroup: "Senior", duration: { kind: "days", days: 3 } }));
@@ -120,7 +120,7 @@ describe.skipIf(process.env.SQL_INTEGRATION_TESTS !== "true")("call-ups in the u
   it("refuses over-age, injured and non-family moves", async () => {
     const u19 = await bestOf("U19");
     const oldest = (await store.get<Player>(
-      "SELECT TOP (1) * FROM players WHERE club_id = ? AND age_group = 'U19' AND role != 'Retired' ORDER BY birth_date,id",
+      "SELECT * FROM players WHERE club_id = ? AND age_group = 'U19' AND role != 'Retired' ORDER BY birth_date,id LIMIT 1",
       clubId,
     ))!;
     await expect(
@@ -130,7 +130,7 @@ describe.skipIf(process.env.SQL_INTEGRATION_TESTS !== "true")("call-ups in the u
     await expect(
       store.transaction(() => callUpPlayer(store, { playerId: u19.id, clubId, ageGroup: "Senior", duration: { kind: "days", days: 7 } })),
     ).rejects.toThrow(/injured/);
-    const other = (await store.get<{ id: number }>("SELECT TOP (1) id FROM clubs WHERE type = 'club' AND id != ?", clubId))!;
+    const other = (await store.get<{ id: number }>("SELECT id FROM clubs WHERE type = 'club' AND id != ? LIMIT 1", clubId))!;
     await expect(
       store.transaction(() => callUpPlayer(store, { playerId: u19.id, clubId: other.id, ageGroup: "Senior", duration: { kind: "match" } })),
     ).rejects.toThrow(/your club/);

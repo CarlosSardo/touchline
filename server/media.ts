@@ -88,7 +88,7 @@ interface ReportInput extends Omit<
 
 async function publish(store: Store, input: ReportInput) {
   const existing = await store.get<{ id: number }>(
-    "SELECT TOP (1) id FROM news WHERE JSON_VALUE(data,'$.mediaKey') = ?",
+    "SELECT id FROM news WHERE category = 'Media' AND data::jsonb ->> 'mediaKey' = ? LIMIT 1",
     input.mediaKey,
   );
   if (existing) return existing.id;
@@ -356,7 +356,7 @@ export async function publishPlayerCoverage(store: Store, fixtureId?: number) {
     performance = saved.players[featured.id];
   } else {
     const roster = await store.all<Player>(
-      "SELECT TOP (24) * FROM players WHERE club_id = ? AND parent_club_id IS NULL AND role != 'Retired' ORDER BY ability DESC,id",
+      "SELECT * FROM players WHERE club_id = ? AND parent_club_id IS NULL AND role != 'Retired' ORDER BY ability DESC,id LIMIT 24",
       club.id,
     );
     player =
@@ -433,7 +433,7 @@ export async function publishClubRoundup(store: Store) {
     gf: number;
     ga: number;
   }>(
-    "SELECT club_id,played,points - deducted AS points,gf,ga FROM standings WHERE league_id = ? AND group_name = (SELECT TOP (1) own.group_name FROM standings AS own WHERE own.league_id = ? AND own.club_id = ?) ORDER BY points - deducted DESC,(gf-ga) DESC,gf DESC,club_id",
+    "SELECT club_id,played,points - deducted AS points,gf,ga FROM standings WHERE league_id = ? AND group_name = (SELECT own.group_name FROM standings AS own WHERE own.league_id = ? AND own.club_id = ?) ORDER BY points - deducted DESC,(gf-ga) DESC,gf DESC,club_id",
     club.league_id,
     club.league_id,
     club.id,
@@ -446,9 +446,9 @@ export async function publishClubRoundup(store: Store) {
     state.date,
   ))!.total;
   const recruitment = (await store.get<{ incoming: number; outgoing: number }>(
-    "SELECT coalesce(sum(CASE WHEN TRY_CONVERT(int, JSON_VALUE(data,'$.to')) = ? THEN 1 ELSE 0 END),0) AS incoming,coalesce(sum(CASE WHEN TRY_CONVERT(int, JSON_VALUE(data,'$.from')) = ? THEN 1 ELSE 0 END),0) AS outgoing FROM history WHERE entity_type IN ('transfer','loan') AND coalesce(JSON_VALUE(data,'$.type'),'') != 'Squad registration' AND date BETWEEN ? AND ?",
-    club.id,
-    club.id,
+    "SELECT count(*) FILTER (WHERE data::jsonb ->> 'to' = ?) AS incoming,count(*) FILTER (WHERE data::jsonb ->> 'from' = ?) AS outgoing FROM history WHERE entity_type IN ('transfer','loan') AND coalesce(data::jsonb ->> 'type','') != 'Squad registration' AND date BETWEEN ? AND ?",
+    String(club.id),
+    String(club.id),
     addDays(state.date, -7),
     state.date,
   ))!;
@@ -555,31 +555,30 @@ export async function mediaFeed(
   const state = await store.meta<GameState>("state");
   const conditions = ["category IN ('Media','Fans','World','Transfers')"];
   const params: (string | number)[] = [];
-  const relevant =
-    "EXISTS (SELECT 1 FROM OPENJSON(news.data,'$.clubIds') AS relevant_clubs WHERE TRY_CONVERT(int, relevant_clubs.[value]) = ?)";
+  const relevant = "coalesce((news.data::jsonb -> 'clubIds') @> jsonb_build_array(?::integer),false)";
   if (filter.scope === "club") {
     conditions.push(
-      `(${relevant} OR (JSON_VALUE(data,'$.mediaKey') IS NULL AND category IN ('Media','Fans','Transfers')))`,
+      `(${relevant} OR (data::jsonb ->> 'mediaKey' IS NULL AND category IN ('Media','Fans','Transfers')))`,
     );
     params.push(state.clubId);
   }
   if (filter.scope === "world") {
     conditions.push(
-      `JSON_VALUE(data,'$.mediaKey') IS NOT NULL AND NOT ${relevant}`,
+      `data::jsonb ->> 'mediaKey' IS NOT NULL AND NOT ${relevant}`,
     );
     params.push(state.clubId);
   }
   if (filter.topic) {
-    conditions.push("JSON_VALUE(data,'$.topic') = ?");
+    conditions.push("data::jsonb ->> 'topic' = ?");
     params.push(filter.topic);
   }
   if (filter.journalist) {
-    conditions.push("JSON_VALUE(data,'$.journalistId') = ?");
+    conditions.push("data::jsonb ->> 'journalistId' = ?");
     params.push(filter.journalist);
   }
   if (filter.q) {
-    conditions.push("(title LIKE ? ESCAPE '!' OR body LIKE ? ESCAPE '!')");
-    const search = `%${filter.q.replace(/[!%_[]/g, "!$&")}%`;
+    conditions.push("(title ILIKE ? ESCAPE '!' OR body ILIKE ? ESCAPE '!')");
+    const search = `%${filter.q.replace(/[!%_]/g, "!$&")}%`;
     params.push(search, search);
   }
   const where = conditions.join(" AND ");
@@ -590,7 +589,7 @@ export async function mediaFeed(
   const pages = Math.max(1, Math.ceil(total / 20));
   const page = Math.min(filter.page, pages);
   const rows = await store.all<NewsItem>(
-    `SELECT * FROM news WHERE ${where} ORDER BY date DESC,id DESC OFFSET ? ROWS FETCH NEXT 20 ROWS ONLY`,
+    `SELECT * FROM news WHERE ${where} ORDER BY date DESC,id DESC LIMIT 20 OFFSET ?`,
     ...params,
     (page - 1) * 20,
   );
@@ -603,8 +602,8 @@ export async function mediaFeed(
   ];
   const clubs = clubIds.length
     ? await store.all<{ id: number; name: string }>(
-        `SELECT id,name FROM clubs WHERE id IN (${clubIds.map(() => "?").join(",")})`,
-        ...clubIds,
+        "SELECT id,name FROM clubs WHERE id = ANY(?::int[])",
+        clubIds,
       )
     : [];
   const clubsById = new Map(clubs.map((club) => [club.id, club]));
@@ -615,7 +614,7 @@ export async function mediaFeed(
       .filter((club): club is { id: number; name: string } => !!club),
   }));
   const latest = await store.get<NewsItem>(
-    `SELECT TOP (1) * FROM news WHERE JSON_VALUE(data,'$.mediaKey') IS NOT NULL AND ${relevant} ORDER BY id DESC`,
+    `SELECT * FROM news WHERE category = 'Media' AND data::jsonb ->> 'mediaKey' IS NOT NULL AND ${relevant} ORDER BY id DESC LIMIT 1`,
     state.clubId,
   );
   const report = latest ? (JSON.parse(latest.data) as MediaReport) : null;

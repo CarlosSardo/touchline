@@ -429,60 +429,69 @@ function developmentLoanTerms(player: Player, borrower: Club, strength: number):
 
 export async function startOnwardLoan(store: Store, negotiation: Negotiation, data: NegotiationData) {
   if (!data.onwardLoan) return;
+  const plan = data.onwardLoan;
   const state = await stateOf(store);
+  const logged = data.log.length;
   try {
-    const player = await playerOf(store, negotiation.player_id);
-    const buyer = await clubOf(store, negotiation.buying_club_id);
-    const options = (await affiliateOptionsForNegotiation(store, { ...negotiation, data: JSON.stringify(data) })).onwardLoanOptions;
-    const option = options.find((entry) => entry.clubId === data.onwardLoan!.clubId);
-    if (!option?.eligible || player.club_id !== buyer.id || player.parent_club_id) {
+    // A savepoint keeps the completed signing even if the optional loan fails half-way through its SQL.
+    await store.savepoint(async () => {
+      const player = await playerOf(store, negotiation.player_id);
+      const buyer = await clubOf(store, negotiation.buying_club_id);
+      const options = (await affiliateOptionsForNegotiation(store, { ...negotiation, data: JSON.stringify(data) })).onwardLoanOptions;
+      const option = options.find((entry) => entry.clubId === plan.clubId);
+      if (!option?.eligible || player.club_id !== buyer.id || player.parent_club_id) {
+        data.log.push({
+          date: state.date,
+          type: "Affiliate loan",
+          message: `The planned affiliate loan could not start: ${option?.reasons.join(" ") ?? "the player's registration changed"}.`,
+        });
+        await news(store, "Transfers", `${player.name}: affiliate loan skipped`, data.log.at(-1)!.message, "warning", "transfers", { playerId: player.id });
+        return;
+      }
+      const borrower = await clubOf(store, plan.clubId);
+      const endDate = affiliateLoanEndDate(state.date, plan.until);
+      const terms = developmentLoanTerms(player, borrower, option.strength);
+      await startLoanSpell(store, {
+        player,
+        parentId: buyer.id,
+        borrower,
+        type: "Development loan",
+        startDate: state.date,
+        endDate,
+        terms,
+      });
+      await store.run(
+        "INSERT INTO history(season,entity_type,entity_id,date,data) VALUES (?,?,?,?,?)",
+        state.season,
+        "loan",
+        player.id,
+        state.date,
+        JSON.stringify({
+          name: player.name,
+          from: buyer.id,
+          to: borrower.id,
+          club: borrower.name,
+          fee: 0,
+          type: "Affiliate loan",
+        }),
+      );
       data.log.push({
         date: state.date,
         type: "Affiliate loan",
-        message: `The planned affiliate loan could not start: ${option?.reasons.join(" ") ?? "the player's registration changed"}.`,
+        message: `${player.name} joined ${borrower.name} on a domestic development loan until ${endDate}.`,
       });
-      await news(store, "Transfers", `${player.name}: affiliate loan skipped`, data.log.at(-1)!.message, "warning", "transfers", { playerId: player.id });
-      return;
-    }
-    const borrower = await clubOf(store, data.onwardLoan.clubId);
-    const endDate = affiliateLoanEndDate(state.date, data.onwardLoan.until);
-    const terms = developmentLoanTerms(player, borrower, option.strength);
-    await startLoanSpell(store, {
-      player,
-      parentId: buyer.id,
-      borrower,
-      type: "Development loan",
-      startDate: state.date,
-      endDate,
-      terms,
+      await news(store, "Loans", `${player.name}: affiliate loan`, `${borrower.name} will give him minutes on a development loan until ${endDate}.`, "success", "loans", { playerId: player.id, clubId: borrower.id });
     });
-    await store.run(
-      "INSERT INTO history(season,entity_type,entity_id,date,data) VALUES (?,?,?,?,?)",
-      state.season,
-      "loan",
-      player.id,
-      state.date,
-      JSON.stringify({
-        name: player.name,
-        from: buyer.id,
-        to: borrower.id,
-        club: borrower.name,
-        fee: 0,
-        type: "Affiliate loan",
-      }),
-    );
-    data.log.push({
-      date: state.date,
-      type: "Affiliate loan",
-      message: `${player.name} joined ${borrower.name} on a domestic development loan until ${endDate}.`,
-    });
-    await news(store, "Loans", `${player.name}: affiliate loan`, `${borrower.name} will give him minutes on a development loan until ${endDate}.`, "success", "loans", { playerId: player.id, clubId: borrower.id });
   } catch (error) {
+    // Everything inside the savepoint was rolled back, including log entries it added.
+    data.log.length = logged;
+    if (!(error instanceof GameError))
+      console.error(`Touchline: the affiliate loan of negotiation ${negotiation.id} failed and was skipped.`, error);
     const player = await playerOf(store, negotiation.player_id).catch(() => null);
     data.log.push({
       date: state.date,
       type: "Affiliate loan",
-      message: `The planned affiliate loan could not start, but the signing was completed. ${error instanceof Error ? error.message : ""}`.trim(),
+      message: `The planned affiliate loan could not start, but the signing was completed. ${error instanceof GameError ? error.message : ""}`.trim(),
     });
     await news(store, "Transfers", `${player?.name ?? "Signing"}: affiliate loan skipped`, data.log.at(-1)!.message, "warning", "transfers", player ? { playerId: player.id } : {});
   }

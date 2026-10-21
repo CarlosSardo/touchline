@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { Store } from "./db.ts";
 import { generateWorld } from "./world.ts";
 import {
@@ -43,7 +43,7 @@ describe("affiliate transfer persistence", () => {
       buyer.country_id,
     );
     await store.run(
-      "UPDATE players SET club_id = NULL, squad_club_id = NULL WHERE club_id = 3 AND id NOT IN (SELECT TOP (20) id FROM players WHERE club_id = 3 ORDER BY id)",
+      "UPDATE players SET club_id = NULL, squad_club_id = NULL WHERE club_id = 3 AND id NOT IN (SELECT id FROM players WHERE club_id = 3 ORDER BY id LIMIT 20)",
     );
     await store.run(
       "INSERT INTO partnerships(club_id, partner_id, type, strength, data) VALUES (1, 3, 'Affiliate', 80, '{}')",
@@ -54,7 +54,7 @@ describe("affiliate transfer persistence", () => {
   it("settles a scheduled future fee and registers the minor at the affiliate", async () => {
     const { seller, affiliate } = await partnerAffiliate();
     const player = (await store.get<{ id: number; profile: string }>(
-      "SELECT TOP (1) id,profile FROM players WHERE club_id = ? ORDER BY id",
+      "SELECT id,profile FROM players WHERE club_id = ? ORDER BY id LIMIT 1",
       seller.id,
     ))!;
     const profile = JSON.parse(player.profile) as PlayerProfile;
@@ -97,14 +97,14 @@ describe("affiliate transfer persistence", () => {
     expect(deal.offer).toBe(0);
     expect(updated.reservedBudget).toBe(50000);
     expect(updated.affiliatePlacement?.originalSellerId).toBe(seller.id);
-    expect(await store.get("SELECT id FROM history WHERE entity_type = 'transfer' AND JSON_VALUE(data,'$.type') = 'Transfer to affiliate'"))
+    expect(await store.get("SELECT id FROM history WHERE entity_type = 'transfer' AND data::jsonb ->> 'type' = 'Transfer to affiliate'"))
       .toBeTruthy();
   });
 
   it("rejects affiliate placement for scheduled pre-contract agreements", async () => {
     const { seller, affiliate } = await partnerAffiliate();
     const player = (await store.get<{ id: number; profile: string }>(
-      "SELECT TOP (1) id,profile FROM players WHERE club_id = ? ORDER BY id",
+      "SELECT id,profile FROM players WHERE club_id = ? ORDER BY id LIMIT 1",
       seller.id,
     ))!;
     const profile = JSON.parse(player.profile) as PlayerProfile;
@@ -139,7 +139,7 @@ describe("affiliate transfer persistence", () => {
   it("keeps original-seller clauses and buyer asset cost after affiliate placement completes", async () => {
     const { buyer, seller, affiliate } = await partnerAffiliate();
     const player = (await store.get<{ id: number; profile: string }>(
-      "SELECT TOP (1) id,profile FROM players WHERE club_id = ? ORDER BY id",
+      "SELECT id,profile FROM players WHERE club_id = ? ORDER BY id LIMIT 1",
       seller.id,
     ))!;
     const profile = JSON.parse(player.profile) as PlayerProfile;
@@ -230,7 +230,7 @@ describe("affiliate transfer persistence", () => {
     const { buyer, seller, affiliate } = await partnerAffiliate();
     await store.run("UPDATE clubs SET country_id = ? WHERE id = 3", buyer.country_id);
     const player = (await store.get<{ id: number; profile: string }>(
-      "SELECT TOP (1) id,profile FROM players WHERE club_id = ? AND age >= 18 ORDER BY id",
+      "SELECT id,profile FROM players WHERE club_id = ? AND age >= 18 ORDER BY id LIMIT 1",
       seller.id,
     ))!;
     const profile = JSON.parse(player.profile) as PlayerProfile;
@@ -265,5 +265,63 @@ describe("affiliate transfer persistence", () => {
     expect(loaned.parent_club_id).toBe(buyer.id);
     expect(await store.get("SELECT id FROM loans WHERE player_id = ? AND type = 'Development loan'", player.id)).toBeTruthy();
     expect(affiliateLoanEndDate("2026-07-01", "season")).toBe("2027-06-30");
+  });
+
+  it("keeps the completed signing when the onward affiliate loan fails mid-way in SQL", async () => {
+    const { buyer, seller, affiliate } = await partnerAffiliate();
+    await store.run("UPDATE clubs SET country_id = ? WHERE id = 3", buyer.country_id);
+    const player = (await store.get<{ id: number; profile: string }>(
+      "SELECT id,profile FROM players WHERE club_id = ? AND age >= 18 ORDER BY id LIMIT 1",
+      seller.id,
+    ))!;
+    const profile = JSON.parse(player.profile) as PlayerProfile;
+    const data: NegotiationData = {
+      log: [],
+      agent: profile.agent,
+      terms: defaultLoanTerms(await playerOf(store, player.id), buyer),
+      years: 4,
+      role: "Squad player",
+      promises: [],
+    };
+    const id = Number((await store.run(
+      "INSERT INTO negotiations(player_id,buying_club_id,selling_club_id,type,stage,asking_price,offer,wage,interest,created,deadline,data) VALUES (?,1,?,'Permanent transfer','Contract review',100000,100000,5000,80,'2026-07-01','2026-07-08',?)",
+      player.id,
+      seller.id,
+      JSON.stringify(data),
+    )).lastInsertRowid);
+    await setOnwardLoanPlan(store, id, affiliate.id, "season");
+    const deal = (await store.get<Negotiation>("SELECT * FROM negotiations WHERE id = ?", id))!;
+    const planned = JSON.parse(deal.data) as NegotiationData;
+    const run = store.run.bind(store);
+    // The loan spell is written, then the history row fails in PostgreSQL, which aborts the statement.
+    const failure = vi.spyOn(store, "run").mockImplementation((sql, ...params) =>
+      sql.startsWith("INSERT INTO history(season,entity_type,entity_id,date,data)")
+        ? run("INSERT INTO history(season,entity_type,entity_id,date,data) VALUES (?,?,?,?,NULL)", ...params.slice(0, 4))
+        : run(sql, ...params),
+    );
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    let logged = "";
+    try {
+      await store.transaction(async () => {
+        await store.run(
+          "UPDATE players SET club_id = ?, parent_club_id = NULL, contract_end = '2029-06-30' WHERE id = ?",
+          buyer.id,
+          player.id,
+        );
+        await startOnwardLoan(store, deal, planned);
+      });
+      logged = errors.mock.calls.map((call) => call.map(String).join(" ")).join("\n");
+    } finally {
+      failure.mockRestore();
+      errors.mockRestore();
+    }
+    expect(logged).toContain(`the affiliate loan of negotiation ${id} failed`);
+    const signed = await playerOf(store, player.id);
+    expect(signed.club_id).toBe(buyer.id);
+    expect(signed.parent_club_id).toBeNull();
+    expect(await store.get("SELECT id FROM loans WHERE player_id = ?", player.id)).toBeUndefined();
+    expect(planned.log.at(-1)?.message).toBe("The planned affiliate loan could not start, but the signing was completed.");
+    expect(planned.log.filter((entry) => entry.type === "Affiliate loan" && entry.message.includes("joined"))).toHaveLength(0);
+    expect(await store.get("SELECT id FROM news WHERE title = ?", `${signed.name}: affiliate loan skipped`)).toBeTruthy();
   });
 });

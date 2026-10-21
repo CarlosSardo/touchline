@@ -1693,7 +1693,7 @@ async function insertRows(store: Store, table: string, rows: Row[]) {
 }
 
 export async function generateWorld(store: Store, options: WorldOptions = {}): Promise<void> {
-  if (await store.get("SELECT [key] FROM meta WHERE [key] = ?", "state")) return;
+  if (await store.get("SELECT key FROM meta WHERE key = ?", "state")) return;
   const lookup = worldCatalog();
   const nations = worldNations(options, lookup);
   assertValidCatalog(lookup.catalog, nations ? { nations } : {});
@@ -1756,6 +1756,8 @@ export async function generateWorld(store: Store, options: WorldOptions = {}): P
         ...(options.structureOnly ? { structureOnly: true } : {}),
       },
     });
+    // Fresh bulk-loaded tables have no statistics yet; plan the first queries on real row counts.
+    await store.exec("ANALYZE countries, leagues, clubs, players, staff, relationships");
   });
   // Club support hires a director assistant per club: people, so structure-only worlds skip it.
   if (!options.structureOnly) await ensureClubSupport(store);

@@ -1,18 +1,37 @@
-import { EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
+import pg from "pg";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { bindSql, DatabaseUnavailableError, openOnFirstUse, runSql, sqlPoolConfig, Store } from "./db.ts";
-import { readSqlSettings, type SqlSettings } from "./sql-config.ts";
-import { OWNER_EMAIL_DEFAULT } from "./legacy-account.ts";
-import { provisionAccounts, LEGACY_EMAIL, LEGACY_OBJECT_ID, type AccountProvisioningPlan } from "../scripts/accounts-migrate.ts";
-import type { AccountRecord } from "./accounts.ts";
 import {
+  advisoryLockKey,
+  bindSql,
+  DatabaseUnavailableError,
+  isForeignKeyViolation,
+  isLockTimeout,
+  isUniqueViolation,
+  openOnFirstUse,
+  sqlErrorCode,
+  sqlPoolConfig,
+  Store,
+} from "./db.ts";
+import {
+  describeSqlError,
+  isLocalSqlHost,
+  MAX_IDENTIFIER_LENGTH,
+  readSqlSettings,
+  validateSqlSchema,
+} from "./sql-config.ts";
+import {
+  accessRequestsTableSql,
   appearanceBackfill,
+  ADDED_WORLD_TABLES,
   IDENTITY_TABLES,
   migrationTableSql,
   quoteIdentifier,
   schemaMigrations,
+  sqlLiteral,
   STORE_TABLES,
+  tableName,
+  usersTableSql,
   WORLD_TABLES,
 } from "./sql-schema.ts";
 
@@ -20,6 +39,20 @@ afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
 });
+
+const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function latch() {
+  let open!: () => void;
+  const opened = new Promise<void>((resolve) => {
+    open = resolve;
+  });
+  return { open, opened };
+}
+
+function sqlError(code: string, message = `SQL error ${code}`) {
+  return Object.assign(new Error(message), { code });
+}
 
 describe("SQL opened on first use (no database)", () => {
   it("shares one attempt between concurrent callers and keeps the opened resource", async () => {
@@ -39,12 +72,12 @@ describe("SQL opened on first use (no database)", () => {
   it("retries a failed connection inside the window, then gives up and lets the next call try again", async () => {
     const resumed = { id: 2 };
     const open = vi.fn<() => Promise<typeof resumed>>()
-      .mockRejectedValueOnce(new Error("Database is not currently available (40613)"))
+      .mockRejectedValueOnce(sqlError("57P03", "the database system is starting up"))
       .mockResolvedValueOnce(resumed);
     expect(await openOnFirstUse(open, { retryFor: 1_000, retryDelay: 1 }).get()).toBe(resumed);
     expect(open).toHaveBeenCalledTimes(2);
 
-    const outage = new Error("ECONNREFUSED");
+    const outage = Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:5432"), { code: "ECONNREFUSED" });
     const unavailable = vi.fn(async () => { throw outage; });
     const database = openOnFirstUse(unavailable, { retryFor: 30, retryDelay: 5 });
     const failure = await database.get().catch((error: unknown) => error);
@@ -62,6 +95,15 @@ describe("SQL opened on first use (no database)", () => {
     const database = openOnFirstUse(open, { retryFor: 60_000, retryDelay: 60_000, retryable: (error) => error !== invalid });
     await expect(database.get()).rejects.toMatchObject({ code: "database_unavailable", cause: invalid });
     expect(open).toHaveBeenCalledOnce();
+  });
+
+  it("gives up without a final wait when the next retry would pass the deadline", async () => {
+    const open = vi.fn(async () => { throw new Error("down"); });
+    const started = Date.now();
+    await expect(openOnFirstUse(open, { retryFor: 50, retryDelay: 10_000 }).get())
+      .rejects.toBeInstanceOf(DatabaseUnavailableError);
+    expect(open).toHaveBeenCalledOnce();
+    expect(Date.now() - started).toBeLessThan(5_000);
   });
 
   it("closes the opened resource, including one still opening, and refuses new calls", async () => {
@@ -82,1637 +124,2188 @@ describe("SQL opened on first use (no database)", () => {
     expect(never).not.toHaveBeenCalled();
     expect(dispose).toHaveBeenCalledOnce();
   });
+
+  it("stops retrying once closed while an attempt is failing", async () => {
+    const open = vi.fn(async () => { throw new Error("down"); });
+    const database = openOnFirstUse(open, { retryFor: 60_000, retryDelay: 20 });
+    const caller = database.get().catch((error: unknown) => error);
+    await pause(30);
+    const dispose = vi.fn(async () => {});
+    await database.close(dispose);
+    expect(await caller).toBeInstanceOf(DatabaseUnavailableError);
+    const attempts = open.mock.calls.length;
+    await pause(60);
+    expect(open.mock.calls.length).toBe(attempts);
+    expect(dispose).not.toHaveBeenCalled();
+  });
+});
+
+describe("SQL error helpers (no database)", () => {
+  it("reads PostgreSQL SQLSTATE codes and classifies common failures", () => {
+    expect(sqlErrorCode(sqlError("23505"))).toBe("23505");
+    expect(sqlErrorCode(sqlError("40P01"))).toBe("40P01");
+    expect(sqlErrorCode(Object.assign(new Error("socket"), { code: "ECONNRESET" }))).toBeUndefined();
+    expect(sqlErrorCode(Object.assign(new Error("number"), { code: 2627 }))).toBeUndefined();
+    expect(sqlErrorCode(null)).toBeUndefined();
+    expect(sqlErrorCode("23505")).toBeUndefined();
+    expect(isUniqueViolation(sqlError("23505"))).toBe(true);
+    expect(isUniqueViolation(sqlError("23503"))).toBe(false);
+    expect(isForeignKeyViolation(sqlError("23503"))).toBe(true);
+    expect(isLockTimeout(sqlError("55P03"))).toBe(true);
+    expect(isLockTimeout(new Error("55P03"))).toBe(false);
+  });
+
+  it("derives stable, distinct signed 64-bit advisory lock keys", () => {
+    const key = advisoryLockKey("touchline:world:touchline_test_a");
+    expect(typeof key).toBe("bigint");
+    expect(advisoryLockKey("touchline:world:touchline_test_a")).toBe(key);
+    expect(advisoryLockKey("touchline:world:touchline_test_b")).not.toBe(key);
+    for (const name of ["", "touchline:account-registry", "touchline:schema-maintenance", "ü".repeat(500)]) {
+      const value = advisoryLockKey(name);
+      expect(value >= -(2n ** 63n) && value < 2n ** 63n).toBe(true);
+    }
+  });
 });
 
 describe("SQL binding (no database)", () => {
-  it("binds only positional parameters outside strings, identifiers, and nested comments", () => {
-    const query = `SELECT N'it''s ? FROM players', "quoted?name", [escaped]]?name], ?
+  it("rewrites ? placeholders to $n outside literals, identifiers, comments and dollar quotes", () => {
+    const query = `SELECT 'it''s ?', "quoted?name", E'esc\\'aped ?', $$dollar ? quoted$$, $tag$ inner $$ ? $tag$, ?
       FROM players -- ? FROM clubs
-      WHERE name = ? /* ? /* nested ? */ FROM news */ AND profile = N'{"question":"?"}'`;
-    const prepared = bindSql(query, [3.25, "O'Brien"], "touchline_test_binder");
-    expect(prepared.parameters.map((parameter) => parameter.value)).toEqual([
-      3.25,
-      "O'Brien",
-    ]);
-    expect(prepared.sql).toContain(
-      "FROM [touchline_test_binder].players -- ? FROM clubs",
-    );
-    expect(prepared.sql).toContain("N'it''s ? FROM players'");
-    expect(prepared.sql).toContain("[escaped]]?name]");
-    expect(prepared.sql).toContain("/* ? /* nested ? */ FROM news */");
+      WHERE name = ? /* ? /* nested ? */ still ? */ AND profile = '{"question":"?"}' AND U&'\\0041?' <> e'\\\\?'`;
+    const prepared = bindSql(query, [3.25, "O'Brien"]);
+    expect(prepared.sql).toBe(query.replace("$tag$, ?\n", "$tag$, $1\n").replace("name = ?", "name = $2"));
+    expect(prepared.values).toEqual([3.25, "O'Brien"]);
     expect(prepared.sql).not.toContain("O'Brien");
+    expect(prepared.statements).toBe(1);
+    expect(prepared.writes).toBe(false);
   });
 
-  it("rejects mismatched and excessive parameter counts and incomplete SQL tokens", () => {
-    expect(() => bindSql("SELECT ?", [])).toThrow(/count mismatch/);
-    expect(() => bindSql("SELECT 1", [1])).toThrow(/count mismatch/);
-    expect(() =>
-      bindSql(`SELECT ${Array(2101).fill("?").join(",")}`, Array(2101).fill(1)),
-    ).toThrow(/2100 parameters/);
+  it("leaves SQL without parameters byte-for-byte unchanged", () => {
+    for (const query of [
+      "SELECT 1",
+      "SELECT x::jsonb ->> 'a', y::double precision FROM players WHERE name ILIKE '%a!%' ESCAPE '!'",
+      "SELECT * FROM players WHERE id = ANY('{1,2}'::int[]) ORDER BY ability DESC NULLS LAST LIMIT 5",
+    ])
+      expect(bindSql(query).sql).toBe(query);
+  });
+
+  it("numbers placeholders in order, including typed casts and array parameters", () => {
+    const prepared = bindSql(
+      "SELECT id FROM players WHERE id = ANY(?::int[]) AND name = ?::text LIMIT ? OFFSET ?",
+      [[1, 2, 3], "Ana", 10, 0],
+    );
+    expect(prepared.sql).toBe("SELECT id FROM players WHERE id = ANY($1::int[]) AND name = $2::text LIMIT $3 OFFSET $4");
+    expect(prepared.values).toEqual([[1, 2, 3], "Ana", 10, 0]);
+    expect(bindSql("SELECT ? || 'suffix', ? & 3", ["a", 1]).sql).toBe("SELECT $1 || 'suffix', $2 & 3");
+  });
+
+  it("normalizes parameter values: bigint to text, undefined to NULL, others unchanged", () => {
+    const date = new Date("2026-09-21T10:00:00Z");
+    const binary = Buffer.from([0, 255]);
+    const prepared = bindSql("SELECT ?, ?, ?, ?, ?, ?, ?", [
+      9007199254740993n, undefined, null, date, binary, true, ["a", null],
+    ]);
+    expect(prepared.values).toEqual(["9007199254740993", null, null, date, binary, true, ["a", null]]);
+    expect(prepared.values[3]).toBe(date);
+    expect(prepared.values[4]).toBe(binary);
+  });
+
+  it("rejects non-finite numbers, also inside arrays", () => {
+    for (const value of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY])
+      expect(() => bindSql("SELECT ?", [value])).toThrow(/finite/);
+    expect(() => bindSql("SELECT ?", [[1, Number.NaN]])).toThrow(/finite/);
+  });
+
+  it("rejects mismatched and excessive parameter counts", () => {
+    expect(() => bindSql("SELECT ?", [])).toThrow(/count mismatch: expected 1, received 0/);
+    expect(() => bindSql("SELECT 1", [1])).toThrow(/count mismatch: expected 0, received 1/);
+    expect(() => bindSql("SELECT '?'", [1])).toThrow(/count mismatch/);
+    const many = Array(65_536).fill(1);
+    expect(() => bindSql(`SELECT ${many.map(() => "?").join(",")}`, many)).toThrow(/65535 parameters/);
+  });
+
+  it("rejects $n placeholders and the jsonb ?| and ?& operators", () => {
+    expect(() => bindSql("SELECT $1")).toThrow(/Use \? placeholders/);
+    expect(() => bindSql("SELECT * FROM players WHERE id = $1 AND name = ?", ["x"])).toThrow(/Use \? placeholders/);
+    expect(() => bindSql("SELECT data::jsonb ?| array['a'] FROM news")).toThrow(/jsonb_exists_any/);
+    expect(() => bindSql("SELECT data::jsonb ?& array['a'] FROM news")).toThrow(/jsonb_exists_all/);
+    expect(bindSql("SELECT jsonb_exists_any(data::jsonb, ?::text[]) FROM news", [["a"]]).sql)
+      .toBe("SELECT jsonb_exists_any(data::jsonb, $1::text[]) FROM news");
+  });
+
+  it("rejects incomplete quoted values, identifiers, comments and dollar quotes", () => {
     for (const query of [
       "SELECT 'missing",
       'SELECT "missing',
-      "SELECT [missing",
       "SELECT /* missing",
+      "SELECT /* nested /* only one */ closed",
+      "SELECT $$missing",
+      "SELECT $tag$ missing $other$",
+      "SELECT E'ends with an escaped quote\\'",
     ])
-      expect(() => bindSql(query)).toThrow(/Unterminated/);
+      expect(() => bindSql(query), query).toThrow(/Unterminated/);
+    expect(() => bindSql("INSERT INTO countries (id, code VALUES (1")).toThrow(/Unbalanced/);
   });
 
-  it("does not collide with existing T-SQL variables", () => {
-    const prepared = bindSql(
-      "DECLARE @__touchline_arg_0 INT = 9; SELECT ?, @__touchline_arg_0",
-      [12],
-    );
-    expect(prepared.parameters[0].name).toBe("__touchline_arg_0_");
-    expect(prepared.sql).toContain(
-      "SELECT @__touchline_arg_0_, @__touchline_arg_0",
-    );
-  });
-
-  it("qualifies game/save tables in DML, nested queries and comma joins", () => {
-    const query = `UPDATE players SET morale = ? WHERE id IN (SELECT player_id FROM loans);
-      INSERT INTO news (title) SELECT name FROM players;
-      DELETE FROM save_chunks WHERE save_id = ?;
-      SELECT players.id FROM players, clubs WHERE players.club_id = clubs.id;`;
-    const prepared = bindSql(query, [90, "slot"], "touchline_test_scope").sql;
-    for (const name of ["players", "loans", "news", "save_chunks", "clubs"])
-      expect(prepared).toContain(`[touchline_test_scope].${name}`);
-    expect(prepared).toContain("players.club_id = clubs.id");
-  });
-
-  it("leaves explicit schemas, sys objects, aliases and statement-local CTE names intact", () => {
-    const query = `WITH news AS (SELECT id FROM players) SELECT * FROM news;
-      SELECT * FROM news JOIN [dbo].[players] AS player ON player.id = news.id
-      JOIN sys.tables AS catalog ON catalog.object_id = player.id;
-      UPDATE players SET name = ? FROM clubs AS players;
-      SELECT * FROM [players] JOIN external.players AS visitor ON visitor.id = [players].id;`;
-    const prepared = bindSql(query, ["club"], "isolated").sql;
-    expect(prepared).toContain("SELECT * FROM news;");
-    expect(prepared).toContain(
-      "SELECT * FROM [isolated].news JOIN [dbo].[players]",
-    );
-    expect(prepared).toContain("JOIN sys.tables");
-    expect(prepared).toContain("UPDATE players SET name =");
-    expect(prepared).toContain("FROM [isolated].clubs AS players");
-    expect(prepared).toContain(
-      "FROM [isolated].[players] JOIN external.players",
-    );
-  });
-
-  it("passes native T-SQL expressions through unchanged", () => {
-    const prepared = bindSql(
-      "SELECT TOP (5) JSON_VALUE(data, '$.name') FROM players ORDER BY id OFFSET 0 ROWS",
-    ).sql;
-    expect(prepared).toBe(
-      "SELECT TOP (5) JSON_VALUE(data, '$.name') FROM [dbo].players ORDER BY id OFFSET 0 ROWS",
-    );
-  });
-
-  it("does not mistake a nested query alias for the outer update target", () => {
-    const query =
-      "UPDATE players SET morale = 50 WHERE country_id IN (SELECT players.id FROM countries AS players)";
-    expect(bindSql(query, [], "isolated").sql).toBe(
-      "UPDATE [isolated].players SET morale = 50 WHERE country_id IN (SELECT players.id FROM [isolated].countries AS players)",
-    );
-  });
-
-  it("isolates MERGE upserts without accepting a second unterminated statement", () => {
-    const query = "MERGE competition_favorites WITH (HOLDLOCK) AS target USING (VALUES (?,?)) AS source(league_id,events) ON target.league_id=source.league_id WHEN MATCHED THEN UPDATE SET events=source.events WHEN NOT MATCHED THEN INSERT (league_id,events) VALUES (source.league_id,source.events)";
-    expect(bindSql(`${query};`, [1, "{}"], "touchline_test_merge").sql).toContain(
-      "MERGE [touchline_test_merge].competition_favorites",
-    );
-    expect(() => bindSql(`${query} DELETE FROM players`, [1, "{}"], "touchline_test_merge")).toThrow(/ambiguous/);
-    expect(() => bindSql(query.replace("MERGE competition_favorites", "MERGE dbo.competition_favorites"), [1, "{}"], "touchline_test_merge")).toThrow(/cross-schema/);
+  it("counts statements, ignoring semicolons in literals and comments and one trailing semicolon", () => {
+    expect(bindSql("").statements).toBe(0);
+    expect(bindSql("  -- only a comment").statements).toBe(0);
+    expect(bindSql("SELECT 1").statements).toBe(1);
+    expect(bindSql("SELECT 1;").statements).toBe(1);
+    expect(bindSql("SELECT ';'; -- ;\n SELECT $$;$$; /* ; */ SELECT 3;").statements).toBe(3);
+    expect(bindSql("SELECT 1; SELECT 2").statements).toBe(2);
   });
 
   it.each([
-    "UPDATE players SET morale=0\nSELECT players.id FROM clubs AS players",
-    "DELETE players\nSELECT players.id FROM clubs AS players",
-    "DELETE FROM players\nSELECT players.id FROM clubs AS players",
-    "UPDATE players SET morale=0 SELECT 1 FROM clubs AS players",
-    "SELECT 1 FROM clubs AS players UPDATE players SET morale=0",
-  ])("rejects ambiguous non-dbo batches: %s", (query) => {
-    expect(() => bindSql(query, [], "touchline_test_review")).toThrow(
-      /unsupported|ambiguous/i,
-    );
+    ["SELECT 'UPDATE', \"delete\" FROM news", false],
+    ["SELECT 1 -- DELETE FROM news", false],
+    ["SELECT $$DROP TABLE news$$", false],
+    ["SELECT id, value FROM meta WHERE key = 'insert'", false],
+    ["INSERT INTO news (title) VALUES ('x')", true],
+    ["update players SET morale = 1", true],
+    ["DELETE FROM news", true],
+    ["WITH gone AS (DELETE FROM news RETURNING id) SELECT id FROM gone", true],
+    ["TRUNCATE TABLE news", true],
+    ["CREATE TEMP TABLE kept ON COMMIT DROP AS SELECT 1", true],
+    ["SELECT * FROM players FOR UPDATE", true],
+    ["SELECT nextval('x')", true],
+    ["SELECT setval('x', 1)", true],
+    ["DO $$ BEGIN END $$", true],
+    ["MERGE INTO meta USING (SELECT 1) AS s ON true WHEN MATCHED THEN DO NOTHING", true],
+    ["ALTER TABLE players ADD COLUMN x int", true],
+    ["DROP INDEX x", true],
+    ["SET search_path TO x", true],
+  ])("classifies %s as writes=%s", (query, writes) => {
+    expect(bindSql(query).writes).toBe(writes);
   });
 
-  it("scopes aliases and CTEs to their own statement and query block", () => {
-    const query = `WITH players AS (SELECT id FROM clubs) SELECT * FROM players;
-      UPDATE players SET morale = (SELECT COUNT(*) FROM clubs AS players)
-      WHERE id IN (SELECT id FROM players);
-      SELECT * FROM (SELECT id FROM clubs AS players) AS previous
-      JOIN (SELECT id FROM players) AS current_rows ON previous.id = current_rows.id;`;
-    const prepared = bindSql(query, [], "isolated").sql;
-    expect(prepared).toContain("SELECT * FROM players;");
-    expect(prepared).toContain("UPDATE [isolated].players SET morale");
-    expect(prepared).toContain("WHERE id IN (SELECT id FROM [isolated].players)");
-    expect(prepared).toContain("JOIN (SELECT id FROM [isolated].players)");
+  // `SELECT ... INTO new_table` creates a table, so it must run under the world writer lock.
+  it("classifies SELECT ... INTO (table creation) as a write", () => {
+    expect(bindSql("SELECT id INTO snapshot FROM countries").writes).toBe(true);
   });
 
-  it("qualifies a CTE's base table before its name enters scope", () => {
-    const query =
-      "WITH players AS (SELECT id FROM clubs), clubs AS (SELECT id FROM players) UPDATE players SET id = 1";
-    expect(bindSql(query, [], "isolated").sql).toBe(
-      "WITH players AS (SELECT id FROM [isolated].clubs), clubs AS (SELECT id FROM players) UPDATE players SET id = 1",
-    );
+  it.each([
+    ["INSERT INTO players (name) VALUES (?)", { table: "players", explicitId: false, returning: false }],
+    ["insert into Players (id, name) values (?, ?)", { table: "players", explicitId: true, returning: false }],
+    ['INSERT INTO "touchline_test_x"."countries" AS c ("id", code) VALUES (?, ?)', { table: "countries", explicitId: true, returning: false }],
+    ["INSERT INTO countries (code) VALUES (?) RETURNING id, code", { table: "countries", explicitId: false, returning: true }],
+    ["INSERT INTO news (title) SELECT title FROM (SELECT id, title FROM news) AS n", { table: "news", explicitId: false, returning: false }],
+    ["WITH src AS (SELECT 12 AS id) INSERT INTO countries (id, code) SELECT id, 'X' FROM src", { table: "countries", explicitId: true, returning: false }],
+    ["INSERT INTO news (title) VALUES ((SELECT title FROM news WHERE id IN (SELECT id FROM news) LIMIT 1))", { table: "news", explicitId: false, returning: false }],
+    ["INSERT INTO countries (code) VALUES (?) ON CONFLICT (code) DO UPDATE SET name = EXCLUDED.name", { table: "countries", explicitId: false, returning: false }],
+  ])("detects identity inserts: %s", (query, insert) => {
+    const params = Array((query.match(/\?/g) ?? []).length).fill(1);
+    expect(bindSql(query, params).insert).toEqual(insert);
   });
 
-  it.each(["UPDATE players SET id = 1", "DELETE players", "DELETE FROM players", "DELETE TOP (1) FROM players"])(
-    "resolves same-block DML aliases: %s",
-    (target) => {
-      const query = `${target} FROM clubs AS players WHERE players.id = 2`;
-      expect(bindSql(query, [], "isolated").sql).toBe(
-        `${target} FROM [isolated].clubs AS players WHERE players.id = 2`,
+  it.each([
+    "INSERT INTO save_slots (id, name) VALUES (?, ?)",
+    "INSERT INTO meta (key, value) VALUES (?, ?)",
+    "INSERT INTO standings (league_id, club_id) VALUES (?, ?)",
+    "UPDATE players SET name = ? WHERE id = ?",
+    "SELECT id, name FROM players WHERE id = ?",
+    "WITH moved AS (INSERT INTO news (title) VALUES (?) RETURNING id) SELECT id FROM moved",
+    "INSERT INTO players (name) VALUES (?); SELECT ?",
+  ])("does not treat %s as a single identity insert", (query) => {
+    const params = Array((query.match(/\?/g) ?? []).length).fill(1);
+    expect(bindSql(query, params).insert).toBeUndefined();
+  });
+
+  it("keeps every schema-qualified migration, registry and backfill statement bindable", () => {
+    const schema = "touchline_test_review";
+    for (const query of [
+      migrationTableSql(schema),
+      usersTableSql("accounts"),
+      accessRequestsTableSql("accounts"),
+      ...schemaMigrations(schema).flatMap((migration) => migration.statements),
+      ...appearanceBackfill(schema),
+    ]) {
+      const prepared = bindSql(query);
+      expect(prepared.sql, query).toBe(query);
+      expect(prepared.writes, query).toBe(true);
+    }
+  });
+});
+
+describe("SQL configuration (no database)", () => {
+  it("defaults to a local, unencrypted PostgreSQL on 5432 and the public schema", () => {
+    expect(readSqlSettings({})).toEqual({
+      host: "127.0.0.1",
+      port: 5432,
+      database: "touchline",
+      user: undefined,
+      password: undefined,
+      ssl: "disable",
+      testMode: false,
+      schema: "public",
+      requestTimeout: 120000,
+      poolSize: 10,
+      applicationName: "Touchline",
+    });
+  });
+
+  it("reads SQL_HOST, SQL_PORT, SQL_SSL, credentials, timeouts and pool size", () => {
+    expect(readSqlSettings({
+      SQL_HOST: "db.example.com",
+      SQL_PORT: "6543",
+      SQL_DATABASE: "touchline_prod",
+      SQL_USER: "touchline",
+      SQL_PASSWORD: "test-only",
+      SQL_SCHEMA: "touchline_user_1",
+      SQL_REQUEST_TIMEOUT_MS: "900000",
+      SQL_POOL_SIZE: "4",
+    })).toMatchObject({
+      host: "db.example.com",
+      port: 6543,
+      database: "touchline_prod",
+      user: "touchline",
+      password: "test-only",
+      ssl: "verify-full",
+      schema: "touchline_user_1",
+      requestTimeout: 900000,
+      poolSize: 4,
+    });
+    expect(readSqlSettings({ SQL_SSL: "require" }).ssl).toBe("require");
+    expect(readSqlSettings({ SQL_HOST: "localhost", SQL_SSL: "verify-full" }).ssl).toBe("verify-full");
+  });
+
+  it("treats loopback and single-label container hosts as local", () => {
+    for (const host of ["localhost", "127.0.0.1", "::1", "postgres", "touchline-db"])
+      expect(isLocalSqlHost(host), host).toBe(true);
+    for (const host of ["db.example.com", "10.0.0.5", "192.168.1.20", "postgres.internal", "-bad"])
+      expect(isLocalSqlHost(host), host).toBe(false);
+    expect(readSqlSettings({ SQL_HOST: "postgres" }).ssl).toBe("disable");
+  });
+
+  it("requires verified TLS for remote hosts", () => {
+    expect(readSqlSettings({ SQL_HOST: "db.example.com" }).ssl).toBe("verify-full");
+    for (const ssl of ["disable", "require"])
+      expect(() => readSqlSettings({ SQL_HOST: "db.example.com", SQL_SSL: ssl })).toThrow(/verified TLS/);
+    expect(() => readSqlSettings({ SQL_SSL: "prefer" })).toThrow(/SQL_SSL must be/);
+  });
+
+  it.each(["SQL_SERVER", "SQL_ENCRYPT", "SQL_TRUST_SERVER_CERTIFICATE", "AZURE_SQL_SERVER"])(
+    "rejects the retired Azure SQL setting %s",
+    (name) => {
+      expect(() => readSqlSettings({ [name]: "example.database.windows.net" })).toThrow(
+        new RegExp(`${name} belongs to the retired Azure SQL setup`),
       );
     },
   );
 
-  it("keeps nested TOP expressions and CTE column lists balanced", () => {
-    const query =
-      "WITH picked (id) AS (SELECT TOP ((1 + 2)) id FROM players) UPDATE TOP ((1 + 1)) players SET morale = 0 WHERE id IN (SELECT id FROM picked)";
-    const prepared = bindSql(query, [], "isolated").sql;
-    expect(prepared).toContain("TOP ((1 + 2)) id FROM [isolated].players");
-    expect(prepared).toContain("UPDATE TOP ((1 + 1)) [isolated].players");
-    expect(prepared).toContain("SELECT id FROM picked");
+  it("rejects SQLite configuration and file-like database names", () => {
+    expect(() => readSqlSettings({ GAME_DB: "data/career.sqlite" })).toThrow(/SQLite configuration/);
+    expect(() => readSqlSettings({ SAVE_DIR: "saves" })).toThrow(/SQLite configuration/);
+    for (const database of [":memory:", "data/touchline.db", "touch line", "1touchline", "a".repeat(64)])
+      expect(() => readSqlSettings({ SQL_DATABASE: database }), database).toThrow(/not a file path/);
+    expect(readSqlSettings({ SQL_DATABASE: "a".repeat(63) }).database).toHaveLength(63);
   });
 
-  it("resolves derived-table aliases without leaking nested aliases", () => {
-    const query = "UPDATE players SET id = 1 FROM (SELECT id FROM clubs AS players) AS players";
-    expect(bindSql(query, [], "isolated").sql).toBe(
-      "UPDATE players SET id = 1 FROM (SELECT id FROM [isolated].clubs AS players) AS players",
-    );
+  it("validates host, port, request timeout, pool size and credential pairs", () => {
+    for (const host of ["", " padded", "a".repeat(254)])
+      expect(() => readSqlSettings({ SQL_HOST: host }), JSON.stringify(host)).toThrow(/SQL_HOST/);
+    for (const port of ["0", "65536", "54.3", "port", "-1"])
+      expect(() => readSqlSettings({ SQL_PORT: port }), port).toThrow(/SQL_PORT/);
+    expect(readSqlSettings({ SQL_PORT: "65535" }).port).toBe(65535);
+    for (const timeout of ["0", "-1", "999", "Infinity", "900001", "invalid", "1500.5"])
+      expect(() => readSqlSettings({ SQL_REQUEST_TIMEOUT_MS: timeout }), timeout).toThrow(/SQL_REQUEST_TIMEOUT_MS/);
+    expect(readSqlSettings({ SQL_REQUEST_TIMEOUT_MS: "1000" }).requestTimeout).toBe(1000);
+    for (const size of ["1", "101", "2.5", "many"])
+      expect(() => readSqlSettings({ SQL_POOL_SIZE: size }), size).toThrow(/SQL_POOL_SIZE/);
+    expect(readSqlSettings({ SQL_POOL_SIZE: "2" }).poolSize).toBe(2);
+    expect(() => readSqlSettings({ SQL_USER: "touchline" })).toThrow(/both SQL_USER and SQL_PASSWORD/);
+    expect(() => readSqlSettings({ SQL_PASSWORD: "test-only" })).toThrow(/both SQL_USER and SQL_PASSWORD/);
   });
 
-  it.each([
-    "UPDATE dbo.players SET morale = 0",
-    "DELETE FROM [dbo].[players]",
-    "UPDATE players SET id = 1 FROM dbo.clubs AS players",
-    "WITH players AS (SELECT id FROM dbo.clubs) UPDATE players SET id = 1",
-    "INSERT INTO dbo.news (title) SELECT name FROM players",
-  ])("rejects explicit cross-schema game writes: %s", (query) => {
-    expect(() => bindSql(query, [], "isolated")).toThrow(/cross-schema/);
+  it("validates schema names, including the 63-character limit and system schemas", () => {
+    expect(MAX_IDENTIFIER_LENGTH).toBe(63);
+    expect(validateSqlSchema("public")).toBe("public");
+    expect(validateSqlSchema(`s${"a".repeat(62)}`)).toHaveLength(63);
+    for (const schema of [`s${"a".repeat(63)}`, "", "1world", "_world", "a.b", 'bad"name', "bad-name", "bad name", "wörld"])
+      expect(() => validateSqlSchema(schema), schema).toThrow(/at most 63 characters/);
+    for (const schema of ["pg_catalog", "pg_toast", "PG_temp_1", "pg_world", "information_schema", "INFORMATION_SCHEMA"])
+      expect(() => validateSqlSchema(schema), schema).toThrow(/system schema/);
+    expect(() => readSqlSettings({ SQL_SCHEMA: "pg_catalog" })).toThrow(/system schema/);
   });
 
-  it("supports insert-select, set operations and explicitly separated conditional writes", () => {
-    for (const query of [
-      "INSERT INTO news (title) SELECT name FROM players UNION ALL SELECT name FROM clubs",
-      "SELECT id FROM players UNION ALL SELECT id FROM clubs",
-      "UPDATE meta SET [value] = '1'; IF @@ROWCOUNT = 0 INSERT INTO meta ([key], [value]) VALUES ('key', '1');",
-    ])
-      expect(bindSql(query, [], "isolated").sql).toContain("[isolated].");
+  it("requires an isolated touchline_test_ or touchline_e2e_ schema in test mode", () => {
+    for (const schema of ["public", "accounts", "touchline_user_1", "touchline_testx", "Touchline_test_x"])
+      expect(() => validateSqlSchema(schema, true), schema).toThrow(/isolated/);
+    expect(validateSqlSchema("touchline_test_x", true)).toBe("touchline_test_x");
+    expect(validateSqlSchema("touchline_e2e_x", true)).toBe("touchline_e2e_x");
+    expect(() => readSqlSettings({ SQL_TEST_MODE: "true" })).toThrow(/isolated/);
+    expect(readSqlSettings({ SQL_TEST_MODE: "TRUE", SQL_SCHEMA: "public" }).testMode).toBe(false);
   });
 
-  it("keeps schema-qualified migration and backfill batches executable", () => {
-    const schema = "touchline_test_review";
-    for (const query of [
-      migrationTableSql(schema),
-      ...schemaMigrations(schema).flatMap((migration) => migration.statements),
-      ...appearanceBackfill(schema),
-    ])
-      expect(() => bindSql(query, [], schema), query).not.toThrow();
+  it("requires both explicit confirmations before tests touch a non-loopback host", () => {
+    const remote = {
+      SQL_HOST: "db.example.com",
+      SQL_DATABASE: "touchline",
+      SQL_TEST_MODE: "true",
+      SQL_SCHEMA: "touchline_test_config",
+    };
+    expect(() => readSqlSettings(remote)).toThrow(/Remote tests require/);
+    expect(() => readSqlSettings({ ...remote, SQL_ALLOW_REMOTE_TESTS: "true" })).toThrow(/Remote tests require/);
+    expect(() => readSqlSettings({ ...remote, SQL_ALLOW_REMOTE_TESTS: "true", SQL_TEST_DATABASE: "other" }))
+      .toThrow(/Remote tests require/);
+    expect(() => readSqlSettings({ ...remote, SQL_ALLOW_REMOTE_TESTS: "1", SQL_TEST_DATABASE: "touchline" }))
+      .toThrow(/Remote tests require/);
+    expect(readSqlSettings({ ...remote, SQL_ALLOW_REMOTE_TESTS: "true", SQL_TEST_DATABASE: "touchline" }).schema)
+      .toBe(remote.SQL_SCHEMA);
+    // A container-network name is local for TLS purposes but is still not loopback for tests.
+    expect(() => readSqlSettings({ ...remote, SQL_HOST: "postgres" })).toThrow(/Remote tests require/);
+    for (const host of ["localhost", "127.0.0.1", "::1"])
+      expect(readSqlSettings({ ...remote, SQL_HOST: host }).testMode).toBe(true);
   });
 });
 
-describe("SQL mutation generation (no database)", () => {
-  it("captures generated IDs using OUTPUT INTO so enabled triggers are supported", () => {
-    const sql = runSql(
-      bindSql("INSERT INTO players ([name]) VALUES (?)", ["Name"], "isolated")
-        .sql,
-    );
-    expect(sql).toContain(
-      "OUTPUT INSERTED.[id] INTO @__touchline_inserted ([id])",
-    );
-    expect(sql).toContain("ORDER BY [ordinal] DESC");
-    expect(sql).not.toContain("SET IDENTITY_INSERT");
-    expect(sql).not.toContain("@@IDENTITY");
+describe("SQL startup error reporting (no database)", () => {
+  it("reports nested causes with SQLSTATE codes and redacts passwords, tokens and secrets", () => {
+    const login = Object.assign(new Error('password authentication failed for user "touchline" (pw-value)'), {
+      code: "28P01",
+      detail: "token-value was rejected",
+    });
+    const failure = Object.assign(new Error("Connection to postgresql://touchline:pw-value@db.example.com/touchline failed"), {
+      cause: login,
+    });
+    const messages = describeSqlError(failure, {
+      SQL_PASSWORD: "pw-value",
+      GITHUB_TOKEN: "token-value",
+      CLIENT_SECRET: "secret-value",
+      SQL_USER: "touchline",
+    });
+    expect(messages).toHaveLength(2);
+    expect(messages[0]).toBe("Error: Connection to postgresql://[redacted]@db.example.com/touchline failed");
+    expect(messages[1]).toContain("Error: 28P01: password authentication failed");
+    expect(messages[1]).toContain("[redacted] was rejected");
+    expect(messages.join(" ")).not.toMatch(/pw-value|token-value|secret-value/);
+    expect(messages.join(" ")).toContain('user "touchline"');
   });
 
-  it("preserves explicit IDs and turns IDENTITY_INSERT off on success and error", () => {
-    const sql = runSql(
-      bindSql(
-        "INSERT INTO countries (id, code) VALUES (?, ?)",
-        [52, "GB"],
-        "isolated",
-      ).sql,
-    );
-    expect(sql).toContain("SET IDENTITY_INSERT [isolated].countries ON");
-    expect(
-      sql.match(/SET IDENTITY_INSERT \[isolated\]\.countries OFF/g),
-    ).toHaveLength(2);
-    expect(sql).toContain("BEGIN CATCH");
-    expect(sql).toContain("THROW;");
+  it("redacts connection URLs even without a configured secret and prefers longer secrets first", () => {
+    expect(describeSqlError(new Error("postgres://admin:hunter2@host/db"), {}))
+      .toEqual(["Error: postgresql://[redacted]@host/db"]);
+    expect(describeSqlError(new Error("abc-long and abc"), { SHORT_PASSWORD: "abc", LONG_PASSWORD: "abc-long" }))
+      .toEqual(["Error: [redacted] and [redacted]"]);
   });
 
-  it("supports existing direct OUTPUT and insert-select with a CTE", () => {
-    const direct = runSql(
-      "INSERT INTO [dbo].[players] (name) OUTPUT INSERTED.id VALUES (@name)",
+  it("walks aggregate errors, bounds depth and size, and survives cycles", () => {
+    const aggregate = new AggregateError(
+      [Object.assign(new Error("first"), { code: "ECONNREFUSED" }), new Error("second")],
+      "all connection attempts failed",
     );
-    expect(direct).toContain("OUTPUT INSERTED.[id] INTO");
-    expect(direct.match(/OUTPUT INSERTED/g)).toHaveLength(1);
-    const select = runSql(
-      ";WITH source AS (SELECT 12 AS id) INSERT INTO [dbo].[countries] (id) SELECT id FROM source;",
-    );
-    expect(select).toContain("OUTPUT INSERTED.[id] INTO");
-    expect(select).toContain("SELECT id FROM source");
-    expect(select).toContain("SET IDENTITY_INSERT [dbo].[countries] ON");
-  });
-
-  it("does not invent numeric IDs for save slots or update/delete results", () => {
-    for (const query of [
-      "INSERT INTO save_slots (id) VALUES (@id)",
-      "UPDATE players SET morale = 75",
-      "DELETE FROM news",
-    ])
-      expect(runSql(query)).toContain(
-        "CAST(NULL AS INT) AS [__touchline_identity]",
-      );
+    expect(describeSqlError(aggregate, {})).toEqual([
+      "AggregateError: all connection attempts failed",
+      "Error: ECONNREFUSED: first",
+      "Error: second",
+    ]);
+    const cyclic: Error & { cause?: unknown } = new Error("loop");
+    cyclic.cause = cyclic;
+    expect(describeSqlError(cyclic, {})).toEqual(["Error: loop"]);
+    let deep: Error = new Error("level 0");
+    for (let level = 1; level < 10; level++) deep = new Error(`level ${level}`, { cause: deep });
+    expect(describeSqlError(deep, {})).toHaveLength(5);
+    expect(describeSqlError(new Error("x".repeat(5000)), {})[0]).toHaveLength(2048);
+    expect(describeSqlError("not an error", {})).toEqual(["Unknown SQL startup error."]);
+    expect(describeSqlError(undefined, {})).toEqual(["Unknown SQL startup error."]);
   });
 });
 
 describe("SQL pool configuration (no database)", () => {
-  it("allows bounded maintenance request timeouts without disabling the timeout", () => {
-    expect(sqlPoolConfig(readSqlSettings({})).requestTimeout).toBe(120000);
-    expect(sqlPoolConfig(readSqlSettings({ SQL_REQUEST_TIMEOUT_MS: "900000" })).requestTimeout).toBe(900000);
-    for (const timeout of ["0", "-1", "Infinity", "900001", "invalid"])
-      expect(() => readSqlSettings({ SQL_REQUEST_TIMEOUT_MS: timeout })).toThrow("SQL_REQUEST_TIMEOUT_MS");
-  });
-  it("uses renewable driver-managed Azure credentials and a short min-zero pool", () => {
-    const configuration = sqlPoolConfig(
-      readSqlSettings({ AZURE_CLIENT_ID: "managed-client" }),
-    );
-    expect(configuration.authentication).toEqual({
-      type: "azure-active-directory-default",
-      options: { clientId: "managed-client" },
+  it("maps settings to a small UTC pg pool with statement and idle-transaction timeouts", () => {
+    const configuration = sqlPoolConfig(readSqlSettings({
+      SQL_HOST: "localhost",
+      SQL_PORT: "54330",
+      SQL_DATABASE: "touchline_checks",
+      SQL_USER: "local-user",
+      SQL_PASSWORD: "test-only",
+      SQL_REQUEST_TIMEOUT_MS: "5000",
+      SQL_POOL_SIZE: "3",
+    }));
+    expect(configuration).toMatchObject({
+      host: "localhost",
+      port: 54330,
+      database: "touchline_checks",
+      user: "local-user",
+      password: "test-only",
+      ssl: false,
+      max: 3,
+      idleTimeoutMillis: 60_000,
+      keepAlive: true,
+      statement_timeout: 5000,
+      idle_in_transaction_session_timeout: 900_000,
+      application_name: "Touchline",
+      options: "-c TimeZone=UTC",
     });
-    expect(configuration.pool).toMatchObject({
-      min: 0,
-      max: 10,
-      idleTimeoutMillis: 60000,
+    expect(sqlPoolConfig(readSqlSettings({ SQL_REQUEST_TIMEOUT_MS: "900000" }))).toMatchObject({
+      statement_timeout: 900000,
+      idle_in_transaction_session_timeout: 9_000_000,
     });
-    expect(configuration.options).toMatchObject({
-      encrypt: true,
-      trustServerCertificate: false,
-      abortTransactionOnError: true,
-    });
-    expect(JSON.stringify(configuration)).not.toContain('"token"');
   });
 
-  it("uses configured SQL credentials only when both were provided", () => {
-    const configuration = sqlPoolConfig(
-      readSqlSettings({ SQL_USER: "local-user", SQL_PASSWORD: "test-only" }),
-    );
-    expect(configuration.user).toBe("local-user");
-    expect(configuration.authentication).toBeUndefined();
-    expect(() => readSqlSettings({ SQL_USER: "local-user" })).toThrow(
-      /both SQL_USER and SQL_PASSWORD/,
-    );
+  it("uses credentials only when both were provided", () => {
+    const configuration = sqlPoolConfig(readSqlSettings({}));
+    expect(configuration.user).toBeUndefined();
+    expect(configuration.password).toBeUndefined();
+  });
+
+  it("maps SQL_SSL to pg TLS options", () => {
+    expect(sqlPoolConfig(readSqlSettings({ SQL_SSL: "disable" })).ssl).toBe(false);
+    expect(sqlPoolConfig(readSqlSettings({ SQL_SSL: "require" })).ssl).toEqual({ rejectUnauthorized: false });
+    expect(sqlPoolConfig(readSqlSettings({ SQL_HOST: "db.example.com" })).ssl).toEqual({ rejectUnauthorized: true });
+  });
+
+  it("parses counts and numerics as numbers, dates as text and UTC timestamps as Dates", () => {
+    const types = sqlPoolConfig(readSqlSettings({})).types!;
+    const parser = (oid: number) => types.getTypeParser(oid, "text") as (value: string) => unknown;
+    expect(parser(20)("9007199254740991")).toBe(9007199254740991);
+    expect(parser(1700)("12.50")).toBe(12.5);
+    expect(parser(1082)("2026-09-21")).toBe("2026-09-21");
+    expect(parser(1114)("2026-09-21 10:11:12.345")).toEqual(new Date("2026-09-21T10:11:12.345Z"));
+    expect(parser(16)("t")).toBe(true);
+    expect(parser(23)("42")).toBe(42);
   });
 });
 
-describe("SQL schema (no database)", () => {
+describe("SQL schema contract (no database)", () => {
   const schema = "touchline_test_schema_contract";
   const migrations = schemaMigrations(schema);
   const statements = migrations.flatMap((migration) => migration.statements);
+  const declaration = (table: string) =>
+    statements.find((statement) => statement.startsWith(`CREATE TABLE IF NOT EXISTS "${schema}"."${table}" (`))!;
+  // Tables added by later migrations (GBE ledger v3, registrations v4) follow the baseline's own tables.
+  const baseline = WORLD_TABLES.filter((table) => !ADDED_WORLD_TABLES.has(table));
 
   it("keeps all world tables in foreign-key dependency order, without saves or migrations", () => {
-    expect(WORLD_TABLES).toHaveLength(34);
+    expect(baseline).toHaveLength(34);
+    expect(WORLD_TABLES).toHaveLength(34 + ADDED_WORLD_TABLES.size);
     expect(new Set(WORLD_TABLES).size).toBe(WORLD_TABLES.length);
-    expect(WORLD_TABLES).not.toContain("save_slots");
-    expect(WORLD_TABLES).not.toContain("save_chunks");
-    expect(WORLD_TABLES).not.toContain("schema_migrations");
+    for (const table of ["save_slots", "save_chunks", "schema_migrations"]) {
+      expect(WORLD_TABLES).not.toContain(table);
+      expect(STORE_TABLES.has(table)).toBe(true);
+    }
+    for (const table of IDENTITY_TABLES) expect(WORLD_TABLES).toContain(table);
     const seen = new Set<string>();
-    for (const [offset, statement] of migrations[0].statements.entries()) {
-      const table = WORLD_TABLES[offset];
-      expect(statement).toContain(`CREATE TABLE [${schema}].[${table}]`);
-      for (const match of statement.matchAll(
-        /REFERENCES \[[^\]]+\]\.\[([^\]]+)\]/g,
-      ))
-        expect(
-          match[1] === table || seen.has(match[1]),
-          `${table} depends on ${match[1]}`,
-        ).toBe(true);
-      expect(statement.includes("[id] INT IDENTITY(1,1)")).toBe(
-        IDENTITY_TABLES.has(table),
-      );
+    for (const [offset, table] of baseline.entries()) {
+      const statement = statements[offset];
+      expect(statement.startsWith(`CREATE TABLE IF NOT EXISTS "${schema}"."${table}" (`)).toBe(true);
+      for (const match of statement.matchAll(/REFERENCES "([^"]+)"\."([^"]+)"/g)) {
+        expect(match[1]).toBe(schema);
+        expect(match[2] === table || seen.has(match[2]), `${table} depends on ${match[2]}`).toBe(true);
+      }
+      expect(statement.includes("id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY"), table)
+        .toBe(IDENTITY_TABLES.has(table));
       seen.add(table);
     }
   });
 
-  it("scopes migrations, indexes, foreign keys and triggers to the selected schema", () => {
-    expect(migrations.map((migration) => migration.version)).toEqual([
-      1, 2, 3, 4, 5, 6,
-    ]);
-    expect(migrationTableSql(schema)).toContain(
-      `[${schema}].[schema_migrations]`,
+  it("is one PostgreSQL baseline, scoped to the selected schema, with no T-SQL left", () => {
+    expect(migrations[0]).toMatchObject({ version: 1, name: "PostgreSQL world baseline" });
+    // Later migrations are appended in version order, one per version.
+    expect(migrations.map((migration) => migration.version)).toEqual(
+      [...new Set(migrations.map((migration) => migration.version))].sort((first, second) => first - second),
     );
+    expect(migrationTableSql(schema)).toContain(`CREATE TABLE IF NOT EXISTS "${schema}"."schema_migrations"`);
     for (const statement of statements) {
-      expect(statement).not.toMatch(
-        /\bdbo\b|CREATE DATABASE|\bPRAGMA\b|IF NOT EXISTS\s+\w+\s+ON|json_extract|COLLATE NOCASE/i,
+      // String literals (JSON defaults such as '[]') are not identifiers.
+      expect(statement.replace(/'[^']*'/g, "''")).not.toMatch(
+        /\[|N'|NVARCHAR|VARBINARY|UNIQUEIDENTIFIER|DATETIME2|\bBIT\b|FLOAT\(|IDENTITY\(|OBJECT_ID|\bsys\.|\bdbo\b|\bGO\b|PERSISTED|OPENJSON|JSON_VALUE|\bREAL\b|SYSUTCDATETIME/,
       );
-      expect(statement).toContain(`[${schema}].`);
+      expect(statement).toContain(`"${schema}".`);
+      expect(statement).not.toMatch(/\b(?:TABLE|ON|REFERENCES|INTO)\s+(?:IF NOT EXISTS\s+)?(?!IF\b|"|DELETE\b|UPDATE\b)[a-z_]+\s*[(\s]/i);
     }
-    const indexes = statements.filter((statement) =>
-      /CREATE (?:UNIQUE )?INDEX/.test(statement),
-    );
-    expect(indexes).toHaveLength(26);
-    for (const statement of indexes) {
-      expect(statement).toContain(`[object_id] = OBJECT_ID(N'[${schema}].`);
-      expect(statement).toContain(` ON [${schema}].`);
-    }
-    expect(statements.join("\n")).toContain(
-      `TRIGGER [${schema}].[clear_transferred_squad] ON [${schema}].[players]`,
-    );
-    const reseed = migrations.find((migration) => migration.version === 6)!.statements[0];
-    expect(reseed).toContain(`PROCEDURE [${schema}].[reseed_world_identity]`);
-    expect(reseed).toContain("WITH EXECUTE AS OWNER");
-    expect(reseed).toContain("IF @table NOT IN (");
-    expect(reseed).toContain("[last_value] IS NOT NULL");
-  });
-
-  it("uses double precision and Unicode text, retaining additive columns and defaults", () => {
     const sql = statements.join("\n");
-    expect(sql).not.toMatch(/\bREAL\b|\bTEXT\b|\bFLOAT(?!\(53\))/i);
-    expect(sql).toContain("[balance] FLOAT(53) NOT NULL");
-    expect(sql).toContain("[data] NVARCHAR(max) NOT NULL DEFAULT N'{}'");
-    expect(sql).toContain("ADD [squad_club_id] INT NULL REFERENCES");
-    expect(sql).toContain("COALESCE([squad_club_id], [club_id]) PERSISTED");
-    expect(sql).toContain("[notification_key], [notification_unkeyed_id]");
-    expect(sql).not.toContain("WHERE [notification_key] IS NOT NULL");
-    expect(sql).toContain("previous_row.[club_id] IS NULL");
-    expect(sql).toContain("current_row.[club_id] IS NULL");
+    expect(sql).toContain(`CREATE OR REPLACE TRIGGER clear_transferred_squad BEFORE UPDATE OF club_id ON "${schema}"."players"`);
+    expect(sql).toContain("IF NEW.club_id IS DISTINCT FROM OLD.club_id THEN");
+    expect(sql).toContain("SET search_path = pg_catalog");
+    expect(sql).toContain("playing_club_id INTEGER GENERATED ALWAYS AS (COALESCE(squad_club_id, club_id)) STORED");
+    expect(sql).toContain("notification_key TEXT\n          GENERATED ALWAYS AS (data::jsonb ->> 'notificationKey') STORED");
+    expect(sql).not.toContain("notification_unkeyed_id");
   });
 
-  it("preserves fractional generated ratings and match/season reputation adjustments", () => {
-    const widening = migrations.find((migration) => migration.version === 5)!;
-    expect(widening.statements).toHaveLength(6);
+  it("creates every index idempotently on schema-qualified tables", () => {
+    const indexes = statements.filter((statement) => /^CREATE (?:UNIQUE )?INDEX/.test(statement));
+    expect(indexes.length).toBeGreaterThan(30);
+    const names = new Set<string>();
+    for (const statement of indexes) {
+      const match = statement.match(
+        /^CREATE (?:UNIQUE )?INDEX IF NOT EXISTS "([a-z_]+)" ON "([^"]+)"\."([a-z_]+)" \(([^;]+?)\)(?: WHERE ([^;]+))?;$/,
+      );
+      expect(match, statement).not.toBeNull();
+      expect(match![2]).toBe(schema);
+      expect(STORE_TABLES.has(match![3])).toBe(true);
+      expect(match![4]).not.toMatch(/\b(?:data|profile|stats|body|terms)\b/);
+      names.add(match![1]);
+    }
+    expect(names.size).toBe(indexes.length);
+    expect(indexes).toContain(
+      `CREATE UNIQUE INDEX IF NOT EXISTS "news_notification_key" ON "${schema}"."news" (notification_key) WHERE notification_key IS NOT NULL;`,
+    );
+    expect(indexes).toContain(`CREATE INDEX IF NOT EXISTS "player_name" ON "${schema}"."players" (lower(name));`);
+  });
+
+  it("uses double precision for fractional values and integers for ids, counts and rounded estimates", () => {
     for (const [table, columns] of [
       ["countries", ["reputation"]],
       ["leagues", ["reputation"]],
-      ["clubs", ["reputation", "facilities"]],
+      ["clubs", ["reputation", "facilities", "balance"]],
       ["staff", ["ability", "tactical_knowledge"]],
-    ] as const) {
-      const declaration = migrations[0].statements[WORLD_TABLES.indexOf(table)];
-      for (const column of columns) {
-        expect(declaration, `${table}.${column}`).toContain(
-          `[${column}] FLOAT(53) NOT NULL`,
-        );
-        expect(widening.statements).toContain(
-          `ALTER TABLE [${schema}].[${table}] ALTER COLUMN [${column}] FLOAT(53) NOT NULL;`,
-        );
-      }
-    }
-  });
-
-  it("retains integer IDs, counts, rankings and rounded scouting estimates", () => {
+      ["players", ["ability", "potential", "value", "wage"]],
+    ] as const)
+      for (const column of columns)
+        expect(declaration(table), `${table}.${column}`).toMatch(new RegExp(`\\b${column} DOUBLE PRECISION NOT NULL`));
     for (const [table, columns] of [
       ["leagues", ["tier"]],
       ["clubs", ["country_id", "academy", "expectations", "capacity"]],
       ["staff", ["influence", "communication", "ambition"]],
-      [
-        "players",
-        ["age", "volatility", "goals", "assists", "appearances", "minutes", "knowledge", "intensity"],
-      ],
-      [
-        "standings",
-        ["played", "wins", "draws", "losses", "gf", "ga", "points", "deducted"],
-      ],
+      ["players", ["age", "volatility", "goals", "assists", "appearances", "minutes", "knowledge", "intensity", "shortlisted", "listed", "available_loan"]],
+      ["standings", ["played", "wins", "draws", "losses", "gf", "ga", "points", "deducted"]],
       ["fixtures", ["season", "round"]],
-      [
-        "reports",
-        ["accuracy", "ability_low", "ability_high", "potential_low", "potential_high", "fit", "risk"],
-      ],
+      ["reports", ["accuracy", "ability_low", "ability_high", "potential_low", "potential_high", "fit", "risk"]],
+      ["news", ["read"]],
+      ["negotiations", ["public"]],
+      ["financial_periods", ["closed"]],
+      ["player_match_appearances", ["started"]],
       ["training_plans", ["intensity"]],
       ["set_pieces", ["risk"]],
-    ] as const) {
-      const declaration = migrations[0].statements[WORLD_TABLES.indexOf(table)];
+    ] as const)
       for (const column of columns)
-        expect(declaration, `${table}.${column}`).toContain(
-          `[${column}] INT NOT NULL`,
-        );
-    }
-  });
-
-  it("indexes only bounded keys and never filters on a computed column", () => {
-    for (const statement of statements.filter((sql) =>
-      /CREATE (?:UNIQUE )?INDEX/.test(sql),
-    )) {
-      const [, table, keys, filter = ""] = statement.match(
-        /CREATE (?:UNIQUE )?INDEX \[[^\]]+\] ON \[[^\]]+\]\.\[([^\]]+)\] \(([^)]+)\)(?: WHERE ([^;]+))?;/,
-      )!;
-      const declaration = migrations[0].statements.find((sql) =>
-        sql.includes(`CREATE TABLE [${schema}].[${table}]`),
-      )!;
-      const computed = statements.filter((sql) =>
-        sql.includes(`ALTER TABLE [${schema}].[${table}] ADD`) &&
-        /ADD \[[^\]]+\] AS\b/.test(sql),
-      );
-      for (const [, column] of keys.matchAll(/\[([^\]]+)\]/g)) {
-        expect(declaration, `${table}.${column}`).not.toMatch(
-          new RegExp(`\\[${column}\\]\\s+(?:N?VARCHAR|VARBINARY)\\(max\\)`, "i"),
-        );
-        for (const addition of computed.filter((sql) =>
-          sql.includes(`ADD [${column}] AS`),
-        ))
-          expect(addition).not.toMatch(/(?:N?VARCHAR|VARBINARY)\(max\)/i);
-      }
-      for (const addition of computed) {
-        const [, column] = addition.match(/ADD \[([^\]]+)\] AS\b/)!;
-        expect(filter, `${table}.${column}`).not.toContain(`[${column}]`);
-      }
-    }
+        expect(declaration(table), `${table}.${column}`).toMatch(new RegExp(`\\b${column} INTEGER NOT NULL`));
+    for (const table of WORLD_TABLES)
+      expect(declaration(table)).not.toMatch(/\b(?:VARCHAR|CHAR|FLOAT|NUMERIC|SMALLINT|JSONB?)\b/i);
   });
 
   it("defines the exact chunked-save storage contract", () => {
-    const saves = migrations[3].statements.join("\n");
-    for (const declaration of [
-      "[id] UNIQUEIDENTIFIER NOT NULL PRIMARY KEY",
-      "[name] NVARCHAR(200) NOT NULL",
-      "[career_id] NVARCHAR(100) NULL",
-      "[career_metadata] NVARCHAR(max) NULL",
-      "[created_at] DATETIME2 NOT NULL",
-      "[automatic] BIT NOT NULL",
-      "[imported] BIT NOT NULL DEFAULT 0",
-      "[format_version] INT NOT NULL",
-      "[byte_length] BIGINT NOT NULL DEFAULT 0",
-      "[sha256] CHAR(64) NULL",
-      "[complete] BIT NOT NULL DEFAULT 0",
-      "[ordinal] INT NOT NULL",
-      "[data] VARBINARY(max) NOT NULL",
-      "PRIMARY KEY([save_id], [ordinal])",
-      "ON DELETE CASCADE",
+    const saves = statements.filter((statement) => /save_(?:slots|chunks)/.test(statement)).join("\n");
+    for (const definition of [
+      "id UUID NOT NULL PRIMARY KEY",
+      "name TEXT NOT NULL",
+      "career_id TEXT NULL",
+      "career_metadata TEXT NULL",
+      "created_at TIMESTAMPTZ NOT NULL",
+      "automatic BOOLEAN NOT NULL",
+      "imported BOOLEAN NOT NULL DEFAULT false",
+      "format_version INTEGER NOT NULL",
+      "byte_length BIGINT NOT NULL DEFAULT 0",
+      "sha256 TEXT NULL",
+      "complete BOOLEAN NOT NULL DEFAULT false",
+      "ordinal INTEGER NOT NULL",
+      "data BYTEA NOT NULL",
+      "PRIMARY KEY (save_id, ordinal)",
+      `REFERENCES "${schema}"."save_slots"(id) ON DELETE CASCADE`,
+      `ALTER TABLE "${schema}"."save_chunks" ALTER COLUMN data SET STORAGE EXTERNAL;`,
     ])
-      expect(saves).toContain(declaration);
-    expect(STORE_TABLES.has("save_slots")).toBe(true);
-    expect(STORE_TABLES.has("save_chunks")).toBe(true);
+      expect(saves).toContain(definition);
   });
 
-  it("backfills both lineups and benches with T-SQL JSON and duplicate protection", () => {
+  it("backfills both lineups and benches from fixture JSON with duplicate protection", () => {
     const backfill = appearanceBackfill(schema);
     expect(backfill).toHaveLength(4);
-    for (const [index, path] of [
-      "home.lineup",
-      "home.bench",
-      "away.lineup",
-      "away.bench",
+    for (const [index, [side, group]] of [
+      ["home", "lineup"],
+      ["home", "bench"],
+      ["away", "lineup"],
+      ["away", "bench"],
     ].entries()) {
-      expect(backfill[index]).toContain(`'$.snapshot.${path}'`);
-      expect(backfill[index]).toContain("OPENJSON");
-      expect(backfill[index]).toContain("ROW_NUMBER()");
-      expect(backfill[index]).toContain("NOT EXISTS");
-      expect(backfill[index]).toContain("'$.substitutions'");
-      expect(backfill[index]).toContain("N'red card', N'injury'");
+      const statement = backfill[index];
+      expect(statement).toContain(`'{snapshot,${side},${group}}'`);
+      expect(statement).toContain(`fixture.${side}_id AS club_id`);
+      expect(statement).toContain(`${group === "lineup" ? 1 : 0} AS started`);
+      expect(statement).toContain("ROW_NUMBER() OVER (PARTITION BY fixture.id");
+      expect(statement).toContain("'substitutions'");
+      expect(statement).toContain("IN ('red card', 'injury')");
+      expect(statement).toContain("ON CONFLICT (fixture_id, player_id) DO NOTHING");
       for (const reference of [
-        `FROM [${schema}].[fixtures] AS fixture`,
-        `INNER JOIN [${schema}].[players] AS player`,
-        `INSERT INTO [${schema}].[player_match_appearances]`,
-        `FROM [${schema}].[player_match_appearances] AS existing`,
+        `FROM "${schema}"."fixtures" AS fixture`,
+        `INNER JOIN "${schema}"."players" AS player`,
+        `INSERT INTO "${schema}"."player_match_appearances"`,
       ])
-        expect(backfill[index]).toContain(reference);
-      expect(backfill[index]).not.toMatch(
-        /\b(?:FROM|JOIN|INTO)\s+\[?(?:fixtures|players|player_match_appearances)\]?(?=\s|;|\()/i,
-      );
-      expect(backfill[index]).not.toMatch(
-        /json_each|json_extract|INSERT OR IGNORE|LIMIT 1/,
-      );
+        expect(statement).toContain(reference);
+      expect(statement).not.toMatch(/\b(?:FROM|JOIN|INTO)\s+(?:fixtures|players|player_match_appearances)\b/i);
+      expect(statement).not.toMatch(/OPENJSON|JSON_VALUE|TRY_CONVERT|NOT EXISTS/);
     }
   });
 
-  it("quotes identifiers without allowing an escape from brackets", () => {
-    expect(quoteIdentifier("test]name")).toBe("[test]]name]");
-    expect(() => quoteIdentifier("a".repeat(129))).toThrow(
-      "Invalid SQL identifier",
-    );
-    expect(() => quoteIdentifier("bad\0name")).toThrow(
-      "Invalid SQL identifier",
-    );
+  it("quotes identifiers and literals without allowing an escape", () => {
+    expect(quoteIdentifier('test"name')).toBe('"test""name"');
+    expect(quoteIdentifier("a".repeat(63))).toBe(`"${"a".repeat(63)}"`);
+    for (const name of ["", "a".repeat(64), "bad\0name"])
+      expect(() => quoteIdentifier(name)).toThrow("Invalid SQL identifier");
+    expect(tableName("touchline_test_x", "players")).toBe('"touchline_test_x"."players"');
+    expect(sqlLiteral("it's")).toBe("'it''s'");
+    expect(() => sqlLiteral("bad\0value")).toThrow("Invalid SQL literal");
   });
 });
 
-describe("SQL configuration safety (no database)", () => {
-  const remote = {
-    SQL_SERVER: "example.database.windows.net",
-    SQL_DATABASE: "touchline",
-    SQL_TEST_MODE: "true",
-    SQL_SCHEMA: "touchline_test_config",
-  };
+type Reply = (text: string, values?: unknown[]) => unknown[] | undefined | Promise<unknown[] | undefined>;
 
-  it("reports nested startup errors without passwords or identity tokens", async () => {
-    const { describeSqlError } = await import("./sql-config.ts");
-    const original = Object.assign(new Error("Login failed for token-user"), { code: "ELOGIN", number: 18456 });
-    const failure = Object.assign(new Error("SQL rejected password-value and identity-header-value"), {
-      originalError: original,
-      cause: new Error("Bearer eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ0ZXN0In0.signature"),
-    });
-    const messages = describeSqlError(failure, {
-      SQL_PASSWORD: "password-value",
-      IDENTITY_HEADER: "identity-header-value",
-    }).join(" | ");
-    expect(messages).toContain("ELOGIN: 18456: Login failed");
-    expect(messages).toContain("[redacted]");
-    expect(messages).not.toMatch(/password-value|identity-header-value|eyJhbGci/);
-  });
-
-  it("requires both explicit remote-test confirmations", () => {
-    expect(() => readSqlSettings(remote)).toThrow(/Remote tests require/);
-    expect(() =>
-      readSqlSettings({
-        ...remote,
-        SQL_ALLOW_REMOTE_TESTS: "true",
-        SQL_TEST_DATABASE: "other",
-      }),
-    ).toThrow(/Remote tests require/);
-    expect(
-      readSqlSettings({
-        ...remote,
-        SQL_ALLOW_REMOTE_TESTS: "true",
-        SQL_TEST_DATABASE: "touchline",
-      }).schema,
-    ).toBe(remote.SQL_SCHEMA);
-  });
-
-  it("never allows dbo tests, unverified remote TLS, or SQLite paths", () => {
-    expect(() =>
-      readSqlSettings({ SQL_TEST_MODE: "true", SQL_SCHEMA: "dbo" }),
-    ).toThrow(/isolated/);
-    expect(() =>
-      readSqlSettings({ SQL_SERVER: remote.SQL_SERVER, SQL_ENCRYPT: "false" }),
-    ).toThrow(/verified TLS/);
-    expect(() =>
-      readSqlSettings({
-        SQL_SERVER: remote.SQL_SERVER,
-        SQL_TRUST_SERVER_CERTIFICATE: "true",
-      }),
-    ).toThrow(/verified TLS/);
-    expect(() => readSqlSettings({ SQL_DATABASE: ":memory:" })).toThrow(
-      /not a file path/,
-    );
-    expect(() => readSqlSettings({ GAME_DB: "data/career.sqlite" })).toThrow(
-      /SQLite configuration/,
-    );
-    expect(readSqlSettings({}).schema).toBe("dbo");
-  });
-});
-
-interface DriverCall {
-  kind: "query" | "batch" | "bulk";
-  sql: string;
-  owner: unknown;
-  parameters: Record<string, unknown>;
-  types: Record<string, unknown>;
-  rows?: unknown[][];
-}
-
-function fakeStore(
-  reply: (call: DriverCall) => unknown[] | Promise<unknown[]> = (call) =>
-    call.sql.includes("AS [__touchline_changes]")
-      ? [{ __touchline_changes: 1, __touchline_identity: 42 }]
-      : [],
-  settings = readSqlSettings({
-    SQL_SCHEMA: "touchline_test_mock",
-    SQL_TEST_MODE: "true",
-  }),
-) {
-  const calls: DriverCall[] = [];
-  const events: string[] = [];
-  const transactions: FakeTransaction[] = [];
-  const busy = new Set<unknown>();
-  const pool = {
-    close: vi.fn(async () => {
-      events.push("close");
-    }),
-  };
-
-  class FakeTransaction extends EventEmitter {
-    constructor(readonly pool: unknown) {
-      super();
-      transactions.push(this);
-    }
-    async begin() {
-      events.push("begin");
-    }
-    async commit() {
-      events.push("commit");
-    }
-    async rollback() {
-      events.push("rollback");
-      this.emit("rollback", false);
-    }
-  }
-
-  class FakeTable {
-    create = false;
-    values: unknown[][] = [];
-    definitions: unknown[][] = [];
-    columns = {
-      add: (...values: unknown[]) => {
-        this.definitions.push(values);
-      },
-    };
-    rows = {
-      add: (...values: unknown[]) => {
-        this.values.push(values);
-      },
-      clear: () => {
-        this.values = [];
-      },
-    };
-    constructor(readonly name: string) {}
-  }
-
-  class FakeRequest {
-    parameters: Record<string, unknown> = {};
-    types: Record<string, unknown> = {};
-    constructor(readonly owner: unknown) {}
-    input(name: string, ...values: unknown[]) {
-      this.parameters[name] = values.at(-1);
-      this.types[name] = values.length === 2 ? values[0] : "inferred";
-      return this;
-    }
-    async execute(kind: DriverCall["kind"], sql: string, rows?: unknown[][]) {
-      if (busy.has(this.owner))
-        throw new Error("Concurrent requests on one transaction connection.");
-      busy.add(this.owner);
-      const call = {
-        kind,
-        sql,
-        owner: this.owner,
-        parameters: { ...this.parameters },
-        types: { ...this.types },
-        rows,
-      };
-      calls.push(call);
-      events.push(kind);
+/** A Store over a fake pg pool: records every query per connection and fails on overlapping queries. */
+function fakeStore(reply: Reply = () => [], schema = "touchline_test_fake") {
+  const queries: { client: number; text: string; values?: unknown[] }[] = [];
+  const released: { client: number; error?: unknown }[] = [];
+  const idle: FakeClient[] = [];
+  let created = 0;
+  class FakeClient {
+    readonly id = ++created;
+    private busy = false;
+    async query(input: string | { text: string; values?: unknown[] }) {
+      if (this.busy) throw new Error("Concurrent queries on one connection.");
+      this.busy = true;
+      const text = typeof input === "string" ? input : input.text;
+      const values = typeof input === "string" ? undefined : input.values;
+      queries.push({ client: this.id, text, values });
       try {
         await Promise.resolve();
-        const result = await reply(call);
-        return {
-          recordset: result,
-          recordsets: [result],
-          rowsAffected: [1],
-          output: {},
-        };
+        const rows = (await reply(text, values)) ?? [];
+        return { rows, rowCount: rows.length };
       } finally {
-        busy.delete(this.owner);
+        this.busy = false;
       }
     }
-    async query(sql: string) {
-      return this.execute("query", sql);
-    }
-    async batch(sql: string) {
-      return this.execute("batch", sql);
-    }
-    async bulk(table: FakeTable) {
-      return this.execute(
-        "bulk",
-        table.name,
-        table.values.map((row) => [...row]),
-      );
+    release(error?: unknown) {
+      released.push({ client: this.id, error });
+      if (!error) idle.push(this);
     }
   }
-
-  const sized = (type: string) => (length: number) => ({ type, length });
-  const driver = {
-    Request: FakeRequest,
-    Transaction: FakeTransaction,
-    Table: FakeTable,
-    MAX: 65535,
-    ISOLATION_LEVEL: { READ_COMMITTED: 2 },
-    Int: "Int",
-    BigInt: "BigInt",
-    Float: "Float",
-    Bit: "Bit",
-    UniqueIdentifier: "UniqueIdentifier",
-    NVarChar: sized("NVarChar"),
-    VarChar: sized("VarChar"),
-    Char: sized("Char"),
-    VarBinary: sized("VarBinary"),
-    DateTime2: sized("DateTime2"),
+  const pool = {
+    connect: vi.fn(async () => idle.pop() ?? new FakeClient()),
+    end: vi.fn(async () => {}),
   };
-  const store = Reflect.construct(Store, [settings, pool, driver]) as Store;
-  return { store, calls, events, transactions, pool };
+  const store = Reflect.construct(Store, [
+    { database: "touchline", schema, testMode: true },
+    pool,
+    new WeakMap(),
+  ]) as Store;
+  const texts = (client?: number) =>
+    queries.filter((query) => client === undefined || query.client === client).map((query) => query.text);
+  return { store, pool, queries, released, texts };
 }
 
-function mockConnections(factory: (settings: SqlSettings) => Store) {
-  return vi
-    .spyOn(
-      Store as unknown as { connect(settings: SqlSettings): Promise<Store> },
-      "connect",
-    )
-    .mockImplementation(async (settings) => factory(settings));
-}
+const worldKey = (schema = "touchline_test_fake") => advisoryLockKey(`touchline:world:${schema}`);
+const isLock = (text: string) => text.includes("pg_advisory_xact_lock");
 
-function localEnvironment() {
-  vi.stubEnv("SQL_SERVER", "127.0.0.1");
-  vi.stubEnv("SQL_DATABASE", "touchline");
-  vi.stubEnv("SQL_SCHEMA", "dbo");
-  vi.stubEnv("SQL_TEST_MODE", "false");
-  vi.stubEnv("SQL_USER", undefined);
-  vi.stubEnv("SQL_PASSWORD", undefined);
-  vi.stubEnv("GAME_DB", undefined);
-  vi.stubEnv("SAVE_DIR", undefined);
-}
-
-describe("SQL Store lifecycle (fake driver, no database)", () => {
-  it("borrows one pool without changing root scope, environment or transaction state", async () => {
-    const harness = fakeStore();
-    const configuredSchema = process.env.SQL_SCHEMA;
-    const first = harness.store.forSchema("touchline_test_first_account");
-    const second = first.forSchema("touchline_test_second_account");
-    expect(harness.calls).toEqual([]);
-    expect(harness.store.schemaName).toBe("touchline_test_mock");
-    expect(process.env.SQL_SCHEMA).toBe(configuredSchema);
-    expect(() => Reflect.set(first, "schemaName", "dbo")).not.toThrow();
-    expect(first.schemaName).toBe("touchline_test_first_account");
-    await Promise.all([
-      first.run("UPDATE meta SET [value] = ? WHERE [key] = ?", "first", "state"),
-      second.run("UPDATE meta SET [value] = ? WHERE [key] = ?", "second", "state"),
-    ]);
-    expect(harness.transactions).toHaveLength(2);
-    expect(harness.transactions.every((transaction) => transaction.pool === harness.pool)).toBe(true);
-    expect(harness.calls.filter((call) => call.parameters.worldLock).map((call) => call.parameters.worldLock)).toEqual([
-      "touchline:world:touchline_test_first_account",
-      "touchline:world:touchline_test_second_account",
-    ]);
-    expect(harness.calls.some((call) => call.sql.includes("UPDATE [touchline_test_first_account].meta"))).toBe(true);
-    expect(harness.calls.some((call) => call.sql.includes("UPDATE [touchline_test_second_account].meta"))).toBe(true);
-    await first.close();
-    expect(harness.pool.close).not.toHaveBeenCalled();
-    await expect(first.all("SELECT 1")).rejects.toThrow(/closed/);
-    await second.all("SELECT 1");
-    await harness.store.close();
-    expect(harness.pool.close).toHaveBeenCalledOnce();
-    expect(harness.calls.some((call) => /DROP SCHEMA/.test(call.sql))).toBe(false);
-    await expect(second.all("SELECT 1")).rejects.toThrow(/closed/);
-  });
-
-  it("rejects invalid or live schema scopes before a test store touches SQL", async () => {
-    const harness = fakeStore();
-    for (const schema of ["dbo", "accounts", "touchline_user_live", "a.b", "bad]name", "a".repeat(129)])
-      expect(() => harness.store.forSchema(schema)).toThrow(/schema/i);
-    expect(harness.calls).toEqual([]);
-    await harness.store.close();
-    expect(() => harness.store.forSchema("touchline_test_after_close")).toThrow(/closed/);
-  });
-
-  it("waits for borrowed transactions before root disposal and refuses an in-transaction root close", async () => {
-    const harness = fakeStore();
-    const scoped = harness.store.forSchema("touchline_test_account_close");
-    await scoped.transaction(async () => {
-      await expect(harness.store.close()).rejects.toThrow(/inside its transaction/);
-    });
-    let release!: () => void;
-    let entered!: () => void;
-    const gate = new Promise<void>((resolve) => { release = resolve; });
-    const started = new Promise<void>((resolve) => { entered = resolve; });
-    const pending = scoped.transaction(async () => {
-      entered();
-      await gate;
-      await scoped.exec("DELETE FROM news");
-    });
-    await started;
-    const closing = harness.store.close();
-    expect(harness.pool.close).not.toHaveBeenCalled();
-    release();
-    await pending;
-    await closing;
-    expect(harness.pool.close).toHaveBeenCalledOnce();
-    expect(harness.events.at(-1)).toBe("close");
-  });
-
-  it("open connects without migrations, seeding or an implicit test schema", async () => {
-    localEnvironment();
-    const harness = fakeStore();
-    const connect = mockConnections(() => harness.store);
-    await Store.open();
-    expect(connect).toHaveBeenCalledWith(
-      expect.objectContaining({
-        database: "touchline",
-        schema: "dbo",
-        testMode: false,
-      }),
-    );
-    expect(harness.calls).toEqual([]);
-    expect(harness.events).toEqual([]);
-    await expect(Store.open(":memory:")).rejects.toThrow(/not a file path/);
-  });
-
-  it("createTest creates unique schemas in the configured database and only closes its own schema", async () => {
-    localEnvironment();
-    const stores: ReturnType<typeof fakeStore>[] = [];
-    mockConnections((settings) => {
-      const harness = fakeStore(undefined, settings);
-      stores.push(harness);
-      return harness.store;
-    });
-    const first = await Store.createTest("same label");
-    const second = await Store.createTest("same label");
-    expect(first.schemaName).toMatch(
-      /^touchline_test_[a-f0-9]{32}_same_label$/,
-    );
-    expect(second.schemaName).not.toBe(first.schemaName);
-    expect(first.database).toBe("touchline");
-    expect(second.database).toBe("touchline");
-    expect(first.testMode).toBe(true);
-    await first.close();
-    expect(
-      stores[0].calls.some(
-        (call) => call.sql === `DROP SCHEMA [${first.schemaName}];`,
-      ),
-    ).toBe(true);
-    expect(
-      stores[1].calls.some((call) => call.sql.includes("DROP SCHEMA")),
-    ).toBe(false);
-    expect(
-      stores
-        .flatMap((harness) => harness.calls)
-        .map((call) => call.sql)
-        .join("\n"),
-    ).not.toMatch(/(?:CREATE|DROP) DATABASE|\[dbo\]\./);
-    await second.close();
-  });
-
-  it("enforces remote-test opt-ins before attempting a connection", async () => {
-    localEnvironment();
-    vi.stubEnv("SQL_SERVER", "example.database.windows.net");
-    vi.stubEnv("SQL_ALLOW_REMOTE_TESTS", "false");
-    vi.stubEnv("SQL_ENCRYPT", "true");
-    vi.stubEnv("SQL_TRUST_SERVER_CERTIFICATE", "false");
-    const connect = mockConnections(() => fakeStore().store);
-    await expect(Store.createTest()).rejects.toThrow(/Remote tests require/);
-    expect(connect).not.toHaveBeenCalled();
-  });
-
-  it("cleans up a created test schema when a migration fails", async () => {
-    localEnvironment();
-    let harness: ReturnType<typeof fakeStore>;
-    mockConnections((settings) => {
-      harness = fakeStore((call) => {
-        if (
-          call.sql.includes("CREATE TABLE") &&
-          call.sql.includes("[countries]")
-        )
-          throw new Error("migration failed");
-        return [];
-      }, settings);
-      return harness.store;
-    });
-    await expect(Store.createTest("failure")).rejects.toThrow(
-      "migration failed",
-    );
-    expect(
-      harness!.calls.some((call) =>
-        call.sql.startsWith("DROP SCHEMA [touchline_test_"),
-      ),
-    ).toBe(true);
-    expect(harness!.pool.close).toHaveBeenCalledOnce();
-  });
-
-  it("ordinary close never drops even a test-prefixed schema it did not create", async () => {
-    const harness = fakeStore();
-    await harness.store.close();
-    await harness.store.close();
-    expect(harness.calls).toEqual([]);
-    expect(harness.pool.close).toHaveBeenCalledOnce();
-    await expect(harness.store.all("SELECT 1")).rejects.toThrow(/closed/);
-  });
-});
-
-describe("Account provisioning transaction scopes (fake driver, no database)", () => {
-  const plan: AccountProvisioningPlan = {
-    database: "touchline", accountSchema: "accounts",
-    tenantId: "11111111-1111-4111-8111-111111111111",
-    legacyObjectId: LEGACY_OBJECT_ID, legacyEmail: LEGACY_EMAIL,
-    ownerObjectId: "22222222-2222-4222-8222-222222222222",
-    ownerEmail: OWNER_EMAIL_DEFAULT,
-    objectIds: [LEGACY_OBJECT_ID, "22222222-2222-4222-8222-222222222222"],
-  };
-
-  function provisioningHarness(records: AccountRecord[] = []) {
-    const schemas = new Set(["dbo"]);
-    let registryCreated = false;
-    return fakeStore((call) => {
-      const parameters = Object.values(call.parameters);
-      if (call.sql.includes("CREATE TABLE [accounts].[users]")) registryCreated = true;
-      const created = call.sql.match(/^CREATE SCHEMA \[(touchline_user_[a-f0-9]{32})\]/)?.[1];
-      if (created) schemas.add(created);
-      if (call.sql.includes("INSERT INTO [accounts].[users]")) {
-        const [id, tenant_id, object_id, display_name, email, game_schema] = parameters as [string, string, string, string, string | null, string];
-        records.push({ id, tenant_id, object_id, display_name, email, game_schema });
-      }
-      if (call.sql.includes("AS [__touchline_changes]"))
-        return [{ __touchline_changes: 1, __touchline_identity: null }];
-      if (call.sql.includes("FROM sys.tables")) {
-        if (parameters[0] === "accounts") return registryCreated
-          ? [{ name: "users" }, { name: "invite_requests" }, { name: "invite_attempts" }]
-          : [];
-        if (call.sql.includes("[name] = N'users'")) return [];
-        return schemas.has(String(parameters[0])) ? [...STORE_TABLES].map((name) => ({ name })) : [];
-      }
-      if (call.sql.includes("FROM sys.indexes")) return [
-        { is_primary_key: true, columns: "id" },
-        { is_primary_key: false, columns: "tenant_id,object_id" },
-        { is_primary_key: false, columns: "game_schema" },
-      ];
-      if (call.sql.startsWith("SELECT * FROM [accounts].[users]")) return call.sql.includes(" WHERE ")
-        ? records.filter((account) =>
-          (account.tenant_id === parameters[0] && account.object_id === parameters[1]) ||
-          account.game_schema === parameters[2] || account.id === parameters[3])
-        : records.map((account) => ({ ...account }));
-      if (call.sql.includes("SELECT SCHEMA_ID(?)")) return [{ schema_id: schemas.has(String(parameters[0])) ? 1 : null }];
-      return [];
-    }, readSqlSettings({}));
-  }
-
-  it("atomically registers empty schemas, binds only the legacy guest to dbo, and is idempotent", async () => {
-    const harness = provisioningHarness();
-    try {
-      const accounts = await provisionAccounts(harness.store, plan);
-      expect(accounts).toHaveLength(2);
-      expect(accounts[0]).toMatchObject({ objectId: LEGACY_OBJECT_ID, schema: "dbo", created: true });
-      const schema = accounts[1].schema;
-      expect(schema).toMatch(/^touchline_user_[a-f0-9]{32}$/);
-      const creation = harness.calls.find((call) => call.sql === `CREATE SCHEMA [${schema}] AUTHORIZATION [dbo];`)!;
-      const insertion = harness.calls.find((call) => call.sql.includes("INSERT INTO [accounts].[users]") && Object.values(call.parameters).includes(schema))!;
-      expect(creation).toBeDefined();
-      expect(insertion.owner).toBe(creation.owner);
-      const maintenance = harness.calls.findIndex((call) => call.owner === creation.owner && call.sql.includes("touchline:schema-maintenance"));
-      expect(maintenance).toBeGreaterThan(-1);
-      expect(maintenance).toBeLessThan(harness.calls.indexOf(creation));
-      expect(harness.calls.map((call) => call.sql).join("\n")).not.toMatch(/(?:CREATE|ALTER|DROP) TABLE \[dbo\]|DELETE FROM \[dbo\]|INSERT INTO \[dbo\]/);
-      const checkpoint = harness.calls.length;
-      const repeated = await provisionAccounts(harness.store, plan);
-      expect(repeated.map((account) => ({ ...account, created: true }))).toEqual(accounts);
-      expect(repeated.every((account) => !account.created)).toBe(true);
-      expect(harness.calls.slice(checkpoint).some((call) => call.sql.startsWith("CREATE SCHEMA [touchline_user_") || call.sql.includes("INSERT INTO [accounts].[users]"))).toBe(false);
-    } finally {
-      await harness.store.close();
-    }
-  });
-
-  it("refuses a wrong legacy owner without creating or adopting another world", async () => {
-    const harness = provisioningHarness([{
-      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", tenant_id: plan.tenantId,
-      object_id: plan.objectIds[1], display_name: "Wrong owner", email: null, game_schema: "dbo",
-    }]);
-    try {
-      await expect(provisionAccounts(harness.store, plan)).rejects.toThrow(/reassign/);
-      expect(harness.calls.some((call) => call.sql.startsWith("CREATE SCHEMA [touchline_user_") || call.sql.includes("INSERT INTO [accounts].[users]"))).toBe(false);
-    } finally {
-      await harness.store.close();
-    }
-  });
-});
-
-describe("SQL Store transactions (fake driver, no database)", () => {
-  it("locks native writes that return rows through all or get", async () => {
-    const harness = fakeStore((call) =>
-      call.sql.includes("OUTPUT DELETED.id") ? [{ id: 9 }] : [],
-    );
-    expect(
-      await harness.store.get(
-        "DELETE FROM news OUTPUT DELETED.id WHERE id = ?",
-        9,
-      ),
-    ).toEqual({ id: 9 });
-    expect(harness.calls[0].sql).toContain("sp_getapplock");
-    expect(harness.calls[1].sql).toContain(
-      "DELETE FROM [touchline_test_mock].news",
-    );
-    expect(
-      harness.calls.every((call) => call.owner === harness.transactions[0]),
-    ).toBe(true);
-    expect(harness.events.at(-1)).toBe("commit");
-    expect(bindSql("SELECT 'UPDATE', [delete] FROM news").writes).toBe(false);
-    expect(bindSql("SELECT id INTO #snapshot FROM countries").writes).toBe(
-      true,
-    );
-    await harness.store.close();
-  });
-
-  it("binds nested operations to one locked connection and serializes concurrent requests", async () => {
-    const harness = fakeStore();
-    const result = await harness.store.transaction(async () => {
-      await harness.store.setMeta("restore", { stage: 1 });
-      await Promise.all([
-        harness.store.all("SELECT 1"),
-        harness.store.all("SELECT 2"),
-      ]);
-      return harness.store.transaction(async () => 73);
+describe("SQL Store transactions (fake pool, no database)", () => {
+  it("runs a writer transaction on one connection: search_path, BEGIN, exclusive world lock, serialized statements, COMMIT", async () => {
+    const fake = fakeStore();
+    const result = await fake.store.transaction(async () => {
+      await fake.store.run("UPDATE players SET morale = ?", 1);
+      await Promise.all([fake.store.all("SELECT 1"), fake.store.all("SELECT 2"), fake.store.setMeta("restore", { stage: 1 })]);
+      return fake.store.transaction(async () => 73);
     });
     expect(result).toBe(73);
-    expect(harness.transactions).toHaveLength(1);
-    expect(harness.events.filter((event) => event === "commit")).toHaveLength(
-      1,
-    );
-    expect(
-      harness.calls.every((call) => call.owner === harness.transactions[0]),
-    ).toBe(true);
-    expect(harness.calls[0].sql).toContain("sys.sp_getapplock");
-    expect(harness.calls[0].sql).toContain("@LockOwner = N'Transaction'");
-    expect(harness.calls[0].sql).toContain("SET XACT_ABORT ON");
-    expect(harness.calls[0].parameters.worldLock).toBe(
-      "touchline:world:touchline_test_mock",
-    );
-    await harness.store.close();
+    expect(fake.pool.connect).toHaveBeenCalledOnce();
+    const [search, begin, lock, ...rest] = fake.texts();
+    expect(search).toBe('SET search_path TO "touchline_test_fake"');
+    expect(begin).toBe("BEGIN");
+    expect(lock).toContain("SET LOCAL lock_timeout = '30s'");
+    expect(lock).toContain(`SELECT pg_advisory_xact_lock(${worldKey()});`);
+    expect(lock).toContain("SET LOCAL lock_timeout = DEFAULT");
+    expect(rest).toEqual([
+      "UPDATE players SET morale = $1",
+      "SELECT 1",
+      "SELECT 2",
+      "INSERT INTO meta (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+      "COMMIT",
+    ]);
+    expect(fake.queries.at(-2)?.values).toEqual(["restore", '{"stage":1}']);
+    expect(fake.released).toEqual([{ client: 1, error: undefined }]);
+    await fake.store.close();
   });
 
-  it("batched() commits each statement on its own while one idle transaction holds the world lock", async () => {
-    const harness = fakeStore();
-    await harness.store.batched(() =>
-      harness.store.transaction(async () => {
-        await harness.store.exec("UPDATE players SET morale = 1");
-        await harness.store.exec("UPDATE players SET morale = 2");
-      }),
-    );
-    const [holder, ...statements] = harness.transactions;
-    expect(statements).toHaveLength(2);
-    const locks = harness.calls.filter((call) => call.sql.includes("sp_getapplock"));
-    expect(locks.map((call) => call.owner)).toEqual([holder]);
-    expect(locks[0].parameters.worldLock).toBe("touchline:world:touchline_test_mock");
-    expect(harness.calls.filter((call) => call.sql.includes("UPDATE")).map((call) => call.owner)).toEqual(statements);
-    expect(harness.events.filter((event) => event === "commit")).toHaveLength(2);
-    expect(harness.events.at(-1)).toBe("rollback");
-    await harness.store.close();
+  it("locks writes that return rows through all() or get(), but not plain reads", async () => {
+    const fake = fakeStore((text) => (text.startsWith("DELETE") ? [{ id: 9 }] : []));
+    expect(await fake.store.get("DELETE FROM news WHERE id = ? RETURNING id", 9)).toEqual({ id: 9 });
+    expect(fake.texts().slice(1)).toEqual([
+      "BEGIN",
+      expect.stringContaining(`pg_advisory_xact_lock(${worldKey()})`),
+      "DELETE FROM news WHERE id = $1 RETURNING id",
+      "COMMIT",
+    ]);
+    const before = fake.queries.length;
+    await fake.store.all("SELECT id FROM news WHERE id = ?", 9);
+    expect(fake.texts().slice(before)).toEqual(["SELECT id FROM news WHERE id = $1"]);
+    await fake.store.close();
   });
 
-  it("readTransaction() shares the world lock between readers and refuses every write", async () => {
-    const harness = fakeStore();
-    let release!: () => void;
-    const gate = new Promise<void>((resolve) => {
-      release = resolve;
-    });
+  it("keeps each pooled connection's search_path in step with the store using it", async () => {
+    const fake = fakeStore();
+    const scoped = fake.store.forSchema("touchline_test_fake_other");
+    await fake.store.all("SELECT 1");
+    await fake.store.all("SELECT 2");
+    await scoped.all("SELECT 3");
+    await scoped.transaction(() => scoped.all("SELECT 4"));
+    await fake.store.all("SELECT 5");
+    expect(fake.texts()).toEqual([
+      'SET search_path TO "touchline_test_fake"',
+      "SELECT 1",
+      "SELECT 2",
+      'SET search_path TO "touchline_test_fake_other"',
+      "SELECT 3",
+      "BEGIN",
+      expect.stringContaining(`pg_advisory_xact_lock(${worldKey("touchline_test_fake_other")})`),
+      "SELECT 4",
+      "COMMIT",
+      'SET search_path TO "touchline_test_fake"',
+      "SELECT 5",
+    ]);
+    expect(fake.pool.connect).toHaveBeenCalledTimes(5);
+    expect(new Set(fake.queries.map((query) => query.client)).size).toBe(1);
+    await fake.store.close();
+  });
+
+  it("readTransaction() runs readers side by side under the shared lock and refuses every write before SQL", async () => {
+    const fake = fakeStore((text) => (text.includes("pg_tables") ? WORLD_TABLES.map((name) => ({ name })) : []));
+    const gate = latch();
     let inside = 0;
     let overlap = 0;
     const reader = () =>
-      harness.store.readTransaction(async () => {
-        inside++;
-        overlap = Math.max(overlap, inside);
-        await harness.store.all("SELECT 1");
-        await gate;
+      fake.store.readTransaction(async () => {
+        overlap = Math.max(overlap, ++inside);
+        await fake.store.all("SELECT 1");
+        await gate.opened;
         inside--;
-        return harness.store.transaction(async () => 7);
+        return fake.store.transaction(async () => 7);
       });
     const readers = Promise.all([reader(), reader()]);
     await vi.waitFor(() => expect(overlap).toBe(2));
-    release();
+    gate.open();
     expect(await readers).toEqual([7, 7]);
-    const locks = harness.calls.filter((call) => call.sql.includes("sp_getapplock"));
+    const locks = fake.queries.filter((query) => isLock(query.text));
     expect(locks).toHaveLength(2);
-    expect(locks.every((call) => call.sql.includes("@LockMode = N'Shared'") && !call.sql.includes("Exclusive"))).toBe(true);
-    expect(locks[0].parameters.worldLock).toBe("touchline:world:touchline_test_mock");
-    expect(new Set(locks.map((call) => call.owner)).size).toBe(2);
+    expect(new Set(locks.map((query) => query.client)).size).toBe(2);
+    for (const lock of locks) expect(lock.text).toContain(`pg_advisory_xact_lock_shared(${worldKey()})`);
+    expect(fake.texts().filter((text) => text.startsWith("BEGIN"))).toEqual(["BEGIN READ ONLY", "BEGIN READ ONLY"]);
+
+    const before = fake.queries.length;
     for (const write of [
-      () => harness.store.run("UPDATE players SET morale = 1"),
-      () => harness.store.exec("DELETE FROM news"),
-      () => harness.store.get("DELETE FROM news OUTPUT DELETED.id WHERE id = ?", 9),
-      () => harness.store.setMeta("state", {}),
-      () => harness.store.bulkInsert("news", [{ id: 1 }]),
-      () => harness.store.clearWorld(),
+      () => fake.store.run("UPDATE players SET morale = 1"),
+      () => fake.store.exec("DELETE FROM news"),
+      () => fake.store.all("DELETE FROM news RETURNING id"),
+      () => fake.store.get("SELECT nextval('x')"),
+      () => fake.store.setMeta("state", {}),
+      () => fake.store.bulkInsert("news", [{ title: "x" }]),
     ])
-      await expect(harness.store.readTransaction(write)).rejects.toThrow(/read-only|writer lock/);
-    expect(harness.calls.some((call) => /UPDATE|DELETE|INSERT|TRUNCATE/.test(call.sql))).toBe(false);
-    await harness.store.transaction(() => harness.store.readTransaction(() => harness.store.exec("UPDATE players SET morale = 2")));
-    const writer = harness.calls.filter((call) => call.sql.includes("sp_getapplock")).at(-1)!;
-    expect(writer.sql).toContain("@LockMode = N'Exclusive'");
-    expect(harness.calls.at(-1)?.sql).toContain("UPDATE [touchline_test_mock].players");
-    await harness.store.close();
+      await expect(fake.store.readTransaction(write)).rejects.toThrow(/read-only SQL transaction cannot write/);
+    await expect(fake.store.readTransaction(() => fake.store.clearWorld())).rejects.toThrow(/writer lock/);
+    await expect(fake.store.readTransaction(() => fake.store.discardWorld())).rejects.toThrow(/writer lock/);
+    expect(fake.texts().slice(before).filter((text) => /UPDATE|DELETE|INSERT|TRUNCATE|nextval/.test(text))).toEqual([]);
+
+    const writer = fake.queries.length;
+    await fake.store.transaction(() => fake.store.readTransaction(() => fake.store.exec("UPDATE players SET morale = 2")));
+    const written = fake.texts().slice(writer);
+    expect(written.filter((text) => text.startsWith("BEGIN"))).toEqual(["BEGIN"]);
+    expect(written.find(isLock)).toContain(`pg_advisory_xact_lock(${worldKey()})`);
+    expect(written).toContain("UPDATE players SET morale = 2");
+    await fake.store.close();
+  });
+
+  it("batched() commits each statement on its own while a session-level lock (no open transaction) holds the world", async () => {
+    const fake = fakeStore();
+    await fake.store.batched(() =>
+      fake.store.transaction(async () => {
+        await fake.store.exec("UPDATE players SET morale = 1");
+        await fake.store.exec("UPDATE players SET morale = 2");
+        await fake.store.readTransaction(() => fake.store.exec("UPDATE players SET morale = 3"));
+      }),
+    );
+    const holder = fake.queries[0].client;
+    expect(fake.texts(holder)).toEqual([
+      "SET lock_timeout = '30s'",
+      `SELECT pg_advisory_lock(${worldKey()})`,
+      "RESET lock_timeout",
+      `SELECT pg_advisory_unlock(${worldKey()})`,
+    ]);
+    const statements = fake.queries.filter((query) => query.text.startsWith("UPDATE"));
+    expect(statements).toHaveLength(3);
+    expect(statements.every((query) => query.client !== holder)).toBe(true);
+    expect(fake.queries.filter((query) => /pg_advisory_(?:xact_)?lock/.test(query.text)).map((query) => query.client))
+      .toEqual([holder]);
+    expect(fake.texts().filter((text) => text === "COMMIT")).toHaveLength(3);
+    expect(fake.texts().at(-1)).toBe(`SELECT pg_advisory_unlock(${worldKey()})`);
+    await fake.store.close();
   });
 
   it("batched() inside a transaction stays one atomic transaction", async () => {
-    const harness = fakeStore();
-    await harness.store.transaction(() =>
-      harness.store.batched(() => harness.store.exec("UPDATE players SET morale = 3")),
+    const fake = fakeStore();
+    await fake.store.transaction(() =>
+      fake.store.batched(() => fake.store.exec("UPDATE players SET morale = 3")),
     );
-    expect(harness.transactions).toHaveLength(1);
-    expect(harness.events.filter((event) => event === "commit")).toHaveLength(1);
-    await harness.store.close();
+    expect(fake.pool.connect).toHaveBeenCalledOnce();
+    expect(fake.texts().filter((text) => text === "COMMIT")).toHaveLength(1);
+    expect(fake.texts()).not.toContain("ROLLBACK");
+    await fake.store.close();
+  });
+
+  it("does not call a transaction body when the writer lock times out", async () => {
+    const fake = fakeStore((text) => {
+      if (isLock(text)) throw sqlError("55P03", "canceling statement due to lock timeout");
+      return [];
+    });
+    const callback = vi.fn(async () => {});
+    const failure = (await fake.store.transaction(callback).catch((error: unknown) => error)) as Error;
+    expect(failure.message).toBe("Touchline lock touchline:world:touchline_test_fake could not be acquired.");
+    expect(isLockTimeout(failure.cause)).toBe(true);
+    expect(callback).not.toHaveBeenCalled();
+    expect(fake.texts().at(-1)).toBe("ROLLBACK");
+    expect(fake.released).toEqual([{ client: 1, error: undefined }]);
+    await fake.store.close();
+  });
+
+  it("rolls back, without committing, after a caught SQL failure and rejects later statements with it", async () => {
+    const broken = sqlError("23505", "duplicate key value violates unique constraint");
+    const fake = fakeStore((text) => {
+      if (text === "BROKEN") throw broken;
+      return [];
+    });
+    const later = vi.fn();
+    const failure = await fake.store.transaction(async () => {
+      await expect(fake.store.all("BROKEN")).rejects.toBe(broken);
+      await expect(fake.store.all("SELECT after_failure")).rejects.toBe(broken);
+      later();
+    }).catch((error: unknown) => error);
+    expect(failure).toBe(broken);
+    expect(later).toHaveBeenCalledOnce();
+    expect(fake.texts()).not.toContain("SELECT after_failure");
+    expect(fake.texts()).not.toContain("COMMIT");
+    expect(fake.texts().at(-1)).toBe("ROLLBACK");
+    await fake.store.close();
   });
 
   it("rolls back even when an inner transaction exception is caught by the caller", async () => {
-    const harness = fakeStore();
+    const fake = fakeStore();
     await expect(
-      harness.store.transaction(async () => {
-        await harness.store.exec("UPDATE players SET morale = 1");
+      fake.store.transaction(async () => {
+        await fake.store.exec("UPDATE players SET morale = 1");
         await expect(
-          harness.store.transaction(async () => {
+          fake.store.transaction(async () => {
             throw new Error("restore failed");
           }),
         ).rejects.toThrow("restore failed");
       }),
     ).rejects.toThrow("restore failed");
-    expect(harness.events).toContain("rollback");
-    expect(harness.events).not.toContain("commit");
-    await harness.store.close();
+    expect(fake.texts()).toContain("ROLLBACK");
+    expect(fake.texts()).not.toContain("COMMIT");
+    await fake.store.close();
   });
 
-  it("does not commit after a caught SQL failure or roll back an automatically aborted transaction twice", async () => {
-    const harness = fakeStore((call) => {
-      if (call.sql === "BROKEN") {
-        (call.owner as EventEmitter).emit("rollback", true);
-        throw new Error("SQL aborted");
-      }
+  it("reports both failures and destroys the connection when ROLLBACK also fails", async () => {
+    const fake = fakeStore((text) => {
+      if (text === "BROKEN") throw sqlError("23503");
+      if (text === "ROLLBACK") throw new Error("Connection terminated unexpectedly");
       return [];
     });
-    await expect(
-      harness.store.transaction(async () => {
-        await expect(harness.store.all("BROKEN")).rejects.toThrow(
-          "SQL aborted",
-        );
-      }),
-    ).rejects.toThrow("SQL aborted");
-    expect(harness.events).not.toContain("commit");
-    expect(harness.events).not.toContain("rollback");
-    await harness.store.close();
+    const failure = await fake.store.transaction(() => fake.store.exec("BROKEN")).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(AggregateError);
+    expect((failure as AggregateError).message).toBe("SQL operation and rollback both failed.");
+    expect((failure as AggregateError).errors.map((error: Error) => error.message)).toEqual([
+      "SQL error 23503",
+      "Connection terminated unexpectedly",
+    ]);
+    expect(fake.released).toEqual([{ client: 1, error: true }]);
+    await fake.store.all("SELECT 1");
+    expect(fake.queries.at(-2)).toMatchObject({ client: 2, text: 'SET search_path TO "touchline_test_fake"' });
+    await fake.store.close();
   });
 
-  it("does not call a transaction body when the writer lock fails", async () => {
-    const harness = fakeStore((call) => {
-      if (call.sql.includes("sp_getapplock")) throw new Error("lock timed out");
+  it("destroys a connection after a connection-level failure but returns it after a SQL error", async () => {
+    const socket = new Error("Connection terminated");
+    const fake = fakeStore((text) => {
+      if (text === "SELECT socket") throw socket;
+      if (text === "SELECT invalid") throw sqlError("42601");
       return [];
     });
-    const callback = vi.fn(async () => {});
-    await expect(harness.store.transaction(callback)).rejects.toThrow(
-      "lock timed out",
-    );
-    expect(callback).not.toHaveBeenCalled();
-    expect(harness.events).toContain("rollback");
-    await harness.store.close();
-  });
-
-  it("keeps transaction-local context out of concurrent external reads", async () => {
-    const harness = fakeStore();
-    let release!: () => void;
-    let entered!: () => void;
-    const gate = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    const inside = new Promise<void>((resolve) => {
-      entered = resolve;
-    });
-    const work = harness.store.transaction(async () => {
-      entered();
-      await gate;
-    });
-    await inside;
-    await harness.store.all("SELECT outside_transaction");
-    expect(harness.calls.at(-1)?.owner).toBe(harness.pool);
-    const closing = harness.store.close();
-    expect(harness.pool.close).not.toHaveBeenCalled();
-    release();
-    await work;
-    await closing;
-    expect(harness.pool.close).toHaveBeenCalledOnce();
+    await expect(fake.store.all("SELECT invalid")).rejects.toMatchObject({ code: "42601" });
+    await expect(fake.store.all("SELECT socket")).rejects.toBe(socket);
+    expect(fake.released).toEqual([
+      { client: 1, error: undefined },
+      { client: 1, error: socket },
+    ]);
+    await fake.store.all("SELECT 1");
+    expect(fake.texts(2)).toEqual(['SET search_path TO "touchline_test_fake"', "SELECT 1"]);
+    await fake.store.close();
   });
 
   it("rejects database work retained in an async context after its transaction completes", async () => {
-    const harness = fakeStore();
-    let release!: () => void;
-    const gate = new Promise<void>((resolve) => {
-      release = resolve;
-    });
+    const fake = fakeStore();
+    const gate = latch();
     let delayed!: Promise<unknown>;
-    await harness.store.transaction(async () => {
-      delayed = gate.then(async () => harness.store.get("SELECT too_late"));
+    await fake.store.transaction(async () => {
+      delayed = gate.opened.then(async () => fake.store.get("SELECT too_late"));
     });
     const assertion = expect(delayed).rejects.toThrow(/already completed/);
-    release();
+    gate.open();
     await assertion;
-    await harness.store.close();
+    expect(fake.texts()).not.toContain("SELECT too_late");
+    await fake.store.close();
   });
 
-  it("requires the writer transaction for clearWorld, truncates unreferenced tables and keeps saves/migrations", async () => {
-    const harness = fakeStore((call) =>
-      call.sql.includes("HAS_PERMS_BY_NAME")
-        ? [
-            { name: "countries", referenced: 1, self_referenced: 0, can_alter: 1 },
-            { name: "players", referenced: 0, self_referenced: 0, can_alter: 1 },
-            { name: "meta", referenced: 0, self_referenced: 0, can_alter: 0 },
-          ]
-        : call.sql.includes("FROM sys.tables")
-          ? [
-              "countries",
-              "meta",
-              "players",
-              "save_slots",
-              "save_chunks",
-              "schema_migrations",
-              "unrelated",
-            ].map((name) => ({ name }))
-          : call.sql.includes("MIN([id])")
-            ? [{ low: 1, high: 1 }]
-            : [],
-    );
-    await expect(harness.store.clearWorld()).rejects.toThrow(
-      /requires an active/,
-    );
-    expect(harness.calls).toEqual([]);
-    await harness.store.transaction(async () => harness.store.clearWorld());
-    const writes = harness.calls.filter((call) =>
-      /^(DELETE FROM|TRUNCATE TABLE)/.test(call.sql),
-    );
-    expect(writes.map((call) => call.sql.split(" WHERE ")[0].replace(/;$/, ""))).toEqual([
-      "TRUNCATE TABLE [touchline_test_mock].[players]",
-      "DELETE FROM [touchline_test_mock].[countries]",
-      "DELETE FROM [touchline_test_mock].[meta]",
-    ]);
-    expect(
-      writes.every((call) => call.owner === harness.transactions[0]),
-    ).toBe(true);
-    expect(harness.calls[0].sql).toContain("sp_getapplock");
-    expect(
-      harness.calls.some((call) =>
-        call.sql.includes("EXEC [touchline_test_mock].[reseed_world_identity]"),
-      ),
-    ).toBe(true);
-    await harness.store.close();
-  });
-
-  it("returns mutation metadata and binds Unicode, binary, dates and double precision", async () => {
-    const harness = fakeStore();
-    const binary = Buffer.from([0, 255]);
-    const date = new Date("2026-09-21T00:00:00Z");
-    expect(
-      await harness.store.run("INSERT INTO promises (target) VALUES (?)", 1e30),
-    ).toEqual({ changes: 1, lastInsertRowid: 42 });
-    expect(harness.calls.at(-1)?.types.__touchline_arg_0).toBe("Float");
-    await harness.store.all(
-      "SELECT ?, ?, ?, ?, ?, ?",
-      "Unicode text",
-      binary,
-      date,
-      null,
-      42,
-      1.2345678901234567,
-    );
-    const call = harness.calls.at(-1)!;
-    expect(call.types.__touchline_arg_0).toMatchObject({
-      type: "NVarChar",
-      length: 65535,
-    });
-    expect(call.types.__touchline_arg_1).toMatchObject({ type: "VarBinary" });
-    expect(call.types.__touchline_arg_2).toMatchObject({ type: "DateTime2" });
-    expect(call.types.__touchline_arg_4).toBe("Int");
-    expect(call.types.__touchline_arg_5).toBe("Float");
-    expect(call.parameters.__touchline_arg_1).toBe(binary);
-    await expect(harness.store.all("SELECT ?", Number.NaN)).rejects.toThrow(
-      /finite/,
-    );
-    await harness.store.close();
+  it("allows several statements only without parameters", async () => {
+    const fake = fakeStore();
+    await fake.store.exec("CREATE TEMP TABLE a (x int); DROP TABLE a;");
+    expect(fake.texts()).toContain("CREATE TEMP TABLE a (x int); DROP TABLE a;");
+    await expect(fake.store.all("SELECT ?; SELECT 2", 1)).rejects.toThrow(/exactly one statement/);
+    await expect(fake.store.run("UPDATE players SET morale = ?; DELETE FROM news", 1)).rejects.toThrow(/exactly one statement/);
+    expect(fake.texts().some((text) => text.includes("$1"))).toBe(false);
+    await fake.store.close();
   });
 });
 
-describe("SQL Store bulk operations (fake driver, no database)", () => {
+describe("SQL Store mutations (fake pool, no database)", () => {
+  it("returns the generated id of identity inserts by appending RETURNING id", async () => {
+    const fake = fakeStore((text) => (text.includes("RETURNING") ? [{ id: 5 }, { id: 7 }] : []));
+    expect(await fake.store.run("INSERT INTO countries (code) VALUES (?), (?)", "A", "B"))
+      .toEqual({ changes: 2, lastInsertRowid: 7 });
+    expect(fake.queries.find((query) => query.text.startsWith("INSERT"))).toMatchObject({
+      text: "INSERT INTO countries (code) VALUES ($1), ($2)\nRETURNING id",
+      values: ["A", "B"],
+    });
+    await fake.store.run("INSERT INTO news (title) VALUES (?);  \n", "x");
+    expect(fake.texts()).toContain("INSERT INTO news (title) VALUES ($1)\nRETURNING id");
+    await fake.store.run("INSERT INTO news (title) VALUES (?) RETURNING id, title", "x");
+    expect(fake.texts()).toContain("INSERT INTO news (title) VALUES ($1) RETURNING id, title");
+    expect(fake.texts().filter((text) => text.includes("setval"))).toEqual([]);
+    await fake.store.close();
+  });
+
+  it("re-syncs the identity sequence after explicit ids, also through all() and exec()", async () => {
+    const fake = fakeStore((text) => (text.includes("RETURNING") ? [{ id: "42" }] : []));
+    expect(await fake.store.run("INSERT INTO countries (id, code) VALUES (?, ?)", 42, "X"))
+      .toEqual({ changes: 1, lastInsertRowid: 42 });
+    await fake.store.exec("INSERT INTO players (id, name) VALUES (1, 'a')");
+    await fake.store.all("INSERT INTO news (id, title) VALUES (?, ?) RETURNING title", 3, "x");
+    const reseeds = fake.queries.filter((query) => query.text.includes("setval"));
+    expect(reseeds.map((query) => query.values)).toEqual([
+      ['"touchline_test_fake"."countries"'],
+      ['"touchline_test_fake"."players"'],
+      ['"touchline_test_fake"."news"'],
+    ]);
+    for (const reseed of reseeds) {
+      expect(reseed.text).toMatch(/^SELECT setval\(pg_get_serial_sequence\(\$1, 'id'\), COALESCE\(MAX\(id\), 1\), MAX\(id\) IS NOT NULL\) FROM "touchline_test_fake"\."(?:countries|players|news)"$/);
+      const statement = fake.queries.indexOf(reseed) - 1;
+      expect(fake.queries[statement].text).toMatch(/^INSERT/);
+      expect(fake.queries[statement].client).toBe(reseed.client);
+    }
+    await fake.store.close();
+  });
+
+  it("does not invent ids for non-identity inserts, updates or deletes", async () => {
+    const fake = fakeStore((text) => (/^(?:UPDATE|DELETE)/.test(text) ? [{}, {}, {}] : []));
+    expect(await fake.store.run("INSERT INTO save_slots (id, name) VALUES (?, ?)", randomUUID(), "slot"))
+      .toEqual({ changes: 0, lastInsertRowid: null });
+    expect(fake.texts()).toContain("INSERT INTO save_slots (id, name) VALUES ($1, $2)");
+    expect(await fake.store.run("UPDATE players SET morale = 75")).toEqual({ changes: 3, lastInsertRowid: null });
+    expect(await fake.store.run("DELETE FROM news")).toEqual({ changes: 3, lastInsertRowid: null });
+    expect(fake.texts().some((text) => text.includes("RETURNING") || text.includes("setval"))).toBe(false);
+    await fake.store.close();
+  });
+
+  it("reads, upserts and validates JSON metadata", async () => {
+    const fake = fakeStore((text) => (text.startsWith("SELECT value FROM meta") ? [{ value: '{"season":2026}' }] : []));
+    expect(await fake.store.meta("world")).toEqual({ season: 2026 });
+    await expect(fake.store.setMeta("bad", undefined)).rejects.toThrow(/JSON serializable/);
+    await expect(fake.store.setMeta("bad", () => {})).rejects.toThrow(/JSON serializable/);
+    const empty = fakeStore();
+    await expect(empty.store.meta("missing")).rejects.toThrow("Missing game metadata: missing");
+    await Promise.all([fake.store.close(), empty.store.close()]);
+  });
+
+  it("requires the writer transaction for clearWorld and truncates world tables with one statement", async () => {
+    const tables = ["countries", "meta", "players", "save_slots", "save_chunks", "schema_migrations", "unrelated"];
+    const fake = fakeStore((text) => (text.includes("pg_tables") ? tables.map((name) => ({ name })) : []));
+    await expect(fake.store.clearWorld()).rejects.toThrow(/requires an active Store.transaction\(\) writer lock/);
+    await expect(fake.store.discardWorld()).rejects.toThrow(/requires an active Store.transaction\(\) writer lock/);
+    expect(fake.queries).toEqual([]);
+    const result = await fake.store.transaction(() => fake.store.clearWorld());
+    expect(result).toBeUndefined();
+    const truncate = fake.queries.filter((query) => query.text.startsWith("TRUNCATE"));
+    expect(truncate.map((query) => query.text)).toEqual([
+      'TRUNCATE TABLE "touchline_test_fake"."meta", "touchline_test_fake"."countries", "touchline_test_fake"."players" RESTART IDENTITY;',
+    ]);
+    expect(new Set(fake.queries.map((query) => query.client)).size).toBe(1);
+    expect(fake.queries.find((query) => query.text.includes("pg_tables"))?.values).toEqual(["touchline_test_fake"]);
+    expect(await fake.store.batched(() => fake.store.discardWorld())).toEqual({
+      truncated: ["meta", "countries", "players"],
+      deleted: [],
+    });
+    await fake.store.close();
+  });
+});
+
+describe("SQL Store bulk operations (fake pool, no database)", () => {
   const metadata = [
-    {
-      name: "id",
-      type: "int",
-      max_length: 4,
-      scale: 0,
-      is_nullable: false,
-      is_identity: true,
-      is_computed: false,
-    },
-    {
-      name: "target",
-      type: "float",
-      max_length: 8,
-      scale: 0,
-      is_nullable: false,
-      is_identity: false,
-      is_computed: false,
-    },
-    {
-      name: "derived",
-      type: "float",
-      max_length: 8,
-      scale: 0,
-      is_nullable: true,
-      is_identity: false,
-      is_computed: true,
-    },
+    { name: "id", type: "integer", nullable: false, identity: true, generated: false },
+    { name: "target", type: "double precision", nullable: false, identity: false, generated: false },
+    { name: "derived", type: "double precision", nullable: true, identity: false, generated: true },
+    { name: "due_date", type: "text", nullable: false, identity: false, generated: false },
   ];
+  const catalog: Reply = (text) => (text.includes("pg_attribute") ? metadata : []);
 
-  it("returns writable columns in order and caches only schema-scoped catalog metadata", async () => {
-    const harness = fakeStore((call) =>
-      call.sql.includes("FROM sys.columns") ? metadata : [],
-    );
-    expect(await harness.store.columns("promises")).toEqual(["id", "target"]);
-    expect(await harness.store.columns("promises")).toEqual(["id", "target"]);
-    expect(harness.calls).toHaveLength(1);
-    expect(Object.values(harness.calls[0].parameters)).toEqual([
-      "touchline_test_mock",
-      "promises",
-    ]);
-    await expect(harness.store.columns("dbo.promises")).rejects.toThrow(
-      /Unknown Touchline table/,
-    );
-    await harness.store.close();
+  it("returns writable columns in order and caches catalog metadata per table", async () => {
+    const fake = fakeStore(catalog);
+    expect(await fake.store.columns("promises")).toEqual(["id", "target", "due_date"]);
+    expect(await fake.store.columns("PROMISES")).toEqual(["id", "target", "due_date"]);
+    expect(fake.queries.filter((query) => query.text.includes("pg_attribute"))).toHaveLength(1);
+    expect(fake.queries.find((query) => query.text.includes("pg_attribute"))?.values)
+      .toEqual(['"touchline_test_fake"."promises"']);
+    for (const table of ["public.promises", "users", "pg_class", '"promises"'])
+      await expect(fake.store.columns(table)).rejects.toThrow(/Unknown Touchline table/);
+    const missing = fakeStore();
+    await expect(missing.store.columns("promises")).rejects.toThrow(/does not exist; call schema\(\) first/);
+    await Promise.all([fake.store.close(), missing.store.close()]);
   });
 
-  it("uses 1000-row SQL bulk chunks, preserves explicit IDs and reseeds to the actual maximum", async () => {
-    const harness = fakeStore((call) =>
-      call.sql.includes("FROM sys.columns") ? metadata : [],
-    );
-    const rows = Array.from({ length: 2003 }, (_, index) => ({
+  it("inserts 5000-row unnest batches in one transaction, skips generated columns and reseeds explicit ids", async () => {
+    const fake = fakeStore(catalog);
+    const rows = Array.from({ length: 12_001 }, (_, index) => ({
       id: index + 100,
-      target: 1.2345678901234567,
+      target: index === 0 ? 10n : 1.2345678901234567,
       derived: 2,
+      due_date: index === 1 ? undefined : "2026-09-21",
     }));
-    await harness.store.bulkInsert("promises", rows);
-    const batches = harness.calls.filter((call) => call.kind === "bulk");
-    expect(batches.map((call) => call.rows?.length)).toEqual([1000, 1000, 3]);
-    expect(batches[0].rows?.[0]).toEqual([100, 1.2345678901234567]);
-    expect(batches[2].rows?.at(-1)).toEqual([2102, 1.2345678901234567]);
-    expect(
-      harness.calls.every((call) => call.owner === harness.transactions[0]),
-    ).toBe(true);
-    expect(batches.every((call) => call.sql.includes("[touchline_test_mock].[promises]"))).toBe(true);
-    expect(harness.calls.some((call) => call.sql.includes("#touchline_bulk_"))).toBe(false);
-    expect(
-      harness.calls.some((call) => call.sql.includes("TRUNCATE TABLE")),
-    ).toBe(false);
-    expect(harness.calls.at(-1)?.sql).toContain(
-      "EXEC [touchline_test_mock].[reseed_world_identity] @table = N'promises'",
-    );
-    expect(harness.events.at(-1)).toBe("commit");
-    await harness.store.close();
+    await fake.store.bulkInsert("promises", rows);
+    const batches = fake.queries.filter((query) => query.text.startsWith("INSERT"));
+    expect(batches).toHaveLength(3);
+    for (const batch of batches)
+      expect(batch.text.replace(/\s+/g, " ")).toBe(
+        'INSERT INTO "touchline_test_fake"."promises" ("id", "target", "due_date") SELECT * FROM unnest($1::integer[], $2::double precision[], $3::text[])',
+      );
+    expect(batches.map((batch) => (batch.values![0] as unknown[]).length)).toEqual([5000, 5000, 2001]);
+    expect((batches[0].values![0] as unknown[])[0]).toBe(100);
+    expect((batches[0].values![1] as unknown[]).slice(0, 2)).toEqual(["10", 1.2345678901234567]);
+    expect((batches[0].values![2] as unknown[]).slice(0, 3)).toEqual(["2026-09-21", null, "2026-09-21"]);
+    expect((batches[2].values![0] as unknown[]).at(-1)).toBe(12_100);
+    expect(fake.texts().filter((text) => text.includes("setval"))).toHaveLength(1);
+    expect(fake.texts().at(-2)).toContain("setval");
+    expect(fake.texts().at(-1)).toBe("COMMIT");
+    expect(new Set(fake.queries.map((query) => query.client)).size).toBe(1);
+    await fake.store.close();
   });
 
-  it("retains the original bulk failure when session cleanup also fails", async () => {
-    const harness = fakeStore((call) => {
-      if (call.sql.includes("FROM sys.columns")) return metadata;
-      if (call.kind === "bulk") throw new Error("original transport timeout");
-      if (call.sql.includes("IDENTITY_INSERT") && call.sql.includes("OFF"))
-        throw new Error("connection already closed");
-      return [];
-    });
-    const error = await harness.store.bulkInsert("promises", [{ id: 1, target: 2 }]).catch((caught: unknown) => caught);
-    expect(error).toBeInstanceOf(AggregateError);
-    expect((error as AggregateError).errors.map((item: Error) => item.message)).toEqual([
-      "original transport timeout", "connection already closed",
-    ]);
-    expect(harness.events).not.toContain("commit");
-    await harness.store.close();
+  it("does nothing for no rows and does not reseed without explicit ids", async () => {
+    const fake = fakeStore(catalog);
+    await fake.store.bulkInsert("promises", []);
+    expect(fake.queries).toEqual([]);
+    await fake.store.bulkInsert("promises", [{ target: 1, due_date: "2026-01-01" }]);
+    expect(fake.texts().some((text) => text.includes("setval"))).toBe(false);
+    await fake.store.close();
   });
 
-  it("rejects mismatched row shapes and rolls back failed bulk copies", async () => {
-    const harness = fakeStore((call) => {
-      if (call.sql.includes("FROM sys.columns")) return metadata;
-      if (call.kind === "bulk") throw new Error("bulk failed");
-      return [];
+  it("rejects unknown tables, unknown columns, mismatched row shapes and non-finite numbers before inserting", async () => {
+    const fake = fakeStore(catalog);
+    await expect(fake.store.bulkInsert("dbo.promises", [{ id: 1 }])).rejects.toThrow(/Unknown Touchline table/);
+    await expect(fake.store.bulkInsert("promises", [{ id: 1, nope: 2 }])).rejects.toThrow(/Unknown SQL column promises.nope/);
+    await expect(fake.store.bulkInsert("promises", [{ derived: 1 }])).rejects.toThrow(/at least one writable column/);
+    for (const rows of [
+      [{ id: 1, target: 2, due_date: "x" }, { id: 2, target: 3 }],
+      [{ id: 1, target: 2 }, { id: 2, target: 3, due_date: "x" }],
+      [{ id: 1, target: 2 }, { id: 2, target: 3, nope: 1 }],
+    ])
+      await expect(fake.store.bulkInsert("promises", rows)).rejects.toThrow(/same writable columns/);
+    await expect(fake.store.bulkInsert("promises", [{ id: 1, target: Number.NaN }])).rejects.toThrow(/finite/);
+    expect(fake.texts().some((text) => text.startsWith("INSERT"))).toBe(false);
+    expect(fake.texts()).not.toContain("COMMIT");
+    await fake.store.close();
+  });
+
+  it("rolls back a failed bulk insert as a whole", async () => {
+    let batches = 0;
+    const fake = fakeStore((text) => {
+      if (text.startsWith("INSERT") && ++batches === 2) throw sqlError("23514", "check constraint violated");
+      return catalog(text);
     });
-    await expect(
-      harness.store.bulkInsert("promises", [{ id: 1, target: 2 }, { id: 2 }]),
-    ).rejects.toThrow(/same writable columns/);
-    expect(harness.calls.some((call) => call.kind === "bulk")).toBe(false);
-    await expect(
-      harness.store.bulkInsert("promises", [{ id: 1, target: 2 }]),
-    ).rejects.toThrow("bulk failed");
-    expect(harness.calls.some((call) => call.sql === "SET XACT_ABORT OFF;")).toBe(true);
-    expect(harness.calls.some((call) =>
-      call.sql === "SET IDENTITY_INSERT [touchline_test_mock].[promises] OFF; SET XACT_ABORT ON;",
-    )).toBe(true);
-    expect(harness.events.filter((event) => event === "rollback")).toHaveLength(
-      2,
-    );
-    expect(harness.events).not.toContain("commit");
-    await harness.store.close();
+    const rows = Array.from({ length: 6000 }, (_, index) => ({ target: index, due_date: "2026-01-01" }));
+    await expect(fake.store.bulkInsert("promises", rows)).rejects.toMatchObject({ code: "23514" });
+    expect(batches).toBe(2);
+    expect(fake.texts()).not.toContain("COMMIT");
+    expect(fake.texts().at(-1)).toBe("ROLLBACK");
+    await fake.store.close();
   });
 });
 
-if (process.env.SQL_INTEGRATION_TESTS === "true") {
-  describe("SQL integration (explicit opt-in, real configured database)", () => {
-    it("isolates schemas, round-trips IDs/numbers/binary saves, rolls back and protects world replacement", async () => {
-      const store = await Store.createTest("store_contract");
-      let other: Store | undefined;
-      let peer: Store | undefined;
-      try {
-        other = await Store.createTest("store_isolation");
-        expect(store.database).toBe(other.database);
-        expect(await store.worldTables()).toEqual([...WORLD_TABLES]);
-        await store.schema();
-        expect(
-          await store.all("SELECT [version] FROM schema_migrations"),
-        ).toHaveLength(schemaMigrations(store.schemaName).length);
-        await store.exec(`CREATE TRIGGER [${store.schemaName}].[country_insert_probe] ON [${store.schemaName}].[countries]
-          AFTER INSERT AS BEGIN SET NOCOUNT ON;
-            INSERT INTO [${store.schemaName}].[history] ([season], [entity_type], [entity_id], [date], [data])
-            SELECT 2026, N'country', [id], N'2026-07-01', N'{}' FROM inserted; END;`);
-        const country = {
-          id: 42,
-          code: "TEST",
-          name: "Test country",
-          continent: "Europe",
-          confederation: "UEFA",
-          reputation: 50,
-          language: "Test",
-          region: "Test",
-        };
-        const inserted = await store.run(
-          `INSERT INTO countries (id,code,name,continent,confederation,reputation,language,region)
-          OUTPUT INSERTED.id VALUES (?,?,?,?,?,?,?,?)`,
-          ...Object.values(country),
-        );
-        expect(inserted).toEqual({ changes: 1, lastInsertRowid: 42 });
-        await store.bulkInsert("countries", [
-          { ...country, id: 100, code: "BULK" },
-          { ...country, id: 77, code: "LOW" },
-        ]);
-        const automatic = await store.run(
-          `INSERT INTO countries (code,name,continent,confederation,reputation,language,region)
-          VALUES (?,?,?,?,?,?,?)`,
-          "AUTO",
-          "Auto",
-          "Europe",
-          "UEFA",
-          50,
-          "Test",
-          "Test",
-        );
-        expect(automatic.lastInsertRowid).toBe(101);
-        expect(await other.get("SELECT id FROM countries")).toBeUndefined();
-        const precise = 1234567890123.4568;
-        const promise = await store.run(
-          "INSERT INTO promises ([type],target,due_date) VALUES (?,?,?)",
-          "precision",
-          precise,
-          "2026-09-21",
-        );
-        expect(
-          (
-            await store.get<{ target: number }>(
-              "SELECT target FROM promises WHERE id = ?",
-              promise.lastInsertRowid,
-            )
-          )?.target,
-        ).toBe(precise);
-        await store.setMeta("rollback", "before");
-        await expect(
-          store.transaction(async () => {
-            await store.setMeta("rollback", "after");
-            throw new Error("rollback probe");
-          }),
-        ).rejects.toThrow("rollback probe");
-        expect(await store.meta("rollback")).toBe("before");
-        const saveId = randomUUID();
-        await store.run(
-          "INSERT INTO save_slots (id,name,created_at,automatic,format_version) VALUES (?,?,?,?,?)",
-          saveId,
-          "Preserved slot",
-          new Date(),
-          false,
-          1,
-        );
-        const payload = Buffer.from([0, 1, 127, 255]);
-        await store.bulkInsert("save_chunks", [
-          { save_id: saveId, ordinal: 0, data: payload },
-        ]);
-        expect(
-          (
-            await store.get<{ data: Buffer }>(
-              "SELECT data FROM save_chunks WHERE save_id = ?",
-              saveId,
-            )
-          )?.data,
-        ).toEqual(payload);
-        vi.stubEnv("SQL_SCHEMA", store.schemaName);
-        vi.stubEnv("SQL_TEST_MODE", "true");
-        peer = await Store.open();
-        let release!: () => void;
-        let entered!: () => void;
-        const gate = new Promise<void>((resolve) => {
-          release = resolve;
-        });
-        const acquired = new Promise<void>((resolve) => {
-          entered = resolve;
-        });
-        const holder = store.transaction(async () => {
-          entered();
-          await gate;
-        });
-        await acquired;
-        let replacementStarted = false;
-        const replacement = peer.transaction(async () => {
-          replacementStarted = true;
-          await peer!.clearWorld();
-        });
-        try {
-          await new Promise((resolve) => setTimeout(resolve, 100));
-          expect(replacementStarted).toBe(false);
-        } finally {
-          release();
-          await holder;
-        }
-        await replacement;
-        expect(await store.get("SELECT id FROM countries")).toBeUndefined();
-        expect(
-          await store.get("SELECT id FROM save_slots WHERE id = ?", saveId),
-        ).toBeDefined();
-        expect(
-          await store.all("SELECT [version] FROM schema_migrations"),
-        ).toHaveLength(schemaMigrations(store.schemaName).length);
-        const reset = await store.run(
-          `INSERT INTO countries (code,name,continent,confederation,reputation,language,region)
-          VALUES (?,?,?,?,?,?,?)`,
-          "RESET",
-          "Reset",
-          "Europe",
-          "UEFA",
-          50,
-          "Test",
-          "Test",
-        );
-        expect(reset.lastInsertRowid).toBe(1);
-        await store.run("DELETE FROM save_slots WHERE id = ?", saveId);
-        expect(
-          await store.get(
-            "SELECT ordinal FROM save_chunks WHERE save_id = ?",
-            saveId,
-          ),
-        ).toBeUndefined();
-      } finally {
-        await Promise.all([peer?.close(), other?.close(), store.close()]);
-      }
-    }, 180000);
-
-    it("runs world readers side by side, while plain and batched writers exclude them", async () => {
-      const store = await Store.createTest("read_lock");
-      const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-      const latch = () => {
-        let open!: () => void;
-        const opened = new Promise<void>((resolve) => {
-          open = resolve;
-        });
-        return { open, opened };
-      };
-      try {
-        await store.setMeta("probe", 1);
-        // Two readers inside the lock at once; serialized readers would hit the 5 s bound instead.
-        const both = latch();
-        let inside = 0;
-        const reader = () =>
-          store.readTransaction(async () => {
-            if (++inside === 2) both.open();
-            await Promise.race([
-              both.opened,
-              pause(5000).then(() => {
-                throw new Error("World readers were serialized.");
-              }),
-            ]);
-            return store.meta<number>("probe");
-          });
-        await expect(Promise.all([reader(), reader()])).resolves.toEqual([1, 1]);
-
-        let value = 1;
-        for (const writer of [
-          (callback: () => Promise<void>) => store.transaction(callback),
-          (callback: () => Promise<void>) => store.batched(callback),
-        ]) {
-          const entered = latch();
-          const finish = latch();
-          value++;
-          const writing = writer(async () => {
-            // Inside batched() this statement has already committed; a reader must still wait for the whole writer.
-            await store.setMeta("probe", value);
-            entered.open();
-            await finish.opened;
-          });
-          await entered.opened;
-          let started = false;
-          const reading = store.readTransaction(async () => {
-            started = true;
-            return store.meta<number>("probe");
-          });
-          await pause(500);
-          expect(started).toBe(false);
-          finish.open();
-          await writing;
-          await expect(reading).resolves.toBe(value);
-        }
-
-        // A writer waits for a reader that is still inside the shared lock.
-        const release = latch();
-        const held = latch();
-        const holding = store.readTransaction(async () => {
-          held.open();
-          await release.opened;
-        });
-        await held.opened;
-        let wrote = false;
-        const writing = store.transaction(async () => {
-          wrote = true;
-          await store.setMeta("probe", 9);
-        });
-        await pause(500);
-        expect(wrote).toBe(false);
-        release.open();
-        await holding;
-        await writing;
-        expect(await store.meta<number>("probe")).toBe(9);
-      } finally {
-        await store.close();
-      }
-    }, 120000);
+describe("SQL Store lifecycle (fake pool, no database)", () => {
+  it("borrows one pool for scoped stores without changing root scope, environment or transaction state", async () => {
+    const fake = fakeStore();
+    const configuredSchema = process.env.SQL_SCHEMA;
+    const first = fake.store.forSchema("touchline_test_first_account");
+    const second = first.forSchema("touchline_test_second_account");
+    expect(fake.queries).toEqual([]);
+    expect(fake.store.schemaName).toBe("touchline_test_fake");
+    expect(process.env.SQL_SCHEMA).toBe(configuredSchema);
+    expect(() => Reflect.set(first, "schemaName", "public")).not.toThrow();
+    expect(first.schemaName).toBe("touchline_test_first_account");
+    expect([first.database, first.testMode]).toEqual(["touchline", true]);
+    await Promise.all([
+      first.run("UPDATE meta SET value = ? WHERE key = ?", "first", "state"),
+      second.run("UPDATE meta SET value = ? WHERE key = ?", "second", "state"),
+    ]);
+    const locks = fake.queries.filter((query) => isLock(query.text)).map((query) => query.text);
+    expect(locks.some((text) => text.includes(`(${worldKey("touchline_test_first_account")})`))).toBe(true);
+    expect(locks.some((text) => text.includes(`(${worldKey("touchline_test_second_account")})`))).toBe(true);
+    expect(fake.texts()).toContain('SET search_path TO "touchline_test_first_account"');
+    expect(fake.texts()).toContain('SET search_path TO "touchline_test_second_account"');
+    await first.close();
+    expect(fake.pool.end).not.toHaveBeenCalled();
+    await expect(first.all("SELECT 1")).rejects.toThrow(/closed/);
+    await second.all("SELECT 1");
+    await fake.store.close();
+    expect(fake.pool.end).toHaveBeenCalledOnce();
+    expect(fake.texts().some((text) => /DROP SCHEMA/.test(text))).toBe(false);
+    await expect(second.all("SELECT 1")).rejects.toThrow(/closed/);
   });
+
+  it("rejects invalid or live schema scopes before a test store touches SQL", async () => {
+    const fake = fakeStore();
+    for (const schema of ["public", "accounts", "touchline_user_live", "pg_temp", "a.b", 'bad"name', `touchline_test_${"a".repeat(49)}`])
+      expect(() => fake.store.forSchema(schema), schema).toThrow(/SQL_SCHEMA|schema/i);
+    expect(fake.store.forSchema(`touchline_test_${"a".repeat(48)}`).schemaName).toHaveLength(63);
+    expect(fake.queries).toEqual([]);
+    await fake.store.close();
+    expect(() => fake.store.forSchema("touchline_test_after_close")).toThrow(/closed/);
+  });
+
+  it("waits for scoped transactions before closing the pool and refuses a close inside a transaction", async () => {
+    const fake = fakeStore();
+    const scoped = fake.store.forSchema("touchline_test_account_close");
+    await scoped.transaction(async () => {
+      await expect(fake.store.close()).rejects.toThrow(/inside its transaction/);
+      await expect(scoped.close()).rejects.toThrow(/inside its transaction/);
+    });
+    const gate = latch();
+    const entered = latch();
+    const pending = scoped.transaction(async () => {
+      entered.open();
+      await gate.opened;
+      await scoped.exec("DELETE FROM news");
+    });
+    await entered.opened;
+    const closing = fake.store.close();
+    await expect(scoped.all("SELECT 1")).rejects.toThrow(/closed or closing/);
+    await pause(10);
+    expect(fake.pool.end).not.toHaveBeenCalled();
+    gate.open();
+    await pending;
+    await closing;
+    expect(fake.pool.end).toHaveBeenCalledOnce();
+    expect(fake.texts()).toContain("DELETE FROM news");
+  });
+
+  it("keeps transaction-local context out of concurrent external reads", async () => {
+    const fake = fakeStore();
+    const gate = latch();
+    const entered = latch();
+    const work = fake.store.transaction(async () => {
+      entered.open();
+      await gate.opened;
+    });
+    await entered.opened;
+    await fake.store.all("SELECT outside_transaction");
+    const outside = fake.queries.find((query) => query.text === "SELECT outside_transaction")!;
+    expect(outside.client).not.toBe(fake.queries[0].client);
+    gate.open();
+    await work;
+    await fake.store.close();
+  });
+
+  it("ordinary close never drops a test-prefixed schema it did not create and is idempotent", async () => {
+    const fake = fakeStore();
+    await Promise.all([fake.store.close(), fake.store.close()]);
+    await fake.store.close();
+    expect(fake.queries).toEqual([]);
+    expect(fake.pool.end).toHaveBeenCalledOnce();
+    await expect(fake.store.all("SELECT 1")).rejects.toThrow(/closed/);
+    await expect(fake.store.transaction(async () => {})).rejects.toThrow(/closed/);
+  });
+
+  it("advisoryLock() requires a transaction and a bounded timeout", async () => {
+    const fake = fakeStore();
+    await expect(fake.store.advisoryLock("touchline:account-registry")).rejects.toThrow(/requires an active/);
+    await fake.store.transaction(async () => {
+      await expect(fake.store.advisoryLock("x", { timeout: "1; DROP TABLE x" })).rejects.toThrow(/Invalid lock timeout/);
+      await fake.store.advisoryLock("touchline:account-registry", { timeout: "250ms" });
+      await fake.store.advisoryLock("touchline:shared", { shared: true, timeout: "2min" });
+    });
+    const locks = fake.texts().filter(isLock);
+    expect(locks[1]).toContain("SET LOCAL lock_timeout = '250ms'");
+    expect(locks[1]).toContain(`pg_advisory_xact_lock(${advisoryLockKey("touchline:account-registry")})`);
+    expect(locks[2]).toContain(`pg_advisory_xact_lock_shared(${advisoryLockKey("touchline:shared")})`);
+    await fake.store.close();
+  });
+
+  it("validates configuration before Store.open or Store.createTest connect", async () => {
+    const connect = vi.spyOn(pg.Pool.prototype, "connect");
+    await expect(Store.open(":memory:")).rejects.toThrow(/not a file path/);
+    vi.stubEnv("SQL_HOST", "db.example.com");
+    vi.stubEnv("SQL_SSL", "verify-full");
+    vi.stubEnv("SQL_ALLOW_REMOTE_TESTS", "false");
+    await expect(Store.createTest()).rejects.toThrow(/Remote tests require/);
+    vi.stubEnv("SQL_HOST", "postgres");
+    await expect(Store.createTest("x", "some_other_database")).rejects.toThrow(/only on local PostgreSQL/);
+    vi.stubEnv("SQL_HOST", "127.0.0.1");
+    vi.stubEnv("SQL_SERVER", "example.database.windows.net");
+    await expect(Store.open()).rejects.toThrow(/retired Azure SQL setup/);
+    expect(connect).not.toHaveBeenCalled();
+  });
+});
+
+const integration = process.env.SQL_INTEGRATION_TESTS === "true";
+
+const countryRow = (code: string) => ({
+  code,
+  name: `Country ${code}`,
+  continent: "Europe",
+  confederation: "UEFA",
+  reputation: 50,
+  language: "Test",
+  region: "Test",
+});
+
+const clubRow = (name: string, countryId: number) => ({
+  name,
+  short_name: name.slice(0, 3),
+  city: "City",
+  country_id: countryId,
+  color: "#123456",
+  reputation: 50,
+  academy: 10,
+  facilities: 10,
+  balance: 1e6,
+  transfer_budget: 1e5,
+  wage_budget: 1e4,
+  philosophy: "Balanced",
+  culture: "Balanced",
+  formation: "4-3-3",
+  tactical_style: "Balanced",
+  chemistry: 50,
+  manager: "Manager",
+  manager_trust: 50,
+  board_confidence: 50,
+  board_pressure: 50,
+  fan_mood: 50,
+  fan_loyalty: 50,
+  fan_patience: 50,
+  expectations: 5,
+  stadium: "Ground",
+  capacity: 10000,
+});
+
+const playerRow = (name: string, countryId: number, clubId: number | null) => ({
+  name,
+  nationality: "Test",
+  country_id: countryId,
+  club_id: clubId,
+  position: "MF",
+  secondary_position: "MF",
+  birth_date: "2000-01-01",
+  age: 26,
+  age_group: "Senior",
+  foot: "Right",
+  ability: 60,
+  base_potential: 70,
+  potential: 70,
+  volatility: 5,
+  value: 1e6,
+  wage: 1e4,
+  contract_end: "2028-06-30",
+  morale: 50,
+  fitness: 90,
+  form: 6,
+  role: "Rotation",
+  profile: "{}",
+});
+
+async function insertRow(store: Store, table: string, row: Record<string, unknown>) {
+  const columns = Object.keys(row);
+  const result = await store.run(
+    `INSERT INTO ${table} (${columns.join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`,
+    ...(Object.values(row) as (string | number | null)[]),
+  );
+  return result.lastInsertRowid!;
 }
+
+async function schemaExists(store: Store, schema: string) {
+  return Boolean(await store.get("SELECT 1 AS present FROM pg_catalog.pg_namespace WHERE nspname = ?", schema));
+}
+
+describe.skipIf(!integration)("SQL Store integration (explicit opt-in, real PostgreSQL)", () => {
+  it("createTest creates a unique, fully migrated schema and close drops only that schema", async () => {
+    const first = await Store.createTest("Same Label!");
+    const second = await Store.createTest(`same label ${"x".repeat(40)}`);
+    try {
+      expect(first.schemaName).toMatch(/^touchline_test_[a-f0-9]{32}_same_label_$/);
+      expect(second.schemaName).toMatch(/^touchline_test_[a-f0-9]{32}_same_label_xxxx$/);
+      expect(second.schemaName).toHaveLength(63);
+      expect(second.schemaName).not.toBe(first.schemaName);
+      expect(first.database).toBe(process.env.SQL_DATABASE ?? "touchline");
+      expect(first.testMode).toBe(true);
+      expect(await first.worldTables()).toEqual([...WORLD_TABLES]);
+      const tables = await first.all<{ name: string }>(
+        "SELECT tablename AS name FROM pg_catalog.pg_tables WHERE schemaname = ? ORDER BY tablename",
+        first.schemaName,
+      );
+      expect(tables.map((row) => row.name)).toEqual([...STORE_TABLES].sort());
+      expect(await first.all("SELECT version, name FROM schema_migrations ORDER BY version")).toEqual(
+        schemaMigrations(first.schemaName).map(({ version, name }) => ({ version, name })),
+      );
+      expect(await first.meta("appearanceIndexVersion")).toBe(1);
+      expect(await first.get("SELECT current_schema() AS schema, current_setting('TimeZone') AS zone, current_setting('application_name') AS app"))
+        .toEqual({ schema: first.schemaName, zone: "UTC", app: "Touchline" });
+      await first.close();
+      expect(await schemaExists(second, first.schemaName)).toBe(false);
+      expect(await schemaExists(second, second.schemaName)).toBe(true);
+      await expect(first.all("SELECT 1")).rejects.toThrow(/closed/);
+      await first.close();
+    } finally {
+      await Promise.all([first.close(), second.close()]);
+    }
+  });
+
+  it("cleans up a created test schema when its migration fails", async () => {
+    const observer = await Store.createTest("observer");
+    try {
+      let created: string | undefined;
+      vi.spyOn(Store.prototype, "schema").mockImplementationOnce(async function (this: Store) {
+        created = this.schemaName;
+        throw new Error("migration failed");
+      });
+      await expect(Store.createTest("failure")).rejects.toThrow("migration failed");
+      expect(created).toMatch(/^touchline_test_[a-f0-9]{32}_failure$/);
+      expect(await schemaExists(observer, created!)).toBe(false);
+    } finally {
+      await observer.close();
+    }
+  });
+
+  it("migrates idempotently, refuses newer versions and account-registry schemas", async () => {
+    const store = await Store.createTest("migrations");
+    try {
+      await store.setMeta("kept", "value");
+      await store.schema();
+      await store.schema();
+      const versions = schemaMigrations(store.schemaName).map(({ version }) => ({ version }));
+      expect(await store.all("SELECT version FROM schema_migrations ORDER BY version")).toEqual(versions);
+      expect(await store.meta("kept")).toBe("value");
+      const future = versions.at(-1)!.version + 1;
+      await store.run("INSERT INTO schema_migrations (version, name) VALUES (?, ?)", future, "from the future");
+      await expect(store.schema()).rejects.toThrow(/migrated by a newer version of Touchline/);
+      await store.run("DELETE FROM schema_migrations WHERE version = ?", future);
+      await store.exec("CREATE TABLE users (id uuid)");
+      await expect(store.schema()).rejects.toThrow(/account registry schema/);
+      expect(await store.all("SELECT version FROM schema_migrations ORDER BY version")).toEqual(versions);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it("Store.open connects to the configured schema without migrating or creating it", async () => {
+    const schema = `touchline_test_${randomUUID().replaceAll("-", "")}_unopened`;
+    vi.stubEnv("SQL_SCHEMA", schema);
+    const store = await Store.open();
+    try {
+      expect(store.schemaName).toBe(schema);
+      expect(await store.worldTables()).toEqual([]);
+      expect(await schemaExists(store, schema)).toBe(false);
+      await expect(store.columns("players")).rejects.toThrow(/does not exist; call schema\(\) first/);
+    } finally {
+      await store.close();
+    }
+    const observer = await Store.createTest("observer");
+    try {
+      expect(await schemaExists(observer, schema)).toBe(false);
+    } finally {
+      await observer.close();
+    }
+  });
+
+  it("returns generated ids, re-syncs identities after explicit ids and reports changes", async () => {
+    const store = await Store.createTest("identity");
+    try {
+      const country = countryRow("AAA");
+      expect(await store.run(
+        "INSERT INTO countries (code, name, continent, confederation, reputation, language, region) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ...Object.values(country),
+      )).toEqual({ changes: 1, lastInsertRowid: 1 });
+      expect(await store.run(
+        "INSERT INTO countries (id, code, name, continent, confederation, reputation, language, region) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        42, "EXP", "Explicit", "Europe", "UEFA", 50, "Test", "Test",
+      )).toEqual({ changes: 1, lastInsertRowid: 42 });
+      expect(await insertRow(store, "countries", countryRow("AFT"))).toBe(43);
+      await store.bulkInsert("countries", [
+        { ...countryRow("BLK"), id: 100 },
+        { ...countryRow("LOW"), id: 77 },
+      ]);
+      expect(await insertRow(store, "countries", countryRow("AUT"))).toBe(101);
+      await store.exec(
+        "WITH source AS (SELECT 200 AS id) INSERT INTO countries (id, code, name, continent, confederation, reputation, language, region) SELECT id, 'CTE', 'Cte', 'Europe', 'UEFA', 50, 'Test', 'Test' FROM source",
+      );
+      expect(await insertRow(store, "countries", countryRow("NXT"))).toBe(201);
+      expect(await store.all<{ id: number }>(
+        "INSERT INTO countries (id, code, name, continent, confederation, reputation, language, region) VALUES (?, 'ALL', 'All', 'Europe', 'UEFA', 50, 'Test', 'Test') RETURNING id",
+        300,
+      )).toEqual([{ id: 300 }]);
+      expect(await insertRow(store, "countries", countryRow("ZZZ"))).toBe(301);
+      const many = await store.run(
+        "INSERT INTO countries (code, name, continent, confederation, reputation, language, region) SELECT code || '2', name, continent, confederation, reputation, language, region FROM countries WHERE id IN (1, 42) ORDER BY id",
+      );
+      expect(many).toEqual({ changes: 2, lastInsertRowid: 303 });
+      expect(await store.run("INSERT INTO countries (code, name, continent, confederation, reputation, language, region) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (code) DO NOTHING", ...Object.values(country)))
+        .toEqual({ changes: 0, lastInsertRowid: null });
+      expect(await store.run("UPDATE countries SET reputation = reputation + 1 WHERE id < ?", 100)).toEqual({ changes: 4, lastInsertRowid: null });
+      expect(await store.run("DELETE FROM countries WHERE code = ?", "ZZZ")).toEqual({ changes: 1, lastInsertRowid: null });
+      expect(await store.run("INSERT INTO meta (key, value) VALUES (?, ?)", "k", "1")).toEqual({ changes: 1, lastInsertRowid: null });
+      const returned = await store.run("INSERT INTO countries (code, name, continent, confederation, reputation, language, region) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING code", "RET", "Ret", "Europe", "UEFA", 1, "Test", "Test");
+      expect(returned).toEqual({ changes: 1, lastInsertRowid: null });
+      // The conflicting ON CONFLICT DO NOTHING insert consumed sequence value 304, as PostgreSQL sequences never roll back.
+      expect(await store.get("SELECT max(id) AS id FROM countries")).toEqual({ id: 305 });
+    } finally {
+      await store.close();
+    }
+  });
+
+  // The appended RETURNING clause must not end up inside a trailing line comment.
+  it("returns the generated id when an insert ends with a line comment", async () => {
+    const store = await Store.createTest("comment");
+    try {
+      expect(await store.run(
+        "INSERT INTO countries (code, name, continent, confederation, reputation, language, region) VALUES (?, ?, ?, ?, ?, ?, ?) -- new country",
+        ...Object.values(countryRow("CMT")),
+      )).toEqual({ changes: 1, lastInsertRowid: 1 });
+    } finally {
+      await store.close();
+    }
+  });
+
+  it("round-trips PostgreSQL types through parameters and results", async () => {
+    const store = await Store.createTest("types");
+    try {
+      const precise = 1234567890123.4568;
+      const promise = await store.run("INSERT INTO promises (type, target, due_date) VALUES (?, ?, ?)", "precision", precise, "2026-09-21");
+      expect((await store.get<{ target: number }>("SELECT target FROM promises WHERE id = ?", promise.lastInsertRowid))?.target).toBe(precise);
+      const moment = new Date("2026-09-21T10:11:12.345Z");
+      const row = await store.get<Record<string, unknown>>(
+        `SELECT count(*) AS count, sum(x) AS total, avg(x) AS average, 2.50::numeric AS numeric,
+          ?::bigint AS big, ?::boolean AS flag, ?::uuid AS id, ?::timestamptz AS moment,
+          '2026-09-21'::date AS day, '2026-09-21 10:11:12'::timestamp AS naive, ?::bytea AS bytes,
+          ?::text AS missing, '{"a":[1,2]}'::jsonb AS document, '{"b":true}'::json AS plain,
+          ?::int[] AS numbers, ?::text[] AS words, 'ÄÖ ü 🙂' AS unicode
+        FROM (VALUES (1), (2), (4)) AS v(x)`,
+        9007199254740993n,
+        true,
+        "8F14E45F-CEEA-467F-A0E6-C6B3B5A1D2F4",
+        moment,
+        Buffer.from([0, 1, 127, 255]),
+        undefined,
+        [1, 2, 3],
+        ["a", "b c", null],
+      );
+      expect(row).toEqual({
+        count: 3,
+        total: 7,
+        average: 7 / 3,
+        numeric: 2.5,
+        big: 9007199254740992,
+        flag: true,
+        id: "8f14e45f-ceea-467f-a0e6-c6b3b5a1d2f4",
+        moment,
+        day: "2026-09-21",
+        naive: new Date("2026-09-21T10:11:12Z"),
+        bytes: Buffer.from([0, 1, 127, 255]),
+        missing: null,
+        document: { a: [1, 2] },
+        plain: { b: true },
+        numbers: [1, 2, 3],
+        words: ["a", "b c", null],
+        unicode: "ÄÖ ü 🙂",
+      });
+      expect(await store.all("SELECT id FROM promises WHERE id = ANY(?::int[])", [promise.lastInsertRowid!, 999]))
+        .toEqual([{ id: promise.lastInsertRowid }]);
+      expect(await store.all("SELECT id FROM promises WHERE id = ANY(?::int[])", [])).toEqual([]);
+      await expect(store.all("SELECT ?::integer AS x", 12.5)).rejects.toMatchObject({ code: "22P02" });
+      await expect(store.all("SELECT ? AS x", Number.NaN)).rejects.toThrow(/finite/);
+      await expect(store.all("SELECT $1 AS x")).rejects.toThrow(/Use \? placeholders/);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it("bulk inserts bytea, uuid, boolean, timestamptz, bigint and nulls in 5000-row batches", async () => {
+    const store = await Store.createTest("bulk");
+    try {
+      const slots = [
+        { id: randomUUID().toUpperCase(), name: "Automatic", career_id: null, career_metadata: null, created_at: new Date("2026-01-02T03:04:05.678Z"), automatic: true, imported: false, format_version: 1, byte_length: 5_000_000_000n, sha256: "a".repeat(64), complete: true },
+        { id: randomUUID(), name: "Manual 'quoted' \"name\"", career_id: "career", career_metadata: '{"club":"x"}', created_at: new Date("2026-06-30T23:59:59.999Z"), automatic: false, imported: true, format_version: 2, byte_length: 0, sha256: null, complete: false },
+      ];
+      await store.bulkInsert("save_slots", slots);
+      const stored = await store.all<Record<string, unknown>>(
+        "SELECT id, name, career_id, career_metadata, created_at, automatic, imported, format_version, byte_length, sha256, complete FROM save_slots ORDER BY created_at",
+      );
+      expect(stored).toEqual(slots.map((slot) => ({
+        ...slot,
+        id: slot.id.toLowerCase(),
+        byte_length: Number(slot.byte_length),
+      })));
+      const chunks = [
+        { save_id: slots[0].id, ordinal: 0, data: Buffer.from([0, 1, 127, 255]) },
+        { save_id: slots[0].id, ordinal: 1, data: Buffer.alloc(0) },
+        { save_id: slots[0].id, ordinal: 2, data: Buffer.from("\\x5c'\"", "utf8") },
+      ];
+      await store.bulkInsert("save_chunks", chunks);
+      expect(await store.all("SELECT ordinal, data FROM save_chunks WHERE save_id = ? ORDER BY ordinal", slots[0].id))
+        .toEqual(chunks.map(({ ordinal, data }) => ({ ordinal, data })));
+
+      const history = Array.from({ length: 12_001 }, (_, index) => ({
+        season: 2026,
+        entity_type: index % 2 ? "player" : "club",
+        entity_id: index,
+        date: "2026-07-01",
+        data: index === 7 ? '{"note":"it\'s ? $1"}' : "{}",
+      }));
+      await store.bulkInsert("history", history);
+      expect(await store.get("SELECT count(*) AS rows, min(id) AS low, max(id) AS high, count(DISTINCT entity_type) AS kinds FROM history"))
+        .toEqual({ rows: 12_001, low: 1, high: 12_001, kinds: 2 });
+      expect(await store.get("SELECT data FROM history WHERE entity_id = 7")).toEqual({ data: '{"note":"it\'s ? $1"}' });
+      expect(await insertRow(store, "history", history[0])).toBe(12_002);
+
+      const country = await insertRow(store, "countries", countryRow("BLK"));
+      const club = await insertRow(store, "clubs", clubRow("Bulk FC", country));
+      await store.bulkInsert("players", [{ ...playerRow("Generated", country, club), playing_club_id: 999 }]);
+      expect(await store.get("SELECT playing_club_id FROM players")).toEqual({ playing_club_id: club });
+      await store.bulkInsert("news", [{ date: "2026-07-01", category: "x", title: "t", body: "b", data: '{"notificationKey":"k"}', notification_key: "ignored" }]);
+      expect(await store.get("SELECT notification_key FROM news")).toEqual({ notification_key: "k" });
+
+      const failing = Array.from({ length: 6000 }, (_, index) => ({
+        type: "bulk", target: index, due_date: index === 5500 ? null : "2026-01-01",
+      }));
+      await expect(store.bulkInsert("promises", failing)).rejects.toMatchObject({ code: "23502" });
+      expect(await store.get("SELECT count(*) AS rows FROM promises")).toEqual({ rows: 0 });
+      await expect(store.bulkInsert("save_chunks", [{ save_id: randomUUID(), ordinal: 0, data: Buffer.from([1]) }]))
+        .rejects.toSatisfy(isForeignKeyViolation);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it("commits, rolls back, propagates errors and joins nested transactions on one connection", async () => {
+    const store = await Store.createTest("transactions");
+    try {
+      await store.setMeta("state", "before");
+      const outer = await store.transaction(async () => {
+        await store.setMeta("state", "committed");
+        const [{ pid, txid }] = await store.all<{ pid: number; txid: number }>("SELECT pg_backend_pid() AS pid, txid_current() AS txid");
+        const inner = await store.transaction(() => store.get<{ pid: number; txid: number }>("SELECT pg_backend_pid() AS pid, txid_current() AS txid"));
+        const read = await store.readTransaction(() => store.get<{ pid: number }>("SELECT pg_backend_pid() AS pid"));
+        expect(inner).toEqual({ pid, txid });
+        expect(read).toEqual({ pid });
+        return "done";
+      });
+      expect(outer).toBe("done");
+      expect(await store.meta("state")).toBe("committed");
+
+      const thrown = new Error("rollback probe");
+      await expect(store.transaction(async () => {
+        await store.setMeta("state", "rolled back");
+        throw thrown;
+      })).rejects.toBe(thrown);
+      expect(await store.meta("state")).toBe("committed");
+
+      const duplicate = await store.transaction(async () => {
+        await store.setMeta("state", "lost");
+        await store.run("INSERT INTO meta (key, value) VALUES (?, ?)", "state", "duplicate");
+      }).catch((error: unknown) => error);
+      expect(isUniqueViolation(duplicate)).toBe(true);
+      expect(await store.meta("state")).toBe("committed");
+
+      await expect(store.transaction(async () => {
+        await store.setMeta("state", "caught");
+        await expect(store.exec("SELECT 1/0")).rejects.toMatchObject({ code: "22012" });
+        // Once a statement failed, the whole transaction is aborted: joining it rethrows the original failure.
+        await expect(store.transaction(async () => { throw new Error("inner"); })).rejects.toMatchObject({ code: "22012" });
+      })).rejects.toMatchObject({ code: "22012" });
+      expect(await store.meta("state")).toBe("committed");
+
+      await expect(store.transaction(async () => {
+        await store.setMeta("state", "inner caught");
+        await store.transaction(async () => { throw new Error("inner only"); }).catch(() => {});
+      })).rejects.toThrow("inner only");
+      expect(await store.meta("state")).toBe("committed");
+
+      const counted = await store.transaction(() =>
+        Promise.all(Array.from({ length: 20 }, (_, index) => store.setMeta(`parallel_${index}`, index))),
+      );
+      expect(counted).toHaveLength(20);
+      expect(await store.get("SELECT count(*) AS rows FROM meta WHERE key LIKE 'parallel!_%' ESCAPE '!'")).toEqual({ rows: 20 });
+      await expect(store.exec("SELECT ?; SELECT 2", 1)).rejects.toThrow(/exactly one statement/);
+      await store.exec("INSERT INTO meta (key, value) VALUES ('multi_a', '1'); INSERT INTO meta (key, value) VALUES ('multi_b', '2');");
+      expect(await store.all("SELECT key FROM meta WHERE key LIKE 'multi%' ORDER BY key")).toEqual([{ key: "multi_a" }, { key: "multi_b" }]);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it("vacuum() reclaims dead row versions outside a transaction and is skipped inside one", async () => {
+    const store = await Store.createTest("vacuum");
+    try {
+      const country = await insertRow(store, "countries", countryRow("VAC"));
+      for (let index = 0; index < 3; index++) await insertRow(store, "players", playerRow(`Player ${index}`, country, null));
+      await store.run("UPDATE players SET ability = ability + 1");
+      expect(await store.transaction(() => store.vacuum(["players"]))).toBe(false);
+      expect(await store.batched(() => store.vacuum(["players"]))).toBe(false);
+      expect(await store.vacuum(["players", "clubs"])).toBe(true);
+      // Conditional: three dead versions are far below a quarter of the (minimum) 1000 rows.
+      expect(await store.vacuum(["players"], { deadShare: 0.25 })).toBe(false);
+      await store.run("UPDATE players SET ability = ability + 1");
+      // Statistics reach the shared counters within about a second.
+      await expect.poll(() => store.vacuum(["players"], { deadShare: 0 }), { timeout: 15_000, interval: 500 }).toBe(true);
+      expect(await store.vacuum([])).toBe(false);
+      await expect(store.vacuum(["pg_class"])).rejects.toThrow(/Unknown Touchline table/);
+      await store.exec("SELECT pg_stat_force_next_flush()");
+      await expect.poll(async () =>
+        (await store.get<{ vacuumed: boolean }>(
+          "SELECT last_vacuum IS NOT NULL AS vacuumed FROM pg_stat_user_tables WHERE relid = 'players'::regclass",
+        ))!.vacuumed,
+      ).toBe(true);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it("savepoint() rolls back only a failed optional step and keeps the transaction usable", async () => {
+    const store = await Store.createTest("savepoints");
+    try {
+      await store.setMeta("state", "before");
+      const outcome = await store.transaction(async () => {
+        await store.setMeta("state", "kept");
+        const failure = await store.savepoint(async () => {
+          await store.setMeta("optional", "discarded");
+          await store.exec("SELECT 1/0");
+        }).catch((error: unknown) => error);
+        expect(failure).toMatchObject({ code: "22012" });
+        // A thrown error inside a nested transaction() is rolled back to the savepoint as well.
+        await expect(store.savepoint(async () => {
+          await store.transaction(async () => {
+            await store.setMeta("nested", "discarded");
+            throw new Error("nested only");
+          });
+        })).rejects.toThrow("nested only");
+        expect(await store.savepoint(async () => {
+          await store.setMeta("released", "yes");
+          return "ok";
+        })).toBe("ok");
+        await store.setMeta("after", "yes");
+        return "committed";
+      });
+      expect(outcome).toBe("committed");
+      expect(await store.meta("state")).toBe("kept");
+      expect(await store.meta("released")).toBe("yes");
+      expect(await store.meta("after")).toBe("yes");
+      expect(await store.get("SELECT key FROM meta WHERE key IN ('optional', 'nested')")).toBeUndefined();
+      // Outside a transaction it is a transaction of its own.
+      await expect(store.savepoint(async () => {
+        await store.setMeta("alone", "discarded");
+        throw new Error("alone");
+      })).rejects.toThrow("alone");
+      expect(await store.get("SELECT key FROM meta WHERE key = 'alone'")).toBeUndefined();
+    } finally {
+      await store.close();
+    }
+  });
+
+  it("upserts metadata and reports missing keys", async () => {
+    const store = await Store.createTest("meta");
+    try {
+      await store.setMeta("world", { season: 2026, nations: ["PT", "IE"] });
+      await store.setMeta("world", { season: 2027, nested: { flag: true, text: "it's ? $1" } });
+      expect(await store.meta("world")).toEqual({ season: 2027, nested: { flag: true, text: "it's ? $1" } });
+      expect(await store.get("SELECT count(*) AS rows FROM meta WHERE key = 'world'")).toEqual({ rows: 1 });
+      await store.setMeta("nothing", null);
+      expect(await store.meta("nothing")).toBeNull();
+      await expect(store.meta("missing")).rejects.toThrow("Missing game metadata: missing");
+    } finally {
+      await store.close();
+    }
+  });
+
+  it("readTransaction() is read-only, shares the world lock between readers and excludes writers", async () => {
+    const store = await Store.createTest("read_lock");
+    try {
+      await store.setMeta("probe", 1);
+      await expect(store.readTransaction(() => store.run("UPDATE meta SET value = '2'"))).rejects.toThrow(/read-only/);
+      await expect(store.readTransaction(() => store.all("SELECT id INTO snapshot FROM countries"))).rejects.toThrow(/read-only/);
+      expect(await store.readTransaction(() => store.get("SELECT current_setting('transaction_read_only') AS ro")))
+        .toEqual({ ro: "on" });
+
+      // Two readers inside the lock at once; serialized readers would hit the 5 s bound instead.
+      const both = latch();
+      let inside = 0;
+      const reader = () =>
+        store.readTransaction(async () => {
+          if (++inside === 2) both.open();
+          await Promise.race([
+            both.opened,
+            pause(5000).then(() => {
+              throw new Error("World readers were serialized.");
+            }),
+          ]);
+          return store.meta<number>("probe");
+        });
+      await expect(Promise.all([reader(), reader()])).resolves.toEqual([1, 1]);
+
+      let value = 1;
+      for (const writer of [
+        (callback: () => Promise<void>) => store.transaction(callback),
+        (callback: () => Promise<void>) => store.batched(callback),
+      ]) {
+        const entered = latch();
+        const finish = latch();
+        value++;
+        const writing = writer(async () => {
+          // Inside batched() this statement has already committed; a reader must still wait for the whole writer.
+          await store.setMeta("probe", value);
+          entered.open();
+          await finish.opened;
+        });
+        await entered.opened;
+        let started = false;
+        const reading = store.readTransaction(async () => {
+          started = true;
+          return store.meta<number>("probe");
+        });
+        await pause(300);
+        expect(started).toBe(false);
+        finish.open();
+        await writing;
+        await expect(reading).resolves.toBe(value);
+      }
+
+      // A writer waits for a reader that is still inside the shared lock.
+      const release = latch();
+      const held = latch();
+      const holding = store.readTransaction(async () => {
+        held.open();
+        await release.opened;
+      });
+      await held.opened;
+      let wrote = false;
+      const writing = store.transaction(async () => {
+        wrote = true;
+        await store.setMeta("probe", 9);
+      });
+      await pause(300);
+      expect(wrote).toBe(false);
+      release.open();
+      await holding;
+      await writing;
+      expect(await store.meta<number>("probe")).toBe(9);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it("batched() holds the world lock outside any transaction, so idle-in-transaction timeouts can't end it", async () => {
+    // Regression: the holder sat idle in a transaction; on a Raspberry Pi a world build outlasted
+    // idle_in_transaction_session_timeout, PostgreSQL ended the session and the process crashed.
+    const store = await Store.createTest("batched_idle");
+    // Only this world's lock: other sessions on a shared test database hold advisory locks of their own.
+    const worldLock = `((lock.classid::bigint << 32) | lock.objid::bigint) = (${advisoryLockKey(`touchline:world:${store.schemaName}`)})::bigint`;
+    try {
+      const holder = await store.batched(async () => {
+        await store.setMeta("slow", 1);
+        return store.get<{ state: string; in_transaction: boolean }>(
+          `SELECT activity.state, activity.xact_start IS NOT NULL AS in_transaction
+           FROM pg_locks AS lock JOIN pg_stat_activity AS activity ON activity.pid = lock.pid
+           WHERE lock.locktype = 'advisory' AND lock.granted AND activity.pid <> pg_backend_pid()
+             AND activity.datname = current_database() AND ${worldLock}`,
+        );
+      });
+      expect(holder).toEqual({ state: "idle", in_transaction: false });
+      const locks = await store.get<{ n: number }>(`SELECT count(*) AS n FROM pg_locks AS lock WHERE locktype = 'advisory' AND pid <> pg_backend_pid() AND ${worldLock}`);
+      expect(locks?.n).toBe(0);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it("batched() commits statements one by one under one held writer lock, and is atomic inside a transaction", async () => {
+    const store = await Store.createTest("batched");
+    vi.stubEnv("SQL_SCHEMA", store.schemaName);
+    const peer = await Store.open();
+    try {
+      const committed = latch();
+      const finish = latch();
+      const batch = store.batched(async () => {
+        await store.transaction(async () => {
+          await store.setMeta("step", 1);
+          await store.setMeta("step", 2);
+        });
+        committed.open();
+        await finish.opened;
+        await store.setMeta("step", 3);
+        await store.exec("SELECT missing_column FROM meta").catch(() => {});
+        return store.meta<number>("step");
+      });
+      await committed.opened;
+      expect(await peer.meta("step")).toBe(2);
+      let peerWrote = false;
+      const peerWrite = peer.setMeta("peer", true).then(() => {
+        peerWrote = true;
+      });
+      await pause(300);
+      expect(peerWrote).toBe(false);
+      finish.open();
+      expect(await batch).toBe(3);
+      await peerWrite;
+      expect(await peer.meta("peer")).toBe(true);
+
+      await expect(store.batched(async () => {
+        await store.setMeta("partial", "kept");
+        throw new Error("batch failed");
+      })).rejects.toThrow("batch failed");
+      expect(await store.meta("partial")).toBe("kept");
+
+      await expect(store.transaction(() => store.batched(async () => {
+        await store.setMeta("atomic", "lost");
+        throw new Error("transaction failed");
+      }))).rejects.toThrow("transaction failed");
+      await expect(store.meta("atomic")).rejects.toThrow(/Missing game metadata/);
+
+      await store.batched(async () => {
+        expect((await store.discardWorld()).truncated).toEqual([...WORLD_TABLES]);
+      });
+      expect(await store.get("SELECT count(*) AS rows FROM meta")).toEqual({ rows: 0 });
+    } finally {
+      await peer.close();
+      await store.close();
+    }
+  });
+
+  it("serializes writers of two Stores on the same schema, while plain reads do not wait", async () => {
+    const store = await Store.createTest("writer_lock");
+    vi.stubEnv("SQL_SCHEMA", store.schemaName);
+    const peer = await Store.open();
+    try {
+      await insertRow(store, "countries", countryRow("ONE"));
+      const saveId = randomUUID();
+      await store.run("INSERT INTO save_slots (id, name, created_at, automatic, format_version) VALUES (?, ?, ?, ?, ?)", saveId, "Kept", new Date(), false, 1);
+      await store.bulkInsert("save_chunks", [{ save_id: saveId, ordinal: 0, data: Buffer.from([1, 2]) }]);
+      const release = latch();
+      const entered = latch();
+      const holder = store.transaction(async () => {
+        entered.open();
+        await release.opened;
+      });
+      await entered.opened;
+      let replaced = false;
+      const replacement = peer.transaction(async () => {
+        replaced = true;
+        await peer.clearWorld();
+      });
+      let deleted = false;
+      const deletion = peer.all("DELETE FROM news RETURNING id").then(() => {
+        deleted = true;
+      });
+      expect(await peer.get("SELECT code FROM countries")).toEqual({ code: "ONE" });
+      await pause(300);
+      expect(replaced).toBe(false);
+      expect(deleted).toBe(false);
+      release.open();
+      await holder;
+      await Promise.all([replacement, deletion]);
+      expect(await store.get("SELECT id FROM countries")).toBeUndefined();
+      expect(await store.get("SELECT name FROM save_slots WHERE id = ?", saveId)).toEqual({ name: "Kept" });
+      expect(await store.all("SELECT version FROM schema_migrations ORDER BY version")).toEqual(
+        schemaMigrations(store.schemaName).map(({ version }) => ({ version })),
+      );
+      expect(await insertRow(store, "countries", countryRow("TWO"))).toBe(1);
+      await store.run("DELETE FROM save_slots WHERE id = ?", saveId);
+      expect(await store.get("SELECT ordinal FROM save_chunks WHERE save_id = ?", saveId)).toBeUndefined();
+    } finally {
+      await peer.close();
+      await store.close();
+    }
+  });
+
+  it("advisoryLock() waits at most its timeout and reports a lock timeout", async () => {
+    const store = await Store.createTest("advisory");
+    const other = await Store.createTest("advisory_peer");
+    try {
+      const release = latch();
+      const held = latch();
+      const holder = store.transaction(async () => {
+        await store.advisoryLock("touchline:test-registry");
+        held.open();
+        await release.opened;
+      });
+      await held.opened;
+      const started = Date.now();
+      const failure = (await other.transaction(() => other.advisoryLock("touchline:test-registry", { timeout: "200ms" }))
+        .catch((error: unknown) => error)) as Error;
+      expect(failure.message).toBe("Touchline lock touchline:test-registry could not be acquired.");
+      expect(isLockTimeout(failure.cause)).toBe(true);
+      expect(Date.now() - started).toBeLessThan(5000);
+      await other.transaction(() => other.advisoryLock("touchline:other-name", { timeout: "200ms" }));
+      release.open();
+      await holder;
+      await other.transaction(() => other.advisoryLock("touchline:test-registry", { timeout: "200ms" }));
+      // Different worlds use different writer locks.
+      const gate = latch();
+      const writing = store.transaction(async () => {
+        await gate.opened;
+      });
+      await other.transaction(() => other.setMeta("independent", true));
+      gate.open();
+      await writing;
+    } finally {
+      await Promise.all([store.close(), other.close()]);
+    }
+  });
+
+  it("isolates schemas through search_path, including scoped stores sharing one pool", async () => {
+    const store = await Store.createTest("isolation_a");
+    const other = await Store.createTest("isolation_b");
+    try {
+      expect(store.database).toBe(other.database);
+      await insertRow(store, "countries", countryRow("AAA"));
+      expect(await other.get("SELECT id FROM countries")).toBeUndefined();
+      const scoped = store.forSchema(other.schemaName);
+      await insertRow(scoped, "countries", countryRow("BBB"));
+      expect(await other.all("SELECT code FROM countries")).toEqual([{ code: "BBB" }]);
+      expect(await store.all("SELECT code FROM countries")).toEqual([{ code: "AAA" }]);
+      const checks = await Promise.all(Array.from({ length: 40 }, async (_, index) => {
+        const target = index % 3 === 0 ? scoped : store;
+        const read = index % 2
+          ? target.get<{ schema: string; code: string }>("SELECT current_schema() AS schema, (SELECT code FROM countries LIMIT 1) AS code")
+          : target.transaction(() => target.get<{ schema: string; code: string }>("SELECT current_schema() AS schema, (SELECT code FROM countries LIMIT 1) AS code"));
+        return { expected: target.schemaName, row: await read };
+      }));
+      for (const { expected, row } of checks) {
+        expect(row?.schema).toBe(expected);
+        expect(row?.code).toBe(expected === store.schemaName ? "AAA" : "BBB");
+      }
+      expect(await scoped.columns("players")).not.toContain("playing_club_id");
+      expect(await store.get(`SELECT count(*) AS rows FROM ${tableName(other.schemaName, "countries")}`)).toEqual({ rows: 1 });
+      await scoped.close();
+      expect(await store.get("SELECT code FROM countries")).toEqual({ code: "AAA" });
+      expect(await schemaExists(store, other.schemaName)).toBe(true);
+    } finally {
+      await Promise.all([store.close(), other.close()]);
+    }
+  });
+
+  it("discardWorld()/clearWorld() truncate every world table, restart identities and keep saves and migrations", async () => {
+    const store = await Store.createTest("clear_world");
+    try {
+      const country = await insertRow(store, "countries", countryRow("CLR"));
+      const club = await insertRow(store, "clubs", clubRow("Clear FC", country));
+      await insertRow(store, "players", playerRow("Cleared", country, club));
+      await store.setMeta("world", { seed: "x" });
+      const saveId = randomUUID();
+      await store.run("INSERT INTO save_slots (id, name, created_at, automatic, format_version) VALUES (?, ?, ?, ?, ?)", saveId, "Kept", new Date(), true, 1);
+      await expect(store.clearWorld()).rejects.toThrow(/requires an active Store.transaction\(\) writer lock/);
+      await expect(store.discardWorld()).rejects.toThrow(/requires an active Store.transaction\(\) writer lock/);
+      expect(await store.transaction(() => store.discardWorld())).toEqual({ truncated: [...WORLD_TABLES], deleted: [] });
+      for (const table of WORLD_TABLES)
+        expect(await store.get(`SELECT count(*) AS rows FROM ${table}`), table).toEqual({ rows: 0 });
+      expect(await store.get("SELECT count(*) AS rows FROM save_slots")).toEqual({ rows: 1 });
+      expect(await store.all("SELECT version FROM schema_migrations ORDER BY version")).toEqual(
+        schemaMigrations(store.schemaName).map(({ version }) => ({ version })),
+      );
+      expect(await insertRow(store, "countries", countryRow("NEW"))).toBe(1);
+      await expect(store.transaction(async () => {
+        await store.clearWorld();
+        throw new Error("abort replacement");
+      })).rejects.toThrow("abort replacement");
+      expect(await store.get("SELECT code FROM countries")).toEqual({ code: "NEW" });
+      await store.transaction(() => store.clearWorld());
+      expect(await store.get("SELECT code FROM countries")).toBeUndefined();
+    } finally {
+      await store.close();
+    }
+  });
+
+  it("migration 2 keeps player profiles out of line, so squad updates stay narrow and HOT, also for existing worlds", async () => {
+    const store = await Store.createTest("narrow_players");
+    try {
+      const storage = () =>
+        store.get<{ options: string[]; filter: boolean; search: boolean }>(
+          `SELECT relation.reloptions AS options, to_regclass(quote_ident(current_schema()) || '.player_filter') IS NOT NULL AS filter,
+             to_regclass(quote_ident(current_schema()) || '.player_search') IS NOT NULL AS search
+           FROM pg_class AS relation WHERE relation.oid = 'players'::regclass`,
+        );
+      expect(await storage()).toEqual({
+        options: expect.arrayContaining(["toast_tuple_target=128", "fillfactor=50"]),
+        filter: false,
+        search: true,
+      });
+      const country = await insertRow(store, "countries", countryRow("NRW"));
+      const club = await insertRow(store, "clubs", clubRow("Narrow", country));
+      const profile = JSON.stringify({ notes: "A long scouting history. ".repeat(250) });
+      const external = () =>
+        store.get<{ external: boolean; profile: string }>(
+          "SELECT pg_column_toast_chunk_id(profile) IS NOT NULL AS external, profile FROM players WHERE club_id = ?",
+          club,
+        );
+      // A world built before migration 2: default TOAST target (compressed profile kept inline) and the old index.
+      await store.exec(`ALTER TABLE players RESET (toast_tuple_target, fillfactor);
+        DROP INDEX player_search; CREATE INDEX player_filter ON players (position, age, ability, potential, value);`);
+      await insertRow(store, "players", { ...playerRow("Inline", country, club), profile });
+      expect(await external()).toEqual({ external: false, profile });
+      await store.run("DELETE FROM schema_migrations WHERE version = 2");
+      await store.schema();
+      expect(await external()).toEqual({ external: true, profile });
+      expect(await storage()).toEqual({
+        options: expect.arrayContaining(["toast_tuple_target=128", "fillfactor=50"]),
+        filter: false,
+        search: true,
+      });
+      // Morale and value change after every match: with no index on value and a narrow row, the update is HOT.
+      const before = await store.get<{ hot: number }>(
+        "SELECT n_tup_hot_upd AS hot FROM pg_stat_user_tables WHERE relid = 'players'::regclass",
+      );
+      await store.run("UPDATE players SET morale = morale + 1, value = value * 1.01 WHERE club_id = ?", club);
+      await store.exec("SELECT pg_stat_force_next_flush()");
+      await expect.poll(async () =>
+        (await store.get<{ hot: number }>("SELECT n_tup_hot_upd AS hot FROM pg_stat_user_tables WHERE relid = 'players'::regclass"))!.hot,
+      ).toBe(before!.hot + 1);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it("clears the squad assignment on transfer and derives playing_club_id", async () => {
+    const store = await Store.createTest("squad_trigger");
+    try {
+      const country = await insertRow(store, "countries", countryRow("SQD"));
+      const [first, second, third] = [
+        await insertRow(store, "clubs", clubRow("First", country)),
+        await insertRow(store, "clubs", clubRow("Second", country)),
+        await insertRow(store, "clubs", clubRow("Third", country)),
+      ];
+      const player = await insertRow(store, "players", playerRow("Mover", country, first));
+      const squad = () => store.get("SELECT club_id, squad_club_id, playing_club_id FROM players WHERE id = ?", player);
+      expect(await squad()).toEqual({ club_id: first, squad_club_id: null, playing_club_id: first });
+      await store.run("UPDATE players SET squad_club_id = ? WHERE id = ?", second, player);
+      expect(await squad()).toEqual({ club_id: first, squad_club_id: second, playing_club_id: second });
+      await store.run("UPDATE players SET morale = 70 WHERE id = ?", player);
+      await store.run("UPDATE players SET club_id = club_id WHERE id = ?", player);
+      expect(await squad()).toEqual({ club_id: first, squad_club_id: second, playing_club_id: second });
+      await store.run("UPDATE players SET club_id = ? WHERE id = ?", third, player);
+      expect(await squad()).toEqual({ club_id: third, squad_club_id: null, playing_club_id: third });
+      await store.run("UPDATE players SET club_id = NULL, squad_club_id = ? WHERE id = ?", second, player);
+      expect(await squad()).toEqual({ club_id: null, squad_club_id: null, playing_club_id: null });
+      await store.run("UPDATE players SET squad_club_id = ? WHERE id = ?", first, player);
+      expect(await squad()).toEqual({ club_id: null, squad_club_id: first, playing_club_id: first });
+      await expect(store.run("UPDATE players SET playing_club_id = 1 WHERE id = ?", player)).rejects.toMatchObject({ code: "428C9" });
+      expect(await store.columns("players")).toEqual(expect.arrayContaining(["squad_club_id", "club_id"]));
+      expect(await store.columns("players")).not.toContain("playing_club_id");
+    } finally {
+      await store.close();
+    }
+  });
+
+  it("deduplicates keyed notifications with the partial unique index", async () => {
+    const store = await Store.createTest("notifications");
+    try {
+      const insert = (data: string) =>
+        store.run(
+          `INSERT INTO news (date, category, title, body, data) VALUES ('2026-07-01', 'board', 'Title', 'Body', ?)
+          ON CONFLICT (notification_key) WHERE notification_key IS NOT NULL DO NOTHING`,
+          data,
+        );
+      expect(await insert('{"notificationKey":"deadline:1"}')).toEqual({ changes: 1, lastInsertRowid: 1 });
+      expect(await insert('{"notificationKey":"deadline:1","extra":true}')).toEqual({ changes: 0, lastInsertRowid: null });
+      expect(await insert('{"notificationKey":"Deadline:1"}')).toEqual({ changes: 1, lastInsertRowid: 3 });
+      expect(await insert("{}")).toMatchObject({ changes: 1 });
+      expect(await insert('{"other":1}')).toMatchObject({ changes: 1 });
+      const duplicate = await store.run(
+        "INSERT INTO news (date, category, title, body, data) VALUES ('2026-07-01', 'board', 'Title', 'Body', ?)",
+        '{"notificationKey":"deadline:1"}',
+      ).catch((error: unknown) => error);
+      expect(isUniqueViolation(duplicate)).toBe(true);
+      expect(await store.all("SELECT notification_key FROM news ORDER BY id")).toEqual([
+        { notification_key: "deadline:1" },
+        { notification_key: "Deadline:1" },
+        { notification_key: null },
+        { notification_key: null },
+      ]);
+      expect(await store.columns("news")).not.toContain("notification_key");
+    } finally {
+      await store.close();
+    }
+  });
+
+  it("backfills match appearances from fixture JSON when the index version is missing", async () => {
+    const store = await Store.createTest("backfill");
+    try {
+      const country = await insertRow(store, "countries", countryRow("APP"));
+      const home = await insertRow(store, "clubs", clubRow("Home", country));
+      const away = await insertRow(store, "clubs", clubRow("Away", country));
+      const [keeper, mid, sub, unused, visitor, existing] = await Promise.all(
+        ["Keeper", "Mid", "Sub", "Unused", "Visitor", "Existing"].map((name, index) =>
+          insertRow(store, "players", playerRow(name, country, index === 4 ? away : home))),
+      );
+      const performance = (minutes: number, rating: unknown, goals = 0, assists = 0) => ({ minutes, rating, goals, assists });
+      const data = {
+        snapshot: {
+          home: {
+            lineup: [
+              { id: keeper, position: "GK" },
+              { id: mid, position: "MF" },
+              { id: mid, position: "FW" },
+              { id: 999_999, position: "MF" },
+              { id: "not-a-number", position: "MF" },
+              { id: existing, position: "DF" },
+            ],
+            bench: [{ id: sub, position: "FW" }, { id: unused, position: "DF" }],
+          },
+          away: { lineup: [{ id: visitor, position: "ST" }], bench: "invalid" },
+        },
+        players: {
+          [keeper]: performance(90, 7.5, 0, 1),
+          [mid]: performance(60, "6.25", 2, 0),
+          [sub]: performance(30, "n/a"),
+          [unused]: performance(0, 6),
+          [visitor]: performance(70, 5.5),
+          [existing]: performance(90, 8),
+          "999999": performance(90, 6),
+        },
+        substitutions: [{ minute: 60, onId: sub, offId: mid }],
+        events: [
+          { type: "goal", playerId: mid, minute: 10 },
+          { type: "red card", playerId: visitor, minute: 70 },
+        ],
+      };
+      const fixture = (status: string) => ({
+        date: "2026-08-15", season: 2026, home_id: home, away_id: away, stage: "League",
+        round: 1, status, seed: "seed", data: JSON.stringify(data),
+      });
+      const played = await insertRow(store, "fixtures", fixture("played"));
+      await insertRow(store, "fixtures", fixture("scheduled"));
+      await store.run(
+        `INSERT INTO player_match_appearances (fixture_id, player_id, club_id, season, date, position, started, minutes,
+          minute_on, minute_off, rating, goals, assists, stats) VALUES (?, ?, ?, 2026, '2026-08-15', 'DF', 1, 90, 0, NULL, 9.9, 0, 0, '{}')`,
+        played, existing, home,
+      );
+      await store.run("DELETE FROM meta WHERE key = ?", "appearanceIndexVersion");
+      await store.schema();
+      expect(await store.meta("appearanceIndexVersion")).toBe(1);
+      const rows = await store.all<Record<string, unknown>>(
+        `SELECT player_id, club_id, season, date, position, started, minutes, minute_on, minute_off, rating, goals, assists, stats
+        FROM player_match_appearances ORDER BY player_id`,
+      );
+      const stats = (id: number) => JSON.stringify(data.players[id]);
+      expect(rows.map((row) => ({ ...row, stats: JSON.stringify(JSON.parse(row.stats as string)) }))).toEqual([
+        { player_id: keeper, club_id: home, season: 2026, date: "2026-08-15", position: "GK", started: 1, minutes: 90, minute_on: 0, minute_off: null, rating: 7.5, goals: 0, assists: 1, stats: expect.any(String) },
+        { player_id: mid, club_id: home, season: 2026, date: "2026-08-15", position: "MF", started: 1, minutes: 60, minute_on: 0, minute_off: 60, rating: 6.25, goals: 2, assists: 0, stats: expect.any(String) },
+        { player_id: sub, club_id: home, season: 2026, date: "2026-08-15", position: "FW", started: 0, minutes: 30, minute_on: 60, minute_off: null, rating: 0, goals: 0, assists: 0, stats: expect.any(String) },
+        { player_id: visitor, club_id: away, season: 2026, date: "2026-08-15", position: "ST", started: 1, minutes: 70, minute_on: 0, minute_off: 70, rating: 5.5, goals: 0, assists: 0, stats: expect.any(String) },
+        { player_id: existing, club_id: home, season: 2026, date: "2026-08-15", position: "DF", started: 1, minutes: 90, minute_on: 0, minute_off: null, rating: 9.9, goals: 0, assists: 0, stats: "{}" },
+      ].sort((first, second) => first.player_id - second.player_id));
+      for (const row of rows.filter((item) => item.player_id !== existing))
+        expect(JSON.parse(row.stats as string)).toEqual(JSON.parse(stats(row.player_id as number)));
+      await store.run("DELETE FROM meta WHERE key = ?", "appearanceIndexVersion");
+      await store.schema();
+      expect(await store.get("SELECT count(*) AS rows FROM player_match_appearances")).toEqual({ rows: 5 });
+    } finally {
+      await store.close();
+    }
+  });
+});

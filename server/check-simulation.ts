@@ -15,6 +15,7 @@ import {
   minorPresenceLegal,
 } from "./registration.ts";
 import { databaseFootprint, FOOTPRINT_BUDGET } from "./retention.ts";
+import { quoteIdentifier } from "./sql-schema.ts";
 import { COMPETITIONS } from "./calendar.ts";
 import { continentalEntries } from "./qualification.ts";
 import { ageOn, daysBetween, VALUE_RANGE } from "../shared/rules.ts";
@@ -197,21 +198,74 @@ const activePlayers = async (store: Store) =>
     "SELECT count(*) AS total FROM players WHERE role != 'Retired'",
   ))!.total;
 
-/** Same report as `npm run db:footprint`; a season growing the world by more than the budget is flagged. */
-export async function reportFootprint(store: Store, label: string, previousMB?: number) {
+/** Fixtures a season in the full world, which decision 11's season budget was set for. */
+export const FULL_WORLD_FIXTURES = 110_000;
+/** Below this a soak world's season budget does not shrink further (fixed per-world overheads dominate). */
+export const MIN_SEASON_BUDGET_MB = 32;
+/**
+ * The players table (heap, out-of-line profiles and indexes) per player row. Squads are rewritten every week, so
+ * the table settles at about two versions of every row once the first weeks have run (measured ≈7.5 KB per row);
+ * row-version bloat (issue 1: 29–95 KB per row after a season) breaks it.
+ */
+export const PLAYER_ROW_BUDGET_BYTES = 10_240;
+
+/**
+ * The season growth budget of a soak world: decision 11 allows FOOTPRINT_BUDGET.seasonMB for the full world's
+ * ~110k fixtures; smaller worlds get the same megabytes per fixture played, with a floor.
+ */
+export function seasonBudgetMB(fixtures: number) {
+  return Math.max(
+    MIN_SEASON_BUDGET_MB,
+    Math.round(FOOTPRINT_BUDGET.seasonMB * Math.min(1, fixtures / FULL_WORLD_FIXTURES)),
+  );
+}
+
+export interface FootprintCheck {
+  worldMB: number;
+  /** World tables other than players: what accumulates season by season (fixtures, history, statistics…). */
+  accumulatedMB: number;
+  /** Growth of accumulatedMB since the previous report. */
+  seasonMB: number | undefined;
+  budgetMB: number;
+  playerBytesPerRow: number;
+  over: boolean;
+}
+
+/**
+ * Same report as `npm run db:footprint`, after fresh statistics so row counts are current. The players table must
+ * stay within PLAYER_ROW_BUDGET_BYTES per row; with `previousMB` (the last report's accumulatedMB) and the season's
+ * `fixtures`, the other tables' growth must stay within seasonBudgetMB(). Either overrun is `over` (the soak fails).
+ */
+export async function reportFootprint(
+  store: Store,
+  label: string,
+  previousMB?: number,
+  fixtures = FULL_WORLD_FIXTURES,
+): Promise<FootprintCheck> {
+  await store.exec(`ANALYZE ${(await store.worldTables()).map(quoteIdentifier).join(", ")}`);
   const [footprint] = await databaseFootprint(store);
-  const seasonMB = previousMB === undefined ? undefined : Math.round((footprint.worldMB - previousMB) * 10) / 10;
-  const over = seasonMB !== undefined && seasonMB > FOOTPRINT_BUDGET.seasonMB;
+  const players = footprint.tables.find((table) => table.table === "players");
+  const playersMB = players?.reservedMB ?? 0;
+  const accumulatedMB = Math.round((footprint.worldMB - playersMB) * 10) / 10;
+  const seasonMB = previousMB === undefined ? undefined : Math.round((accumulatedMB - previousMB) * 10) / 10;
+  const budgetMB = seasonBudgetMB(fixtures);
+  const playerBytesPerRow = players?.rows ? Math.round((playersMB * 1048576) / players.rows) : 0;
+  const seasonOver = seasonMB !== undefined && seasonMB > budgetMB;
+  const playersOver = playerBytesPerRow > PLAYER_ROW_BUDGET_BYTES;
   const largest = footprint.tables.slice(0, 4).map((table) => `${table.table} ${table.reservedMB}`).join(", ");
   console.log(
     `Footprint ${label}: world ${footprint.worldMB} MB, ${footprint.rows} rows` +
-      (seasonMB === undefined ? "" : `, ${seasonMB >= 0 ? "+" : ""}${seasonMB} MB this season`) +
-      (over ? ` OVER the ${FOOTPRINT_BUDGET.seasonMB} MB season budget` : "") +
+      (seasonMB === undefined
+        ? ""
+        : `, other tables ${seasonMB >= 0 ? "+" : ""}${seasonMB} MB this season (budget ${budgetMB} MB for ${fixtures} fixtures)${seasonOver ? " OVER BUDGET" : ""}`) +
+      `; players ${playersMB} MB, ${playerBytesPerRow} bytes per row (budget ${PLAYER_ROW_BUDGET_BYTES})${playersOver ? " OVER BUDGET" : ""}` +
       ` (largest: ${largest})`,
   );
-  if (over && process.env.GITHUB_ACTIONS === "true")
-    console.log(`::warning title=DB footprint::${label} added ${seasonMB} MB (budget ${FOOTPRINT_BUDGET.seasonMB} MB).`);
-  return { worldMB: footprint.worldMB, seasonMB };
+  if ((seasonOver || playersOver) && process.env.GITHUB_ACTIONS === "true")
+    console.log(
+      `::error title=DB footprint::${label}: other tables ${seasonMB ?? 0} MB this season (budget ${budgetMB} MB), players ${playerBytesPerRow} bytes per row (budget ${PLAYER_ROW_BUDGET_BYTES}).`,
+    );
+  return { worldMB: footprint.worldMB, accumulatedMB, seasonMB, budgetMB, playerBytesPerRow, over: seasonOver || playersOver };
 }
 
 /** Section 8 squad invariant: minimums with two goalkeepers everywhere, youth and AI first-team caps. */
@@ -228,7 +282,7 @@ export async function checkSquads(store: Store, label: string) {
     keepers: number;
     contracted: number;
   }>(
-    "SELECT clubs.id,clubs.type,clubs.parent_id,league_country.code AS league_code,leagues.tier,squads.squad,count(players.id) AS players,coalesce(sum(CASE WHEN players.position = 'GK' THEN 1 ELSE 0 END),0) AS keepers,coalesce(sum(CASE WHEN players.parent_club_id IS NULL THEN 1 ELSE 0 END),0) AS contracted FROM clubs CROSS APPLY (VALUES ('Senior'),('U19'),('U17')) AS squads(squad) LEFT JOIN leagues ON leagues.id = clubs.league_id LEFT JOIN countries AS league_country ON league_country.id = leagues.country_id LEFT JOIN players ON coalesce(players.squad_club_id,players.club_id) = clubs.id AND players.age_group = squads.squad AND players.role != 'Retired' WHERE clubs.type = 'club' OR (clubs.type = 'bteam' AND squads.squad = 'Senior') GROUP BY clubs.id,clubs.type,clubs.parent_id,league_country.code,leagues.tier,squads.squad",
+    "SELECT clubs.id,clubs.type,clubs.parent_id,league_country.code AS league_code,leagues.tier,squads.squad,count(players.id) AS players,coalesce(sum(CASE WHEN players.position = 'GK' THEN 1 ELSE 0 END),0) AS keepers,coalesce(sum(CASE WHEN players.parent_club_id IS NULL THEN 1 ELSE 0 END),0) AS contracted FROM clubs CROSS JOIN (VALUES ('Senior'),('U19'),('U17')) AS squads(squad) LEFT JOIN leagues ON leagues.id = clubs.league_id LEFT JOIN countries AS league_country ON league_country.id = leagues.country_id LEFT JOIN players ON players.playing_club_id = clubs.id AND players.age_group = squads.squad AND players.role != 'Retired' WHERE clubs.type = 'club' OR (clubs.type = 'bteam' AND squads.squad = 'Senior') GROUP BY clubs.id,clubs.type,clubs.parent_id,league_country.code,leagues.tier,squads.squad",
   );
   const failures: string[] = [];
   for (const row of rows) {
@@ -308,7 +362,7 @@ export const describeSquadCheck = (report: SquadCheck) =>
 export async function checkInSeasonSquads(store: Store) {
   const state = await stateOf(store);
   const rows = await store.all<SquadCount>(
-    "SELECT clubs.id,clubs.name,clubs.type,squads.squad,count(players.id) AS players,coalesce(sum(CASE WHEN players.position = 'GK' THEN 1 ELSE 0 END),0) AS keepers FROM clubs CROSS APPLY (VALUES ('Senior'),('U19'),('U17')) AS squads(squad) LEFT JOIN players ON coalesce(players.squad_club_id,players.club_id) = clubs.id AND players.club_id IS NOT NULL AND players.age_group = squads.squad AND players.role != 'Retired' AND (players.contract_end >= ? OR players.parent_club_id IS NOT NULL) AND (squads.squad = 'Senior' OR players.birth_date >= CASE squads.squad WHEN 'U17' THEN ? ELSE ? END) WHERE (clubs.type = 'club' OR (clubs.type = 'bteam' AND squads.squad = 'Senior')) AND clubs.id != ? AND coalesce(clubs.parent_id,0) != ? GROUP BY clubs.id,clubs.name,clubs.type,squads.squad",
+    "SELECT clubs.id,clubs.name,clubs.type,squads.squad,count(players.id) AS players,coalesce(sum(CASE WHEN players.position = 'GK' THEN 1 ELSE 0 END),0) AS keepers FROM clubs CROSS JOIN (VALUES ('Senior'),('U19'),('U17')) AS squads(squad) LEFT JOIN players ON players.playing_club_id = clubs.id AND players.club_id IS NOT NULL AND players.age_group = squads.squad AND players.role != 'Retired' AND (players.contract_end >= ? OR players.parent_club_id IS NOT NULL) AND (squads.squad = 'Senior' OR players.birth_date >= CASE squads.squad WHEN 'U17' THEN ?::text ELSE ?::text END) WHERE (clubs.type = 'club' OR (clubs.type = 'bteam' AND squads.squad = 'Senior')) AND clubs.id != ? AND coalesce(clubs.parent_id,0) != ? GROUP BY clubs.id,clubs.name,clubs.type,squads.squad",
     state.date,
     youthBirthCutoff("U17", state.season),
     youthBirthCutoff("U19", state.season),
@@ -322,7 +376,7 @@ type InSeasonTotals = Record<"moved" | "left" | "promoted" | "signed" | "registe
 
 /** Season totals of the weekly in-season squad check (`maintainSquads`), undefined if none were recorded for `season`. */
 async function inSeasonTotals(store: Store, season: number) {
-  const row = await store.get<{ value: string }>("SELECT [value] FROM meta WHERE [key] = 'youthSquadCheck'");
+  const row = await store.get<{ value: string }>("SELECT value FROM meta WHERE key = 'youthSquadCheck'");
   const check = row ? (JSON.parse(row.value) as { season: number; totals?: InSeasonTotals }) : undefined;
   return check?.season === season ? check.totals : undefined;
 }
@@ -342,16 +396,16 @@ export async function checkMinors(store: Store, date: string) {
     code: string;
     club_code: string;
     club_data: string;
-    identity: string;
-    family: string | null;
+    identity: PlayerProfile["identity"];
+    family: PlayerProfile["familyMove"] | null;
   }>(
-    "SELECT players.id,players.birth_date,countries.code,club_country.code AS club_code,clubs.data AS club_data,JSON_QUERY(players.profile,'$.identity') AS [identity],JSON_QUERY(players.profile,'$.familyMove') AS family FROM players JOIN countries ON countries.id = players.country_id JOIN clubs ON clubs.id = players.club_id JOIN countries AS club_country ON club_country.id = clubs.country_id WHERE players.birth_date > ? AND players.role != 'Retired' AND clubs.type != 'national'",
+    "SELECT players.id,players.birth_date,countries.code,club_country.code AS club_code,clubs.data AS club_data,players.profile::jsonb -> 'identity' AS identity,players.profile::jsonb -> 'familyMove' AS family FROM players JOIN countries ON countries.id = players.country_id JOIN clubs ON clubs.id = players.club_id JOIN countries AS club_country ON club_country.id = clubs.country_id WHERE players.birth_date > ? AND players.role != 'Retired' AND clubs.type != 'national'",
     cutoff,
   );
   const illegal = minors.filter((minor) => {
     const profile = {
-      identity: JSON.parse(minor.identity) as PlayerProfile["identity"],
-      ...(minor.family ? { familyMove: JSON.parse(minor.family) as PlayerProfile["familyMove"] } : {}),
+      identity: minor.identity,
+      ...(minor.family ? { familyMove: minor.family } : {}),
     };
     return !minorPresenceLegal({
       age: ageOn(minor.birth_date, date),
@@ -368,7 +422,7 @@ export async function checkMinors(store: Store, date: string) {
 export async function checkYouthHeights(store: Store, date: string, previous: ReadonlyMap<number, number>) {
   const cutoff = `${Number(date.slice(0, 4)) - 21}${date.slice(4)}`;
   const rows = await store.all<{ id: number; height: number | null }>(
-    "SELECT id,TRY_CONVERT(float,JSON_VALUE(profile,'$.identity.height')) AS height FROM players WHERE birth_date > ? AND role != 'Retired'",
+    "SELECT id,jsonb_path_query_first(profile::jsonb, '$.identity.height.double()', silent => true)::double precision AS height FROM players WHERE birth_date > ? AND role != 'Retired'",
     cutoff,
   );
   const failures = rows.filter(
@@ -412,7 +466,7 @@ export async function checkMovement(store: Store, before: readonly SeniorPlace[]
   const sizes = leagueSizes(after);
   const parked = (
     await store.all<{ id: number; parent_id: number | null; league_id: number | null; data: string }>(
-      "SELECT id,parent_id,league_id,data FROM clubs WHERE type = 'bteam' AND JSON_VALUE(data,'$.parkedLeagueId') IS NOT NULL",
+      "SELECT id,parent_id,league_id,data FROM clubs WHERE type = 'bteam' AND data::jsonb ->> 'parkedLeagueId' IS NOT NULL",
     )
   ).map((club) => ({ ...club, leagueId: Number(JSON.parse(club.data).parkedLeagueId) }));
   const parkedIn = new Map<number, number>();
@@ -596,7 +650,7 @@ export async function checkForfeits(store: Store, season: number) {
     season,
   ))!.total;
   const rows = await store.all<{ club_id: number; name: string; age_group: string; forfeits: number }>(
-    "SELECT forfeited.club_id,clubs.name,forfeited.age_group,count(*) AS forfeits FROM (SELECT CASE WHEN TRY_CONVERT(int,JSON_VALUE(fixtures.data,'$.awarded.home')) = 0 THEN fixtures.home_id ELSE fixtures.away_id END AS club_id,coalesce(leagues.age_group,'Senior') AS age_group FROM fixtures LEFT JOIN leagues ON leagues.id = fixtures.league_id WHERE fixtures.season = ? AND fixtures.status = 'played' AND JSON_QUERY(fixtures.data,'$.awarded') IS NOT NULL) AS forfeited JOIN clubs ON clubs.id = forfeited.club_id GROUP BY forfeited.club_id,clubs.name,forfeited.age_group ORDER BY count(*) DESC,forfeited.club_id",
+    "SELECT forfeited.club_id,clubs.name,forfeited.age_group,count(*) AS forfeits FROM (SELECT CASE WHEN fixtures.data::jsonb #> '{awarded,home}' = '0'::jsonb THEN fixtures.home_id ELSE fixtures.away_id END AS club_id,coalesce(leagues.age_group,'Senior') AS age_group FROM fixtures LEFT JOIN leagues ON leagues.id = fixtures.league_id WHERE fixtures.season = ? AND fixtures.status = 'played' AND jsonb_typeof(fixtures.data::jsonb -> 'awarded') = 'object') AS forfeited JOIN clubs ON clubs.id = forfeited.club_id GROUP BY forfeited.club_id,clubs.name,forfeited.age_group ORDER BY count(*) DESC,forfeited.club_id",
     season,
   );
   const forfeits = rows.reduce((total, row) => total + row.forfeits, 0);
@@ -634,7 +688,7 @@ export async function checkRollover(
   assert.equal(outside.length, 0, `Intake outside ${INTAKE.min}-${INTAKE.max} at clubs ${outside.slice(0, 10).map((club) => club.id).join(",")}`);
   const cutoff = (years: number) => `${Number(state.date.slice(0, 4)) - years}${state.date.slice(4)}`;
   const wrongAge = (await store.get<{ total: number }>(
-    "SELECT count(*) AS total FROM players WHERE JSON_VALUE(profile,'$.intake.source') = 'academy' AND JSON_VALUE(profile,'$.intake.season') = ? AND (birth_date > ? OR birth_date <= ?)",
+    "SELECT count(*) AS total FROM players WHERE profile::jsonb #>> '{intake,source}' = 'academy' AND profile::jsonb #>> '{intake,season}' = ? AND (birth_date > ? OR birth_date <= ?)",
     String(state.season),
     cutoff(14),
     cutoff(16),
@@ -676,7 +730,7 @@ export async function seasonSoak(seasons: number, fullWorld = false, nations: re
   const store = await Store.createTest("simulation-check");
   try {
     assert(
-      store.testMode && store.schemaName !== "dbo",
+      store.testMode && store.schemaName !== "public",
       "Simulation checks cannot use gameplay schemas",
     );
     await store.schema();
@@ -689,19 +743,18 @@ export async function seasonSoak(seasons: number, fullWorld = false, nations: re
     const initialPlayers = await activePlayers(store);
     const initialSizes = leagueSizes(await seniorPlaces(store));
     const generated = await reportFootprint(store, "after generation");
-    let worldMB = generated.worldMB;
+    let accumulatedMB = generated.accumulatedMB;
     await checkSquads(store, "world start");
     await checkMinors(store, (await stateOf(store)).date);
     let heights = await checkYouthHeights(store, (await stateOf(store)).date, new Map());
-    const rollovers: (Omit<Awaited<ReturnType<typeof checkRollover>>, "heights"> & {
-      worldMB: number;
-      seasonMB: number | undefined;
+    const rollovers: (Omit<Awaited<ReturnType<typeof checkRollover>>, "heights"> & FootprintCheck & {
       seasonStartPlayers: number;
       playersBeforeRollover: number;
     })[] = [];
     const squadChecks: SquadCheck[] = [];
     let seasonStartPlayers = initialPlayers;
     let simulated = 0;
+    let seasonMatches = 0;
     let weeks = 0;
     let advanceSeconds = 0;
     const timing = () => {
@@ -710,7 +763,7 @@ export async function seasonSoak(seasons: number, fullWorld = false, nations: re
         matchesPerSecond: Math.round((simulated / Math.max(0.01, advanceSeconds)) * 10) / 10,
         secondsPerWeek: Math.round(perWeek * 10) / 10,
         // First-order scaling by fixture volume: ~110k fixtures a season in the full v4 world.
-        fullWorldSecondsPerWeek: Math.round((perWeek * (110_000 / 52)) / Math.max(1, simulated / Math.max(1, weeks))),
+        fullWorldSecondsPerWeek: Math.round((perWeek * (FULL_WORLD_FIXTURES / 52)) / Math.max(1, simulated / Math.max(1, weeks))),
       };
     };
     while ((await stateOf(store)).date < end) {
@@ -727,6 +780,7 @@ export async function seasonSoak(seasons: number, fullWorld = false, nations: re
         daysBetween(current.date, `${current.season + 1}-07-01`) <= step ? await seniorPlaces(store) : undefined;
       const playersBeforeRollover = before ? await activePlayers(store) : undefined;
       const result = await advance(store, step);
+      seasonMatches += result.matches;
       const now = await stateOf(store);
       if (now.season !== current.season) {
         assert(before && playersBeforeRollover !== undefined, "A rollover ran before the step that reaches 1 July");
@@ -741,8 +795,9 @@ export async function seasonSoak(seasons: number, fullWorld = false, nations: re
           `Population ${summary.season - 1}/${String(summary.season).slice(-2)}: ${seasonStartPlayers} at the start; ${playersBeforeRollover} before the rollover (${change(playersBeforeRollover - seasonStartPlayers)}; weekly squad check: ${describeInSeason(inSeason)}); ` +
             `${summary.players} after it (${change(summary.players - playersBeforeRollover)}; ${flows.count} created incl. ${flows.academy} academy, ${flows.topUps} top-up places, ${flows.pools} home-pool entrants, ${flows.retired} retired, ${flows.leftFootball} left football)`,
         );
-        const footprint = await reportFootprint(store, `after the ${summary.season} rollover`, worldMB);
-        worldMB = footprint.worldMB;
+        const footprint = await reportFootprint(store, `after the ${summary.season} rollover`, accumulatedMB, seasonMatches);
+        accumulatedMB = footprint.accumulatedMB;
+        seasonMatches = 0;
         rollovers.push({ ...summary, ...footprint, seasonStartPlayers, playersBeforeRollover });
         seasonStartPlayers = summary.players;
       }
@@ -774,6 +829,12 @@ export async function seasonSoak(seasons: number, fullWorld = false, nations: re
     }
     assert.equal(rollovers.length, seasons, "Every season must roll over");
     await checkSqlConstraints(store);
+    const overBudget = rollovers.filter((rollover) => rollover.over);
+    assert.equal(
+      overBudget.length,
+      0,
+      `The world grew past its footprint budget: ${overBudget.map((rollover) => `${rollover.season - 1}/${String(rollover.season).slice(-2)} other tables +${rollover.seasonMB} MB (budget ${rollover.budgetMB} MB), players ${rollover.playerBytesPerRow} bytes per row (budget ${PLAYER_ROW_BUDGET_BYTES})`).join(", ")}`,
+    );
     const failedChecks = squadChecks.filter((check) => !check.ok);
     assert.equal(
       failedChecks.length,

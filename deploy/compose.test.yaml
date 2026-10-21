@@ -1,0 +1,47 @@
+# Disposable PostgreSQL 18 for `npm run test:local` (project "touchline-checks"). Test data only:
+# durability is traded for speed. Never point the app or real careers at this instance.
+name: touchline-checks
+
+services:
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_PASSWORD: ${SQL_PASSWORD:?test-local writes SQL_PASSWORD to .env.test.local}
+      POSTGRES_DB: touchline_checks
+      POSTGRES_INITDB_ARGS: --locale-provider=builtin --builtin-locale=C.UTF-8 --encoding=UTF8
+    command:
+      - postgres
+      - -c
+      - max_connections=100
+      - -c
+      - shared_buffers=512MB
+      - -c
+      - work_mem=16MB
+      - -c
+      - maintenance_work_mem=256MB
+      - -c
+      - jit=off
+      - -c
+      - fsync=off
+      - -c
+      - synchronous_commit=off
+      - -c
+      - full_page_writes=off
+      - -c
+      - max_wal_size=4GB
+      - -c
+      - timezone=UTC
+    shm_size: 512m
+    ports:
+      - "127.0.0.1:${SQL_PORT:-54329}:5432"
+    volumes:
+      - checks-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d touchline_checks -h 127.0.0.1"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 30s
+
+volumes:
+  checks-data:

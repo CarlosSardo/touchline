@@ -1,20 +1,15 @@
 import { Store } from "./db.ts";
-import { clamp, daysBetween } from "../shared/rules.ts";
+import { daysBetween } from "../shared/rules.ts";
 import { nationByCode } from "../shared/world-catalog/index.ts";
 import type {
   Club,
   Country,
-  GameState,
-  League,
   Player,
   PlayerProfile,
-  Standing,
 } from "../shared/types.ts";
 import type { YouthTransferAssessment } from "../shared/api.ts";
-
-// Players' season minutes count the regulation clock only (v4), so available minutes must too.
-const REGULATION_MINUTES =
-  "CASE WHEN coalesce(TRY_CONVERT(float, JSON_VALUE(fixtures.data,'$.duration')),90) >= 120 THEN 120 ELSE 90 END";
+import type { GbeAssessment } from "../shared/gbe/types.ts";
+import { gbeAssessments } from "./gbe.ts";
 
 // ------------------------------------------------ nationality facts (all held nationalities count)
 
@@ -255,31 +250,6 @@ export function countsTowardQuota(quota: ForeignQuota, nationalities: readonly s
   return !nationalities.some((code) => domestic.some((entry) => passportGroup(entry) === passportGroup(code)));
 }
 
-export interface EndorsementEvidence {
-  nationalityCode: string;
-  destinationCode: string;
-  age: number;
-  leagueBand: number;
-  domesticMinutesPercent: number;
-  internationalAppearancesPercent: number;
-  internationalRank: number;
-  continentalMinutesPercent: number;
-  continentalBand: number;
-  domesticFinish:
-    | "champion"
-    | "band1-league"
-    | "band1-qualifying"
-    | "band2-league"
-    | "band2-qualifying"
-    | "mid-table"
-    | "relegation"
-    | "promotion";
-  continentalStage: string;
-  seniorAppearance: boolean;
-  youthDebut: boolean;
-  existingPermission: boolean;
-}
-
 export interface RegistrationAssessment {
   allowed: boolean;
   status: string;
@@ -288,189 +258,30 @@ export interface RegistrationAssessment {
   automatic: boolean;
   breakdown: Record<string, number>;
   reasons: string[];
-  evidence: EndorsementEvidence;
+  /** The FA GBE assessment (server/gbe.ts) when the endorsement decided the verdict. */
+  gbe?: GbeAssessment;
   source: string;
 }
-export const GBE_SOURCE =
-  "FA Men's Players Governing Body Endorsement Criteria 2026/27, Tables 1-6 (effective 15 June 2026)";
 
-export function leagueBand(code: string, tier: number) {
-  if (tier === 1 && ["EN", "DE", "ES", "IT", "FR"].includes(code)) return 1;
-  if (
-    (tier === 1 && ["PT", "NL", "BE", "BR"].includes(code)) ||
-    (code === "EN" && tier === 2)
-  )
-    return 2;
-  if (tier === 1 && ["US", "AR", "MX", "TR", "SCO"].includes(code)) return 3;
-  if (
-    (tier === 1 &&
-      ["CZ", "HR", "CH", "UA", "GR", "CO", "AT", "DK", "RU", "JP"].includes(
-        code,
-      )) ||
-    (tier === 2 && ["ES", "DE", "FR"].includes(code))
-  )
-    return 4;
-  if (
-    (tier === 1 &&
-      ["RS", "PL", "CL", "UY", "SE", "NO", "HU", "KR", "AU"].includes(code)) ||
-    (code === "IT" && tier === 2) ||
-    (code === "EN" && tier === 3)
-  )
-    return 5;
-  return 6;
-}
+const GBE_OUTCOME_STATUS: Record<GbeAssessment["outcome"], string> = {
+  auto_pass: "International automatic pass",
+  pass: "Points threshold met",
+  exempt: "No FA endorsement required",
+  panel: "Exceptions Panel range",
+  fail: "Endorsement not met",
+  no_data: "No GBE evidence yet",
+};
 
-export const continentalBand = (name: string) =>
-  name.startsWith("UEFA Champions League") ||
-  (name.startsWith("CONMEBOL Libertadores") && !name.includes("Sub-20"))
-    ? 1
-    : /UEFA Europa|UEFA Conference|CONMEBOL Sudamericana|FIFA Club World/.test(name)
-      ? 2
-      : 3;
-
-export function endorsementPoints(
-  evidence: EndorsementEvidence,
-): RegistrationAssessment {
-  const band = Math.round(clamp(evidence.leagueBand, 1, 6));
-  const percent = Math.round(
-    clamp(evidence.internationalAppearancesPercent, 0, 100),
-  );
-  const rank = Math.max(1, evidence.internationalRank);
-  const domesticPercent = Math.round(
-    clamp(evidence.domesticMinutesPercent, 0, 100),
-  );
-  const continentalPercent = Math.round(
-    clamp(evidence.continentalMinutesPercent, 0, 100),
-  );
-  const automatic =
-    (rank <= 10 && percent >= 30) ||
-    (rank <= 20 && percent >= 40) ||
-    (rank <= 30 && percent >= 60) ||
-    (rank <= 50 && percent >= 70);
-  const internationalRows: Record<number, number[]> = {
-    90: [20, 20, 20, 20, 2],
-    80: [20, 20, 20, 20, 1],
-    70: [20, 20, 20, 20, 0],
-    60: [20, 20, 20, 10, 0],
-    50: [20, 20, 10, 8, 0],
-    40: [20, 20, 9, 7, 0],
-    30: [20, 10, 8, 6, 0],
-    20: [10, 9, 7, 0, 0],
-    10: [9, 8, 0, 0, 0],
-    1: [8, 7, 0, 0, 0],
-  };
-  const row = [90, 80, 70, 60, 50, 40, 30, 20, 10, 1].find(
-    (minimum) => percent >= minimum,
-  );
-  const rankColumn =
-    rank <= 10 ? 0 : rank <= 20 ? 1 : rank <= 30 ? 2 : rank <= 50 ? 3 : 4;
-  const domesticPoints =
-    domesticPercent < 30
-      ? 0
-      : Math.max(
-          0,
-          Math.min(9, Math.floor(domesticPercent / 10)) + 3 - (band - 1) * 2,
-        );
-  const debut = evidence.age < 21 && evidence.youthDebut ? 7 - band : 0;
-  const continentalPoints =
-    continentalPercent < 30
-      ? 0
-      : Math.max(
-          0,
-          Math.min(9, Math.floor(continentalPercent / 10)) +
-            1 -
-            (evidence.continentalBand === 1
-              ? 0
-              : evidence.continentalBand === 2
-                ? 5
-                : 8),
-        );
-  const positions: Record<EndorsementEvidence["domesticFinish"], number[]> = {
-    champion: [6, 5, 4, 3, 2, 1],
-    "band1-league": [5, 4, 3, 2, 1, 0],
-    "band1-qualifying": [4, 3, 2, 1, 0, 0],
-    "band2-league": [3, 2, 1, 0, 0, 0],
-    "band2-qualifying": [2, 1, 0, 0, 0, 0],
-    "mid-table": [1, 0, 0, 0, 0, 0],
-    relegation: [0, 0, 0, 0, 0, 0],
-    promotion: [0, 1, 1, 1, 1, 1],
-  };
-  const stagePoints: Record<string, number[]> = {
-    Final: [10, 7, 2],
-    "Semi-final": [9, 6, 1],
-    "Quarter-final": [8, 5, 0],
-    "Round of 16": [7, 4, 0],
-    "Round of 32": [6, 3, 0],
-    "Knockout round play-offs": [6, 3, 0],
-    "Knockout play-off": [6, 3, 0],
-    "League phase": [5, 2, 0],
-    "Group stage": [5, 2, 0],
-  };
-  const breakdown = {
-    "International appearances": row ? internationalRows[row][rankColumn] : 0,
-    "Domestic league minutes": Math.max(domesticPoints, debut),
-    "Continental minutes": continentalPoints,
-    "Final league position": evidence.seniorAppearance
-      ? positions[evidence.domesticFinish][band - 1]
-      : 0,
-    "Continental progression": evidence.seniorAppearance
-      ? (stagePoints[evidence.continentalStage]?.[
-          evidence.continentalBand - 1
-        ] ?? 0)
-      : 0,
-    "Current league quality": evidence.seniorAppearance
-      ? [12, 10, 8, 6, 4, 2][band - 1]
-      : 0,
-  };
-  const points = Object.values(breakdown).reduce(
-    (total, value) => total + value,
-    0,
-  );
-  const citizenship = ["EN", "SCO", "WAL", "NIR", "IE"].includes(
-    evidence.nationalityCode,
-  );
-  const required = evidence.destinationCode === "EN";
-  const allowed =
-    !required ||
-    citizenship ||
-    evidence.existingPermission ||
-    automatic ||
-    points >= 15;
-  const status = !required
-    ? "No FA endorsement required"
-    : citizenship
-      ? "Domestic work rights"
-      : evidence.existingPermission
-        ? "Existing valid registration permission"
-        : automatic
-          ? "International automatic pass"
-          : points >= 15
-            ? "Points threshold met"
-            : "Endorsement not met";
-  return {
-    allowed,
-    status,
-    points,
-    threshold: 15,
-    automatic,
-    breakdown,
-    reasons: allowed
-      ? [status]
-      : [
-          `${points}/15 points. Ability rating is not an eligibility criterion.`,
-          "No verified exception or unused Elite Significant Contribution place is recorded.",
-        ],
-    evidence,
-    source: GBE_SOURCE,
-  };
-}
-
+/**
+ * Predicted registration of `player` at `buyer` (AI market preferences and the cross-border loan review): domestic
+ * work rights, an existing registration in the same association or the FA GBE verdict (server/gbe.ts, cached per
+ * day), plus the association's foreign-player quota. Signings are never refused on this (server/eligibility.ts).
+ */
 export async function assessRegistration(
   store: Store,
   player: Player,
   buyer: Club,
 ): Promise<RegistrationAssessment> {
-  const state = await store.meta<GameState>("state");
   const country = (await store.get<Country>(
     "SELECT * FROM countries WHERE id = ?",
     player.country_id,
@@ -488,192 +299,46 @@ export async function assessRegistration(
         currentClub.country_id,
       )
     : undefined;
-  const league = currentClub?.league_id
-    ? await store.get<League>(
-        "SELECT * FROM leagues WHERE id = ?",
-        currentClub.league_id,
-      )
-    : undefined;
-  const leagueCountry = league?.country_id
-    ? await store.get<Country>(
-        "SELECT * FROM countries WHERE id = ?",
-        league.country_id,
-      )
-    : undefined;
-  const band =
-    league && leagueCountry ? leagueBand(leagueCountry.code, league.tier) : 6;
-  const records = await store.all<{
-    minutes: number;
-    appearances: number;
-    league_id: number;
-    club_id: number;
-    age_group: string;
-    kind: string;
-    name: string;
-  }>(
-    "SELECT player_season_stats.*,leagues.age_group,leagues.kind,leagues.name FROM player_season_stats JOIN leagues ON leagues.id = player_season_stats.league_id WHERE player_id = ? AND season BETWEEN ? AND ?",
-    player.id,
-    state.season - (player.age < 21 ? 1 : 2),
-    state.season,
-  );
-  const domestic = records.filter(
-    (record) => record.kind === "league" && record.age_group === "Senior",
-  );
-  const domesticMinutes = domestic.reduce(
-    (sum, record) => sum + record.minutes,
-    0,
-  );
-  const appearances = domestic.reduce(
-    (sum, record) => sum + record.appearances,
-    0,
-  );
-  const availableDomestic = currentClub
-    ? (await store.get<{ minutes: number }>(
-        `SELECT coalesce(sum(${REGULATION_MINUTES}),0) AS minutes FROM fixtures JOIN leagues ON leagues.id = fixtures.league_id WHERE leagues.kind = 'league' AND leagues.age_group = 'Senior' AND fixtures.status = 'played' AND (home_id = ? OR away_id = ?) AND fixtures.season >= ?`,
-        currentClub.id,
-        currentClub.id,
-        state.season - 1,
-      ))!.minutes
-    : 0;
-  const seniorInternational = records.filter(
-    (record) =>
-      record.kind === "international" && record.age_group === "Senior",
-  );
-  const nationalTeam = await store.get<Club>(
-    "SELECT * FROM clubs WHERE country_id = ? AND type = 'national' AND age_group = 'Senior'",
-    player.country_id,
-  );
-  const internationalMatches = nationalTeam
-    ? (await store.get<{ total: number }>(
-        "SELECT count(*) AS total FROM fixtures WHERE (home_id = ? OR away_id = ?) AND status = 'played' AND season >= ?",
-        nationalTeam.id,
-        nationalTeam.id,
-        state.season - (player.age < 21 ? 1 : 2),
-      ))!.total
-    : 0;
-  // FIFA ranking proxy: senior national-team strength (countries.reputation is league strength in world v4).
-  const nationalOrder = await store.all<{ country_id: number }>(
-    "SELECT country_id FROM clubs WHERE type = 'national' AND age_group = 'Senior' ORDER BY reputation DESC,country_id",
-  );
-  const ranking =
-    nationalOrder.findIndex((item) => item.country_id === country.id) + 1 ||
-    nationalOrder.length + 1;
-  const tableData = league
-    ? await store.get<{ data: string }>(
-        "SELECT TOP (1) data FROM history WHERE entity_type = 'league' AND entity_id = ? AND season = ? ORDER BY id DESC",
-        league.id,
-        state.season - 1,
-      )
-    : undefined;
-  const table = tableData
-    ? (JSON.parse(tableData.data).table as Standing[])
-    : [];
-  const position = table.findIndex(
-    (entry) => entry.club_id === currentClub?.id,
-  );
-  let finish: EndorsementEvidence["domesticFinish"] =
-    position === 0
-      ? "champion"
-      : position >= 0 && position >= table.length - 2
-        ? "relegation"
-        : "mid-table";
-  let bestContinental = { band: 3, percent: 0, stage: "Other", points: 0 };
-  const continentalRecords = records.filter(
-    (item) => item.kind === "continental",
-  );
-  const continentalFixtures = continentalRecords.length
-    ? await store.all<{
-        league_id: number;
-        club_id: number;
-        stage: string;
-        minutes: number;
-      }>(
-        `SELECT series.league_id,series.club_id,fixtures.stage,sum(${REGULATION_MINUTES}) AS minutes FROM (SELECT DISTINCT player_season_stats.league_id,player_season_stats.club_id FROM player_season_stats JOIN leagues ON leagues.id = player_season_stats.league_id WHERE player_id = ? AND season BETWEEN ? AND ? AND leagues.kind = 'continental') AS series JOIN fixtures ON fixtures.league_id = series.league_id AND (fixtures.home_id = series.club_id OR fixtures.away_id = series.club_id) WHERE fixtures.status = 'played' GROUP BY series.league_id,series.club_id,fixtures.stage`,
-        player.id,
-        state.season - (player.age < 21 ? 1 : 2),
-        state.season,
-      )
-    : [];
-  for (const record of continentalRecords) {
-    const fixtures = continentalFixtures.filter(
-      (fixture) =>
-        fixture.league_id === record.league_id &&
-        fixture.club_id === record.club_id,
-    );
-    const available = fixtures.reduce(
-      (total, fixture) =>
-        total + (fixture.stage === "Qualifying" ? 0 : fixture.minutes),
-      0,
-    );
-    const band = continentalBand(record.name);
-    const percent = available
-      ? Math.min(100, (record.minutes / available) * 100)
-      : 0;
-    const stages = fixtures.map((fixture) => fixture.stage);
-    const stage =
-      [
-        "Final",
-        "Semi-final",
-        "Quarter-final",
-        "Round of 16",
-        "Round of 32",
-        "Knockout round play-offs",
-        "League phase",
-        "Group stage",
-      ].find((value) => stages.includes(value)) ?? "Other";
-    const points = percent / band;
-    if (points >= bestContinental.points)
-      bestContinental = { band, percent, stage, points };
-  }
-  if (currentClub && finish !== "champion") {
-    const qualified = await store.get<{ name: string }>(
-      "SELECT TOP (1) leagues.name FROM standings JOIN leagues ON leagues.id = standings.league_id WHERE standings.club_id = ? AND leagues.kind = 'continental' AND leagues.name NOT LIKE '%Qualifying' ORDER BY leagues.reputation DESC",
-      currentClub.id,
-    );
-    if (qualified)
-      finish =
-        continentalBand(qualified.name) === 1 ? "band1-league" : "band2-league";
-  }
   const profile = JSON.parse(player.profile) as PlayerProfile;
   const nationalities = heldNationalities(country.code, profile);
   const target = clubRegistration(destination.code, buyer.data);
+  // A registration on file in the same association carries over (a refused or pending one does not).
   const existing =
-    !!(await store.get(
-      "SELECT player_id FROM registration_records WHERE player_id = ? AND country_id = ? AND status = 'approved'",
+    !!currentClub &&
+    !!currentCountry &&
+    clubRegistration(currentCountry.code, currentClub.data).association === target.association &&
+    !(await store.get(
+      "SELECT 1 AS refused FROM player_registrations WHERE player_id = ? AND club_id = ? AND status IN ('pending','not_registered','refused')",
       player.id,
-      buyer.country_id,
-    )) ||
-    (!!currentClub &&
-      !!currentCountry &&
-      clubRegistration(currentCountry.code, currentClub.data).association ===
-        target.association);
-  const assessment = endorsementPoints({
-    nationalityCode:
-      nationalities.find((code) => ["GB", "IE"].includes(passportGroup(code))) ??
-      country.code,
-    destinationCode: target.association,
-    age: player.age,
-    leagueBand: band,
-    domesticMinutesPercent: availableDomestic
-      ? (domesticMinutes / availableDomestic) * 100
-      : 0,
-    internationalAppearancesPercent: internationalMatches
-      ? (seniorInternational.reduce(
-          (sum, record) => sum + record.appearances,
-          0,
-        ) /
-          internationalMatches) *
-        100
-      : 0,
-    internationalRank: ranking,
-    continentalMinutesPercent: bestContinental.percent,
-    continentalBand: bestContinental.band,
-    domesticFinish: finish,
-    continentalStage: bestContinental.stage,
-    seniorAppearance: appearances > 0 || seniorInternational.length > 0,
-    youthDebut: player.age < 21 && appearances > 0,
-    existingPermission: existing,
+      currentClub.id,
+    ));
+  const verdict = (allowed: boolean, status: string, gbe?: GbeAssessment): RegistrationAssessment => ({
+    allowed,
+    status,
+    points: gbe?.points ?? 0,
+    threshold: gbe?.passMark ?? 15,
+    automatic: gbe?.autoPass ?? false,
+    breakdown: Object.fromEntries((gbe?.breakdown ?? []).map((row) => [row.label ?? row.criterion, row.points])),
+    reasons: allowed
+      ? [status]
+      : [
+          `${gbe?.points ?? 0}/${gbe?.passMark ?? 15} points (${status}). Ability rating is not an eligibility criterion.`,
+          "No verified exception or unused Elite Significant Contribution place is recorded.",
+        ],
+    ...(gbe ? { gbe } : {}),
+    source: gbe?.source?.title ?? gbe?.rulesetTitle ?? "FA Men's Players Governing Body Endorsement Criteria",
   });
+  const assessment =
+    target.association !== "EN"
+      ? verdict(true, "No FA endorsement required")
+      : nationalities.some((code) => ["GB", "IE"].includes(passportGroup(code)))
+        ? verdict(true, "Domestic work rights")
+        : existing
+          ? verdict(true, "Existing valid registration permission")
+          : await (async () => {
+              const gbe = (await gbeAssessments(store, [player.id])).get(player.id)!;
+              return verdict(["exempt", "auto_pass", "pass"].includes(gbe.outcome), GBE_OUTCOME_STATUS[gbe.outcome], gbe);
+            })();
   const quota = await quotaCheck(store, player, buyer, target, nationalities);
   return quota
     ? {

@@ -1,0 +1,60 @@
+.gbe-breakdown {
+  display: grid;
+  gap: 10px;
+}
+.gbe-breakdown header {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.gbe-total {
+  font-size: 1.15rem;
+  font-weight: 700;
+}
+.gbe-total small,
+.gbe-points small {
+  font-size: 0.72rem;
+  font-weight: 500;
+  color: var(--muted);
+}
+.gbe-criteria,
+.gbe-notes {
+  margin: 0;
+  padding: 0;
+}
+.gbe-criteria {
+  list-style: none;
+  border-top: 1px solid var(--line);
+}
+.gbe-criterion {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+}
+.gbe-criterion strong {
+  margin-right: 6px;
+}
+.gbe-criterion p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+.gbe-points {
+  min-width: 42px;
+  text-align: right;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.gbe-no_data .gbe-points {
+  color: var(--muted);
+}
+.gbe-notes {
+  padding-left: 18px;
+  font-size: 0.8rem;
+}
+.gbe-breakdown footer {
+  font-size: 0.75rem;
+}

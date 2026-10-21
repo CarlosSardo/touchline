@@ -30,6 +30,7 @@ import {
   type YouthTournamentSpec,
 } from "../shared/features/youth-internationals.ts";
 import type { AgeGroup, Club, Position } from "../shared/types.ts";
+import { refreshGbe } from "./gbe.ts";
 
 export const DUTY_META = "internationalDuty";
 const AGE_LIMIT: Record<string, number> = { U17: 17, U19: 19, U20: 20, U21: 21 };
@@ -55,7 +56,7 @@ function remember(store: Store, date: string, duty: NationalDutyMeta | null) {
 }
 
 export async function readDuty(store: Store): Promise<NationalDutyMeta | null> {
-  const row = await store.get<{ value: string }>("SELECT [value] FROM meta WHERE [key] = ?", DUTY_META);
+  const row = await store.get<{ value: string }>("SELECT value FROM meta WHERE key = ?", DUTY_META);
   return row ? (JSON.parse(row.value) as NationalDutyMeta) : null;
 }
 
@@ -75,18 +76,62 @@ export async function dutySquad(store: Store, teamId: number, leagueId: number |
   return records.find((record) => record.leagueId === leagueId) ?? records[0];
 }
 
+/** An integer JSON property, or NULL when it is missing or not an integer. */
+const jsonInt = (document: string, key: string) =>
+  `(CASE WHEN ${document} ->> '${key}' ~ '^-?[0-9]+$' THEN (${document} ->> '${key}')::integer END)`;
+
 const notFound = (message: string) => Object.assign(new GameError(message), { status: 404 });
 
 /** Worlds generated before U21 national teams existed get them from their U20 rows (data only, no schema change). */
 export async function ensureNationalTeams(store: Store) {
   await store.run(
     `INSERT INTO clubs (name,short_name,city,country_id,league_id,type,parent_id,age_group,color,reputation,academy,facilities,balance,transfer_budget,wage_budget,philosophy,culture,formation,tactical_style,chemistry,manager,manager_trust,board_confidence,board_pressure,fan_mood,fan_loyalty,fan_patience,expectations,stadium,capacity,data)
-     SELECT CASE WHEN RIGHT(base.name,4) = N' U20' THEN LEFT(base.name,LEN(base.name)-4) ELSE base.name END + N' U21',base.short_name,base.city,base.country_id,NULL,N'national',NULL,N'U21',base.color,LEAST(99,base.reputation+1),base.academy,base.facilities,0,0,0,base.philosophy,base.culture,base.formation,base.tactical_style,base.chemistry,base.manager,base.manager_trust,base.board_confidence,base.board_pressure,base.fan_mood,base.fan_loyalty,base.fan_patience,base.expectations,base.stadium,base.capacity,
-       JSON_MODIFY(base.data,'$.worldKey',CONCAT(N'N:',countries.code,N':U21'))
+     SELECT CASE WHEN right(base.name,4) = ' U20' THEN left(base.name,-4) ELSE base.name END || ' U21',base.short_name,base.city,base.country_id,NULL,'national',NULL,'U21',base.color,LEAST(99,base.reputation+1),base.academy,base.facilities,0,0,0,base.philosophy,base.culture,base.formation,base.tactical_style,base.chemistry,base.manager,base.manager_trust,base.board_confidence,base.board_pressure,base.fan_mood,base.fan_loyalty,base.fan_patience,base.expectations,base.stadium,base.capacity,
+       jsonb_set(base.data::jsonb,'{worldKey}',to_jsonb('N:' || countries.code || ':U21'))::text
      FROM clubs AS base JOIN countries ON countries.id = base.country_id
-     WHERE base.type = N'national' AND base.age_group = N'U20'
-       AND NOT EXISTS (SELECT 1 FROM clubs AS other WHERE other.type = N'national' AND other.age_group = N'U21' AND other.country_id = base.country_id)`,
+     WHERE base.type = 'national' AND base.age_group = 'U20'
+       AND NOT EXISTS (SELECT 1 FROM clubs AS other WHERE other.type = 'national' AND other.age_group = 'U21' AND other.country_id = base.country_id)`,
   );
+}
+
+/** Senior friendly dates (MM-DD) in the March and June FIFA windows, played by every senior national team. */
+export const FRIENDLY_WINDOW_DATES = ["03-24", "03-28", "06-08", "06-12"];
+
+export interface FriendlyTeam {
+  id: number;
+  confederation: string;
+  reputation: number;
+}
+
+/**
+ * Opponents for one friendly date: teams of similar strength within each confederation (a seeded shuffle of the
+ * strength order keeps opponents varying between dates), odd teams paired across confederations, and a random team
+ * without a match when the number is odd. Stronger side at home.
+ */
+export function friendlyPairs(teams: readonly FriendlyTeam[], random: () => number): [number, number][] {
+  const pairs: [number, number][] = [];
+  const leftover: { team: FriendlyTeam; score: number }[] = [];
+  const bye = teams.length % 2 ? teams[Math.floor(random() * teams.length)] : undefined;
+  const byConfederation = new Map<string, FriendlyTeam[]>();
+  for (const team of teams)
+    if (team !== bye) byConfederation.set(team.confederation, [...(byConfederation.get(team.confederation) ?? []), team]);
+  const pair = (list: { team: FriendlyTeam; score: number }[]) => {
+    for (let index = 0; index + 1 < list.length; index += 2) {
+      const [left, right] = [list[index].team, list[index + 1].team];
+      pairs.push(left.reputation >= right.reputation ? [left.id, right.id] : [right.id, left.id]);
+    }
+    if (list.length % 2) leftover.push(list.at(-1)!);
+  };
+  for (const confederation of [...byConfederation.keys()].sort())
+    pair(
+      byConfederation
+        .get(confederation)!
+        .map((team) => ({ team, score: team.reputation + (random() - 0.5) * 14 }))
+        .sort((left, right) => right.score - left.score || left.team.id - right.team.id),
+    );
+  const rest = leftover.splice(0).sort((left, right) => right.score - left.score);
+  pair(rest);
+  return pairs;
 }
 
 const tournamentOf = (name: string) => YOUTH_TOURNAMENT_BY_NAME.get(name.replace(/ Qualifying$/, ""));
@@ -138,15 +183,16 @@ export async function processInternationalDuty(store: Store) {
     return;
   }
   const leagues = await store.all<LeagueRow>(
-    "SELECT id,name,age_group,JSON_VALUE(data,'$.phase') AS phase,TRY_CONVERT(int,JSON_VALUE(data,'$.season')) AS season,TRY_CONVERT(int,JSON_VALUE(data,'$.forSeason')) AS for_season FROM leagues WHERE kind = 'international'",
+    `SELECT id,name,age_group,doc ->> 'phase' AS phase,${jsonInt("doc", "season")} AS season,${jsonInt("doc", "forSeason")} AS for_season
+     FROM leagues CROSS JOIN LATERAL (SELECT leagues.data::jsonb AS doc OFFSET 0) AS parsed WHERE kind = 'international'`,
   );
   const leagueById = new Map(leagues.map((league) => [league.id, league]));
   const upcoming = leagues.length
     ? await store.all<{ league_id: number; date: string; home_id: number; away_id: number }>(
-        "SELECT league_id,date,home_id,away_id FROM fixtures WHERE season = ? AND status = 'scheduled' AND date >= ? AND league_id IN (SELECT [id] FROM OPENJSON(?) WITH ([id] INT '$')) ORDER BY date",
+        "SELECT league_id,date,home_id,away_id FROM fixtures WHERE season = ? AND status = 'scheduled' AND date >= ? AND league_id = ANY(?::int[]) ORDER BY date",
         state.season,
         date,
-        JSON.stringify(leagues.map((league) => league.id)),
+        leagues.map((league) => league.id),
       )
     : [];
   const dates = new Map<string, string[]>();
@@ -182,7 +228,12 @@ export async function processInternationalDuty(store: Store) {
     rewarded: duty.rewarded ?? [],
     nextCheck: later && addDays(later, -NATIONAL_DUTY_RULES.lookaheadDays + 1) < idle ? addDays(later, -NATIONAL_DUTY_RULES.lookaheadDays + 1) : idle,
   };
-  if (ended.length) await endDuty(store, state.season, ended);
+  if (ended.length) {
+    await endDuty(store, state.season, ended);
+    // After a senior window the caps (and the nation's available matches) changed for these players.
+    const senior = ended.filter((record) => record.ageGroup === "Senior").flatMap((record) => record.players);
+    if (senior.length) await refreshGbe(store, senior);
+  }
   for (const league of leagues) {
     const spec = YOUTH_TOURNAMENT_BY_NAME.get(league.name);
     if (!spec || league.phase !== "complete" || league.season !== state.season || next.rewarded!.includes(league.id)) continue;
@@ -203,8 +254,8 @@ async function nameSquads(
   const teams = new Map(
     (
       await store.all<Pick<Club, "id" | "name" | "country_id" | "age_group">>(
-        "SELECT id,name,country_id,age_group FROM clubs WHERE id IN (SELECT [id] FROM OPENJSON(?) WITH ([id] INT '$'))",
-        JSON.stringify(needed.map((entry) => entry.teamId)),
+        "SELECT id,name,country_id,age_group FROM clubs WHERE id = ANY(?::int[])",
+        needed.map((entry) => entry.teamId),
       )
     ).map((team) => [team.id, team]),
   );
@@ -246,28 +297,27 @@ async function nameSquads(
     })
     .sort((left, right) => NATIONAL_TEAM_AGES.indexOf(left.team.age_group) - NATIONAL_TEAM_AGES.indexOf(right.team.age_group));
   const candidates = new Map<number, CandidateRow[]>();
-  for (let offset = 0; offset < plans.length; offset += 200)
+  for (let offset = 0; offset < plans.length; offset += 200) {
+    const batch = plans.slice(offset, offset + 200);
     for (const row of await store.all<CandidateRow>(
       `SELECT team.k, pick.id, pick.name, pick.position, pick.ability, pick.potential, pick.form, pick.club_id, pick.parent_club_id, pick.age_group, pick.role, club.reputation AS club_reputation
-       FROM OPENJSON(?) WITH (k int, country_id int, cutoff nvarchar(10), max_age int, fit_by nvarchar(10)) AS team
-       CROSS APPLY (
-         SELECT TOP (${NATIONAL_DUTY_RULES.candidatePool}) players.id, players.name, players.position, players.ability, players.potential, players.form, players.club_id, players.parent_club_id, players.age_group, players.role
-         FROM (SELECT TOP (200) ranked.id FROM players AS ranked WHERE ranked.country_id = team.country_id AND ranked.age <= team.max_age ORDER BY ranked.ability DESC, ranked.id) AS top_ids
+       FROM unnest(?::int[], ?::int[], ?::text[], ?::int[], ?::text[]) AS team(k, country_id, cutoff, max_age, fit_by)
+       CROSS JOIN LATERAL (
+         SELECT players.id, players.name, players.position, players.ability, players.potential, players.form, players.club_id, players.parent_club_id, players.age_group, players.role
+         FROM (SELECT ranked.id FROM players AS ranked WHERE ranked.country_id = team.country_id AND ranked.age <= team.max_age ORDER BY ranked.ability DESC, ranked.id LIMIT 200) AS top_ids
          JOIN players ON players.id = top_ids.id
          WHERE players.birth_date >= team.cutoff AND players.role != 'Retired' AND (players.injury_until IS NULL OR players.injury_until <= team.fit_by)
-         ORDER BY players.ability DESC, players.id) AS pick
-       LEFT JOIN clubs AS club ON club.id = pick.club_id`,
-      JSON.stringify(
-        plans.slice(offset, offset + 200).map((plan) => ({
-          k: plan.k,
-          country_id: plan.team.country_id,
-          cutoff: plan.cutoff,
-          max_age: plan.maxAge,
-          fit_by: plan.entry.dates[0],
-        })),
-      ),
+         ORDER BY players.ability DESC, players.id LIMIT ${NATIONAL_DUTY_RULES.candidatePool}) AS pick
+       LEFT JOIN clubs AS club ON club.id = pick.club_id
+       ORDER BY team.k, pick.ability DESC, pick.id`,
+      batch.map((plan) => plan.k),
+      batch.map((plan) => plan.team.country_id),
+      batch.map((plan) => plan.cutoff),
+      batch.map((plan) => plan.maxAge),
+      batch.map((plan) => plan.entry.dates[0]),
     ))
       candidates.set(row.k, [...(candidates.get(row.k) ?? []), row]);
+  }
   const settings = await settingsOf(store);
   const policy = (settings.youthRelease as ReleasePolicy | undefined) ?? "club policy";
   const family = new Set(
@@ -358,9 +408,9 @@ async function nameSquads(
   }
   if (refused.length)
     await store.run(
-      "UPDATE players SET morale = LEAST(99,GREATEST(1,morale + ?)) WHERE id IN (SELECT [id] FROM OPENJSON(?) WITH ([id] INT '$'))",
+      "UPDATE players SET morale = LEAST(99,GREATEST(1,morale + ?)) WHERE id = ANY(?::int[])",
       NATIONAL_DUTY_RULES.refusalMorale,
-      JSON.stringify(refused),
+      refused,
     );
   return records;
 }
@@ -372,10 +422,11 @@ async function endDuty(store: Store, season: number, ended: NationalDutyRecord[]
   await store.run(
     `UPDATE players SET fitness = GREATEST(25,fitness - ?) WHERE id IN (
        SELECT stats.player_id FROM player_season_stats AS stats
-       JOIN OPENJSON(?) WITH (team_id int, league_id int) AS record ON record.team_id = stats.club_id AND record.league_id = stats.league_id
+       JOIN unnest(?::int[], ?::int[]) AS record(team_id, league_id) ON record.team_id = stats.club_id AND record.league_id = stats.league_id
        WHERE stats.season = ? AND stats.appearances > 0)`,
     NATIONAL_DUTY_RULES.travelFitness,
-    JSON.stringify(played.map((record) => ({ team_id: record.teamId, league_id: record.leagueId }))),
+    played.map((record) => record.teamId),
+    played.map((record) => record.leagueId),
     season,
   );
 }
@@ -389,7 +440,7 @@ async function rewardFinals(store: Store, leagueId: number, spec: YouthTournamen
   );
   if (!fixtures.length) return;
   const champion = (await store.get<{ champion: number | null }>(
-    "SELECT TRY_CONVERT(int,JSON_VALUE(data,'$.champion')) AS champion FROM leagues WHERE id = ?",
+    `SELECT ${jsonInt("data::jsonb", "champion")} AS champion FROM leagues WHERE id = ?`,
     leagueId,
   ))?.champion;
   const reached = new Map<number, string>();
@@ -400,17 +451,23 @@ async function rewardFinals(store: Store, leagueId: number, spec: YouthTournamen
       if (!current || STAGE_ORDER.indexOf(stage) > STAGE_ORDER.indexOf(current)) reached.set(teamId, stage);
     }
   if (champion) reached.set(champion, "Champion");
-  const performances = await store.all<{ player_id: number; club_id: number; matches: number; rating: number; international: string | null }>(
-    `SELECT appearance.player_id, appearance.club_id, count(*) AS matches, avg(appearance.rating) AS rating, JSON_QUERY(players.profile,'$.international') AS international
-     FROM player_match_appearances AS appearance JOIN players ON players.id = appearance.player_id
-     WHERE appearance.fixture_id IN (SELECT [id] FROM OPENJSON(?) WITH ([id] INT '$')) AND appearance.minutes > 0
-     GROUP BY appearance.player_id, appearance.club_id, JSON_QUERY(players.profile,'$.international')`,
-    JSON.stringify(fixtures.map((fixture) => fixture.id)),
+  const performances = await store.all<{
+    player_id: number;
+    club_id: number;
+    matches: number;
+    rating: number;
+    international: { value: number; date: string } | null;
+  }>(
+    `SELECT appearance.player_id, appearance.club_id, appearance.matches, appearance.rating, players.profile::jsonb -> 'international' AS international
+     FROM (SELECT player_id, club_id, count(*) AS matches, avg(rating) AS rating FROM player_match_appearances
+       WHERE fixture_id = ANY(?::int[]) AND minutes > 0 GROUP BY player_id, club_id) AS appearance
+     JOIN players ON players.id = appearance.player_id`,
+    fixtures.map((fixture) => fixture.id),
   );
   const rows = performances.map((row) => {
     const stage = reached.get(row.club_id) ?? "Group stage";
     const earned = tournamentExposure(stage, spec.prestige, row.matches >= STANDOUT.matches && row.rating >= STANDOUT.rating);
-    const previous = row.international ? (JSON.parse(row.international) as { value: number; date: string }) : undefined;
+    const previous = row.international ?? undefined;
     const remaining = exposureValueFactor(previous, date) - 1;
     const value = Math.max(earned, remaining);
     return {
@@ -419,20 +476,28 @@ async function rewardFinals(store: Store, leagueId: number, spec: YouthTournamen
       morale: stage === "Champion" ? 4 : STAGE_ORDER.indexOf(stage) >= STAGE_ORDER.indexOf("Semi-final") ? 2 : 0,
     };
   });
-  for (let offset = 0; offset < rows.length; offset += 1000)
+  for (let offset = 0; offset < rows.length; offset += 5000) {
+    const batch = rows.slice(offset, offset + 5000);
     await store.run(
-      "UPDATE target SET profile = JSON_MODIFY(target.profile,'$.international',JSON_QUERY(changes.international)), knowledge = CASE WHEN target.knowledge < ? THEN ? ELSE target.knowledge END, morale = LEAST(99,target.morale + changes.morale) FROM players AS target JOIN OPENJSON(?) WITH (id int, international nvarchar(max), morale float) AS changes ON changes.id = target.id",
+      `UPDATE players AS target SET profile = jsonb_set(target.profile::jsonb, '{international}', changes.international::jsonb)::text,
+         knowledge = GREATEST(target.knowledge, ?), morale = LEAST(99, target.morale + changes.morale)
+       FROM unnest(?::int[], ?::text[], ?::double precision[]) AS changes(id, international, morale) WHERE changes.id = target.id`,
       NATIONAL_DUTY_RULES.exposureKnowledge,
-      NATIONAL_DUTY_RULES.exposureKnowledge,
-      JSON.stringify(rows.slice(offset, offset + 1000)),
+      batch.map((row) => row.id),
+      batch.map((row) => row.international),
+      batch.map((row) => row.morale),
     );
+  }
+  const deltas = [...reached].map(([id, stage]) => ({ id, delta: TEAM_REPUTATION_BY_STAGE[stage] ?? 0 }));
   await store.run(
-    `UPDATE team SET reputation = LEAST(senior.reputation + ?, GREATEST(senior.reputation - ?, LEAST(99, GREATEST(1, team.reputation + change.delta))))
-     FROM clubs AS team JOIN OPENJSON(?) WITH (id int, delta float) AS change ON change.id = team.id
-     JOIN clubs AS senior ON senior.country_id = team.country_id AND senior.type = 'national' AND senior.age_group = 'Senior'`,
+    `UPDATE clubs AS team SET reputation = LEAST(senior.reputation + ?, GREATEST(senior.reputation - ?, LEAST(99, GREATEST(1, team.reputation + change.delta))))
+     FROM unnest(?::int[], ?::double precision[]) AS change(id, delta)
+     JOIN clubs AS senior ON senior.type = 'national' AND senior.age_group = 'Senior'
+     WHERE change.id = team.id AND senior.country_id = team.country_id`,
     TEAM_REPUTATION_BAND / 2,
     TEAM_REPUTATION_BAND,
-    JSON.stringify([...reached].map(([id, stage]) => ({ id, delta: TEAM_REPUTATION_BY_STAGE[stage] ?? 0 }))),
+    deltas.map((row) => row.id),
+    deltas.map((row) => row.delta),
   );
 }
 
@@ -454,7 +519,7 @@ interface SquadRow {
 }
 
 const capsJoin =
-  "OUTER APPLY (SELECT sum(stats.appearances) AS caps, sum(stats.goals) AS goals FROM player_season_stats AS stats WHERE stats.player_id = players.id AND stats.club_id = ?) AS record";
+  "LEFT JOIN LATERAL (SELECT sum(stats.appearances) AS caps, sum(stats.goals) AS goals FROM player_season_stats AS stats WHERE stats.player_id = players.id AND stats.club_id = ?) AS record ON true";
 
 /** One national team: the squad on duty (or the provisional squad for its next fixture), competitions and fixtures. */
 export async function nationalTeamView(store: Store, teamId: number): Promise<NationalTeamView> {
@@ -466,7 +531,7 @@ export async function nationalTeamView(store: Store, teamId: number): Promise<Na
   if (!team) throw notFound("National team not found.");
   const record = await dutySquad(store, teamId, undefined, state.date);
   const nextFixture = await store.get<{ league_id: number; name: string; for_season: number | null }>(
-    "SELECT TOP (1) fixtures.league_id, leagues.name, TRY_CONVERT(int,JSON_VALUE(leagues.data,'$.forSeason')) AS for_season FROM fixtures JOIN leagues ON leagues.id = fixtures.league_id WHERE (fixtures.home_id = ? OR fixtures.away_id = ?) AND fixtures.status = 'scheduled' ORDER BY fixtures.date, fixtures.id",
+    `SELECT fixtures.league_id, leagues.name, ${jsonInt("leagues.data::jsonb", "forSeason")} AS for_season FROM fixtures JOIN leagues ON leagues.id = fixtures.league_id WHERE (fixtures.home_id = ? OR fixtures.away_id = ?) AND fixtures.status = 'scheduled' ORDER BY fixtures.date, fixtures.id LIMIT 1`,
     teamId,
     teamId,
   );
@@ -498,13 +563,13 @@ export async function nationalTeamView(store: Store, teamId: number): Promise<Na
   if (record) {
     const ids = [...record.players, ...record.withheld.map((entry) => entry.playerId)];
     const rows = ids.length
-      ? await store.all<SquadRow>(`${select} WHERE players.id IN (SELECT [id] FROM OPENJSON(?) WITH ([id] INT '$'))`, teamId, JSON.stringify(ids))
+      ? await store.all<SquadRow>(`${select} WHERE players.id = ANY(?::int[])`, teamId, ids)
       : [];
     players = rows.map((row) => view(row, record.players.includes(row.id) ? "selected" : "withheld"));
   } else {
     const maxAge = team.age_group === "Senior" ? 40 : Number(state.date.slice(0, 4)) - Number(cutoff.slice(0, 4)) + 1;
     const rows = await store.all<SquadRow>(
-      `${select} WHERE players.id IN (SELECT TOP (200) ranked.id FROM players AS ranked WHERE ranked.country_id = ? AND ranked.age <= ? ORDER BY ranked.ability DESC, ranked.id) AND players.birth_date >= ? AND players.role != 'Retired'`,
+      `${select} WHERE players.id IN (SELECT ranked.id FROM players AS ranked WHERE ranked.country_id = ? AND ranked.age <= ? ORDER BY ranked.ability DESC, ranked.id LIMIT 200) AND players.birth_date >= ? AND players.role != 'Retired'`,
       teamId,
       team.country_id,
       maxAge,
@@ -518,13 +583,15 @@ export async function nationalTeamView(store: Store, teamId: number): Promise<Na
   }
   players.sort((left, right) => right.ability - left.ability || left.id - right.id);
   const competitions = await store.all<{ leagueId: number; name: string; phase: string | null; season: number | null }>(
-    "SELECT DISTINCT leagues.id AS leagueId, leagues.name, JSON_VALUE(leagues.data,'$.phase') AS phase, TRY_CONVERT(int,JSON_VALUE(leagues.data,'$.season')) AS season FROM leagues JOIN standings ON standings.league_id = leagues.id WHERE standings.club_id = ?",
+    `SELECT leagues.id AS "leagueId", leagues.name, doc ->> 'phase' AS phase, ${jsonInt("doc", "season")} AS season
+     FROM leagues CROSS JOIN LATERAL (SELECT leagues.data::jsonb AS doc OFFSET 0) AS parsed
+     WHERE EXISTS (SELECT 1 FROM standings WHERE standings.league_id = leagues.id AND standings.club_id = ?)`,
     teamId,
   );
   const fixtures = await store.all<NationalTeamView["fixtures"][number]>(
-    `SELECT TOP (40) fixtures.id, fixtures.date, fixtures.league_id AS leagueId, leagues.name AS competition, fixtures.stage, fixtures.home_id AS homeId, fixtures.away_id AS awayId, home.name AS homeName, away.name AS awayName, fixtures.status, fixtures.home_goals AS homeGoals, fixtures.away_goals AS awayGoals
+    `SELECT fixtures.id, fixtures.date, fixtures.league_id AS "leagueId", leagues.name AS competition, fixtures.stage, fixtures.home_id AS "homeId", fixtures.away_id AS "awayId", home.name AS "homeName", away.name AS "awayName", fixtures.status, fixtures.home_goals AS "homeGoals", fixtures.away_goals AS "awayGoals"
      FROM fixtures JOIN leagues ON leagues.id = fixtures.league_id JOIN clubs AS home ON home.id = fixtures.home_id JOIN clubs AS away ON away.id = fixtures.away_id
-     WHERE (fixtures.home_id = ? OR fixtures.away_id = ?) AND fixtures.season = ? ORDER BY fixtures.date, fixtures.id`,
+     WHERE (fixtures.home_id = ? OR fixtures.away_id = ?) AND fixtures.season = ? ORDER BY fixtures.date, fixtures.id LIMIT 40`,
     teamId,
     teamId,
     state.season,
@@ -546,7 +613,8 @@ export async function internationalsDesk(store: Store): Promise<InternationalsDe
   const leagues = new Map(
     (
       await store.all<{ id: number; name: string; phase: string | null; champion_name: string | null }>(
-        "SELECT id,name,JSON_VALUE(data,'$.phase') AS phase,JSON_VALUE(data,'$.championName') AS champion_name FROM leagues WHERE kind = 'international' AND country_id IS NULL",
+        `SELECT id,name,doc ->> 'phase' AS phase,doc ->> 'championName' AS champion_name
+         FROM leagues CROSS JOIN LATERAL (SELECT leagues.data::jsonb AS doc OFFSET 0) AS parsed WHERE kind = 'international' AND country_id IS NULL`,
       )
     ).map((league) => [league.name, league]),
   );
@@ -556,18 +624,18 @@ export async function internationalsDesk(store: Store): Promise<InternationalsDe
   const ids = records.flatMap((record) => [...record.players, ...record.withheld.map((entry) => entry.playerId)]);
   const own = ids.length
     ? await store.all<{ id: number; name: string }>(
-        "SELECT id,name FROM players WHERE id IN (SELECT [id] FROM OPENJSON(?) WITH ([id] INT '$')) AND (club_id IN (SELECT [id] FROM OPENJSON(?) WITH ([id] INT '$')) OR parent_club_id IN (SELECT [id] FROM OPENJSON(?) WITH ([id] INT '$')))",
-        JSON.stringify(ids),
-        JSON.stringify(family),
-        JSON.stringify(family),
+        "SELECT id,name FROM players WHERE id = ANY(?::int[]) AND (club_id = ANY(?::int[]) OR parent_club_id = ANY(?::int[]))",
+        ids,
+        family,
+        family,
       )
     : [];
   const teamNames = new Map(
     records.length
       ? (
           await store.all<{ id: number; name: string }>(
-            "SELECT id,name FROM clubs WHERE id IN (SELECT [id] FROM OPENJSON(?) WITH ([id] INT '$'))",
-            JSON.stringify(records.map((record) => record.teamId)),
+            "SELECT id,name FROM clubs WHERE id = ANY(?::int[])",
+            records.map((record) => record.teamId),
           )
         ).map((team) => [team.id, team.name])
       : [],
@@ -612,8 +680,8 @@ export async function internationalsDesk(store: Store): Promise<InternationalsDe
 
 /** A player's national-team record by team (season totals survive retention), plus his current exposure. */
 export async function playerCaps(store: Store, playerId: number): Promise<PlayerCaps> {
-  const player = await store.get<{ id: number; international: string | null }>(
-    "SELECT id, JSON_QUERY(profile,'$.international') AS international FROM players WHERE id = ?",
+  const player = await store.get<{ id: number; international: PlayerCaps["exposure"] }>(
+    "SELECT id, profile::jsonb -> 'international' AS international FROM players WHERE id = ?",
     playerId,
   );
   if (!player) throw notFound("Player not found.");
@@ -640,6 +708,6 @@ export async function playerCaps(store: Store, playerId: number): Promise<Player
     playerId,
     teams,
     total: { appearances: teams.reduce((sum, row) => sum + row.appearances, 0), goals: teams.reduce((sum, row) => sum + row.goals, 0) },
-    exposure: player.international ? JSON.parse(player.international) : null,
+    exposure: player.international ?? null,
   };
 }

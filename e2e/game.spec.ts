@@ -2739,113 +2739,54 @@ test("journalists cover real signings with persistent analysis and supporter dis
   await noOverflow(page);
 });
 
-test("an outgoing loan honors its terms and can be recalled", async ({
+test("a club's loan offer is accepted from the inbox, tracked and can be recalled", async ({
   page,
   request,
 }) => {
   const bootstrap = await (await request.get("/api/bootstrap")).json();
+  expect(
+    (await request.patch("/api/settings", { data: { marketOfferFrequency: "high", autosave: "off" } })).status(),
+  ).toBe(200);
+  // Clubs approach the director: make young players available for loan, then let the window run.
   const roster = await (
     await request.get(
-      `/api/players?club=${bootstrap.club.id}&ageMin=19&ageMax=25&ageGroup=Senior&pageSize=100&sort=value&direction=asc`,
+      `/api/players?club=${bootstrap.club.id}&ageMin=18&ageMax=22&pageSize=100&sort=potential&direction=desc`,
     )
   ).json();
-  const candidates = roster.players.filter(
-    (player: { contract_end: string; parent_club_id: number | null }) =>
-      !player.parent_club_id && player.contract_end >= "2028-06-30",
-  ) as { id: number; name: string; position: string; ability: number }[];
-  const worldClubs = await (
-    await request.get(
-      `/api/world/clubs?type=club&country=${bootstrap.club.country_id}&pageSize=100`,
-    )
-  ).json();
-  const borrowerNeeds = new Map<number, number[]>();
-  for (const club of worldClubs.clubs as { id: number; reputation: number }[]) {
-    if (club.id === bootstrap.club.id) continue;
-    const squad = await (
-      await request.get(
-        `/api/players?club=${club.id}&ageGroup=Senior&pageSize=100`,
-      )
-    ).json();
-    if (squad.players.length >= 28) continue;
-    const positions = new Map<string, number>();
-    for (const player of squad.players as { position: string }[])
-      positions.set(player.position, (positions.get(player.position) ?? 0) + 1);
-    for (const candidate of candidates) {
-      const positionCount = positions.get(candidate.position) ?? 0;
-      const abilityGap = candidate.ability - club.reputation;
-      const need =
-        34 -
-        positionCount * 9 +
-        Math.max(0, 24 - squad.players.length) * 1.4 +
-        Math.max(-12, Math.min(18, abilityGap));
-      if (need >= 10) {
-        const list = borrowerNeeds.get(candidate.id) ?? [];
-        list.push(club.id);
-        borrowerNeeds.set(candidate.id, list);
-      }
-    }
+  for (const player of (roster.players as { id: number; parent_club_id: number | null; contract_end: string }[])
+    .filter((entry) => !entry.parent_club_id && entry.contract_end >= "2027-06-30")
+    .slice(0, 6))
+    expect(
+      (
+        await request.post("/api/action", {
+          data: { type: "availability", playerId: player.id, listed: false, loan: true },
+        })
+      ).status(),
+    ).toBe(200);
+  type Offer = { id: number; player_id: number; player_name: string; buyer_name: string; stage: string; selling_club_id: number; data: string };
+  let offer: Offer | undefined;
+  for (let day = 0; day < 10 && !offer; day++) {
+    expect((await request.post("/api/advance", { data: { days: 1 }, timeout: 180000 })).status()).toBe(200);
+    const desk = await (await request.get("/api/loans")).json();
+    offer = (desk.loanOffers as Offer[]).find(
+      (entry) =>
+        entry.stage === "Offer received" &&
+        entry.selling_club_id === bootstrap.club.id &&
+        JSON.parse(entry.data).terms.recall,
+    );
   }
-  // Interest in the borrowing club is only known once talks exist: open them, keep the first willing player.
-  let found: { target: (typeof candidates)[number]; negotiation: { id: number; asking_price: number } } | undefined;
-  for (const candidate of candidates) {
-    for (const destinationId of borrowerNeeds.get(candidate.id) ?? []) {
-      const enquiry = await request.post("/api/action", {
-        data: {
-          type: "enquiry",
-          playerId: candidate.id,
-          dealType: "Development loan",
-          destinationId,
-        },
-      });
-      if (enquiry.status() !== 200) continue;
-      const opened = await enquiry.json();
-      if (opened.stage === "Rejected") continue;
-      const interest = await interestOf(request, candidate.id, {
-        negotiationId: String(opened.id),
-      });
-      if (
-        opened.interest >= 50 &&
-        willingToTalk(interest) &&
-        interest.wageToAgree! <= interest.expectedWage * 1.5
-      ) {
-        found = { target: candidate, negotiation: opened };
-        break;
-      }
-      expect(
-        (
-          await request.post("/api/action", {
-            data: { type: "negotiation", id: opened.id, action: "withdraw" },
-          })
-        ).status(),
-      ).toBe(200);
-    }
-    if (found) break;
-  }
-  expect(found).toBeTruthy();
-  const { target, negotiation } = found!;
-  await page.goto("/#transfers");
-  const card = page.locator(".entity-card").filter({
-    has: page.getByRole("heading", { name: target.name, exact: true }),
-  });
-  await card.getByRole("button", { name: "Open negotiations" }).click();
-  const dialog = page.locator(".offer-negotiation");
-  await dialog.getByRole("button", { name: "Request formal talks" }).click();
-  await dialog.getByLabel("Proposed transfer fee").fill("0");
-  await dialog
-    .getByRole("slider", { name: /Borrowing club salary share/ })
-    .focus();
-  // A share below the parent's reference split is priced into its asking fee; a higher share keeps the fee.
-  await dialog
-    .getByRole("slider", { name: /Borrowing club salary share/ })
-    .press("ArrowRight");
-  await dialog.getByRole("button", { name: "Send loan proposal" }).click();
-  await expect(page).toHaveURL(new RegExp(`#contract/${target.id}$`));
-  await expect(
-    dialog.getByRole("slider", { name: /Borrowing club salary share/ }),
-  ).toHaveCount(0);
-  await expect(dialog).toContainText(
-    "The buying club is negotiating personal terms with the agent",
-  );
+  expect(offer).toBeTruthy();
+  const details = JSON.parse(offer!.data);
+  await page.goto("/#loans");
+  await page.getByRole("tab", { name: /Loan offers/ }).click();
+  const card = page.getByRole("article", { name: `${offer!.buyer_name} offer for ${offer!.player_name}` });
+  await expect(card).toContainText(details.reason.text);
+  await expect(card).toContainText(`${details.terms.salarySplit}% paid by them`);
+  await expect(card).toContainText("Reply by");
+  await card.getByRole("button", { name: "Accept", exact: true }).click();
+  await page.getByRole("dialog").last().getByRole("button", { name: "Confirm", exact: true }).click();
+  await expect(card).toHaveCount(0);
+  const target = { id: offer!.player_id, name: offer!.player_name };
   expect(
     (
       await request.post("/api/advance", { data: { days: 6 }, timeout: 180000 })
@@ -2853,11 +2794,14 @@ test("an outgoing loan honors its terms and can be recalled", async ({
   ).toBe(200);
   const desk = await (await request.get("/api/loans")).json();
   const loan = desk.loans.find(
-    (item: { player_id: number }) => item.player_id === target.id,
+    (item: { player_id: number; status: string }) => item.player_id === target.id && item.status === "active",
   );
   expect(loan.status).toBe("active");
-  expect(JSON.parse(loan.terms).salarySplit).toBe(71);
-  await page.goto("/#loans");
+  expect(JSON.parse(loan.terms).salarySplit).toBe(details.terms.salarySplit);
+  expect(JSON.parse(loan.data).reason.text).toBe(details.reason.text);
+  // The days were advanced through the API: reload so the Loans view reads the started loan.
+  await page.reload();
+  await page.getByRole("tab", { name: /Loan tracker/ }).click();
   await page
     .locator("tbody tr")
     .filter({ hasText: target.name })
@@ -2898,7 +2842,8 @@ test("advancing the full world produces coherent match analysis and all eight no
     expect(response.status()).toBe(200);
     const result = await response.json();
     // v4 leagues start on 8 August; on 11 July every EN, DE and LU senior league plays a pre-season round (126 friendlies).
-    expect(result.matches).toBeGreaterThan(100);
+    // Earlier specs may already have advanced past it (the maps below still need real matches either way).
+    if (start < new Date("2026-07-11").getTime()) expect(result.matches).toBeGreaterThan(100);
   }
   await page.goto("/#analytics");
   await expect(page.getByLabel("Pitch map type")).toBeVisible({

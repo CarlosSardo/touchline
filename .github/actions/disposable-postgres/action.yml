@@ -1,0 +1,54 @@
+name: Disposable PostgreSQL
+description: >-
+  CI equivalent of scripts/test-local.ts. Starts a throwaway PostgreSQL 18 container on 127.0.0.1:54329
+  with an in-job random password, creates touchline_checks and exports the same SQL_* environment that
+  test-local.ts gives its command.
+runs:
+  using: composite
+  steps:
+    - name: Start PostgreSQL 18 on 127.0.0.1:54329
+      shell: bash
+      run: |
+        set -euo pipefail
+        password="$(openssl rand -hex 24)"
+        echo "::add-mask::${password}"
+        # Test data only: durability is traded for speed (same settings as deploy/compose.test.yaml).
+        POSTGRES_PASSWORD="$password" docker run --detach --name touchline-postgres \
+          --env POSTGRES_PASSWORD --env POSTGRES_DB=touchline_checks \
+          --env POSTGRES_INITDB_ARGS="--locale-provider=builtin --builtin-locale=C.UTF-8 --encoding=UTF8" \
+          --shm-size 1g --publish 127.0.0.1:54329:5432 \
+          --health-cmd 'pg_isready -U postgres -d touchline_checks -h 127.0.0.1' \
+          --health-interval 5s --health-timeout 5s --health-retries 24 --health-start-period 30s \
+          postgres:18 \
+          -c max_connections=100 -c shared_buffers=1GB -c work_mem=16MB -c maintenance_work_mem=256MB \
+          -c jit=off -c fsync=off -c synchronous_commit=off -c full_page_writes=off -c max_wal_size=4GB \
+          -c timezone=UTC > /dev/null
+        status=starting
+        for _ in $(seq 36); do
+          status="$(docker inspect --format '{{.State.Health.Status}}' touchline-postgres)"
+          if [[ "$status" == healthy || "$status" == unhealthy ]]; then break; fi
+          sleep 5
+        done
+        if [[ "$status" != healthy ]]; then
+          docker logs --tail 100 touchline-postgres || true
+          echo "::error::PostgreSQL container is ${status} after 180 s."
+          exit 1
+        fi
+        docker exec touchline-postgres psql -U postgres -d touchline_checks -Atc 'SELECT version()'
+        {
+          echo "SQL_HOST=127.0.0.1"
+          echo "SQL_PORT=54329"
+          echo "SQL_DATABASE=touchline_checks"
+          echo "SQL_USER=postgres"
+          echo "SQL_PASSWORD=${password}"
+          echo "SQL_SSL=disable"
+          echo "SQL_ALLOW_REMOTE_TESTS=false"
+          echo "SQL_TEST_DATABASE="
+          echo "SQL_INTEGRATION_TESTS=true"
+          echo "SQL_SAVE_TESTS=true"
+          echo "SQL_TEST_MODE=true"
+          echo "SQL_SCHEMA=touchline_test_ci_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+          echo "TOUCHLINE_TEST_LOCAL=true"
+          echo "TOUCHLINE_DISPOSABLE_SQL=true"
+        } >> "$GITHUB_ENV"
+        echo "PostgreSQL is healthy on 127.0.0.1:54329 and touchline_checks exists."

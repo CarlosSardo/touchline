@@ -9,10 +9,21 @@ import { rm } from "node:fs/promises";
 import { pipeline } from "node:stream/promises";
 import { z } from "zod";
 import { DatabaseUnavailableError, Store } from "./db.ts";
-import { Accounts, type AuthenticatedIdentity } from "./accounts.ts";
-import { createInviteRouter, type InviteRouteOptions } from "./invite-routes.ts";
-import { CONSUMER_TENANT_ID } from "./invite-store.ts";
-import { OWNER_EMAIL_DEFAULT } from "./legacy-account.ts";
+import { describeSqlError } from "./sql-config.ts";
+import { Accounts } from "./accounts.ts";
+import { createAdminRouter, isAccessAdministration, type AccessAdministration } from "./admin-routes.ts";
+import {
+  AuthenticationRequiredError,
+  createAuthenticator,
+  NotAuthorizedError,
+  readAdminGroup,
+  readAuthConfiguration,
+  readTrustProxy,
+  type AuthConfiguration,
+  type AuthenticatedIdentity,
+  type OidcProvider,
+  type TrustProxySetting,
+} from "./auth.ts";
 import {
   affiliateDesk,
   affiliateInterest,
@@ -37,6 +48,7 @@ import {
 import { resolveUnexpectedEvent, unexpectedEvents } from "./events.ts";
 import { answerCallUpProposal, callUpDesk, callUpPlayer, endCallUp, setDevelopmentRequest } from "./callups.ts";
 import { internationalsDesk, nationalTeamView, playerCaps } from "./internationals.ts";
+import { gbeAssessment } from "./gbe.ts";
 import { CALL_UP_RULES } from "../shared/features/callups.ts";
 import {
   assignScout,
@@ -90,6 +102,7 @@ import type { Club, Negotiation, PlayerProfile } from "../shared/types.ts";
 import type {
   AccountSession,
   AccountUser,
+  AdvanceResult,
   DeleteActiveCareerResult,
   Health,
   HealthDetails,
@@ -106,56 +119,30 @@ const saveFileSchema = z
     "Choose a valid portable save slot.",
   );
 const loopbackHosts = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
-const principalSchema = z.object({
-  auth_typ: z.literal("aad"),
-  claims: z
-    .array(
-      z.object({
-        typ: z.string().max(256),
-        val: z.string().max(4096),
-      }),
-    )
-    .max(256),
-});
-const identifier =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const defaultApproverEmail = "sardo.kiko@gmail.com";
-const emailAddressSchema = z.string().trim().toLowerCase().max(320).email();
+export { AuthenticationRequiredError, NotAuthorizedError };
 
-export class AuthenticationRequiredError extends Error {
-  readonly status = 401;
-
-  constructor() {
-    super("Authentication required.");
-    this.name = "AuthenticationRequiredError";
-  }
-}
-
-export class NotAuthorizedError extends Error {
-  readonly status = 403;
-  readonly code = "not_authorized";
-
-  constructor() {
-    super("This account is not authorized.");
-    this.name = "NotAuthorizedError";
-  }
-}
+/** Removed with the move to Authelia; a stale value must not silently change who may sign in. */
+const removedSecurityVariables = ["OWNER_OBJECT_ID", "ALLOWED_USER_OBJECT_IDS", "AUTH_HOME_TENANT_ID", "AZURE_TENANT_ID"];
+/** Removed with the email/invite flows; harmless leftovers. */
+const removedEmailVariables = ["INVITE_SIGNING_SECRET", "EMAIL_TRANSPORT", "APPROVER_EMAIL", "OWNER_EMAIL"];
 
 export interface ApiConfiguration {
   host: string;
   port: number;
+  /** REQUIRE_AUTH=true: served behind an HTTPS reverse proxy with OpenID Connect sign-in and approved access. */
   hosted: boolean;
   requireAuth: boolean;
-  ownerObjectId: string;
-  allowedUserObjectIds: Set<string>;
-  tenantId: string;
   appOrigin: string | undefined;
-  approverEmail: string;
-  ownerEmail: string;
+  trustProxy: TrustProxySetting;
+  auth: AuthConfiguration | undefined;
+  /** ADMIN_GROUP: identity provider group whose members approve access at /admin. */
+  adminGroup: string;
+  /** MAX_PLAYERS: approved non-admin players. */
   maxPlayers: number;
-  inviteDbSizeLimitGb: number;
-  inviteSigningSecret: string;
-  emailTransport: "gmail" | "log" | "disabled";
+  /** DB_SIZE_LIMIT_GB: approvals stop when the database reaches this size. */
+  dbSizeLimitGb: number;
+  /** Non-fatal configuration notices for the startup log (removed variables that are still set). */
+  warnings: string[];
 }
 
 const parsePositiveInteger = (value: string | undefined, fallback: number, name: string) => {
@@ -175,42 +162,30 @@ const parsePositiveNumber = (value: string | undefined, fallback: number, name: 
 export function readApiConfiguration(
   environment: NodeJS.ProcessEnv = process.env,
 ): ApiConfiguration {
-  const hosted = Boolean(environment.CONTAINER_APP_NAME?.trim());
+  const isSet = (name: string) => (environment[name] ?? "").trim() !== "";
+  const removed = removedSecurityVariables.filter(isSet);
+  if (removed.length)
+    throw new Error(
+      `removed: ${removed.join(", ")} (Microsoft sign-in and object-ID allow-lists no longer exist; access is approved by an ADMIN_GROUP member at /admin). Unset ${removed.length === 1 ? "it" : "them"}.`,
+    );
+  if (isSet("INVITE_DB_SIZE_LIMIT_GB"))
+    throw new Error("removed: INVITE_DB_SIZE_LIMIT_GB was renamed to DB_SIZE_LIMIT_GB.");
+  const ignored = [
+    ...removedEmailVariables.filter(isSet),
+    ...Object.keys(environment).filter((name) => name.startsWith("SMTP_") && isSet(name)).sort(),
+  ];
+  const warnings = ignored.length
+    ? [`removed and ignored (email delivery no longer exists): ${ignored.join(", ")}.`]
+    : [];
+  const requireAuth = environment.REQUIRE_AUTH === "true";
+  const hosted = requireAuth;
   const host = environment.API_HOST ?? (hosted ? "0.0.0.0" : "127.0.0.1");
   const port = Number(environment.PORT ?? environment.API_PORT ?? 3001);
-  const requireAuth = environment.REQUIRE_AUTH === "true";
-  const ownerObjectId = (environment.OWNER_OBJECT_ID ?? "").toLowerCase();
-  const tenantId = (environment.AZURE_TENANT_ID ?? "").toLowerCase();
-  const approverEmailResult = emailAddressSchema.safeParse(environment.APPROVER_EMAIL ?? defaultApproverEmail);
-  if (!approverEmailResult.success)
-    throw new Error("APPROVER_EMAIL must be a valid email address up to 320 characters.");
-  const approverEmail = approverEmailResult.data;
-  const ownerEmailResult = emailAddressSchema.safeParse(environment.OWNER_EMAIL ?? OWNER_EMAIL_DEFAULT);
-  if (!ownerEmailResult.success)
-    throw new Error("OWNER_EMAIL must be a valid email address up to 320 characters.");
-  const ownerEmail = ownerEmailResult.data;
   const maxPlayers = parsePositiveInteger(environment.MAX_PLAYERS, 10, "MAX_PLAYERS");
-  const inviteDbSizeLimitGb = parsePositiveNumber(environment.INVITE_DB_SIZE_LIMIT_GB, 24, "INVITE_DB_SIZE_LIMIT_GB");
-  const inviteSigningSecret =
-    environment.INVITE_SIGNING_SECRET ??
-    (requireAuth ? "" : "local-development-invite-signing-secret");
-  if (requireAuth && inviteSigningSecret.length < 32)
-    throw new Error("INVITE_SIGNING_SECRET is required and must be at least 32 characters when REQUIRE_AUTH=true.");
-  if (!requireAuth && inviteSigningSecret.length < 32)
-    throw new Error("INVITE_SIGNING_SECRET must be at least 32 characters when set.");
-  const emailTransport = (environment.EMAIL_TRANSPORT ?? (hosted ? "gmail" : "log")).toLowerCase();
-  if (emailTransport !== "gmail" && emailTransport !== "log" && emailTransport !== "disabled")
-    throw new Error("EMAIL_TRANSPORT must be gmail, log or disabled.");
-  if (hosted && emailTransport === "log")
-    throw new Error("EMAIL_TRANSPORT must be gmail or disabled when hosted.");
-  const invitedObjectIds = (environment.ALLOWED_USER_OBJECT_IDS ?? "")
-    .split(",")
-    .map((value) => value.trim().toLowerCase())
-    .filter(Boolean);
+  const dbSizeLimitGb = parsePositiveNumber(environment.DB_SIZE_LIMIT_GB, 24, "DB_SIZE_LIMIT_GB");
+  const adminGroup = readAdminGroup(environment.ADMIN_GROUP);
   const appOrigin = environment.APP_ORIGIN;
-  if (invitedObjectIds.length > 100 || invitedObjectIds.some((value) => !identifier.test(value)))
-    throw new Error("ALLOWED_USER_OBJECT_IDS must contain at most 100 comma-separated Entra object UUIDs.");
-  const allowedUserObjectIds = new Set([ownerObjectId, ...invitedObjectIds]);
+  const trustProxy = readTrustProxy(environment.TRUST_PROXY, hosted);
   if (!host || host.trim() !== host)
     throw new Error("API_HOST must be a hostname or IP address.");
   if (!Number.isInteger(port) || port < 1 || port > 65535)
@@ -220,20 +195,13 @@ export function readApiConfiguration(
     !["true", "false"].includes(environment.REQUIRE_AUTH)
   )
     throw new Error("REQUIRE_AUTH must be true or false.");
-  if ((hosted || !loopbackHosts.has(host)) && !requireAuth)
+  if (!loopbackHosts.has(host) && !requireAuth)
     throw new Error(
       "Public API binding requires explicit REQUIRE_AUTH=true and hosted authentication.",
     );
-  if (
-    requireAuth &&
-    (!hosted || !identifier.test(ownerObjectId) || !identifier.test(tenantId))
-  )
-    throw new Error(
-      "Hosted authentication requires CONTAINER_APP_NAME, OWNER_OBJECT_ID and AZURE_TENANT_ID.",
-    );
   if (requireAuth && !appOrigin)
     throw new Error(
-      "Hosted authentication requires APP_ORIGIN as an exact HTTPS origin.",
+      "REQUIRE_AUTH=true requires APP_ORIGIN as the exact public HTTPS origin (for example https://touchline.example.com).",
     );
   if (appOrigin) {
     let origin: URL;
@@ -258,76 +226,14 @@ export function readApiConfiguration(
     port,
     hosted,
     requireAuth,
-    ownerObjectId,
-    allowedUserObjectIds,
-    tenantId,
     appOrigin,
-    approverEmail,
-    ownerEmail,
+    trustProxy,
+    auth: requireAuth && appOrigin ? readAuthConfiguration(environment, { appOrigin }) : undefined,
+    adminGroup,
     maxPlayers,
-    inviteDbSizeLimitGb,
-    inviteSigningSecret,
-    emailTransport,
+    dbSizeLimitGb,
+    warnings,
   };
-}
-
-export function parseClientPrincipal(
-  encoded: unknown,
-  configuration: Pick<ApiConfiguration, "allowedUserObjectIds" | "ownerObjectId" | "tenantId">,
-): AuthenticatedIdentity {
-  if (
-    typeof encoded !== "string" ||
-    encoded.length > 65536 ||
-    !/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)
-  )
-    throw new AuthenticationRequiredError();
-  try {
-    const principal = principalSchema.parse(
-      JSON.parse(Buffer.from(encoded, "base64").toString("utf8")),
-    );
-    const claims = (...types: string[]) =>
-      principal.claims.filter((claim) => types.includes(claim.typ));
-    const singleTrustedClaim = (...types: string[]) => {
-      const values = claims(...types).map((claim) => claim.val.trim()).filter(Boolean);
-      const first = values[0]?.toLowerCase();
-      if (!first || !values.every((value) => value.toLowerCase() === first))
-        throw new NotAuthorizedError();
-      return first;
-    };
-    const tenantId = singleTrustedClaim("tid", "http://schemas.microsoft.com/identity/claims/tenantid");
-    const objectId = singleTrustedClaim("oid", "http://schemas.microsoft.com/identity/claims/objectidentifier");
-    const homeTenant = tenantId === configuration.tenantId;
-    const consumersTenant = tenantId === CONSUMER_TENANT_ID;
-    if (
-      (!homeTenant && !consumersTenant) ||
-      (homeTenant && objectId !== configuration.ownerObjectId && !configuration.allowedUserObjectIds.has(objectId))
-    )
-      throw new NotAuthorizedError();
-    const profileClaim = (...types: string[]) => {
-      for (const type of types) {
-        const value = principal.claims.find((claim) => claim.typ === type)?.val.trim();
-        if (value) return value;
-      }
-      return null;
-    };
-    return {
-      tenantId,
-      objectId,
-      displayName: profileClaim(
-        "name",
-        "http://schemas.microsoft.com/identity/claims/displayname",
-        "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name",
-      ) ?? "Sporting director",
-      email: profileClaim(
-        "email",
-        "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress",
-        "preferred_username",
-      )?.toLowerCase() ?? null,
-    };
-  } catch (error) {
-    if (error instanceof NotAuthorizedError) throw error;
-    throw new AuthenticationRequiredError();
-  }
 }
 
 const positive = z.number().finite().min(0);
@@ -491,6 +397,7 @@ export async function dispatchAction(
       )!.options!;
       if (!choices.includes(data.background))
         throw new GameError("Choose a director background.");
+      const clubChanged = !!data.clubId && data.clubId !== state.clubId;
       if (data.clubId && data.clubId !== state.clubId) {
         if (state.started && !state.gameOver)
           throw new GameError("You already hold a club position.");
@@ -522,6 +429,9 @@ export async function dispatchAction(
           [skill]: 2,
         };
       }
+      // The new director decides who is available: the world generator's loan flags at his club are cleared.
+      if (!state.started || clubChanged)
+        await store.run("UPDATE players SET available_loan = 0 WHERE club_id = ? AND available_loan = 1", state.clubId);
       state.started = true;
       await store.setMeta("state", state);
       await store.setMeta("settings", {
@@ -580,7 +490,6 @@ export async function dispatchAction(
             "Pre-contract agreement",
             ...LOAN_TYPES,
           ]),
-          destinationId: idSchema.optional(),
           guardianConsent: z.boolean().default(false),
         })
         .parse(body);
@@ -588,17 +497,11 @@ export async function dispatchAction(
         const player = await store.get<{ club_id: number | null }>("SELECT club_id FROM players WHERE id = ?", data.playerId);
         const error = loanDurationError({
           type: data.dealType,
-          crossBorder: !!player && (await loanCrossesBorder(store, data.destinationId ?? state.clubId, player.club_id)),
+          crossBorder: !!player && (await loanCrossesBorder(store, state.clubId, player.club_id)),
         });
         if (error) throw new GameError(error);
       }
-      return enquire(
-        store,
-        data.playerId,
-        data.dealType,
-        data.destinationId,
-        data.guardianConsent,
-      );
+      return enquire(store, data.playerId, data.dealType, data.guardianConsent);
     }
     case "offer": {
       const data = z
@@ -813,7 +716,7 @@ export async function dispatchAction(
         })
         .parse(body);
       await store.run(
-        "MERGE INTO training_plans WITH (HOLDLOCK) AS target USING (VALUES (?, ?, ?, ?)) AS source(club_id, focus, intensity, youth_focus) ON target.club_id = source.club_id WHEN MATCHED THEN UPDATE SET focus = source.focus, intensity = source.intensity, youth_focus = source.youth_focus WHEN NOT MATCHED THEN INSERT (club_id, focus, intensity, youth_focus) VALUES (source.club_id, source.focus, source.intensity, source.youth_focus);",
+        "INSERT INTO training_plans (club_id, focus, intensity, youth_focus) VALUES (?, ?, ?, ?) ON CONFLICT (club_id) DO UPDATE SET focus = EXCLUDED.focus, intensity = EXCLUDED.intensity, youth_focus = EXCLUDED.youth_focus",
         state.clubId,
         data.focus,
         data.intensity,
@@ -835,7 +738,7 @@ export async function dispatchAction(
         })
         .parse(body);
       await store.run(
-        "MERGE INTO set_pieces WITH (HOLDLOCK) AS destination USING (VALUES (?, ?, ?, ?)) AS source(club_id, routine, target, risk) ON destination.club_id = source.club_id WHEN MATCHED THEN UPDATE SET routine = source.routine, target = source.target, risk = source.risk WHEN NOT MATCHED THEN INSERT (club_id, routine, target, risk) VALUES (source.club_id, source.routine, source.target, source.risk);",
+        "INSERT INTO set_pieces (club_id, routine, target, risk) VALUES (?, ?, ?, ?) ON CONFLICT (club_id) DO UPDATE SET routine = EXCLUDED.routine, target = EXCLUDED.target, risk = EXCLUDED.risk",
         state.clubId,
         data.routine,
         data.target,
@@ -956,7 +859,7 @@ export async function dispatchAction(
         .enum(["youth", "back-manager", "budget", "recovery"])
         .parse(body.approach);
       const last = await store.get<{ value: string }>(
-        "SELECT [value] FROM meta WHERE [key] = 'lastBoardMeeting'",
+        "SELECT value FROM meta WHERE key = 'lastBoardMeeting'",
       );
       if (last && daysBetween(JSON.parse(last.value), state.date) < 7)
         throw new GameError("The board will meet with you again next week.");
@@ -1066,7 +969,7 @@ export async function dispatchAction(
         );
       // Pin the operating reference first, so a slider move never lowers running costs or survives the rollover.
       await store.run(
-        "UPDATE clubs SET transfer_budget = transfer_budget - ?, wage_budget = wage_budget + ?, data = JSON_MODIFY(coalesce(data,'{}'),'$.operatingWageBudget',coalesce(TRY_CONVERT(float,JSON_VALUE(coalesce(data,'{}'),'$.operatingWageBudget')),wage_budget)) WHERE id = ?",
+        "UPDATE clubs SET transfer_budget = transfer_budget - ?, wage_budget = wage_budget + ?, data = jsonb_set(data::jsonb, '{operatingWageBudget}', to_jsonb(coalesce((data::jsonb ->> 'operatingWageBudget')::double precision, wage_budget)))::text WHERE id = ?",
         amount,
         amount / 52,
         club.id,
@@ -1105,8 +1008,9 @@ export async function dispatchAction(
     }
     case "read-news": {
       const id = body.id === undefined ? undefined : idSchema.parse(body.id);
-      if (id) await store.run("UPDATE news SET [read] = 1 WHERE id = ?", id);
-      else await store.run("UPDATE news SET [read] = 1");
+      if (id) await store.run("UPDATE news SET read = 1 WHERE id = ?", id);
+      // Skipping read rows avoids rewriting every news tuple (MVCC) on each "mark all read".
+      else await store.run("UPDATE news SET read = 1 WHERE read = 0");
       return { message: "Inbox updated." };
     }
     default:
@@ -1119,24 +1023,32 @@ export interface AppDatabase {
   accounts?: Pick<Accounts, "resolve">;
 }
 
+export interface AppOptions {
+  /** Replaces OpenID Connect discovery and token validation (tests). */
+  oidcProvider?: OidcProvider;
+  /** Admin page operations; defaults to the account registry when it implements them. */
+  adminAccounts?: AccessAdministration;
+}
+
 /** `database` is an open store, or a function that opens it on the first request that needs SQL. */
 export function createApp(
   database: Store | (() => Promise<AppDatabase>),
   accounts?: Pick<Accounts, "resolve">,
-  options: InviteRouteOptions = {},
+  options: AppOptions = {},
 ) {
   const configuration = readApiConfiguration();
   const app = express();
+  const authenticator = configuration.auth
+    ? createAuthenticator({ auth: configuration.auth, provider: options.oidcProvider })
+    : undefined;
+  const authenticate = authenticator?.authenticate ?? (() => {
+    throw new AuthenticationRequiredError();
+  });
   const connection = (store: Store, resolver?: Pick<Accounts, "resolve">) => ({
     store,
     resolver: configuration.requireAuth
       ? resolver ?? new Accounts(store, "accounts", {
-        limits: {
-          maxPlayers: configuration.maxPlayers,
-          sizeLimitGb: configuration.inviteDbSizeLimitGb,
-          ownerObjectId: configuration.ownerObjectId,
-          ownerEmail: configuration.ownerEmail,
-        },
+        limits: { maxPlayers: configuration.maxPlayers, sizeLimitGb: configuration.dbSizeLimitGb },
       })
       : undefined,
   });
@@ -1150,9 +1062,9 @@ export function createApp(
     return connected;
   };
   const worlds = new Map<string, ReturnType<typeof createWorldRouter>>();
-  const localUser: AccountUser = { id: "local", displayName: "Local director", email: null };
+  const localUser: AccountUser = { id: "local", username: "local", displayName: "Local director", email: null, admin: false };
   app.disable("x-powered-by");
-  app.set("trust proxy", false);
+  app.set("trust proxy", configuration.trustProxy);
   app.use((request, response, next) => {
     response.setHeader("X-Content-Type-Options", "nosniff");
     response.setHeader("Referrer-Policy", "same-origin");
@@ -1163,7 +1075,9 @@ export function createApp(
     );
     response.setHeader(
       "Content-Security-Policy",
-      "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'",
+      "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; " +
+        // Sign-out is a form POST that redirects to the identity provider's logout endpoint.
+        ["form-action 'self'", ...(authenticator?.formActionOrigins ?? [])].join(" "),
     );
     if (configuration.hosted)
       response.setHeader("Strict-Transport-Security", "max-age=31536000");
@@ -1174,20 +1088,23 @@ export function createApp(
   app.get("/api/health", (_request, response) =>
     response.json({ status: "ok" } satisfies Health),
   );
-  app.use(createInviteRouter({
+  if (authenticator) app.use(authenticator.router);
+  app.use(createAdminRouter({
     configuration,
-    getStore: async () => (await getConnection()).store,
-    parsePrincipal: parseClientPrincipal,
-    ...options,
+    authenticate,
+    accounts: options.adminAccounts ?? (async () => {
+      const { resolver } = await getConnection();
+      return isAccessAdministration(resolver) ? resolver : undefined;
+    }),
   }));
   app.use("/api", (request, response, next) => {
     if (configuration.requireAuth) {
       try {
-        response.locals.identity = parseClientPrincipal(request.headers["x-ms-client-principal"], configuration);
+        response.locals.identity = authenticate(request);
       } catch (error) {
         if (error instanceof NotAuthorizedError)
           return response.status(error.status).json({ error: error.message, code: error.code });
-        return response.status(401).json({ error: "Authentication required." });
+        return response.status(401).json({ error: "Authentication required.", code: "authentication_required" });
       }
     } else {
       if (
@@ -1236,10 +1153,12 @@ export function createApp(
     if (request.path !== "/api" && !request.path.startsWith("/api/")) return next();
     try {
       const { store, resolver } = await getConnection();
-      const account = resolver
-        ? await resolver.resolve(response.locals.identity as AuthenticatedIdentity)
+      const identity = response.locals.identity as AuthenticatedIdentity | undefined;
+      const account = resolver && identity
+        ? await resolver.resolve(identity)
         : { user: localUser, store };
-      response.locals.user = account.user;
+      // Admin rights follow the signed-in identity's groups, not anything stored with the account.
+      response.locals.user = identity ? { ...account.user, admin: identity.admin } : account.user;
       const key = `${account.store.database}:${account.store.schemaName}`.toLowerCase();
       let world = worlds.get(key);
       if (!world) {
@@ -1254,6 +1173,7 @@ export function createApp(
   app.use("/api", (_request, response) =>
     response.status(404).json({ error: "API route not found." }),
   );
+  if (authenticator) app.use(authenticator.requireBrowserSession);
   const dist = resolve("dist");
   if (existsSync(resolve(dist, "index.html"))) {
     app.use(express.static(dist));
@@ -1266,19 +1186,19 @@ export function createApp(
   app.use(
     (
       error: unknown,
-      _request: Request,
+      request: Request,
       response: Response,
       _next: NextFunction,
     ) => {
-      if (response.headersSent) return response.destroy();
+      if (response.headersSent) {
+        logUnexpectedError(request, response, error);
+        return response.destroy();
+      }
       if (
         error instanceof AuthenticationRequiredError ||
         error instanceof NotAuthorizedError
       ) {
-        const body = error instanceof NotAuthorizedError
-          ? { error: error.message, code: error.code }
-          : { error: error.message };
-        return response.status(error.status).json(body);
+        return response.status(error.status).json({ error: error.message, code: error.code });
       }
       if (error instanceof Error && "code" in error && "status" in error) {
         const status = Number(error.status);
@@ -1287,10 +1207,8 @@ export function createApp(
           Number.isInteger(status) &&
           status >= 400 &&
           status < 600 &&
-          ["account_not_provisioned", "invite_required", "capacity_unavailable"].includes(code)
+          ["access_pending", "access_denied"].includes(code)
         ) {
-          if (code === "capacity_unavailable")
-            response.set("Retry-After", "300");
           return response.status(status).json({ error: error.message, code });
         }
       }
@@ -1330,13 +1248,30 @@ export function createApp(
             .status(415)
             .json({ error: "Unsupported request encoding." });
       }
-      console.error("Touchline: an API request failed.");
+      logUnexpectedError(request, response, error);
       return response.status(500).json({
         error: "An unexpected server error occurred.",
       });
     },
   );
   return app;
+}
+
+/**
+ * Logs an unexpected failure with its operation, route, SQLSTATE, message chain and stack, redacting configured
+ * secrets; request bodies and SQL parameters are never logged.
+ */
+export function logUnexpectedError(request: Pick<Request, "method" | "path">, response: Pick<Response, "locals">, error: unknown) {
+  const operation = typeof response.locals.operation === "string" ? response.locals.operation : "api_request";
+  const context = typeof response.locals.failureContext === "string" ? ` ${response.locals.failureContext}` : "";
+  const detail = error && typeof error === "object" ? describeSqlError(error).join(" | ") : String(error);
+  const stack = error instanceof Error && error.stack ? describeSqlError({ message: error.stack })[0] : "";
+  console.error(`Touchline: ${operation} failed (${request.method} ${request.path}${context}): ${detail}${stack ? `\n${stack}` : ""}`);
+}
+
+/** The message a player sees for a failure: game rule messages as they are, anything else generic. */
+function publicFailure(error: unknown) {
+  return error instanceof GameError && error.status < 500 ? error.message : "An unexpected server error occurred.";
 }
 
 const WORLD_REPLACING = new Set<WorldOperation>([
@@ -1397,6 +1332,7 @@ function createWorldRouter(
     async (request: Request, response: Response, next: NextFunction) => {
       if (activity) return conflict(response, activity);
       activity = { operation, startedAt: new Date().toISOString() };
+      response.locals.operation = operation;
       try {
         if (readers > 0)
           await new Promise<void>((resolveReads) => {
@@ -1419,7 +1355,7 @@ function createWorldRouter(
       async () =>
         ({
           status: "ok",
-          database: "SQL Server",
+          database: "PostgreSQL",
           databaseName: store.database,
           schema: store.schemaName,
           hosted: configuration.hosted,
@@ -1566,6 +1502,16 @@ function createWorldRouter(
     read((request) => playerCaps(store, idSchema.parse(request.params.id))),
   );
   app.get(
+    "/api/players/:id/gbe",
+    read((request) =>
+      gbeAssessment(
+        store,
+        idSchema.parse(request.params.id),
+        z.object({ asOf: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional() }).parse(request.query).asOf,
+      ),
+    ),
+  );
+  app.get(
     "/api/scouting",
     read(() => query.scouting(store)),
   );
@@ -1654,8 +1600,8 @@ function createWorldRouter(
         })
         .parse(request.query);
       return store.all<Club>(
-        `SELECT clubs.*, countries.name AS country_name, countries.code AS country_code FROM clubs JOIN countries ON countries.id = clubs.country_id WHERE clubs.type = 'club' AND clubs.name LIKE ? ${filter.country ? "AND country_id = ?" : ""} ORDER BY clubs.reputation DESC, clubs.id OFFSET 0 ROWS FETCH NEXT ? ROWS ONLY`,
-        `%${filter.q}%`,
+        `SELECT clubs.*, countries.name AS country_name, countries.code AS country_code FROM clubs JOIN countries ON countries.id = clubs.country_id WHERE clubs.type = 'club' AND clubs.name ILIKE ? ESCAPE '!' ${filter.country ? "AND country_id = ?" : ""} ORDER BY clubs.reputation DESC, clubs.id LIMIT ?`,
+        query.likePattern(filter.q),
         ...(filter.country ? [filter.country] : []),
         filter.limit,
       );
@@ -1696,8 +1642,8 @@ function createWorldRouter(
           limit: z.coerce.number().int().min(1).max(3000).default(200),
         })
         .parse(request.query);
-      const where = ["leagues.name LIKE ?"];
-      const params: (string | number)[] = [`%${filter.q}%`];
+      const where = ["leagues.name ILIKE ? ESCAPE '!'"];
+      const params: (string | number)[] = [query.likePattern(filter.q)];
       if (filter.country) {
         where.push("leagues.country_id = ?");
         params.push(filter.country);
@@ -1719,10 +1665,10 @@ function createWorldRouter(
           "EXISTS(SELECT 1 FROM competition_favorites WHERE league_id = leagues.id)",
         );
       return store.all(
-        `SELECT leagues.*, countries.name AS country_name FROM leagues LEFT JOIN countries ON countries.id = leagues.country_id WHERE ${where.join(" AND ")} ORDER BY leagues.reputation DESC, leagues.name, leagues.id OFFSET ? ROWS FETCH NEXT ? ROWS ONLY`,
+        `SELECT leagues.*, countries.name AS country_name FROM leagues LEFT JOIN countries ON countries.id = leagues.country_id WHERE ${where.join(" AND ")} ORDER BY leagues.reputation DESC, lower(leagues.name), leagues.id LIMIT ? OFFSET ?`,
         ...params,
-        (filter.page - 1) * filter.limit,
         filter.limit,
+        (filter.page - 1) * filter.limit,
       );
     }),
   );
@@ -1778,16 +1724,18 @@ function createWorldRouter(
         .object({ days: z.number().int().min(1).max(28) })
         .parse(request.body);
       const started = performance.now();
-      const result = await store.transaction(async () => {
-        const initial = await stateOf(store);
-        const progress = {
-          from: initial.date,
-          date: initial.date,
-          days: 0,
-          matches: 0,
-          seconds: 0,
-        };
-        for (let step = 0; step < days; step++) {
+      const initial = await stateOf(store);
+      const progress: AdvanceResult = {
+        from: initial.date,
+        date: initial.date,
+        days: 0,
+        matches: 0,
+        seconds: 0,
+      };
+      // Every simulated day (and its autosave) commits on its own: no transaction or world lock spans the request,
+      // and a failure keeps the days already played. `activity` still holds other mutations and reads off until the end.
+      for (let step = 0; step < days; step++) {
+        try {
           const day = await advance(store, 1);
           progress.days += day.days;
           progress.matches += day.matches;
@@ -1802,11 +1750,16 @@ function createWorldRouter(
           )
             await saves.create("Career", true);
           if (state.gameOver) break;
+        } catch (error) {
+          response.locals.failureContext = `after ${progress.days} of ${days} days, from ${progress.date}`;
+          if (!progress.days) throw error;
+          if (!(error instanceof GameError && error.status < 500)) logUnexpectedError(request, response, error);
+          progress.error = `The simulation stopped after ${progress.date}; ${progress.days === 1 ? "1 day was" : `${progress.days} days were`} simulated and kept. ${publicFailure(error)}`;
+          break;
         }
-        return progress;
-      });
-      result.seconds = Math.round((performance.now() - started) / 10) / 100;
-      response.json(result);
+      }
+      progress.seconds = Math.round((performance.now() - started) / 10) / 100;
+      response.json(progress);
     }),
   );
   app.get(

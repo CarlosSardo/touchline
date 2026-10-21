@@ -3,13 +3,12 @@ import request from "supertest";
 import { randomUUID } from "node:crypto";
 import { readFile, rm } from "node:fs/promises";
 import { openOnFirstUse, Store } from "./db.ts";
-import { AccountNotProvisionedError, type AuthenticatedIdentity } from "./accounts.ts";
+import { AccessDeniedError, AccessPendingError } from "./accounts.ts";
 import { processCompetitionNotifications } from "./notifications.ts";
 import { generateWorld } from "./world.ts";
 import { createCalendar } from "./calendar.ts";
 import { createApp, isCalendarDate, loanDurationError, MAX_LOAN_DAYS, readApiConfiguration } from "./app.ts";
-import { CONSUMER_TENANT_ID } from "./invite-store.ts";
-import { OWNER_EMAIL_DEFAULT } from "./legacy-account.ts";
+import { sessionCookieName, signSession, type AuthenticatedIdentity } from "./auth.ts";
 import { playerSearchChanged } from "./queries.ts";
 import { initialInbox, stateOf } from "./systems.ts";
 import { Saves } from "./saves.ts";
@@ -20,26 +19,46 @@ import { clubTransfersChanged } from "./club-transfers.ts";
 import type { AccountUser, SaveSlot } from "../shared/api.ts";
 import { createUnexpectedEvent } from "./events.ts";
 
+// Authelia subjects are opaque per-user UUIDs.
 const owner = "11111111-1111-1111-1111-111111111111";
 const guest = "22222222-2222-2222-2222-222222222222";
 const secondGuest = "33333333-3333-3333-3333-333333333333";
-const tenant = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+const issuer = "https://auth.example.com";
+const sessionSecret = "session-secret-abcdefghijklmnopqrstuvwxyz";
 const configuration = {
-  CONTAINER_APP_NAME: "touchline",
   API_HOST: "0.0.0.0",
   REQUIRE_AUTH: "true",
-  OWNER_OBJECT_ID: owner,
-  ALLOWED_USER_OBJECT_IDS: `${guest}, ${secondGuest}`,
-  AZURE_TENANT_ID: tenant,
   APP_ORIGIN: "https://touchline.example.com",
-  INVITE_SIGNING_SECRET: "12345678901234567890123456789012",
-  EMAIL_TRANSPORT: "gmail",
-  OWNER_EMAIL: OWNER_EMAIL_DEFAULT,
+  OIDC_ISSUER: issuer,
+  OIDC_CLIENT_ID: "touchline",
+  OIDC_CLIENT_SECRET: "client-secret-value",
+  SESSION_SECRET: sessionSecret,
 };
-const principal = (objectId: string, tenantId = tenant, additional: { typ: string; val: string }[] = []) =>
-  Buffer.from(JSON.stringify({ auth_typ: "aad", claims: [
-    { typ: "oid", val: objectId }, { typ: "tid", val: tenantId }, ...additional,
-  ] })).toString("base64");
+type Profile = { email?: string; name?: string; username?: string; admin?: boolean };
+const identityOf = (subject: string, profile: Profile = {}): AuthenticatedIdentity => ({
+  issuer,
+  subject,
+  username: profile.username ?? "director",
+  displayName: profile.name ?? "Sporting director",
+  email: profile.email ?? null,
+  groups: profile.admin ? ["admins", "family"] : ["family"],
+  admin: profile.admin ?? false,
+});
+/** The account user an Accounts resolver would return for the identity. */
+const userOf = (identity: AuthenticatedIdentity, id = identity.subject): AccountUser => ({
+  id, username: identity.username, displayName: identity.displayName, email: identity.email, admin: identity.admin,
+});
+/** Cookie header for a signed-in session, as issued by GET /auth/callback (see auth.test.ts for the OIDC flow). */
+const signedIn = (
+  subject: string,
+  profile: Profile = {},
+  options: { secret?: string; issuedAt?: Date; issuer?: string } = {},
+) =>
+  `${sessionCookieName(true)}=${signSession(
+    { ...identityOf(subject, profile), issuer: options.issuer ?? issuer },
+    { sessionSecret: options.secret ?? sessionSecret, sessionTtlSeconds: 3600 },
+    options.issuedAt,
+  )}`;
 const sqlIntegration = process.env.SQL_INTEGRATION_TESTS === "true";
 
 describe("action input validation (no database)", () => {
@@ -60,153 +79,221 @@ describe("action input validation (no database)", () => {
   });
 });
 
-describe("hosted invitation access (no database)", () => {
-  const app = (
-    allowed = configuration.ALLOWED_USER_OBJECT_IDS,
-    resolver?: Parameters<typeof createApp>[1],
-  ) => {
-    for (const [name, value] of Object.entries({ ...configuration, ALLOWED_USER_OBJECT_IDS: allowed }))
-      vi.stubEnv(name, value);
+describe("hosted access (no database)", () => {
+  const app = (resolver?: Parameters<typeof createApp>[1]) => {
+    for (const [name, value] of Object.entries(configuration)) vi.stubEnv(name, value);
     const store = Object.create(Store.prototype) as Store;
     return createApp(store, resolver ?? {
       async resolve(identity) {
-        return { user: { id: identity.objectId, displayName: identity.displayName, email: identity.email }, store };
+        return { user: userOf(identity), store };
       },
     });
   };
   afterEach(() => vi.unstubAllEnvs());
 
-  it.each([owner, guest, secondGuest])("admits the configured account %s", async (objectId) => {
-    const response = await request(app()).get("/api/access-probe")
-      .set("x-ms-client-principal", principal(objectId, tenant.toUpperCase()));
+  it.each([owner, guest, secondGuest])("admits the signed-in identity %s", async (subject) => {
+    const response = await request(app()).get("/api/access-probe").set("Cookie", signedIn(subject));
     expect(response.status).toBe(404);
     expect(response.body.error).toBe("API route not found.");
   });
 
-  it("rejects anonymous and unlisted home-tenant accounts", async () => {
-    const application = app();
+  it("rejects anonymous requests and sessions issued for another provider", async () => {
+    const resolve = vi.fn(async () => { throw new Error("Must not resolve"); });
+    const application = app({ resolve });
     expect((await request(application).get("/api/access-probe")).status).toBe(401);
-    const response = await request(application).get("/api/access-probe")
-      .set("x-ms-client-principal", principal("44444444-4444-4444-4444-444444444444"));
-    expect(response.status).toBe(403);
-    expect(response.body.code).toBe("not_authorized");
-  });
-
-  it("passes consumers-tenant identities to account resolution with lowercased email", async () => {
-    const resolve = vi.fn(async (identity: AuthenticatedIdentity) => {
-      return { user: { id: identity.objectId, displayName: identity.displayName, email: identity.email }, store: Object.create(Store.prototype) as Store };
-    });
-    const response = await request(app("", { resolve })).get("/api/access-probe")
-      .set("x-ms-client-principal", principal(guest, CONSUMER_TENANT_ID, [
-        { typ: "preferred_username", val: "Player@Example.TEST" },
-      ]));
-    expect(response.status).toBe(404);
-    expect(resolve).toHaveBeenCalledWith(expect.objectContaining({
-      tenantId: CONSUMER_TENANT_ID,
-      objectId: guest,
-      email: "player@example.test",
-    }));
-  });
-
-  it("passes the MSA owner identity to account resolution", async () => {
-    const resolve = vi.fn(async (identity: AuthenticatedIdentity) => {
-      return { user: { id: "owner-account", displayName: identity.displayName, email: identity.email }, store: Object.create(Store.prototype) as Store };
-    });
-    const response = await request(app("", { resolve })).get("/api/access-probe")
-      .set("x-ms-client-principal", principal(guest, CONSUMER_TENANT_ID, [
-        { typ: "email", val: OWNER_EMAIL_DEFAULT.toUpperCase() },
-        { typ: "name", val: "Owner Director" },
-      ]));
-    expect(response.status).toBe(404);
-    expect(resolve).toHaveBeenCalledWith(expect.objectContaining({
-      tenantId: CONSUMER_TENANT_ID,
-      objectId: guest,
-      email: OWNER_EMAIL_DEFAULT,
-    }));
-  });
-
-  it("rejects other tenants even when the email is the approver", async () => {
-    const resolve = vi.fn(async () => { throw new Error("Must not resolve unauthorized tenants"); });
-    const response = await request(app("", { resolve })).get("/api/access-probe")
-      .set("x-ms-client-principal", principal(guest, owner, [
-        { typ: "email", val: "sardo.kiko@gmail.com" },
-      ]));
-    expect(response.status).toBe(403);
-    expect(response.body.code).toBe("not_authorized");
+    const other = await request(application).get("/api/access-probe")
+      .set("Cookie", signedIn(owner, { admin: true }, { issuer: "https://other.example.com" }));
+    expect(other.status).toBe(401);
+    expect(other.body).toEqual({ error: "Authentication required.", code: "authentication_required" });
     expect(resolve).not.toHaveBeenCalled();
   });
 
-  it("rejects conflicting identity claims even when both accounts are allowed", async () => {
-    const identity = principal(owner, tenant, [{
-      typ: "http://schemas.microsoft.com/identity/claims/objectidentifier", val: guest,
-    }]);
-    expect((await request(app()).get("/api/access-probe")
-      .set("x-ms-client-principal", identity)).status).toBe(403);
+  it("passes the signed-in identity to account resolution", async () => {
+    const store = Object.create(Store.prototype) as Store;
+    const resolve = vi.fn(async (identity: AuthenticatedIdentity) => ({ user: userOf(identity), store }));
+    const profile = { email: "player@example.test", name: "Player One", username: "player1" };
+    const response = await request(app({ resolve })).get("/api/access-probe").set("Cookie", signedIn(guest, profile));
+    expect(response.status).toBe(404);
+    expect(resolve).toHaveBeenCalledWith({
+      issuer, subject: guest, username: "player1", displayName: "Player One", email: "player@example.test",
+      groups: ["family"], admin: false,
+    } satisfies AuthenticatedIdentity);
+    await request(app({ resolve })).get("/api/access-probe").set("Cookie", signedIn(owner, { admin: true }));
+    expect(resolve).toHaveBeenLastCalledWith(expect.objectContaining({ subject: owner, groups: ["admins", "family"], admin: true }));
   });
 
-  it("rejects conflicting tenant claims before resolving an account", async () => {
-    const resolve = vi.fn(async () => { throw new AccountNotProvisionedError(); });
-    const application = app(undefined, { resolve });
-    const response = await request(application).get("/api/me")
-      .set("x-ms-client-principal", principal(owner, tenant, [{
-        typ: "http://schemas.microsoft.com/identity/claims/tenantid", val: guest,
-      }]));
+  it.each([
+    [new AccessPendingError(), "access_pending"],
+    [new AccessDeniedError(), "access_denied"],
+  ] as const)("answers 403 %s without opening a world", async (error, code) => {
+    const resolve = vi.fn(async () => { throw error; });
+    const response = await request(app({ resolve })).get("/api/me").set("Cookie", signedIn(guest));
     expect(response.status).toBe(403);
-    expect(resolve).not.toHaveBeenCalled();
-  });
-
-  it.each([owner, guest])("denies an unprovisioned allowed account without an owner fallback: %s", async (objectId) => {
-    const resolve = vi.fn(async () => { throw new AccountNotProvisionedError(); });
-    const application = app(undefined, { resolve });
-    const response = await request(application).get("/api/me")
-      .set("x-ms-client-principal", principal(objectId));
-    expect(response.status).toBe(403);
-    expect(response.body.code).toBe("account_not_provisioned");
+    expect(response.headers["retry-after"]).toBeUndefined();
+    expect(response.body).toEqual({ error: error.message, code });
     expect(resolve).toHaveBeenCalledOnce();
+  });
+
+  it("rejects forged, tampered, expired and proxy identity headers before resolving an account", async () => {
+    const resolve = vi.fn(async () => { throw new AccessPendingError(); });
+    const application = app({ resolve });
+    const valid = signedIn(guest).split("=")[1];
+    const [body, signature] = valid.split(".");
+    const forge = (changes: object) => Buffer.from(JSON.stringify({
+      ...JSON.parse(Buffer.from(body, "base64url").toString("utf8")), ...changes,
+    })).toString("base64url");
+    for (const attempt of [
+      { cookie: `${sessionCookieName(true)}=${forge({ sub: owner })}.${signature}` },
+      { cookie: `${sessionCookieName(true)}=${forge({ adm: true, groups: ["admins"] })}.${signature}` },
+      { cookie: signedIn(owner, {}, { secret: "another-secret-abcdefghijklmnopqrstuvwxyz" }) },
+      { cookie: signedIn(owner, {}, { issuedAt: new Date(Date.now() - 2 * 3600_000) }) },
+      { cookie: `touchline_session=${valid}` },
+      // Forward-auth headers (Caddy + Authelia) are never trusted: only the signed OIDC session counts.
+      { headers: { "Remote-User": "owner", "Remote-Groups": "admins", "Remote-Email": "owner@example.test" } },
+    ]) {
+      const probe = request(application).get("/api/me");
+      if (attempt.cookie) probe.set("Cookie", attempt.cookie);
+      if (attempt.headers) probe.set(attempt.headers);
+      const response = await probe;
+      expect(response.status).toBe(401);
+      expect(response.body).toEqual({ error: "Authentication required.", code: "authentication_required" });
+    }
+    expect(resolve).not.toHaveBeenCalled();
+  });
+
+  it("redirects anonymous browser navigations to sign-in and keeps sign-in routes public", async () => {
+    const application = app();
+    const page = await request(application).get("/squad?tab=1");
+    expect(page.status).toBe(302);
+    expect(page.headers.location).toBe("/auth/login?returnTo=%2Fsquad%3Ftab%3D1");
+    expect((await request(application).get("/")).headers.location).toBe("/auth/login");
+    const signedOut = await request(application).get("/auth/signed-out");
+    expect(signedOut.status).toBe(200);
+    expect(signedOut.text).toContain("You're signed out");
+    expect((await request(application).get("/invite")).headers.location).toBe("/auth/login?returnTo=%2Finvite");
+    expect((await request(application).get("/admin")).headers.location).toBe("/auth/login?returnTo=%2Fadmin");
+    const retiredInvites = await request(application).get("/admin/invites");
+    expect(retiredInvites.status).toBe(301);
+    expect(retiredInvites.headers.location).toBe("/admin");
+    expect((await request(application).get("/squad").set("Cookie", signedIn(owner))).status).not.toBe(302);
+    expect((await request(application).post("/squad")).status).toBe(401);
   });
 
   it("keeps anonymous health public without invoking account resolution", async () => {
     const resolve = vi.fn(async () => { throw new Error("Must not resolve health"); });
-    const response = await request(app(undefined, { resolve })).get("/api/health");
+    const response = await request(app({ resolve })).get("/api/health");
     expect(response.status).toBe(200);
     expect(response.body).toEqual({ status: "ok" });
     expect(resolve).not.toHaveBeenCalled();
   });
 
-  it("keeps owner-only access when no guest IDs are configured", async () => {
-    const application = app("");
-    expect((await request(application).get("/api/access-probe")
-      .set("x-ms-client-principal", principal(guest))).status).toBe(403);
-    expect((await request(application).get("/api/access-probe")
-      .set("x-ms-client-principal", principal(owner))).status).toBe(404);
+  it("fails on removed security variables and only warns about removed email variables", () => {
+    for (const name of ["OWNER_OBJECT_ID", "ALLOWED_USER_OBJECT_IDS", "AUTH_HOME_TENANT_ID", "AZURE_TENANT_ID"]) {
+      expect(() => readApiConfiguration({ ...configuration, [name]: owner }), name).toThrow(`removed: ${name}`);
+      expect(() => readApiConfiguration({ API_HOST: "127.0.0.1", [name]: owner }), name).toThrow(`removed: ${name}`);
+    }
+    expect(readApiConfiguration({ ...configuration, OWNER_OBJECT_ID: " " }).warnings).toEqual([]);
+    expect(() => readApiConfiguration({ ...configuration, INVITE_DB_SIZE_LIMIT_GB: "8" }))
+      .toThrow("INVITE_DB_SIZE_LIMIT_GB was renamed to DB_SIZE_LIMIT_GB");
+    expect(readApiConfiguration(configuration).warnings).toEqual([]);
+    expect(readApiConfiguration({
+      ...configuration,
+      INVITE_SIGNING_SECRET: "12345678901234567890123456789012",
+      EMAIL_TRANSPORT: "gmail",
+      SMTP_USER: "touchline@example.test",
+      SMTP_PASS: "app-password",
+      APPROVER_EMAIL: "owner@example.test",
+      OWNER_EMAIL: "owner@example.test",
+    }).warnings).toEqual([
+      "removed and ignored (email delivery no longer exists): INVITE_SIGNING_SECRET, EMAIL_TRANSPORT, APPROVER_EMAIL, OWNER_EMAIL, SMTP_PASS, SMTP_USER.",
+    ]);
   });
 
-  it("refuses email addresses and malformed object IDs in the allowlist", () => {
-    expect(() => readApiConfiguration({ ...configuration, ALLOWED_USER_OBJECT_IDS: "guest@example.com" }))
-      .toThrow("Entra object UUIDs");
-    expect(() => readApiConfiguration({ ...configuration, ALLOWED_USER_OBJECT_IDS: "not-an-id" }))
-      .toThrow("Entra object UUIDs");
-  });
-
-  it("validates invite and mail configuration", () => {
+  it("reads access capacity and the admin group", () => {
     expect(readApiConfiguration(configuration)).toEqual(expect.objectContaining({
-      approverEmail: "sardo.kiko@gmail.com",
-      ownerEmail: OWNER_EMAIL_DEFAULT,
+      adminGroup: "admins",
       maxPlayers: 10,
-      inviteDbSizeLimitGb: 24,
-      emailTransport: "gmail",
+      dbSizeLimitGb: 24,
+      warnings: [],
     }));
-    expect(readApiConfiguration({ ...configuration, EMAIL_TRANSPORT: "disabled" }).emailTransport).toBe("disabled");
-    expect(() => readApiConfiguration({ ...configuration, INVITE_SIGNING_SECRET: "short" }))
-      .toThrow("INVITE_SIGNING_SECRET");
-    expect(() => readApiConfiguration({ ...configuration, EMAIL_TRANSPORT: "log" }))
-      .toThrow("EMAIL_TRANSPORT must be gmail or disabled when hosted");
-    expect(() => readApiConfiguration({ ...configuration, MAX_PLAYERS: "0" }))
-      .toThrow("MAX_PLAYERS");
-    expect(() => readApiConfiguration({ ...configuration, APPROVER_EMAIL: "not-an-email" }))
-      .toThrow("APPROVER_EMAIL");
-    expect(() => readApiConfiguration({ ...configuration, OWNER_EMAIL: "not-an-email" }))
-      .toThrow("OWNER_EMAIL");
+    expect(readApiConfiguration({ ...configuration, MAX_PLAYERS: "4", DB_SIZE_LIMIT_GB: "2.5", ADMIN_GROUP: " touchline-admins " }))
+      .toEqual(expect.objectContaining({ maxPlayers: 4, dbSizeLimitGb: 2.5, adminGroup: "touchline-admins" }));
+    expect(readApiConfiguration({ ...configuration, ADMIN_GROUP: "touchline-admins" }).auth?.adminGroup).toBe("touchline-admins");
+    for (const [overrides, message] of [
+      [{ MAX_PLAYERS: "0" }, "MAX_PLAYERS"],
+      [{ MAX_PLAYERS: "2.5" }, "MAX_PLAYERS"],
+      [{ DB_SIZE_LIMIT_GB: "0" }, "DB_SIZE_LIMIT_GB"],
+      [{ DB_SIZE_LIMIT_GB: "lots" }, "DB_SIZE_LIMIT_GB"],
+      [{ ADMIN_GROUP: "touchline admins" }, "ADMIN_GROUP"],
+      [{ ADMIN_GROUP: "a".repeat(65) }, "ADMIN_GROUP"],
+    ] as const)
+      expect(() => readApiConfiguration({ ...configuration, ...overrides }), message).toThrow(message);
+  });
+
+  it("validates hosted sign-in configuration strictly", () => {
+    const hosted = readApiConfiguration(configuration);
+    expect(hosted).toEqual(expect.objectContaining({ hosted: true, trustProxy: "loopback" }));
+    expect(hosted.auth).toEqual({
+      issuer,
+      clientId: "touchline",
+      clientSecret: "client-secret-value",
+      logoutUrl: undefined,
+      adminGroup: "admins",
+      sessionSecret,
+      sessionTtlSeconds: 8 * 3600,
+      appOrigin: "https://touchline.example.com",
+      redirectUri: "https://touchline.example.com/auth/callback",
+      postLogoutRedirectUri: "https://touchline.example.com/auth/signed-out",
+      secureCookies: true,
+    });
+    expect(readApiConfiguration({ ...configuration, REQUIRE_AUTH: "false", API_HOST: "127.0.0.1", APP_ORIGIN: undefined }))
+      .toEqual(expect.objectContaining({ hosted: false, auth: undefined, trustProxy: false }));
+    expect(readApiConfiguration({ API_HOST: "127.0.0.1" }).auth).toBeUndefined();
+    expect(readApiConfiguration({ ...configuration, TRUST_PROXY: "1" }).trustProxy).toBe(1);
+    expect(readApiConfiguration({ ...configuration, TRUST_PROXY: "loopback, 172.18.0.0/16" }).trustProxy).toBe("loopback,172.18.0.0/16");
+    expect(readApiConfiguration({ ...configuration, SESSION_TTL_HOURS: "24" }).auth?.sessionTtlSeconds).toBe(24 * 3600);
+    expect(readApiConfiguration({ ...configuration, OIDC_LOGOUT_URL: `${issuer}/logout?rd=https%3A%2F%2Ftouchline.example.com` }).auth?.logoutUrl)
+      .toBe(`${issuer}/logout?rd=https%3A%2F%2Ftouchline.example.com`);
+    for (const [overrides, message] of [
+      [{ API_HOST: "0.0.0.0", REQUIRE_AUTH: undefined }, "Public API binding requires explicit REQUIRE_AUTH=true"],
+      [{ REQUIRE_AUTH: "yes" }, "REQUIRE_AUTH must be true or false"],
+      [{ APP_ORIGIN: undefined }, "REQUIRE_AUTH=true requires APP_ORIGIN"],
+      [{ APP_ORIGIN: "http://touchline.example.com" }, "APP_ORIGIN must be an exact HTTPS hosted origin"],
+      [{ APP_ORIGIN: "https://touchline.example.com/" }, "APP_ORIGIN must be an exact HTTPS hosted origin"],
+      [{ OIDC_ISSUER: undefined }, "REQUIRE_AUTH=true requires OIDC_ISSUER"],
+      [{ OIDC_ISSUER: " " }, "REQUIRE_AUTH=true requires OIDC_ISSUER"],
+      [{ OIDC_ISSUER: "http://auth.example.com" }, "OIDC_ISSUER"],
+      [{ OIDC_ISSUER: "auth.example.com" }, "OIDC_ISSUER"],
+      [{ OIDC_ISSUER: "https://user:pass@auth.example.com" }, "OIDC_ISSUER"],
+      [{ OIDC_ISSUER: "https://auth.example.com/?client=x" }, "OIDC_ISSUER"],
+      [{ OIDC_CLIENT_ID: undefined }, "OIDC_CLIENT_ID"],
+      [{ OIDC_CLIENT_ID: "touch line" }, "OIDC_CLIENT_ID"],
+      [{ OIDC_CLIENT_SECRET: undefined }, "OIDC_CLIENT_SECRET"],
+      [{ OIDC_LOGOUT_URL: "http://auth.example.com/logout" }, "OIDC_LOGOUT_URL"],
+      [{ OIDC_LOGOUT_URL: "/logout" }, "OIDC_LOGOUT_URL"],
+      [{ SESSION_SECRET: undefined }, "SESSION_SECRET"],
+      [{ SESSION_SECRET: "too-short" }, "SESSION_SECRET"],
+      [{ OIDC_CLIENT_SECRET: sessionSecret }, "SESSION_SECRET must differ from OIDC_CLIENT_SECRET"],
+      [{ SESSION_TTL_HOURS: "0" }, "SESSION_TTL_HOURS"],
+      [{ SESSION_TTL_HOURS: "1.5" }, "SESSION_TTL_HOURS"],
+      [{ TRUST_PROXY: "true" }, "TRUST_PROXY=true"],
+      [{ TRUST_PROXY: "proxy.example" }, "TRUST_PROXY must be"],
+      [{ TRUST_PROXY: "10.0.0.0/33" }, "TRUST_PROXY must be"],
+    ] as const)
+      expect(() => readApiConfiguration({ ...configuration, ...overrides }), message).toThrow(message);
+  });
+
+  it("allows sign-out redirects only to the provider in the CSP form-action", async () => {
+    const csp = async (environment: Record<string, string>) => {
+      for (const [name, value] of Object.entries({ ...configuration, ...environment })) vi.stubEnv(name, value);
+      const store = Object.create(Store.prototype) as Store;
+      const application = createApp(store, { resolve: async (identity) => ({ user: userOf(identity), store }) });
+      return (await request(application).get("/api/health")).headers["content-security-policy"];
+    };
+    expect(await csp({})).toMatch(/form-action 'self' https:\/\/auth\.example\.com$/);
+    expect(await csp({ OIDC_LOGOUT_URL: `${issuer}/logout` })).toMatch(/form-action 'self' https:\/\/auth\.example\.com$/);
+    expect(await csp({ OIDC_LOGOUT_URL: "https://sso.example.net/logout" }))
+      .toMatch(/form-action 'self' https:\/\/auth\.example\.com https:\/\/sso\.example\.net$/);
   });
 
   it("preserves same-origin referrers for hosted cookie CSRF validation", async () => {
@@ -214,9 +301,9 @@ describe("hosted invitation access (no database)", () => {
     expect(response.headers["referrer-policy"]).toBe("same-origin");
   });
 
-  it.each([owner, guest, secondGuest])("admits same-origin mutations for %s", async (objectId) => {
+  it.each([owner, guest, secondGuest])("admits same-origin mutations for %s", async (subject) => {
     const response = await request(app()).post("/api/access-probe")
-      .set("x-ms-client-principal", principal(objectId))
+      .set("Cookie", signedIn(subject))
       .set("Origin", configuration.APP_ORIGIN)
       .set("Referer", `${configuration.APP_ORIGIN}/`)
       .send({ type: "read-news" });
@@ -226,8 +313,8 @@ describe("hosted invitation access (no database)", () => {
 
   it.each([undefined, "null", "https://other.example.com"])("rejects mutations with untrusted origin %s", async (origin) => {
     const resolve = vi.fn(async () => { throw new Error("Untrusted origins must not resolve accounts"); });
-    const mutation = request(app(undefined, { resolve })).post("/api/careers/prepare")
-      .set("x-ms-client-principal", principal(guest))
+    const mutation = request(app({ resolve })).post("/api/careers/prepare")
+      .set("Cookie", signedIn(guest))
       .set("Referer", `${configuration.APP_ORIGIN}/`);
     if (origin) mutation.set("Origin", origin);
     expect((await mutation.send({ type: "read-news" })).status).toBe(403);
@@ -246,7 +333,7 @@ describe("SQL opened on the first request that needs it (no database)", () => {
       store,
       accounts: {
         async resolve(identity: AuthenticatedIdentity) {
-          return { user: { id: identity.objectId, displayName: identity.displayName, email: identity.email }, store };
+          return { user: userOf(identity), store };
         },
       },
     };
@@ -259,11 +346,11 @@ describe("SQL opened on the first request that needs it (no database)", () => {
     expect(health.status).toBe(200);
     expect(health.body).toEqual({ status: "ok" });
     expect((await request(application).get("/api/bootstrap")).status).toBe(401);
-    expect((await request(application).get("/api/me").set("x-ms-client-principal", "not a principal")).status).toBe(401);
+    expect((await request(application).get("/api/me").set("Cookie", `${sessionCookieName(true)}=not.a-session`)).status).toBe(401);
     expect((await request(application).get("/api/me")
-      .set("x-ms-client-principal", principal("44444444-4444-4444-4444-444444444444"))).status).toBe(403);
+      .set("Cookie", signedIn(owner, {}, { issuer: "https://other.example.com" }))).status).toBe(401);
     expect((await request(application).post("/api/careers/prepare")
-      .set("x-ms-client-principal", principal(owner)).send({})).status).toBe(403);
+      .set("Cookie", signedIn(owner)).send({})).status).toBe(403);
     expect((await request(application).get("/")).status).toBeLessThan(500);
     expect(open).not.toHaveBeenCalled();
   });
@@ -272,7 +359,7 @@ describe("SQL opened on the first request that needs it (no database)", () => {
     const open = vi.fn<() => Promise<ReturnType<typeof fakeDatabase>>>()
       .mockRejectedValueOnce(new Error("Database is not currently available (40613)"));
     const application = createApp(openOnFirstUse(open, { retryFor: 0 }).get);
-    const unavailable = await request(application).get("/api/me").set("x-ms-client-principal", principal(owner));
+    const unavailable = await request(application).get("/api/me").set("Cookie", signedIn(owner));
     expect(unavailable.status).toBe(503);
     expect(unavailable.headers["retry-after"]).toBe("5");
     expect(unavailable.body).toEqual({
@@ -281,15 +368,15 @@ describe("SQL opened on the first request that needs it (no database)", () => {
     });
     let finish: (database: ReturnType<typeof fakeDatabase>) => void = () => {};
     open.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
-    const pending = [owner, guest, secondGuest].map((objectId) =>
-      request(application).get("/api/access-probe").set("x-ms-client-principal", principal(objectId)).then((response) => response));
+    const pending = [owner, guest, secondGuest].map((subject) =>
+      request(application).get("/api/access-probe").set("Cookie", signedIn(subject)).then((response) => response));
     await vi.waitFor(() => expect(open).toHaveBeenCalledTimes(2));
     finish(fakeDatabase());
     for (const response of await Promise.all(pending)) {
       expect(response.status).toBe(404);
       expect(response.body.error).toBe("API route not found.");
     }
-    expect((await request(application).get("/api/access-probe").set("x-ms-client-principal", principal(guest))).status).toBe(404);
+    expect((await request(application).get("/api/access-probe").set("Cookie", signedIn(guest))).status).toBe(404);
     expect(open).toHaveBeenCalledTimes(2);
   });
 });
@@ -301,12 +388,14 @@ describe.skipIf(!sqlIntegration)("per-user HTTP isolation (two isolated SQL sche
   let ownerWorld: Store;
   let app: ReturnType<typeof createApp>;
   let baseline: { file: string; name: string };
-  const access = (method: "get" | "post" | "patch" | "delete", path: string, objectId = owner) =>
+  const access = (method: "get" | "post" | "patch" | "delete", path: string, subject = owner) =>
     request(app)[method](path)
-      .set("x-ms-client-principal", principal(objectId, tenant, [
-        { typ: "name", val: objectId === owner ? "Owner Director" : "Guest Director" },
-        { typ: "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress", val: "shared@example.test" },
-      ]))
+      .set("Cookie", signedIn(subject, {
+        name: subject === owner ? "Owner Director" : "Guest Director",
+        username: subject === owner ? "owner" : "guest",
+        email: "shared@example.test",
+        admin: subject === owner,
+      }))
       .set("Origin", configuration.APP_ORIGIN);
 
   beforeAll(async () => {
@@ -334,13 +423,10 @@ describe.skipIf(!sqlIntegration)("per-user HTTP isolation (two isolated SQL sche
     const worlds = new Map([[owner, ownerWorld], [guest, root]]);
     app = createApp(root, {
       async resolve(identity: AuthenticatedIdentity) {
-        const store = worlds.get(identity.objectId);
-        if (identity.tenantId !== tenant || !store) throw new AccountNotProvisionedError();
-        const user: AccountUser = {
-          id: identity.objectId === owner ? "owner-account" : "guest-account",
-          displayName: identity.displayName,
-          email: identity.email,
-        };
+        const store = worlds.get(identity.subject);
+        if (identity.issuer !== issuer || !store) throw new AccessPendingError();
+        // The admin flag in /api/me must follow the session's groups, not the stored account.
+        const user = { ...userOf(identity, identity.subject === owner ? "owner-account" : "guest-account"), admin: false };
         return { user, store };
       },
     });
@@ -363,7 +449,7 @@ describe.skipIf(!sqlIntegration)("per-user HTTP isolation (two isolated SQL sche
       .query({ schema: root.schemaName, userId: guest, email: "shared@example.test" });
     expect(session.status).toBe(200);
     expect(session.body).toEqual({
-      user: { id: "owner-account", displayName: "Owner Director", email: "shared@example.test" },
+      user: { id: "owner-account", username: "owner", displayName: "Owner Director", email: "shared@example.test", admin: true },
       hasWorld: false,
       activity: null,
     });
@@ -378,28 +464,27 @@ describe.skipIf(!sqlIntegration)("per-user HTTP isolation (two isolated SQL sche
       careerName: "Not prepared", background: "Former scout", clubId: 1,
     })).status).toBe(409);
     expect((await access("get", "/api/me", guest)).body).toEqual({
-      user: { id: "guest-account", displayName: "Guest Director", email: "shared@example.test" },
+      user: { id: "guest-account", username: "guest", displayName: "Guest Director", email: "shared@example.test", admin: false },
       hasWorld: true,
       activity: null,
     });
     expect((await access("get", "/api/bootstrap", guest)).body.state.director.name).toBe("Existing guest director");
     const renamed = await access("get", "/api/me")
-      .set("x-ms-client-principal", principal(owner, tenant, [
-        { typ: "http://schemas.microsoft.com/identity/claims/displayname", val: "Updated owner" },
-        { typ: "email", val: "updated@example.test" },
-      ]));
-    expect(renamed.body.user).toEqual({ id: "owner-account", displayName: "Updated owner", email: "updated@example.test" });
+      .set("Cookie", signedIn(owner, { name: "Updated owner", username: "owner2", email: "updated@example.test" }));
+    expect(renamed.body.user).toEqual({
+      id: "owner-account", username: "owner2", displayName: "Updated owner", email: "updated@example.test", admin: false,
+    });
     expect(await new Saves(ownerWorld).currentState()).toBeNull();
     expect(generate).not.toHaveBeenCalled();
   });
 
   it("denies foreign save export, restore, load and deletion in both directions", async () => {
-    const deny = async (objectId: string, file: string) => {
-      expect((await access("get", "/api/saves/export", objectId).query({ file })).status).toBe(404);
+    const deny = async (subject: string, file: string) => {
+      expect((await access("get", "/api/saves/export", subject).query({ file })).status).toBe(404);
       for (const [method, path] of [
         ["post", "/api/saves/restore"], ["post", "/api/careers/load"], ["delete", "/api/careers"],
       ] as const) {
-        const response = await access(method, path, objectId)
+        const response = await access(method, path, subject)
           .send({ file, schema: root.schemaName, userId: guest });
         expect(response.status, path).toBe(404);
       }
@@ -434,7 +519,7 @@ describe.skipIf(!sqlIntegration)("per-user HTTP isolation (two isolated SQL sche
       const session = await access("get", "/api/me").timeout({ response: 20_000 });
       expect(session.status).toBe(200);
       expect(session.body).toEqual({
-        user: { id: "owner-account", displayName: "Owner Director", email: "shared@example.test" },
+        user: { id: "owner-account", username: "owner", displayName: "Owner Director", email: "shared@example.test", admin: true },
         hasWorld: null,
         activity: { operation: "prepare_world", startedAt: expect.any(String) },
       });
@@ -640,9 +725,9 @@ describe.skipIf(!sqlIntegration)("per-user HTTP isolation (two isolated SQL sche
     expect((await access("get", "/api/saves")).body.map((slot: SaveSlot) => slot.file)).toEqual([kept.file]);
     expect(await ownerWorld.all(chunkQuery, "kept-owner-career")).toEqual(keptChunks);
     expect(await ownerWorld.all(chunkQuery, "deleted-owner-career")).toEqual([]);
-    expect(await ownerWorld.all("SELECT [key], [value] FROM meta")).toEqual([{ key: "appearanceIndexVersion", value: "1" }]);
+    expect(await ownerWorld.all("SELECT key, value FROM meta")).toEqual([{ key: "appearanceIndexVersion", value: "1" }]);
     const counts = await ownerWorld.all<{ rows: number }>(WORLD_TABLES.filter((table) => table !== "meta").map((table) =>
-      `SELECT COUNT(*) AS [rows] FROM ${tableName(ownerWorld.schemaName, table)}`).join(" UNION ALL "));
+      `SELECT count(*) AS rows FROM ${tableName(ownerWorld.schemaName, table)}`).join(" UNION ALL "));
     expect(counts).toHaveLength(WORLD_TABLES.length - 1);
     expect(counts.every((count) => count.rows === 0)).toBe(true);
     expect(await stateOf(root)).toEqual(guestState);
@@ -655,57 +740,6 @@ describe.skipIf(!sqlIntegration)("per-user HTTP isolation (two isolated SQL sche
     expect((await access("post", "/api/careers/prepare").send({})).body).toEqual({ created: true });
     expect((await access("get", "/api/me")).body).toMatchObject({ hasWorld: true, activity: null });
     expect((await ownerSaves.list()).map((slot) => slot.file)).toEqual([kept.file]);
-  }, 300_000);
-
-  it("refuses to delete the protected legacy dbo career without reading or changing its world or snapshots", async () => {
-    await generateWorld(ownerWorld, { ...fixture, seed: "protected-legacy-world" });
-    const initial = await stateOf(ownerWorld);
-    await ownerWorld.setMeta("state", { ...initial, started: true, careerId: "legacy-career", careerName: "Legacy career" });
-    const snapshot = await new Saves(ownerWorld).create("Legacy snapshot");
-    // Test mode forbids a real dbo store, so the isolated world is presented under the legacy schema name.
-    const legacy = new Proxy(Object.create(ownerWorld) as Store, {
-      get(_target, property) {
-        if (property === "schemaName") return "dbo";
-        const value = Reflect.get(ownerWorld, property, ownerWorld);
-        return typeof value === "function" ? value.bind(ownerWorld) : value;
-      },
-    });
-    app = createApp(root, {
-      async resolve(identity: AuthenticatedIdentity) {
-        if (identity.tenantId !== tenant || identity.objectId !== secondGuest) throw new AccountNotProvisionedError();
-        return { user: { id: "legacy-account", displayName: identity.displayName, email: identity.email }, store: legacy };
-      },
-    });
-    const countsQuery = WORLD_TABLES.map((table) =>
-      `SELECT '${table}' AS [table], COUNT(*) AS [rows] FROM ${tableName(ownerWorld.schemaName, table)}`).join(" UNION ALL ");
-    const chunkQuery = "SELECT chunks.save_id, chunks.ordinal, chunks.data FROM save_chunks AS chunks ORDER BY chunks.save_id, chunks.ordinal";
-    const before = {
-      state: await stateOf(ownerWorld),
-      slots: await new Saves(ownerWorld).list(),
-      chunks: await ownerWorld.all(chunkQuery),
-      counts: await ownerWorld.all(countsQuery),
-      guest: await stateOf(root),
-    };
-    expect(before.slots.map((slot) => slot.file)).toEqual([snapshot.file]);
-    expect(before.chunks.length).toBeGreaterThan(0);
-    const spies = (["get", "all", "run", "exec", "transaction", "discardWorld"] as const)
-      .map((method) => vi.spyOn(ownerWorld, method).mockImplementation(() => {
-        throw new Error("A protected career must not reach SQL.");
-      }));
-
-    const refused = await access("delete", "/api/careers/active", secondGuest)
-      .send({ careerId: "legacy-career", seed: before.state.seed });
-    expect(refused.status).toBe(409);
-    expect(refused.headers["retry-after"]).toBeUndefined();
-    expect(refused.body).toEqual({ error: "This career is protected and can't be deleted here.", code: "career_protected" });
-    for (const spy of spies) expect(spy).not.toHaveBeenCalled();
-
-    vi.restoreAllMocks();
-    expect(await stateOf(ownerWorld)).toEqual(before.state);
-    expect(await new Saves(ownerWorld).list()).toEqual(before.slots);
-    expect(await ownerWorld.all(chunkQuery)).toEqual(before.chunks);
-    expect(await ownerWorld.all(countsQuery)).toEqual(before.counts);
-    expect(await stateOf(root)).toEqual(before.guest);
   }, 300_000);
 
   it("does not make another user's mutation wait for an in-flight reader", async () => {
@@ -763,42 +797,42 @@ describe.skipIf(!sqlIntegration)("per-user HTTP isolation (two isolated SQL sche
   }, 300_000);
 
   it("uses an explicit local identity and ignores forged identity headers and resolver injection in no-auth mode", async () => {
-    vi.stubEnv("CONTAINER_APP_NAME", "");
     vi.stubEnv("API_HOST", "127.0.0.1");
     vi.stubEnv("REQUIRE_AUTH", "false");
     vi.stubEnv("APP_ORIGIN", undefined);
     const resolve = vi.fn(async () => { throw new Error("Local mode must not use a hosted identity"); });
     const local = createApp(ownerWorld, { resolve });
-    const response = await request(local).get("/api/me").set("x-ms-client-principal", principal(guest));
+    const response = await request(local).get("/api/me").set("Cookie", signedIn(guest));
     expect(response.status).toBe(200);
-    expect(response.body).toEqual({ user: { id: "local", displayName: "Local director", email: null }, hasWorld: false, activity: null });
+    expect(response.body).toEqual({
+      user: { id: "local", username: "local", displayName: "Local director", email: null, admin: false },
+      hasWorld: false, activity: null });
     expect(resolve).not.toHaveBeenCalled();
     expect((await request(local).get("/api/me").set("Host", "untrusted.example")
-      .set("x-ms-client-principal", principal(owner))).status).toBe(403);
+      .set("Cookie", signedIn(owner))).status).toBe(403);
   });
 });
 
 async function expectSchemaIntegrity(store: Store) {
-  const tables = await store.all<{ id: number; name: string }>(
-    "SELECT object_id AS id,name FROM sys.tables WHERE schema_id = SCHEMA_ID(?) ORDER BY name",
+  const tables = await store.all<{ name: string }>(
+    "SELECT tablename AS name FROM pg_catalog.pg_tables WHERE schemaname = ? ORDER BY tablename",
     store.schemaName,
   );
   expect(tables.length).toBeGreaterThan(0);
+  // PostgreSQL keeps every validated constraint true for all rows; only NOT VALID constraints
+  // or disabled (foreign-key) triggers could let inconsistent rows in.
   expect(
     await store.all(
-      "SELECT name FROM sys.foreign_keys WHERE schema_id = SCHEMA_ID(?) AND (is_disabled = 1 OR is_not_trusted = 1)",
+      "SELECT conrelid::regclass::text AS table_name, conname FROM pg_catalog.pg_constraint WHERE connamespace = ?::regnamespace AND NOT convalidated",
       store.schemaName,
     ),
   ).toEqual([]);
-  for (const table of tables) {
-    expect(Number.isSafeInteger(table.id)).toBe(true);
-    expect(
-      await store.all(
-        `DBCC CHECKCONSTRAINTS (${table.id}) WITH ALL_CONSTRAINTS, ALL_ERRORMSGS`,
-      ),
-      table.name,
-    ).toEqual([]);
-  }
+  expect(
+    await store.all(
+      "SELECT tgrelid::regclass::text AS table_name, tgname FROM pg_catalog.pg_trigger JOIN pg_catalog.pg_class ON pg_class.oid = pg_trigger.tgrelid WHERE pg_class.relnamespace = ?::regnamespace AND pg_trigger.tgenabled = 'D'",
+      store.schemaName,
+    ),
+  ).toEqual([]);
 }
 
 describe.skipIf(!sqlIntegration)("game HTTP API and SQL saves", () => {
@@ -827,6 +861,19 @@ describe.skipIf(!sqlIntegration)("game HTTP API and SQL saves", () => {
     expect(response.body.schema).toMatch(/^touchline_test_/);
     expect(response.body.schema).not.toBe("dbo");
     expect(response.body).not.toHaveProperty("path");
+  });
+
+  it("serves a player's GBE breakdown and validates the date", async () => {
+    const { id } = (await store.get<{ id: number }>(
+      "SELECT id FROM players WHERE age_group = 'Senior' AND club_id IS NOT NULL ORDER BY ability DESC, id LIMIT 1",
+    ))!;
+    const response = await request(app).get(`/api/players/${id}/gbe`);
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ playerId: id, ruleset: "fa-2026-27", passMark: 15 });
+    expect(response.body.breakdown).toHaveLength(6);
+    expect((await request(app).get(`/api/players/${id}/gbe?asOf=2027-01-01`)).body.asOf).toBe("2027-01-01");
+    expect((await request(app).get(`/api/players/${id}/gbe?asOf=soon`)).status).toBe(400);
+    expect((await request(app).get("/api/players/99999999/gbe")).status).toBe(404);
   });
 
   it("groups snapshots by career identity without merging unrelated or legacy saves", () => {
@@ -915,7 +962,7 @@ describe.skipIf(!sqlIntegration)("game HTTP API and SQL saves", () => {
     expect(ordered).toEqual([...ordered].sort((left, right) => right - left));
     // Same filter, other sort and page: the cached match set must give the same total and disjoint pages.
     const expected = await store.all<{ id: number }>(
-      "SELECT TOP (20) id FROM players WHERE role <> 'Retired' AND position = 'ST' ORDER BY value ASC, name COLLATE Latin1_General_100_CI_AI ASC, id ASC",
+      "SELECT id FROM players WHERE role <> 'Retired' AND position = 'ST' ORDER BY value ASC, lower(name) ASC, id ASC LIMIT 20",
     );
     const first = await request(app).get("/api/players").query({ position: "ST", sort: "value", direction: "asc", pageSize: 10 });
     const second = await request(app).get("/api/players").query({ position: "ST", sort: "value", direction: "asc", pageSize: 10, page: 2 });
@@ -988,7 +1035,7 @@ describe.skipIf(!sqlIntegration)("game HTTP API and SQL saves", () => {
       profile: string;
       country_id: number;
     }>(
-      "SELECT TOP (1) id,profile,country_id FROM players WHERE country_id != 1",
+      "SELECT id,profile,country_id FROM players WHERE country_id <> 1 ORDER BY id LIMIT 1",
     ))!;
     const profile = JSON.parse(player.profile);
     try {
@@ -1027,7 +1074,12 @@ describe.skipIf(!sqlIntegration)("game HTTP API and SQL saves", () => {
       ).toBe(true);
       const dossier = await request(app).get(`/api/players/${player.id}`);
       // The v4 fixture's clubs are Scottish and Irish; the FA endorsement applies only to English clubs.
-      expect(dossier.body.registration.status).toBe("No FA endorsement required");
+      expect(dossier.body.eligibility.association.gbe).toBeUndefined();
+      if (dossier.body.signing)
+        expect(dossier.body.signing.registration).toMatchObject({
+          status: "registered",
+          reasons: [expect.stringMatching(/^No work-permit endorsement is required/)],
+        });
     } finally {
       await store.run(
         "UPDATE players SET profile = ? WHERE id = ?",
@@ -1049,7 +1101,7 @@ describe.skipIf(!sqlIntegration)("game HTTP API and SQL saves", () => {
       home_goals: number | null;
       away_goals: number | null;
     }>(
-      "SELECT TOP (1) id,date,league_id,status,home_goals,away_goals FROM fixtures WHERE league_id = 1 ORDER BY date",
+      "SELECT id,date,league_id,status,home_goals,away_goals FROM fixtures WHERE league_id = 1 ORDER BY date LIMIT 1",
     ))!;
     try {
       expect(
@@ -1153,7 +1205,7 @@ describe.skipIf(!sqlIntegration)("game HTTP API and SQL saves", () => {
   it("orders career clubs by country, division and name with consistent pagination and league labels", async () => {
     const original = await stateOf(store);
     const expected = await store.all<{ id: number }>(
-      "SELECT TOP (20) clubs.id FROM clubs JOIN countries ON countries.id = clubs.country_id JOIN leagues ON leagues.id = clubs.league_id WHERE clubs.type = 'club' ORDER BY countries.name COLLATE Latin1_General_100_CI_AS,leagues.tier,clubs.name COLLATE Latin1_General_100_CI_AS,clubs.id",
+      "SELECT clubs.id FROM clubs JOIN countries ON countries.id = clubs.country_id JOIN leagues ON leagues.id = clubs.league_id WHERE clubs.type = 'club' ORDER BY lower(countries.name),leagues.tier,lower(clubs.name),clubs.id LIMIT 20",
     );
     const ids: number[] = [];
     for (const page of [1, 2]) {
@@ -1203,7 +1255,7 @@ describe.skipIf(!sqlIntegration)("game HTTP API and SQL saves", () => {
       squad_club_id: number | null;
       country_id: number;
     }>(
-      "SELECT TOP (1) players.id,players.profile,players.age,players.birth_date,players.club_id,players.squad_club_id,players.country_id FROM players JOIN countries ON countries.id = players.country_id WHERE countries.code = 'SCO' AND players.club_id IS NOT NULL AND players.parent_club_id IS NULL AND players.age_group != 'Senior' ORDER BY players.id",
+      "SELECT players.id,players.profile,players.age,players.birth_date,players.club_id,players.squad_club_id,players.country_id FROM players JOIN countries ON countries.id = players.country_id WHERE countries.code = 'SCO' AND players.club_id IS NOT NULL AND players.parent_club_id IS NULL AND players.age_group <> 'Senior' ORDER BY players.id LIMIT 1",
     ))!;
     const profile = JSON.parse(player.profile);
     delete profile.registration;
@@ -1306,7 +1358,7 @@ describe.skipIf(!sqlIntegration)("game HTTP API and SQL saves", () => {
     const before = await store.all(
       "SELECT id,club_id,wage,morale FROM players ORDER BY id",
     );
-    const negotiations = await store.all("SELECT * FROM negotiations");
+    const negotiations = await store.all("SELECT * FROM negotiations ORDER BY id");
     const result = await request(app)
       .get("/api/players/1/interest")
       .query({
@@ -1338,7 +1390,7 @@ describe.skipIf(!sqlIntegration)("game HTTP API and SQL saves", () => {
           .query({ negotiationId: 999999 })
       ).status,
     ).toBe(400);
-    expect(await store.all("SELECT * FROM negotiations")).toEqual(negotiations);
+    expect(await store.all("SELECT * FROM negotiations ORDER BY id")).toEqual(negotiations);
     expect(
       await store.all("SELECT id,club_id,wage,morale FROM players ORDER BY id"),
     ).toEqual(before);
@@ -1348,11 +1400,11 @@ describe.skipIf(!sqlIntegration)("game HTTP API and SQL saves", () => {
   it("shows rival pursuits on the transfer desk and interest preview only as fogged views", async () => {
     const state = await stateOf(store);
     const target = (await store.get<{ id: number; club_id: number; wage: number; profile: string }>(
-      "SELECT TOP (1) id,club_id,wage,profile FROM players WHERE club_id IS NOT NULL AND club_id <> ? AND role <> 'Retired' AND age_group = 'Senior' ORDER BY ability DESC,id",
+      "SELECT id,club_id,wage,profile FROM players WHERE club_id IS NOT NULL AND club_id <> ? AND role <> 'Retired' AND age_group = 'Senior' ORDER BY ability DESC,id LIMIT 1",
       state.clubId,
     ))!;
     const rival = (await store.get<{ id: number }>(
-      "SELECT TOP (1) id FROM clubs WHERE type = 'club' AND id NOT IN (?,?) ORDER BY id",
+      "SELECT id FROM clubs WHERE type = 'club' AND id NOT IN (?,?) ORDER BY id LIMIT 1",
       state.clubId,
       target.club_id,
     ))!;
@@ -1664,7 +1716,7 @@ describe.skipIf(!sqlIntegration)("game HTTP API and SQL saves", () => {
       "DELETE FROM staff WHERE role = 'Sporting director assistant'",
     );
     await store.run(
-      "DELETE FROM partnerships WHERE JSON_VALUE(data,'$.origin') = 'initial'",
+      "DELETE FROM partnerships WHERE data::jsonb ->> 'origin' = 'initial'",
     );
     const originalPlayers = await store.all(
       "SELECT id,club_id,wage,contract_end FROM players ORDER BY id",
@@ -1840,6 +1892,52 @@ describe.skipIf(!sqlIntegration)("game HTTP API and SQL saves", () => {
     );
   });
 
+  it("commits every advanced day: a failure keeps the earlier days, reports them and logs the cause", async () => {
+    await request(app).patch("/api/settings").send({ autosave: "off" });
+    const start = (await stateOf(store)).date;
+    const failing = addDays(start, 3);
+    // A real SQL failure on day 3: PostgreSQL rejects the day's state update, which aborts that day's transaction.
+    await store.exec(`CREATE OR REPLACE FUNCTION fail_advance() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        IF NEW.key = 'state' AND NEW.value::jsonb ->> 'date' = '${failing}' THEN
+          RAISE EXCEPTION 'injected failure for %', NEW.value::jsonb ->> 'date';
+        END IF;
+        RETURN NEW;
+      END $$;
+      CREATE TRIGGER fail_advance BEFORE INSERT OR UPDATE ON meta FOR EACH ROW EXECUTE FUNCTION fail_advance();`);
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const partial = await request(app).post("/api/advance").send({ days: 5 });
+      expect(partial.status).toBe(200);
+      expect(partial.body).toMatchObject({ from: start, date: addDays(start, 2), days: 2 });
+      expect(partial.body.error).toBe(
+        `The simulation stopped after ${addDays(start, 2)}; 2 days were simulated and kept. An unexpected server error occurred.`,
+      );
+      expect((await stateOf(store)).date).toBe(addDays(start, 2));
+      const logged = errors.mock.calls.map((call) => call.join(" ")).join("\n");
+      expect(logged).toContain(`Touchline: advance_days failed (POST /api/advance after 2 of 5 days, from ${addDays(start, 2)})`);
+      expect(logged).toContain(`injected failure for ${failing}`);
+      expect(logged).toMatch(/\n\s*at /);
+      if (process.env.SQL_PASSWORD) expect(logged).not.toContain(process.env.SQL_PASSWORD);
+      errors.mockClear();
+      // The same failure on the first day of a request is an error response; nothing is half-done.
+      const failed = await request(app).post("/api/advance").send({ days: 3 });
+      expect(failed.status).toBe(500);
+      expect(failed.body).toEqual({ error: "An unexpected server error occurred." });
+      expect((await stateOf(store)).date).toBe(addDays(start, 2));
+      expect(errors.mock.calls.map((call) => call.join(" ")).join("\n")).toContain("advance_days failed");
+    } finally {
+      errors.mockRestore();
+      await store.exec("DROP TRIGGER IF EXISTS fail_advance ON meta; DROP FUNCTION IF EXISTS fail_advance();");
+    }
+    const resumed = await request(app).post("/api/advance").send({ days: 2 });
+    expect(resumed.status).toBe(200);
+    expect(resumed.body).toMatchObject({ date: addDays(start, 4), days: 2 });
+    expect(resumed.body.error).toBeUndefined();
+    // The world was never left busy.
+    expect((await request(app).get("/api/me")).body.activity ?? null).toBeNull();
+  });
+
   it("deletes only the selected inactive career and protects the active career and database", async () => {
     const saves = new Saves(store);
     const original = await stateOf(store);
@@ -1966,11 +2064,11 @@ describe.skipIf(!sqlIntegration)("game HTTP API and SQL saves", () => {
   it("lists a club's recorded transfers in and out by season with fees, terms and totals", async () => {
     const state = await stateOf(store);
     const [home, away] = await store.all<{ id: number; name: string }>(
-      "SELECT TOP (2) id,name FROM clubs WHERE type = 'club' AND id != ? ORDER BY id",
+      "SELECT id,name FROM clubs WHERE type = 'club' AND id <> ? ORDER BY id LIMIT 2",
       state.clubId,
     );
     const player = (await store.get<{ id: number; name: string; birth_date: string; position: string }>(
-      "SELECT TOP (1) id,name,birth_date,position FROM players WHERE club_id = ? ORDER BY id",
+      "SELECT id,name,birth_date,position FROM players WHERE club_id = ? ORDER BY id LIMIT 1",
       home.id,
     ))!;
     const season = state.season - 3;
@@ -2083,7 +2181,7 @@ describe.skipIf(!sqlIntegration)("game HTTP API and SQL saves", () => {
         expect((await request(app).get(`/api/clubs/${home.id}/transfers?${query}`)).status, query).toBe(400);
       expect((await request(app).get("/api/clubs/abc/transfers")).status).toBe(400);
     } finally {
-      await store.run("DELETE FROM history WHERE id IN (SELECT [id] FROM OPENJSON(?) WITH ([id] INT '$'))", JSON.stringify(history));
+      await store.run("DELETE FROM history WHERE id = ANY(?::int[])", history);
       await store.run("DELETE FROM negotiations WHERE id = ?", negotiation);
       // The scan cache assumes append-only move rows.
       clubTransfersChanged(store);
@@ -2093,7 +2191,7 @@ describe.skipIf(!sqlIntegration)("game HTTP API and SQL saves", () => {
   it("rejects impossible call-up end dates and loans longer than a year between countries", async () => {
     const state = await stateOf(store);
     const own = (await store.get<{ id: number }>(
-      "SELECT TOP (1) id FROM players WHERE club_id = ? AND role != 'Retired' ORDER BY id",
+      "SELECT id FROM players WHERE club_id = ? AND role <> 'Retired' ORDER BY id LIMIT 1",
       state.clubId,
     ))!;
     const callUp = (date: string) =>
@@ -2109,7 +2207,7 @@ describe.skipIf(!sqlIntegration)("game HTTP API and SQL saves", () => {
     expect(tooLong.status).toBe(400);
     expect(tooLong.body.error).toMatch(new RegExp(`at most ${CALL_UP_RULES.maxDays} days`));
     const foreign = await store.get<{ id: number }>(
-      "SELECT TOP (1) players.id FROM players JOIN clubs ON clubs.id = players.club_id WHERE clubs.type = 'club' AND clubs.country_id <> (SELECT country_id FROM clubs WHERE id = ?) AND players.role != 'Retired' AND players.parent_club_id IS NULL ORDER BY players.id",
+      "SELECT players.id FROM players JOIN clubs ON clubs.id = players.club_id WHERE clubs.type = 'club' AND clubs.country_id <> (SELECT country_id FROM clubs WHERE id = ?) AND players.role <> 'Retired' AND players.parent_club_id IS NULL ORDER BY players.id LIMIT 1",
       state.clubId,
     );
     expect(foreign).toBeTruthy();

@@ -46,13 +46,13 @@ import {
 import {
   dateLabel,
   label,
-  LOAN_TYPES,
   PARTNERSHIP_TYPES,
   AFFILIATION_BENEFITS,
 } from "../../shared/rules.ts";
 import { AffiliateInterest } from "./ClubSupport.tsx";
+import { IncomingOffers, NegotiationSheet } from "./Transfers.tsx";
 import type { LoanDesk } from "../../shared/api.ts";
-import type { Club, Loan, LoanTerms, Negotiation, NegotiationData, Player } from "../../shared/types.ts";
+import type { Club, Loan, LoanTerms, Negotiation, NegotiationData, OfferReason } from "../../shared/types.ts";
 import { dateValue, type SortColumn } from "../sort.ts";
 import { useSortableRows } from "../useSortableRows.ts";
 
@@ -134,89 +134,58 @@ function ClubChooser({
   );
 }
 
-export function ClubNetworkSheet({
-  player,
-  close,
-}: {
-  player?: Player;
-  close: () => void;
-}) {
-  const { act, navigate } = useGame();
+function ClubNetworkSheet({ close }: { close: () => void }) {
+  const { act } = useGame();
   const { money } = useCurrency();
   const [club, setClub] = useState<Club | null>(null);
-  const [type, setType] = useState(
-    player ? "Development loan" : "Development club",
-  );
+  const [type, setType] = useState("Development club");
   const [pending, setPending] = useState(false);
   async function submit() {
     if (!club) return;
     setPending(true);
-    const result = player
-      ? await act({
-          type: "enquiry",
-          playerId: player.id,
-          dealType: type,
-          destinationId: club.id,
-        })
-      : await act({
-          type: "partnership",
-          clubId: club.id,
-          partnershipType: type,
-        });
+    const result = await act({
+      type: "partnership",
+      clubId: club.id,
+      partnershipType: type,
+    });
     setPending(false);
-    if (result) {
-      close();
-      if (player) navigate("transfers");
-    }
+    if (result) close();
   }
   return (
-    <Modal
-      title={
-        player ? `Find a loan for ${player.name}` : "Build a club partnership"
-      }
-      onClose={close}
-    >
+    <Modal title="Build a club partnership" onClose={close}>
       <div className="sheet-body">
         <div className="form-section">
-          <Field label={player ? "Loan type" : "Affiliation type"}>
+          <Field label="Affiliation type">
             <select
               value={type}
               onChange={(event) => setType(event.target.value)}
             >
-              {(player ? LOAN_TYPES : PARTNERSHIP_TYPES).map((value) => (
+              {PARTNERSHIP_TYPES.map((value) => (
                 <option key={value}>{value}</option>
               ))}
             </select>
           </Field>
-          {!player && (
-            <p className="sheet-description">{AFFILIATION_BENEFITS[type]}</p>
-          )}
+          <p className="sheet-description">{AFFILIATION_BENEFITS[type]}</p>
         </div>
         <ClubChooser selected={club} onChoose={setClub} />
-        {club && !player && (
-          <AffiliateInterest partnerId={club.id} purpose={type} />
-        )}
+        {club && <AffiliateInterest partnerId={club.id} purpose={type} />}
         {club && (
           <div className="section-space">
             <DetailList
               items={[
                 [
-                  "Receiving club",
-                  <ClubLink key="receiving" id={club.id} name={club.name} />,
+                  "Partner club",
+                  <ClubLink key="partner" id={club.id} name={club.name} />,
                 ],
                 ["Academy", `${club.academy}/100`],
                 ["Facilities", `${club.facilities}/100`],
                 ["Manager trust", `${Math.round(club.manager_trust)}/100`],
                 ["Formation", club.formation],
                 ["Philosophy", club.philosophy],
-                ...(!player
-                  ? [
-                      [
-                        "Annual partnership fee",
-                        money(100_000 + Math.round(club.reputation ** 2 * 60)),
-                      ] as [string, string],
-                    ]
-                  : []),
+                [
+                  "Annual partnership fee",
+                  money(100_000 + Math.round(club.reputation ** 2 * 60)),
+                ],
               ]}
             />
           </div>
@@ -227,11 +196,11 @@ export function ClubNetworkSheet({
           Cancel
         </Button>
         <Button
-          icon={player ? ArrowLeftRight : Handshake}
+          icon={Handshake}
           onClick={() => void submit()}
           disabled={!club || pending}
         >
-          {player ? "Send loan enquiry" : "Propose affiliation"}
+          Propose affiliation
         </Button>
       </footer>
     </Modal>
@@ -252,6 +221,7 @@ function LoanReport({ loan, close }: { loan: Loan; close: () => void }) {
     }[];
     weeks: number;
     failures: number;
+    reason?: OfferReason;
   };
   const parent = loan.parent_id === bootstrap?.club.id;
   function recall(injury = false) {
@@ -367,6 +337,7 @@ function LoanReport({ loan, close }: { loan: Loan; close: () => void }) {
             <SectionHeading title="The agreement" />
             <DetailList
               items={[
+                ...(details.reason ? ([["Why they wanted him", details.reason.text]] as [string, string][]) : []),
                 ["Playing time", `${terms.playingTime}%`],
                 ["Position / role", `${terms.position} / ${terms.role}`],
                 ["Development plan", terms.developmentPlan],
@@ -460,11 +431,11 @@ function LoanReport({ loan, close }: { loan: Loan; close: () => void }) {
 
 export default function Loans() {
   const { data, error } = useResource<LoanDesk>("loans");
-  const { navigate, bootstrap, openOffer } = useGame();
+  const { navigate, bootstrap, openOffer, openContract, act } = useGame();
   const { money } = useCurrency();
   const [tab, setTab] = useState("active");
   const [network, setNetwork] = useState(false);
-  const [offer, setOffer] = useState<Player | null>(null);
+  const [offer, setOffer] = useState<number | null>(null);
   const [selected, setSelected] = useState<number | null>(null);
   const shown = (data?.loans ?? []).filter((loan) =>
     tab === "history" ? loan.status !== "active" : loan.status === "active",
@@ -477,6 +448,12 @@ export default function Loans() {
   if (!data || !bootstrap) return <Loading />;
   const active = data.loans.filter((loan) => loan.status === "active");
   const loanOffers = data.loanOffers ?? [];
+  // Clubs' approaches for the director's players await his answer; the rest are deals already in progress.
+  const received = loanOffers.filter(
+    (negotiation) => negotiation.stage === "Offer received" && negotiation.selling_club_id === bootstrap.club.id,
+  );
+  const inProgress = loanOffers.filter((negotiation) => !received.includes(negotiation));
+  const opened = loanOffers.find((negotiation) => negotiation.id === offer);
   const average = active.length
     ? Math.round(
         active.reduce((sum, loan) => sum + loan.score, 0) / active.length,
@@ -519,9 +496,9 @@ export default function Loans() {
         />
         <Stat
           label="Loan offers"
-          value={loanOffers.length}
+          value={received.length}
           icon={ShieldCheck}
-          detail="Incoming offers and outgoing talks"
+          detail="Clubs' offers awaiting your answer"
         />
       </div>
       <Panel>
@@ -531,12 +508,12 @@ export default function Loans() {
             {
               id: "offers",
               label: "Loan offers",
-              count: loanOffers.length,
+              count: received.length,
             },
             {
-              id: "candidates",
-              label: "Loan candidates",
-              count: data.candidates.length,
+              id: "list",
+              label: "Loan list",
+              count: data.loanList.filter((player) => player.available_loan).length,
             },
             {
               id: "network",
@@ -646,107 +623,123 @@ export default function Loans() {
               <Button
                 icon={Search}
                 variant="secondary"
-                onClick={() => setTab("candidates")}
+                onClick={() => setTab("list")}
               >
-                Review loan candidates
+                Open the loan list
               </Button>
             </Empty>
           ))}
-        {tab === "offers" &&
-          (loanOffers.length ? (
-            <div className="table-scroll" role="region" aria-label="Loan offers" tabIndex={0}>
-              <table className="data-table">
-                <thead>
-                  <tr>
-                    <th>Player</th>
-                    <th>Direction</th>
-                    <th>Club</th>
-                    <th>Type</th>
-                    <th>Terms</th>
-                    <th>Status</th>
-                    <th>Open</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {loanOffers.map((negotiation: Negotiation) => {
-                    const details = JSON.parse(negotiation.data) as NegotiationData;
-                    const outgoing = negotiation.selling_club_id === bootstrap.club.id;
-                    const otherClub = outgoing
-                      ? negotiation.buyer_name
-                      : negotiation.seller_name;
-                    return (
-                      <tr key={negotiation.id}>
-                        <td>
-                          <strong>
-                            <PlayerLink
-                              id={negotiation.player_id}
-                              name={negotiation.player_name ?? "Player"}
-                            />
-                          </strong>
-                          <small>
-                            {negotiation.position} / {negotiation.age}
-                          </small>
-                        </td>
-                        <td>{outgoing ? "Loaning out" : "Loaning in"}</td>
-                        <td>{otherClub ?? "Club"}</td>
-                        <td>
-                          <Badge>{negotiation.type}</Badge>
-                        </td>
-                        <td>
-                          {money(negotiation.offer)} / {details.terms.salarySplit}% wage share
-                        </td>
-                        <td>
-                          <Badge tone={negotiation.stage === "Offer received" ? "green" : "amber"}>
-                            {negotiation.stage}
-                          </Badge>
-                        </td>
-                        <td>
-                          <Button
-                            variant="secondary"
-                            icon={ArrowUpRight}
-                            onClick={() => openOffer(negotiation.player_id)}
-                          >
-                            Open
-                          </Button>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          ) : (
-            <Empty
-              icon={ArrowLeftRight}
-              title="No active loan offers"
-              detail="Incoming loan offers and outgoing loan proposals will appear here."
-            >
-              <Button
-                icon={Search}
-                variant="secondary"
-                onClick={() => setTab("candidates")}
-              >
-                Find a club for a player
-              </Button>
-            </Empty>
-          ))}
-        {tab === "candidates" && (
+        {tab === "offers" && (
           <>
-            <SectionHeading title="Players with room to grow">
+            <IncomingOffers
+              offers={received}
+              onOpen={(negotiation) => setOffer(negotiation.id)}
+              emptyTitle="No loan offers yet"
+              emptyDetail="Clubs that need a player at your squad's level send loan offers during the registration windows, more often for players on your loan list or not registered for your competitions."
+            />
+            {inProgress.length > 0 && (
+              <>
+                <SectionHeading title="Loan deals in progress" />
+                <div className="table-scroll" role="region" aria-label="Loan deals in progress" tabIndex={0}>
+                  <table className="data-table">
+                    <thead>
+                      <tr>
+                        <th>Player</th>
+                        <th>Direction</th>
+                        <th>Club</th>
+                        <th>Type</th>
+                        <th>Terms</th>
+                        <th>Status</th>
+                        <th>Open</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {inProgress.map((negotiation: Negotiation) => {
+                        const details = JSON.parse(negotiation.data) as NegotiationData;
+                        const outgoing = negotiation.selling_club_id === bootstrap.club.id;
+                        return (
+                          <tr key={negotiation.id}>
+                            <td>
+                              <strong>
+                                <PlayerLink
+                                  id={negotiation.player_id}
+                                  name={negotiation.player_name ?? "Player"}
+                                />
+                              </strong>
+                              <small>
+                                {negotiation.position} / {negotiation.age}
+                              </small>
+                            </td>
+                            <td>{outgoing ? "Loaning out" : "Loaning in"}</td>
+                            <td>{(outgoing ? negotiation.buyer_name : negotiation.seller_name) ?? "Club"}</td>
+                            <td>
+                              <Badge>{negotiation.type}</Badge>
+                            </td>
+                            <td>
+                              {money(negotiation.offer)} / {details.terms.salarySplit}% wage share
+                            </td>
+                            <td>
+                              <Badge tone="amber">{negotiation.stage}</Badge>
+                            </td>
+                            <td>
+                              <Button
+                                variant="secondary"
+                                icon={ArrowUpRight}
+                                onClick={() =>
+                                  outgoing || ["Agent talks", "Contract review", "Medical", "Registration"].includes(negotiation.stage)
+                                    ? openContract(negotiation.player_id)
+                                    : openOffer(negotiation.player_id)
+                                }
+                              >
+                                Open
+                              </Button>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            )}
+          </>
+        )}
+        {tab === "list" && (
+          <>
+            <SectionHeading title="Your loan list">
               <TextLink onClick={() => navigate("database")}>
                 Find incoming loans
               </TextLink>
             </SectionHeading>
-            <PlayerTable players={data.candidates} compact>
-              {(player) => (
-                <Button
-                  variant="secondary"
-                  icon={ArrowLeftRight}
-                  onClick={() => setOffer(player)}
-                >
-                  Find a club
-                </Button>
-              )}
+            <p className="dossier-copy padded">
+              Clubs approach you with loan offers for players you make available, and for young or unregistered
+              players they need. Offers arrive in the registration windows at the frequency set in Settings.
+            </p>
+            <PlayerTable players={data.loanList} compact>
+              {(player) => {
+                const entry = data.loanList.find((item) => item.id === player.id)!;
+                return (
+                  <div className="inline-controls">
+                    {entry.open_offers > 0 && (
+                      <Badge tone="green">{`${entry.open_offers} offer${entry.open_offers === 1 ? "" : "s"}`}</Badge>
+                    )}
+                    <Button
+                      variant="secondary"
+                      icon={ArrowLeftRight}
+                      onClick={() =>
+                        void act({
+                          type: "availability",
+                          playerId: player.id,
+                          listed: !!player.listed,
+                          loan: !player.available_loan,
+                        })
+                      }
+                    >
+                      {player.available_loan ? "Remove from loan list" : "Make available for loan"}
+                    </Button>
+                  </div>
+                );
+              }}
             </PlayerTable>
           </>
         )}
@@ -799,8 +792,12 @@ export default function Loans() {
           ))}
       </Panel>
       {network && <ClubNetworkSheet close={() => setNetwork(false)} />}
-      {offer && (
-        <ClubNetworkSheet player={offer} close={() => setOffer(null)} />
+      {opened && (
+        <NegotiationSheet
+          key={opened.id}
+          negotiation={opened}
+          close={() => setOffer(null)}
+        />
       )}
       {current && <LoanReport loan={current} close={() => setSelected(null)} />}
     </div>

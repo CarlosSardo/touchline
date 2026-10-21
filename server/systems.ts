@@ -9,13 +9,14 @@ import {
   transferEmbargo,
 } from "./finance.ts";
 import { assessRegistration, registrationAssociationId } from "./registration.ts";
+import { canSign, currentSpell, playerEligibility, registerSpell } from "./eligibility.ts";
 import {
   assessPlayerInterest,
   assessYouthTransfer,
-  MARKET_WAGE_PREMIUM_CAP,
   MOVE_REFUSAL_THRESHOLD,
   PERSONAL_TERMS_THRESHOLD,
   personalTermsOutcome,
+  personalTermsWage,
 } from "./recruitment.ts";
 import {
   publishPlayerCoverage,
@@ -23,6 +24,7 @@ import {
   publishTransferStory,
 } from "./media.ts";
 import { startOnwardLoan } from "./affiliates.ts";
+import { acceptIncomingOffer, committedWages } from "./market-offers.ts";
 import {
   addDays,
   addMonths,
@@ -132,7 +134,7 @@ export async function playerOf(store: Store, id: number) {
 export async function clubSquads(store: Store) {
   const clubId = (await stateOf(store)).clubId;
   return await store.all<Club>(
-    "SELECT * FROM clubs WHERE id = ? OR (parent_id = ? AND type = 'bteam') ORDER BY parent_id,id",
+    "SELECT * FROM clubs WHERE id = ? OR (parent_id = ? AND type = 'bteam') ORDER BY parent_id NULLS FIRST,id",
     clubId,
     clubId,
   );
@@ -169,8 +171,7 @@ export async function squadDestinations(store: Store, player: Player) {
     overage.set(
       club.id,
       (await store.get<{ count: number }>(
-        "SELECT count(*) AS count FROM players WHERE (squad_club_id = ? OR (club_id = ? AND squad_club_id IS NULL)) AND id != ? AND age_group = 'Senior' AND role != 'Retired' AND birth_date <= ?",
-        club.id,
+        "SELECT count(*) AS count FROM players WHERE playing_club_id = ? AND id != ? AND age_group = 'Senior' AND role != 'Retired' AND birth_date <= ?",
         club.id,
         player.id,
         `${state.season - rule.maxAge - 1}-07-01`,
@@ -344,7 +345,7 @@ export async function weeklyWages(store: Store, clubId: number) {
     clubId,
   ))!.total;
   const adjustments = (await store.get<{ total: number }>(
-    `SELECT coalesce(sum(CASE WHEN loans.parent_id = ? THEN players.wage * (1 - TRY_CONVERT(float, JSON_VALUE(loans.terms,'$.salarySplit')) / 100.0) ELSE -players.wage * (1 - TRY_CONVERT(float, JSON_VALUE(loans.terms,'$.salarySplit')) / 100.0) END),0) AS total FROM loans JOIN players ON players.id = loans.player_id WHERE loans.status = 'active' AND (loans.parent_id = ? OR loans.destination_id = ?)`,
+    `SELECT coalesce(sum(CASE WHEN loans.parent_id = ? THEN players.wage * (1 - (loans.terms::jsonb ->> 'salarySplit')::double precision / 100.0) ELSE -players.wage * (1 - (loans.terms::jsonb ->> 'salarySplit')::double precision / 100.0) END),0) AS total FROM loans JOIN players ON players.id = loans.player_id WHERE loans.status = 'active' AND (loans.parent_id = ? OR loans.destination_id = ?)`,
     clubId,
     clubId,
     clubId,
@@ -562,7 +563,7 @@ export async function processTransferPayments(store: Store) {
     );
     if (payment.sell_on_clause_id !== null) {
       await store.run(
-        "UPDATE sell_on_clauses SET paid = ROUND(paid + ?, 2) WHERE id = ?",
+        "UPDATE sell_on_clauses SET paid = round((paid + ?)::numeric, 2) WHERE id = ?",
         payment.amount,
         payment.sell_on_clause_id,
       );
@@ -832,7 +833,7 @@ export async function experience(store: Store, amount: number, reputation = 0) {
 export async function initialInbox(store: Store) {
   if (
     !(await store.get(
-      "SELECT [key] FROM meta WHERE [key] = 'mediaCoverageVersion'",
+      "SELECT key FROM meta WHERE key = 'mediaCoverageVersion'",
     ))
   ) {
     await publishPlayerCoverage(store);
@@ -840,7 +841,7 @@ export async function initialInbox(store: Store) {
   }
   if (
     await store.get(
-      "SELECT [key] FROM meta WHERE [key] = ?",
+      "SELECT key FROM meta WHERE key = ?",
       "inboxInitialized",
     )
   )
@@ -848,11 +849,11 @@ export async function initialInbox(store: Store) {
   const club = await clubOf(store);
   // Worlds made only of home-pool nations (db:seed --nations FO) start at a national team without staff.
   const scout = await store.get<Staff>(
-    "SELECT TOP (1) * FROM staff WHERE club_id = ? AND role = 'Scout' ORDER BY id",
+    "SELECT * FROM staff WHERE club_id = ? AND role = 'Scout' ORDER BY id LIMIT 1",
     club.id,
   );
   const prospects = !scout ? [] : await store.all<Player>(
-    "SELECT TOP (5) * FROM players WHERE club_id != ? AND age BETWEEN 18 AND 23 AND ability BETWEEN 65 AND 77 AND potential >= 82 ORDER BY potential DESC, value ASC,id",
+    "SELECT * FROM players WHERE club_id != ? AND age BETWEEN 18 AND 23 AND ability BETWEEN 65 AND 77 AND potential >= 82 ORDER BY potential DESC, value ASC,id LIMIT 5",
     club.id,
   );
   for (const player of prospects) {
@@ -1083,7 +1084,7 @@ export async function finishScouting(store: Store) {
     const players = assignment.player_id
       ? [await playerOf(store, assignment.player_id)]
       : await store.all<Player>(
-          `SELECT TOP (5) * FROM players WHERE club_id != ? AND age <= ? AND value <= ? ${assignment.country_id ? "AND country_id = ?" : ""} ${assignment.position ? "AND position = ?" : ""} ORDER BY potential - ability + potential / 4 DESC,id`,
+          `SELECT * FROM players WHERE club_id != ? AND age <= ? AND value <= ? ${assignment.country_id ? "AND country_id = ?" : ""} ${assignment.position ? "AND position = ?" : ""} ORDER BY potential - ability + potential / 4 DESC,id LIMIT 5`,
           state.clubId,
           assignment.max_age,
           assignment.budget,
@@ -1133,7 +1134,6 @@ export async function enquire(
   store: Store,
   playerId: number,
   type: string,
-  destinationId?: number,
   guardianConsent = false,
 ) {
   const state = await stateOf(store);
@@ -1144,14 +1144,10 @@ export async function enquire(
     throw new GameError(
       "The player is already on loan. Resolve that agreement first.",
     );
-  const buyingClub = await clubOf(store, destinationId ?? state.clubId);
+  const buyingClub = await clubOf(store, state.clubId);
   const sellingClub = player.club_id
     ? await clubOf(store, player.club_id)
     : null;
-  if (destinationId && player.club_id !== state.clubId)
-    throw new GameError("You can only offer your own players to another club.");
-  if (buyingClub.type !== "club")
-    throw new GameError("Choose a senior club for negotiations.");
   const renewal = type === "Contract renewal";
   const youthApproach = type === "Youth approach";
   const future = type === "Future transfer";
@@ -1555,6 +1551,7 @@ async function assessLoanBorrowerPackage(
     buyer.id,
     player.position,
   ))!.total;
+  const commission = (JSON.parse(negotiation.data) as NegotiationData).agent?.commission ?? 0;
   return loanBorrowerWillingness({
     type: negotiation.type,
     playerValue: player.value,
@@ -1562,9 +1559,10 @@ async function assessLoanBorrowerPackage(
     playerAbility: player.ability,
     playerAge: player.age,
     borrowerReputation: buyer.reputation,
-    borrowerTransferBudget: buyer.transfer_budget,
+    // The agent's commission on the loan fee and wages already agreed elsewhere count against the borrower's room.
+    borrowerTransferBudget: Math.floor(buyer.transfer_budget / (1 + commission / 100)),
     borrowerWageBudget: buyer.wage_budget,
-    borrowerCurrentWages: await weeklyWages(store, buyer.id),
+    borrowerCurrentWages: (await weeklyWages(store, buyer.id)) + (await committedWages(store, buyer.id, negotiation.id)),
     seniorSquadSize,
     positionCount,
     days,
@@ -1617,10 +1615,10 @@ export async function counterIncomingOffer(
   if (!Number.isFinite(fee) || fee < 0 || fee > buyer.transfer_budget)
     throw new GameError("The counteroffer exceeds the buying club's budget.");
   const data = JSON.parse(negotiation.data) as NegotiationData;
-  const ceiling = buyerFeeCeiling(
-    negotiation.asking_price,
-    negotiation.offer,
-    proposed,
+  // The bidder also keeps the agent's commission on the wage inside its transfer budget.
+  const ceiling = Math.min(
+    buyerFeeCeiling(negotiation.asking_price, negotiation.offer, proposed),
+    Math.floor(buyer.transfer_budget - (negotiation.wage * 52 * (data.agent?.commission ?? 0)) / 100),
   );
   if (fee > ceiling) {
     data.counter = ceiling;
@@ -1677,6 +1675,12 @@ export async function counterIncomingLoan(
   const endDate = loanEndDate(negotiation.type, state.date, terms.duration);
   if (endDate > player.contract_end)
     throw new GameError("The proposed loan outlasts the parent contract.");
+  if (terms.position !== player.position && terms.position !== player.secondary_position)
+    throw new GameError("The position guarantee must match a trained position.");
+  if (terms.tacticalFit > tacticalFit(player, buyer) + 10)
+    throw new GameError(`${buyer.name} cannot meet that tactical-fit guarantee.`);
+  if (terms.managerTrust > buyer.manager_trust)
+    throw new GameError(`${buyer.name}'s manager does not meet the requested trust threshold.`);
   const issue = loanTermsIssue(
     {
       type: negotiation.type,
@@ -1723,6 +1727,7 @@ export async function closeNegotiation(
   negotiation: Negotiation,
   stage: "Rejected" | "Withdrawn" | "Expired" | "Hijacked",
   message: string,
+  closedReason?: NegotiationData["closedReason"],
 ) {
   const current = (await store.get<Negotiation>(
     "SELECT * FROM negotiations WHERE id = ?",
@@ -1744,6 +1749,7 @@ export async function closeNegotiation(
     data.reservedBudget = 0;
     message += " The reserved transfer allocation has been released.";
   }
+  if (closedReason) data.closedReason = closedReason;
   data.log.push({ date: (await stateOf(store)).date, type: stage, message });
   await store.run(
     "UPDATE negotiations SET stage = ?,data = ? WHERE id = ?",
@@ -1790,6 +1796,8 @@ export async function negotiationStep(
       negotiation.selling_club_id !== state.clubId
     )
       throw new GameError("Only an incoming offer can be accepted here.");
+    const withdrawn = await acceptIncomingOffer(store, negotiation, data, state.date);
+    if (withdrawn) return { stage: "Withdrawn", message: withdrawn };
     data.workflowVersion = 2;
     data.buyerManaged = true;
     data.nextStageDate = addDays(state.date, 1);
@@ -2015,8 +2023,7 @@ export async function progressDealMilestones(
         playingTime: loan ? data.terms.playingTime : undefined,
         tension: negotiation.tension,
       });
-      const ceiling = Math.round(preview.expectedWage * MARKET_WAGE_PREMIUM_CAP);
-      if (!preview.refuses && (preview.wageToAgree == null || preview.wageToAgree > ceiling)) {
+      if (!preview.refuses && personalTermsWage(preview) === null) {
         const message = `${player.name} and ${buyer.name} could not agree personal terms: he is not convinced by the move at a wage they will pay (interest ${preview.moveScore ?? preview.score}% before wages, ${PERSONAL_TERMS_THRESHOLD}% needed to agree).`;
         await closeNegotiation(store, negotiation, "Rejected", message);
         if (negotiation.selling_club_id === state.clubId)
@@ -2080,6 +2087,9 @@ export async function progressDealMilestones(
           data.registrationDate < data.futureArrivalDate
         )
           data.registrationDate = data.futureArrivalDate;
+        // A club's approach starts on the date it offered, not earlier.
+        if (data.plannedStart && data.registrationDate < data.plannedStart)
+          data.registrationDate = data.plannedStart;
         data.log.push({
           date: state.date,
           type: "Registration",
@@ -2099,7 +2109,7 @@ export async function progressDealMilestones(
             store,
             "Transfers",
             `${player.name}: medical passed`,
-            "Registration checks, work permission and financial commitments are now being finalized.",
+            "Contract documents, international clearance and financial commitments are now being finalized. Work permission and competition registration are assessed separately and do not stop the signing.",
             "success",
             "transfers",
           );
@@ -2135,7 +2145,7 @@ export async function declareInterest(store: Store, id: number) {
   });
   data.declared = true;
   await store.run(
-    "UPDATE negotiations SET [public] = 1, tension = LEAST(100, tension + 12), interest = LEAST(100, interest + 8), asking_price = ROUND(asking_price * 1.08, 0), data = ? WHERE id = ?",
+    "UPDATE negotiations SET public = 1, tension = LEAST(100, tension + 12), interest = LEAST(100, interest + 8), asking_price = round(asking_price * 1.08), data = ? WHERE id = ?",
     JSON.stringify(data),
     id,
   );
@@ -2200,6 +2210,8 @@ export async function negotiate(
   const data = JSON.parse(negotiation.data) as NegotiationData;
   if (data.buyerManaged && buyer.id !== state.clubId && !automated)
     throw new GameError("The buying club controls personal terms and signing.");
+  if (negotiation.stage === "Club talks" && buyer.id !== state.clubId)
+    throw new GameError("Clubs now approach you with their own offers. Withdraw these talks and answer their offers instead.");
   const loan = LOAN_TYPES.includes(negotiation.type);
   if (negotiation.type === "Youth approach" && input.fee !== 0)
     throw new GameError(
@@ -2268,7 +2280,7 @@ export async function negotiate(
       (input.signingBonus ?? 0) +
       (data.trainingCompensation ?? 0) +
       committedAgentFee >
-      buyer.transfer_budget
+      buyer.transfer_budget + (data.reservedBudget ?? 0)
   )
     throw new GameError(
       committedAgentFee
@@ -2341,78 +2353,54 @@ export async function negotiate(
       "The receiving manager does not meet the requested trust threshold.",
     );
   if (stage === "Club talks") {
-    if (loan && negotiation.selling_club_id === state.clubId && buyer.id !== state.clubId) {
-      const willingness = await assessLoanBorrowerPackage(store, negotiation, player, buyer, input.fee, data.terms);
-      const fatalReasons = willingness.reasons.filter((reason) =>
-        reason.includes("full senior squad") ||
-        reason.includes("does not have a clear squad need") ||
-        reason.includes("below the borrowing club"),
-      );
-      if (fatalReasons.length) {
-        stage = "Rejected";
-        message = `The borrower has declined the loan. ${fatalReasons.slice(0, 2).join(" ")}`;
-      } else if (willingness.willing) {
-        fee = input.fee;
-        stage = "Agent talks";
-        tension = Math.max(5, tension - 8);
-        data.buyerManaged = true;
-        data.nextStageDate = addDays(state.date, 1);
-        message = `Borrower's terms agreed at ${money(fee)} with ${data.terms.salarySplit}% of the wage covered. The player keeps his parent-club contract while the borrower completes acceptance.`;
-      } else {
-        tension += input.fee > willingness.maximumFee * 1.35 ? 18 : 10;
-        data.counter = willingness.maximumFee;
-        message = `Loan proposal rejected. The borrower counters at ${money(willingness.maximumFee)}, can cover up to ${willingness.maximumSalarySplit}% of the wage${willingness.maximumOptionFee ? ` and will only accept a purchase clause up to ${money(willingness.maximumOptionFee)}` : ""}. ${willingness.reasons.slice(0, 2).join(" ")}`;
-      }
+    const guaranteeDiscount = loan
+      ? (data.terms.playingTime - 50) / 500 + (actualRelationship - 50) / 1000
+      : 0;
+    const seller =
+      !loan && negotiation.type === "Permanent transfer" && negotiation.selling_club_id
+        ? await clubOf(store, negotiation.selling_club_id)
+        : undefined;
+    const sellerFloorRatio = seller
+      ? sellerValueFloor(player, seller, state.date)
+      : 0;
+    const loanBackDiscount = seller
+      ? loanBackSellerFloorDiscount(data.transferTerms?.loanBack, sellerFloorRatio)
+      : 0;
+    // A selling club does not let a starter go far below his value, and asks a premium for deferred payment.
+    const valueFloor = seller
+      ? player.value * Math.max(0, sellerFloorRatio + difficulty - skill - loanBackDiscount)
+      : 0;
+    const floor =
+      Math.max(
+        askingPrice *
+          (0.88 +
+            difficulty -
+            skill -
+            loanBackDiscount -
+            guaranteeDiscount +
+            (data.agent.personality === "Combative" ? 0.04 : 0)),
+        valueFloor,
+      ) * (1 + (loan ? 0 : deferralPremium(checkedTransferTerms(data.transferTerms))));
+    const finalOffers =
+      data.battle?.status === "final-offers" &&
+      state.date <= data.battle.finalOffersDeadline!;
+    if (negotiation.interest < MOVE_REFUSAL_THRESHOLD) {
+      stage = "Rejected";
+      message =
+        "The player has declined: the proposed club and career pathway do not fit their ambitions.";
+    } else if (input.fee >= floor && finalOffers) {
+      // Best-and-final round: the selling club decides between all bidders on the deadline.
+      data.battle!.userFinalOffer = input.fee;
+      message = `Final offer of ${money(input.fee)} lodged. The selling club decides on ${data.battle!.finalOffersDeadline}; bids within 5% of the best stand and the player then chooses.`;
+    } else if (input.fee >= floor) {
+      fee = input.fee;
+      stage = "Agent talks";
+      tension = Math.max(5, tension - 8);
+      message = `Club terms agreed at ${money(fee)}${loanBackSummary(checkedTransferTerms(data.transferTerms))}. Personal terms and the medical remain outstanding.`;
     } else {
-      const guaranteeDiscount = loan
-        ? (data.terms.playingTime - 50) / 500 + (actualRelationship - 50) / 1000
-        : 0;
-      const seller =
-        !loan && negotiation.type === "Permanent transfer" && negotiation.selling_club_id
-          ? await clubOf(store, negotiation.selling_club_id)
-          : undefined;
-      const sellerFloorRatio = seller
-        ? sellerValueFloor(player, seller, state.date)
-        : 0;
-      const loanBackDiscount = seller
-        ? loanBackSellerFloorDiscount(data.transferTerms?.loanBack, sellerFloorRatio)
-        : 0;
-      // A selling club does not let a starter go far below his value, and asks a premium for deferred payment.
-      const valueFloor = seller
-        ? player.value * Math.max(0, sellerFloorRatio + difficulty - skill - loanBackDiscount)
-        : 0;
-      const floor =
-        Math.max(
-          askingPrice *
-            (0.88 +
-              difficulty -
-              skill -
-              loanBackDiscount -
-              guaranteeDiscount +
-              (data.agent.personality === "Combative" ? 0.04 : 0)),
-          valueFloor,
-        ) * (1 + (loan ? 0 : deferralPremium(checkedTransferTerms(data.transferTerms))));
-      const finalOffers =
-        data.battle?.status === "final-offers" &&
-        state.date <= data.battle.finalOffersDeadline!;
-      if (negotiation.interest < MOVE_REFUSAL_THRESHOLD) {
-        stage = "Rejected";
-        message =
-          "The player has declined: the proposed club and career pathway do not fit their ambitions.";
-      } else if (input.fee >= floor && finalOffers) {
-        // Best-and-final round: the selling club decides between all bidders on the deadline.
-        data.battle!.userFinalOffer = input.fee;
-        message = `Final offer of ${money(input.fee)} lodged. The selling club decides on ${data.battle!.finalOffersDeadline}; bids within 5% of the best stand and the player then chooses.`;
-      } else if (input.fee >= floor) {
-        fee = input.fee;
-        stage = "Agent talks";
-        tension = Math.max(5, tension - 8);
-        message = `Club terms agreed at ${money(fee)}${loanBackSummary(checkedTransferTerms(data.transferTerms))}. Personal terms and the medical remain outstanding.`;
-      } else {
-        tension += input.fee < floor * 0.65 ? 24 : 12;
-        data.counter = clubCounter(askingPrice, floor);
-        message = `Offer rejected. The club counters at ${money(data.counter)}.`;
-      }
+      tension += input.fee < floor * 0.65 ? 24 : 12;
+      data.counter = clubCounter(askingPrice, floor);
+      message = `Offer rejected. The club counters at ${money(data.counter)}.`;
     }
   } else {
     data.interestDetails = await assessPlayerInterest(store, player, buyer, {
@@ -2526,6 +2514,8 @@ export async function startLoanSpell(
     startDate: string;
     endDate: string;
     terms: LoanTerms;
+    /** Why the borrower wanted him (club approaches), kept with the loan record. */
+    reason?: NegotiationData["reason"];
   },
 ) {
   const { player, terms } = spell;
@@ -2557,10 +2547,12 @@ export async function startLoanSpell(
           factors: {},
           history: [],
           bonusPaid: false,
+          ...(spell.reason ? { reason: spell.reason } : {}),
         }),
       )
     ).lastInsertRowid,
   );
+  const previous = await currentSpell(store, player.id);
   await store.run(
     "UPDATE players SET parent_club_id = ?, club_id = ?, squad_club_id = NULL, role = ?, training = ?, listed = 0, available_loan = 0, morale = LEAST(99, morale + 3), loan_progress = 0 WHERE id = ?",
     spell.parentId,
@@ -2569,6 +2561,7 @@ export async function startLoanSpell(
     terms.developmentPlan,
     player.id,
   );
+  await registerSpell(store, player.id, "loan-start", previous);
   return loanId;
 }
 
@@ -2772,24 +2765,29 @@ export async function completeNegotiation(
     return;
   }
   const playerProfile = JSON.parse(player.profile) as PlayerProfile;
-  const registration = await assessRegistration(store, player, buyer);
-  if (!renewal && !registration.allowed) {
-    await closeNegotiation(
-      store,
-      negotiation,
-      "Rejected",
-      `Registration denied: ${registration.reasons.join(" ")}`,
-    );
+  // Only real transfer rules can stop the signing; GBE and quotas decide registration after completion.
+  const signing = renewal
+    ? { ok: true, reasons: [] }
+    : await canSign(
+        store,
+        player.id,
+        buyer.id,
+        loan ? "loan_in" : !negotiation.selling_club_id ? "free" : negotiation.type === "Youth approach" ? "youth" : "transfer",
+        { emergency: negotiation.type === "Emergency loan" },
+      );
+  if (!signing.ok) {
+    await closeNegotiation(store, negotiation, "Rejected", `Transfer rules prevent completion: ${signing.reasons.join(" ")}`);
     await news(
       store,
       "Transfers",
-      `${player.name}: registration denied`,
-      `${registration.source}: ${registration.reasons.join(" ")}`,
+      `${player.name}: deal cannot complete`,
+      signing.reasons.join(" "),
       "warning",
-      "loans",
+      loan ? "loans" : "transfers",
     );
     return;
   }
+  const previousSpell = renewal ? null : await currentSpell(store, player.id);
   const agentFee = Math.round(
     ((loan ? negotiation.offer : negotiation.wage * 52) *
       data.agent.commission) /
@@ -2876,13 +2874,6 @@ export async function completeNegotiation(
     );
     return;
   }
-  await store.run(
-    "MERGE registration_records WITH (HOLDLOCK) AS target USING (VALUES (?,?,'approved',?,?)) AS source(player_id,country_id,status,date,data) ON target.player_id = source.player_id AND target.country_id = source.country_id WHEN MATCHED THEN UPDATE SET status = source.status,date = source.date,data = source.data WHEN NOT MATCHED THEN INSERT (player_id,country_id,status,date,data) VALUES (source.player_id,source.country_id,source.status,source.date,source.data);",
-    player.id,
-    buyer.country_id,
-    state.date,
-    JSON.stringify(registration),
-  );
   await ledger(
     store,
     buyer.id,
@@ -2990,6 +2981,7 @@ export async function completeNegotiation(
       startDate: state.date,
       endDate: loanEndDate(negotiation.type, state.date, duration),
       terms,
+      reason: data.reason,
     });
     await acquirePlayerAsset(
       store,
@@ -3047,6 +3039,7 @@ export async function completeNegotiation(
       JSON.stringify(playerProfile),
       player.id,
     );
+    if (!renewal) await registerSpell(store, player.id, "signing", previousSpell);
   }
   const transferClauseBeneficiaryId =
     data.affiliatePlacement?.originalSellerId ?? negotiation.selling_club_id;
@@ -3100,11 +3093,18 @@ export async function completeNegotiation(
       JSON.stringify({ startMinutes: player.minutes, clubId: buyer.id }),
     );
   await startOnwardLoan(store, negotiation, data);
+  const eligibility = renewal ? null : await playerEligibility(store, player.id);
+  const registrationNote = !eligibility
+    ? ""
+    : eligibility.label === "eligible" || eligibility.label === "loaned_out"
+      ? " Registration approved: he is eligible for competitive matches."
+      : ` ${eligibility.text}: ${eligibility.association.reasons.join(" ")} He can play friendlies and train until registered.`;
   data.log.push({
     date: state.date,
     type: "Completed",
-    message:
-      "Registration approved. The agreed fee, contract and any loan guarantees are now effective.",
+    message: renewal
+      ? "The renewed contract and wage are now effective."
+      : `Signed. The agreed fee, contract and any loan guarantees are now effective.${registrationNote}`,
   });
   await store.run(
     "UPDATE negotiations SET stage = 'Completed', data = ? WHERE id = ?",
@@ -3151,7 +3151,7 @@ export async function completeNegotiation(
       store,
       "Transfers",
       `${player.name}: deal completed`,
-      `${negotiation.type} agreed with ${buyer.name}. ${loan ? "The loan guarantees and development plan are now being monitored." : "The contract, wage and promises are registered."}`,
+      `${negotiation.type} agreed with ${buyer.name}. ${loan ? "The loan guarantees and development plan are now being monitored." : "The contract, wage and promises are in force."}${registrationNote}`,
       "success",
       loan ? "loans" : "squad",
       { playerId: player.id },
@@ -3257,17 +3257,19 @@ export async function recallLoan(store: Store, id: number, injury = false) {
       "A standard recall must take place within a registration window.",
     );
   await store.run(
-    "UPDATE loans SET status = 'recalled', relationship = GREATEST(0, relationship - 12), data = JSON_MODIFY(data,'$.endedOn',?) WHERE id = ?",
+    "UPDATE loans SET status = 'recalled', relationship = GREATEST(0, relationship - 12), data = (data::jsonb || jsonb_build_object('endedOn', ?::text))::text WHERE id = ?",
     state.date,
     id,
   );
   const details = JSON.parse(loan.data);
+  const previous = await currentSpell(store, player.id);
   await store.run(
     "UPDATE players SET club_id = parent_club_id, parent_club_id = NULL, role = ?, training = ? WHERE id = ?",
     details.parentRole ?? "Squad player",
     details.parentTraining ?? "Balanced",
     player.id,
   );
+  await registerSpell(store, player.id, "loan-recall", previous);
   await store.run(
     "UPDATE sell_on_clauses SET status = 'cancelled' WHERE source_loan_id = ? AND status = 'active'",
     loan.id,
@@ -3357,7 +3359,7 @@ export async function exerciseOption(
     loan.player_id,
   );
   await store.run(
-    "UPDATE loans SET status = 'purchased', data = JSON_MODIFY(data,'$.endedOn',?) WHERE id = ?",
+    "UPDATE loans SET status = 'purchased', data = (data::jsonb || jsonb_build_object('endedOn', ?::text))::text WHERE id = ?",
     (await stateOf(store)).date,
     id,
   );
@@ -3398,7 +3400,7 @@ export async function reviewLoans(store: Store) {
       correct: number;
       minutes: number;
     }>(
-      "SELECT count(*) AS total, coalesce(sum(CASE WHEN JSON_VALUE(data,'$.position') = ? THEN 1 ELSE 0 END),0) AS correct, coalesce(sum(TRY_CONVERT(float, JSON_VALUE(data,'$.minutes'))),0) AS minutes FROM history WHERE entity_type = 'appearance' AND entity_id = ? AND date >= ? AND TRY_CONVERT(int, JSON_VALUE(data,'$.clubId')) = ?",
+      "SELECT count(*) AS total, coalesce(sum(CASE WHEN appearance.data ->> 'position' = ? THEN 1 ELSE 0 END),0) AS correct, coalesce(sum((appearance.data ->> 'minutes')::double precision),0) AS minutes FROM history CROSS JOIN LATERAL (SELECT history.data::jsonb AS data) AS appearance WHERE history.entity_type = 'appearance' AND history.entity_id = ? AND history.date >= ? AND (appearance.data ->> 'clubId')::integer = ?",
       terms.position,
       player.id,
       loan.start_date,
@@ -3479,7 +3481,7 @@ export async function reviewLoans(store: Store) {
           loan.destination_id,
         );
         await store.run(
-          "UPDATE clubs SET data = JSON_MODIFY(data,'$.loanTrust',GREATEST(0,coalesce(TRY_CONVERT(float, JSON_VALUE(data,'$.loanTrust')),65) - 12)) WHERE id = ?",
+          "UPDATE clubs SET data = (data::jsonb || jsonb_build_object('loanTrust', GREATEST(0, coalesce((data::jsonb ->> 'loanTrust')::double precision, 65) - 12)))::text WHERE id = ?",
           loan.parent_id,
         );
         loan.relationship = Math.max(0, loan.relationship - 15);
@@ -3587,47 +3589,14 @@ export async function reviewLoans(store: Store) {
       JSON.stringify(data),
       loan.id,
     );
-    if (state.date >= loan.end_date) {
-      const obligation =
-        loan.type === "Loan with obligation" &&
-        (terms.obligationCondition === "Unconditional" ||
-          (terms.obligationCondition === "Minutes played" &&
-            minutes >= terms.mandatoryMinutes) ||
-          (terms.obligationCondition === "Avoid relegation" &&
-            destination.crisis < 70));
-      if (obligation) await exerciseOption(store, loan.id, true);
-      else {
-        await store.run(
-          "UPDATE players SET club_id = parent_club_id, parent_club_id = NULL, role = ?, training = ? WHERE id = ?",
-          data.parentRole ?? "Squad player",
-          data.parentTraining ?? "Balanced",
-          player.id,
-        );
-        await store.run(
-          "UPDATE loans SET status = 'completed', data = JSON_MODIFY(data,'$.endedOn',?) WHERE id = ?",
-          state.date,
-          loan.id,
-        );
-        await store.run(
-          "UPDATE partnerships SET strength = LEAST(100, GREATEST(0, strength + ?)) WHERE club_id = ? AND partner_id = ?",
-          (score - 50) / 10,
-          loan.parent_id,
-          loan.destination_id,
-        );
-        if (loan.parent_id === state.clubId)
-          await news(
-            store,
-            "Loans",
-            `${player.name} returns`,
-            `The loan concluded with a success score of ${score}/100 and ${minutes} minutes played.`,
-            score > 65 ? "success" : "important",
-            "loans",
-          );
-      }
-    }
   }
 }
 
+/**
+ * Ends every loan whose term is over (runs daily): an obligation whose condition is met makes the move permanent;
+ * an AI borrower decides on a purchase option it can afford after a successful spell; otherwise the player returns
+ * to the parent club with his parent role and training, and the club relationship moves with the loan's success.
+ */
 export async function expireLoans(store: Store) {
   const state = await stateOf(store);
   for (const loan of await store.all<Loan>(
@@ -3636,8 +3605,9 @@ export async function expireLoans(store: Store) {
   )) {
     const terms = JSON.parse(loan.terms) as LoanTerms;
     const details = JSON.parse(loan.data);
+    const destination = await clubOf(store, loan.destination_id);
     const minutes = (await store.get<{ total: number }>(
-      "SELECT coalesce(sum(TRY_CONVERT(float, JSON_VALUE(data,'$.minutes'))),0) AS total FROM history WHERE entity_type = 'appearance' AND entity_id = ? AND date >= ? AND TRY_CONVERT(int, JSON_VALUE(data,'$.clubId')) = ?",
+      "SELECT coalesce(sum((appearance.data ->> 'minutes')::double precision),0) AS total FROM history CROSS JOIN LATERAL (SELECT history.data::jsonb AS data) AS appearance WHERE history.entity_type = 'appearance' AND history.entity_id = ? AND history.date >= ? AND (appearance.data ->> 'clubId')::integer = ?",
       loan.player_id,
       loan.start_date,
       loan.destination_id,
@@ -3648,31 +3618,55 @@ export async function expireLoans(store: Store) {
         (terms.obligationCondition === "Minutes played" &&
           minutes >= terms.mandatoryMinutes) ||
         (terms.obligationCondition === "Avoid relegation" &&
-          (await clubOf(store, loan.destination_id)).crisis < 70));
-    if (obligation) await exerciseOption(store, loan.id, true);
-    else {
-      await store.run(
-        "UPDATE players SET club_id = parent_club_id, parent_club_id = NULL, role = ?, training = ? WHERE id = ?",
-        details.parentRole ?? "Squad player",
-        details.parentTraining ?? "Balanced",
-        loan.player_id,
-      );
-      await store.run(
-        "UPDATE loans SET status = 'completed', data = JSON_MODIFY(data,'$.endedOn',?) WHERE id = ?",
-        state.date,
-        loan.id,
-      );
-      if (loan.parent_id === state.clubId)
-        await news(
-          store,
-          "Loans",
-          `${(await playerOf(store, loan.player_id)).name} returns`,
-          `The agreement has expired. The player returns with a loan success score of ${Math.round(loan.score)}.`,
-          "info",
-          "loans",
-        );
+          destination.crisis < 70));
+    if (obligation || (await aiTakesOption(store, loan, terms, destination))) {
+      await exerciseOption(store, loan.id, true);
+      continue;
     }
+    const previous = await currentSpell(store, loan.player_id);
+    await store.run(
+      "UPDATE players SET club_id = parent_club_id, parent_club_id = NULL, role = ?, training = ? WHERE id = ?",
+      details.parentRole ?? "Squad player",
+      details.parentTraining ?? "Balanced",
+      loan.player_id,
+    );
+    await registerSpell(store, loan.player_id, "loan-return", previous);
+    await store.run(
+      "UPDATE loans SET status = 'completed', data = (data::jsonb || jsonb_build_object('endedOn', ?::text))::text WHERE id = ?",
+      state.date,
+      loan.id,
+    );
+    await store.run(
+      "UPDATE partnerships SET strength = LEAST(100, GREATEST(0, strength + ?)) WHERE (club_id = ? AND partner_id = ?) OR (club_id = ? AND partner_id = ?)",
+      (loan.score - 50) / 10,
+      loan.parent_id,
+      loan.destination_id,
+      loan.destination_id,
+      loan.parent_id,
+    );
+    if (loan.parent_id === state.clubId)
+      await news(
+        store,
+        "Loans",
+        `${(await playerOf(store, loan.player_id)).name} returns`,
+        `The loan at ${destination.name} has ended: success score ${Math.round(loan.score)}/100 and ${Math.round(minutes)} minutes played.`,
+        loan.score > 65 ? "success" : "info",
+        "loans",
+        { playerId: loan.player_id },
+      );
   }
+}
+
+/**
+ * Whether an AI borrower exercises a loan's purchase option at its end: after a successful spell (success score 60+)
+ * for a player at its level, when its transfer budget, cash and wage budget cover the fee and the full wage.
+ */
+async function aiTakesOption(store: Store, loan: Loan, terms: LoanTerms, buyer: Club) {
+  if (loan.type !== "Loan with option" || buyer.id === (await stateOf(store)).clubId || loan.score < 60) return false;
+  const player = await playerOf(store, loan.player_id);
+  if (player.ability < buyer.reputation - 8 || terms.optionFee <= 0) return false;
+  if (buyer.transfer_budget < terms.optionFee || buyer.balance < terms.optionFee) return false;
+  return (await weeklyWages(store, buyer.id)) + (player.wage * (100 - terms.salarySplit)) / 100 <= buyer.wage_budget;
 }
 
 export async function mentorPlayer(
@@ -3712,7 +3706,7 @@ export async function mentorPlayer(
     player.id,
   );
   await store.run(
-    "MERGE relationships WITH (HOLDLOCK) AS target USING (VALUES (?, 'player', ?, 'player', ?, 65, 'Mentorship')) AS source(club_id,source_type,source_id,target_type,target_id,strength,kind) ON target.source_type = source.source_type AND target.source_id = source.source_id AND target.target_type = source.target_type AND target.target_id = source.target_id WHEN MATCHED THEN UPDATE SET strength = 65,kind = 'Mentorship' WHEN NOT MATCHED THEN INSERT (club_id,source_type,source_id,target_type,target_id,strength,kind) VALUES (source.club_id,source.source_type,source.source_id,source.target_type,source.target_id,source.strength,source.kind);",
+    "INSERT INTO relationships(club_id,source_type,source_id,target_type,target_id,strength,kind) VALUES (?, 'player', ?, 'player', ?, 65, 'Mentorship') ON CONFLICT (source_type,source_id,target_type,target_id) DO UPDATE SET strength = 65,kind = 'Mentorship'",
     (await stateOf(store)).clubId,
     mentor.id,
     player.id,
@@ -3726,7 +3720,7 @@ export async function squadRole(store: Store, playerId: number, role: string) {
     throw new GameError("The loan agreement controls this player's role.");
   if (role === "Captain")
     await store.run(
-      "UPDATE players SET role = 'Regular starter' WHERE coalesce(squad_club_id,club_id) = ? AND age_group = ? AND role = 'Captain'",
+      "UPDATE players SET role = 'Regular starter' WHERE playing_club_id = ? AND age_group = ? AND role = 'Captain'",
       player.squad_club_id ?? player.club_id,
       player.age_group,
     );
@@ -3786,13 +3780,13 @@ export async function staffAction(
       id,
     );
     const peer = await store.get<Staff>(
-      "SELECT TOP (1) * FROM staff WHERE club_id = ? AND id != ? ORDER BY influence DESC,id",
+      "SELECT * FROM staff WHERE club_id = ? AND id != ? ORDER BY influence DESC,id LIMIT 1",
       club.id,
       id,
     );
     if (peer)
       await store.run(
-        "MERGE relationships WITH (HOLDLOCK) AS target USING (VALUES (?, 'staff', ?, 'staff', ?, ?, ?)) AS source(club_id,source_type,source_id,target_type,target_id,strength,kind) ON target.source_type = source.source_type AND target.source_id = source.source_id AND target.target_type = source.target_type AND target.target_id = source.target_id WHEN NOT MATCHED THEN INSERT (club_id,source_type,source_id,target_type,target_id,strength,kind) VALUES (source.club_id,source.source_type,source.source_id,source.target_type,source.target_id,source.strength,source.kind);",
+        "INSERT INTO relationships(club_id,source_type,source_id,target_type,target_id,strength,kind) VALUES (?, 'staff', ?, 'staff', ?, ?, ?) ON CONFLICT (source_type,source_id,target_type,target_id) DO NOTHING",
         club.id,
         id,
         peer.id,
@@ -3863,7 +3857,7 @@ export async function staffAction(
 export async function mediaResponse(store: Store, approach: string) {
   const state = await stateOf(store);
   const last = await store.get<{ value: string }>(
-    "SELECT value FROM meta WHERE [key] = ?",
+    "SELECT value FROM meta WHERE key = ?",
     "lastMediaResponse",
   );
   if (last && JSON.parse(last.value) === state.date)

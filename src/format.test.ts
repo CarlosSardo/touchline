@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { expectationText, ordinal, plural, seasonText, showsGbe, unreadLabel } from "./format.ts";
+import { expectationText, ordinal, plural, seasonText, unreadLabel } from "./format.ts";
 
 describe("ordinal", () => {
   it("handles teens and the twenties of 24-club leagues", () => {
@@ -29,11 +29,5 @@ describe("text helpers", () => {
     expect(expectationText(4)).toBe("Finish in the top 4");
     expect(unreadLabel(7, 100)).toBe("7");
     expect(unreadLabel(100, 100)).toBe("99+");
-  });
-
-  it("shows GBE points only where the FA endorsement applies", () => {
-    expect(showsGbe({ status: "No FA endorsement required" })).toBe(false);
-    expect(showsGbe({ status: "Points threshold met" })).toBe(true);
-    expect(showsGbe({ status: "Endorsement not met" })).toBe(true);
   });
 });

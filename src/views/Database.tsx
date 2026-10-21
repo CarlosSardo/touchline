@@ -21,6 +21,7 @@ import {
   PageHeading,
   Panel,
   PlayerTable,
+  ShortlistButton,
   SortDirectionButton,
   type PlayerTableColumn,
 } from "../ui.tsx";
@@ -40,6 +41,7 @@ import {
 } from "../sort.ts";
 import { createDebouncer, totalLabel } from "../resource-cache.ts";
 import { plural } from "../format.ts";
+import { EligibilityBadge } from "../EligibilityBadge.tsx";
 
 const TYPING_DELAY_MS = 300;
 
@@ -731,7 +733,14 @@ export default function Database() {
             columns={DATABASE_COLUMNS}
             sort={sort === "minutes" ? null : { key: sort, direction }}
             onSortChange={setSorting}
-          />
+          >
+            {(player) => (
+              <div className="database-row-actions">
+                <EligibilityBadge eligibility={player.eligibility} hideEligible />
+                <ShortlistButton player={player} />
+              </div>
+            )}
+          </PlayerTable>
         ) : (
           <Empty
             icon={Search}

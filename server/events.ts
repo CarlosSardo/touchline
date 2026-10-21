@@ -104,7 +104,7 @@ export async function unexpectedEvents(
   const frequency = (await settingsOf(store)).unexpectedEvents;
   const all = (
     await store.all<EventRow>(
-      "SELECT TOP (31) * FROM unexpected_events WHERE club_id = ? ORDER BY date DESC,id DESC",
+      "SELECT * FROM unexpected_events WHERE club_id = ? ORDER BY date DESC,id DESC LIMIT 31",
       state.clubId,
     )
   ).map(readEvent);
@@ -121,7 +121,7 @@ export async function createUnexpectedEvent(store: Store, requested: EventKind) 
   const state = await stateOf(store);
   const club = await clubOf(store);
   const existing = await store.get<{ id: number }>(
-    "SELECT TOP (1) id FROM unexpected_events WHERE club_id = ? AND (status = 'pending' OR date = ?) ORDER BY id DESC",
+    "SELECT id FROM unexpected_events WHERE club_id = ? AND (status = 'pending' OR date = ?) ORDER BY id DESC LIMIT 1",
     club.id,
     state.date,
   );
@@ -130,7 +130,7 @@ export async function createUnexpectedEvent(store: Store, requested: EventKind) 
     `${state.seed}:event-detail:${club.id}:${state.date}`,
   );
   const players = await store.all<Player>(
-    "SELECT TOP (18) * FROM players WHERE club_id = ? AND role != 'Retired' AND age_group = 'Senior' ORDER BY ability DESC,id",
+    "SELECT * FROM players WHERE club_id = ? AND role != 'Retired' AND age_group = 'Senior' ORDER BY ability DESC,id LIMIT 18",
     club.id,
   );
   const player = players[Math.floor(random() * players.length)];
@@ -503,7 +503,7 @@ export async function processUnexpectedEvents(store: Store) {
   if (
     (
       await store.get<{ value: string }>(
-        "SELECT value FROM meta WHERE [key] = ?",
+        "SELECT value FROM meta WHERE key = ?",
         key,
       )
     )?.value === JSON.stringify(state.date)
@@ -512,7 +512,7 @@ export async function processUnexpectedEvents(store: Store) {
   await store.setMeta(key, state.date);
   if (
     await store.get(
-      "SELECT id FROM unexpected_events WHERE club_id = ? AND status = 'pending'",
+      "SELECT id FROM unexpected_events WHERE club_id = ? AND status = 'pending' LIMIT 1",
       state.clubId,
     )
   )
@@ -520,7 +520,7 @@ export async function processUnexpectedEvents(store: Store) {
   const level = (await unexpectedEvents(store)).frequency;
   const configuration = FREQUENCIES[level];
   const recent = await store.all<{ date: string; kind: string }>(
-    `SELECT TOP (${RECENT_KINDS}) date,kind FROM unexpected_events WHERE club_id = ? ORDER BY date DESC,id DESC`,
+    `SELECT date,kind FROM unexpected_events WHERE club_id = ? ORDER BY date DESC,id DESC LIMIT ${RECENT_KINDS}`,
     state.clubId,
   );
   const last = recent[0];
@@ -535,14 +535,14 @@ export async function processUnexpectedEvents(store: Store) {
     state.clubId,
   ))!;
   const fixture = await store.get<{ home_id: number }>(
-    "SELECT TOP (1) fixtures.home_id FROM fixtures LEFT JOIN leagues ON leagues.id = fixtures.league_id WHERE (fixtures.home_id = ? OR fixtures.away_id = ?) AND fixtures.status = 'scheduled' AND fixtures.date BETWEEN ? AND ? AND coalesce(leagues.age_group,'Senior') = 'Senior' ORDER BY fixtures.date,fixtures.id",
+    "SELECT fixtures.home_id FROM fixtures LEFT JOIN leagues ON leagues.id = fixtures.league_id WHERE (fixtures.home_id = ? OR fixtures.away_id = ?) AND fixtures.status = 'scheduled' AND fixtures.date BETWEEN ? AND ? AND coalesce(leagues.age_group,'Senior') = 'Senior' ORDER BY fixtures.date,fixtures.id LIMIT 1",
     state.clubId,
     state.clubId,
     state.date,
     addDays(state.date, 3),
   );
   const hasPlayers = !!(await store.get(
-    "SELECT TOP (1) id FROM players WHERE club_id = ? AND role != 'Retired' AND age_group = 'Senior'",
+    "SELECT id FROM players WHERE club_id = ? AND role != 'Retired' AND age_group = 'Senior' LIMIT 1",
     state.clubId,
   ));
   const kind = pickEventKind(

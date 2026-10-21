@@ -29,13 +29,13 @@ describe.skipIf(process.env.SQL_INTEGRATION_TESTS !== "true")("transfer battles 
       await setDate("2026-08-10");
       userClubId = (await stateOf(store)).clubId;
       const candidates = await store.all<Player>(
-        "SELECT TOP (40) players.* FROM players JOIN clubs ON clubs.id = players.club_id WHERE clubs.type = 'club' AND players.club_id != ? AND players.parent_club_id IS NULL AND players.age_group = 'Senior' AND players.role != 'Retired' AND players.position != 'GK' AND players.contract_end > '2027-06-30' ORDER BY players.ability DESC,players.id",
+        "SELECT players.* FROM players JOIN clubs ON clubs.id = players.club_id WHERE clubs.type = 'club' AND players.club_id != ? AND players.parent_club_id IS NULL AND players.age_group = 'Senior' AND players.role != 'Retired' AND players.position != 'GK' AND players.contract_end > '2027-06-30' ORDER BY players.ability DESC,players.id LIMIT 40",
         userClubId,
       );
       for (const candidate of candidates) {
         if (!(await sellerCanRelease(store, candidate, "2026-08-10"))) continue;
         const buyers = await store.all<Club>(
-          "SELECT TOP (10) clubs.* FROM clubs JOIN clubs AS seller ON seller.id = ? WHERE clubs.type = 'club' AND clubs.country_id = seller.country_id AND clubs.id NOT IN (?,?) AND (SELECT count(*) FROM players WHERE players.club_id = clubs.id AND age_group = 'Senior' AND role != 'Retired') < 28 ORDER BY clubs.id",
+          "SELECT clubs.* FROM clubs JOIN clubs AS seller ON seller.id = ? WHERE clubs.type = 'club' AND clubs.country_id = seller.country_id AND clubs.id NOT IN (?,?) AND (SELECT count(*) FROM players WHERE players.club_id = clubs.id AND age_group = 'Senior' AND role != 'Retired') < 28 ORDER BY clubs.id LIMIT 10",
           candidate.club_id,
           candidate.club_id,
           userClubId,
@@ -123,7 +123,7 @@ describe.skipIf(process.env.SQL_INTEGRATION_TESTS !== "true")("transfer battles 
   });
 
   it("hands a live rival bid to the market once the director's talks have closed", async () => {
-    // Regression: the LIKE pattern '"rivals":[{' was an unclosed T-SQL character class and never matched.
+    // Regression: the handover query matches the literal '"rivals":[{' JSON fragment with LIKE.
     const id = await openTalks("Withdrawn", [{ ...agreedRival(90), status: "bid", termsOffered: false }], { status: "open" });
     await store.transaction(() => processTransferBattles(store));
     const data = JSON.parse((await talks(id)).data) as NegotiationData;

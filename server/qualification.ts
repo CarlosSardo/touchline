@@ -21,19 +21,7 @@ async function insertHistory(
   rows: Record<string, string | number>[],
 ) {
   if (!rows.length) return;
-  await store.transaction(async () => {
-    const lastId = (await store.get<{ id: number }>(
-      "SELECT coalesce(max(id),0) AS id FROM history WITH (UPDLOCK,HOLDLOCK)",
-    ))!.id;
-    for (let offset = 0; offset < rows.length; offset += 1000)
-      await store.bulkInsert(
-        "history",
-        rows.slice(offset, offset + 1000).map((row, index) => ({
-          id: lastId + offset + index + 1,
-          ...row,
-        })),
-      );
-  });
+  await store.bulkInsert("history", rows);
 }
 
 /** Writes the catalog 2020/21–2025/26 association coefficients (seasons firstSeason-6..-1); idempotent. */
@@ -162,7 +150,7 @@ export async function domesticOrder(
     countryId,
   );
   const archived = await store.get<{ data: string }>(
-    "SELECT TOP (1) data FROM history WHERE entity_type = 'league' AND entity_id = ? AND season = ? ORDER BY id DESC",
+    "SELECT data FROM history WHERE entity_type = 'league' AND entity_id = ? AND season = ? ORDER BY id DESC LIMIT 1",
     clubs[0]?.league_id ?? 0,
     season - 1,
   );
@@ -181,7 +169,7 @@ export async function domesticOrder(
 
 async function latestChampion(store: Store, season: number, name: string, countryId?: number) {
   const row = await store.get<{ data: string }>(
-    `SELECT TOP (1) history.data FROM history JOIN leagues ON leagues.id = history.entity_id WHERE history.entity_type = 'champion' AND history.season = ? AND leagues.name = ? ${countryId === undefined ? "" : "AND leagues.country_id = ?"} ORDER BY history.id DESC`,
+    `SELECT history.data FROM history JOIN leagues ON leagues.id = history.entity_id WHERE history.entity_type = 'champion' AND history.season = ? AND leagues.name = ? ${countryId === undefined ? "" : "AND leagues.country_id = ?"} ORDER BY history.id DESC LIMIT 1`,
     season,
     name,
     ...(countryId === undefined ? [] : [countryId]),
@@ -192,7 +180,7 @@ async function latestChampion(store: Store, season: number, name: string, countr
 /** A lone cup entrant wins by walkover at calendar creation, so it stands in for a missing previous edition. */
 async function walkoverWinner(store: Store, season: number, name: string, countryId: number) {
   const row = await store.get<{ data: string }>(
-    "SELECT TOP (1) history.data FROM history JOIN leagues ON leagues.id = history.entity_id WHERE history.entity_type = 'champion' AND history.season = ? AND leagues.name = ? AND leagues.country_id = ? AND JSON_VALUE(history.data,'$.walkover') = 'true' ORDER BY history.id DESC",
+    "SELECT history.data FROM history JOIN leagues ON leagues.id = history.entity_id WHERE history.entity_type = 'champion' AND history.season = ? AND leagues.name = ? AND leagues.country_id = ? AND history.data::jsonb ->> 'walkover' = 'true' ORDER BY history.id DESC LIMIT 1",
     season,
     name,
     countryId,
@@ -203,7 +191,7 @@ async function walkoverWinner(store: Store, season: number, name: string, countr
 async function archivedOrder(store: Store, leagueId: number | undefined, season: number) {
   if (!leagueId) return { order: [] as number[], champion: undefined as number | undefined };
   const archived = await store.get<{ data: string }>(
-    "SELECT TOP (1) data FROM history WHERE entity_type = 'league' AND entity_id = ? AND season = ? ORDER BY id DESC",
+    "SELECT data FROM history WHERE entity_type = 'league' AND entity_id = ? AND season = ? ORDER BY id DESC LIMIT 1",
     leagueId,
     season,
   );
@@ -218,7 +206,7 @@ async function archivedOrder(store: Store, leagueId: number | undefined, season:
 async function accessNation(store: Store, country: Country, season: number): Promise<AccessNation> {
   const football = nationByCode(country.code)?.football;
   const top = await store.get<{ id: number }>(
-    "SELECT TOP (1) id FROM leagues WHERE country_id = ? AND kind = 'league' AND age_group = 'Senior' AND tier = 1 AND coalesce(JSON_VALUE(data,'$.reserveOnly'),'false') NOT IN ('true','1') ORDER BY id",
+    "SELECT id FROM leagues WHERE country_id = ? AND kind = 'league' AND age_group = 'Senior' AND tier = 1 AND coalesce(data::jsonb ->> 'reserveOnly','false') NOT IN ('true','1') ORDER BY id LIMIT 1",
     country.id,
   );
   const clubs = (
@@ -240,7 +228,7 @@ async function accessNation(store: Store, country: Country, season: number): Pro
   const national = cupName("national");
   const leagueCup = cupName("league");
   const youth = await store.get<{ id: number }>(
-    "SELECT TOP (1) id FROM leagues WHERE country_id = ? AND kind = 'league' AND age_group = 'U19' ORDER BY tier, id",
+    "SELECT id FROM leagues WHERE country_id = ? AND kind = 'league' AND age_group = 'U19' ORDER BY tier, id LIMIT 1",
     country.id,
   );
   const archivedYouth = (await archivedOrder(store, youth?.id, season - 1)).order;
@@ -249,7 +237,7 @@ async function accessNation(store: Store, country: Country, season: number): Pro
     ? archivedYouth
     : (
         await store.all<{ id: number }>(
-          "SELECT TOP (1) clubs.id FROM clubs JOIN standings ON standings.club_id = clubs.id WHERE standings.league_id = ? AND clubs.type = 'club' ORDER BY clubs.reputation DESC, clubs.id",
+          "SELECT clubs.id FROM clubs JOIN standings ON standings.club_id = clubs.id WHERE standings.league_id = ? AND clubs.type = 'club' ORDER BY clubs.reputation DESC, clubs.id LIMIT 1",
           youth?.id ?? 0,
         )
       ).map((club) => club.id);
@@ -269,12 +257,16 @@ async function accessNation(store: Store, country: Country, season: number): Pro
   };
 }
 
+/** Access data per `countryId:season`, shared by the competitions of one calendar build (inputs do not change). */
+export type AccessNationCache = Map<string, AccessNation>;
+
 /** Access-list entrants of one continental competition (catalog id or real name), main-phase places first. */
 export async function continentalEntries(
   store: Store,
   competition: string,
   season: number,
   excluded: Set<number>,
+  cache: AccessNationCache = new Map(),
 ): Promise<QualificationEntry[]> {
   const spec = CONTINENTAL.competitions.find((item) => item.id === competition || item.name === competition);
   if (!spec) return [];
@@ -286,8 +278,12 @@ export async function continentalEntries(
   const ranked = new Set(associations.map((entry) => entry.countryId));
   const nations: AccessNation[] = [];
   for (const country of countries)
-    if (ranked.has(country.id) && nationByCode(country.code)?.football && !isSuspended(country.code, "club"))
-      nations.push(await accessNation(store, country, season));
+    if (ranked.has(country.id) && nationByCode(country.code)?.football && !isSuspended(country.code, "club")) {
+      const key = `${country.id}:${season}`;
+      let nation = cache.get(key);
+      if (!nation) cache.set(key, (nation = await accessNation(store, country, season)));
+      nations.push(nation);
+    }
   const titleholders: Record<string, number> = {};
   const feederResults: Record<string, number[]> = {};
   for (const item of CONTINENTAL.competitions.filter((entry) => entry.confederation === spec.confederation)) {
@@ -295,7 +291,7 @@ export async function continentalEntries(
     if (winner !== undefined) titleholders[item.id] = winner;
     if (item.feeder && winner !== undefined) {
       const league = await store.get<{ id: number }>(
-        "SELECT TOP (1) leagues.id FROM leagues JOIN history ON history.entity_id = leagues.id AND history.entity_type = 'champion' AND history.season = ? WHERE leagues.name = ? ORDER BY history.id DESC",
+        "SELECT leagues.id FROM leagues JOIN history ON history.entity_id = leagues.id AND history.entity_type = 'champion' AND history.season = ? WHERE leagues.name = ? ORDER BY history.id DESC LIMIT 1",
         season - 1,
         item.name,
       );
@@ -323,11 +319,14 @@ export async function continentalEntries(
             .map((entry) => entry.code)
         : [],
   }).filter((entry) => entry.competition === spec.id && !excluded.has(entry.clubId));
-  const clubs = new Map<number, Club>();
-  for (const entry of resolved) {
-    const club = await store.get<Club>("SELECT * FROM clubs WHERE id = ?", entry.clubId);
-    if (club) clubs.set(club.id, club);
-  }
+  const clubs = new Map(
+    (
+      await store.all<Club>(
+        "SELECT * FROM clubs WHERE id = ANY(?::integer[])",
+        [...new Set(resolved.map((entry) => entry.clubId))],
+      )
+    ).map((club) => [club.id, club]),
+  );
   return resolved
     .filter((entry) => clubs.has(entry.clubId))
     .map((entry) => ({
@@ -355,14 +354,14 @@ export async function recordAssociationCoefficients(
     competition: string;
     points: number;
   }>(
-    `SELECT clubs.country_id,clubs.id AS club_id,clubs.data AS club_data,leagues.name AS competition,sum(CASE WHEN fixtures.home_goals = fixtures.away_goals THEN 1 WHEN (fixtures.home_id = clubs.id AND fixtures.home_goals > fixtures.away_goals) OR (fixtures.away_id = clubs.id AND fixtures.away_goals > fixtures.home_goals) THEN 2 ELSE 0 END * CASE WHEN fixtures.stage = 'Qualifying' THEN 0.5 ELSE 1 END) AS points FROM fixtures JOIN leagues ON leagues.id = fixtures.league_id JOIN clubs ON clubs.id IN (fixtures.home_id,fixtures.away_id) WHERE fixtures.season = ? AND fixtures.status = 'played' AND leagues.confederation IN (${confederations.map(() => "?").join(",")}) AND leagues.kind = 'continental' AND leagues.age_group = 'Senior' GROUP BY clubs.country_id,clubs.id,clubs.data,leagues.name ORDER BY clubs.id`,
+    `SELECT clubs.country_id,clubs.id AS club_id,clubs.data AS club_data,leagues.name AS competition,sum(CASE WHEN fixtures.home_goals = fixtures.away_goals THEN 1 WHEN (fixtures.home_id = clubs.id AND fixtures.home_goals > fixtures.away_goals) OR (fixtures.away_id = clubs.id AND fixtures.away_goals > fixtures.home_goals) THEN 2 ELSE 0 END * CASE WHEN fixtures.stage = 'Qualifying' THEN 0.5 ELSE 1 END) AS points FROM fixtures JOIN leagues ON leagues.id = fixtures.league_id JOIN clubs ON clubs.id IN (fixtures.home_id,fixtures.away_id) WHERE fixtures.season = ? AND fixtures.status = 'played' AND leagues.confederation = ANY(?::text[]) AND leagues.kind = 'continental' AND leagues.age_group = 'Senior' GROUP BY clubs.id,leagues.name ORDER BY clubs.id, leagues.name`,
     season,
-    ...confederations,
+    confederations,
   );
   const countries = (
     await store.all<Country>(
-      `SELECT * FROM countries WHERE confederation IN (${confederations.map(() => "?").join(",")}) ORDER BY id`,
-      ...confederations,
+      "SELECT * FROM countries WHERE confederation = ANY(?::text[]) ORDER BY id",
+      confederations,
     )
   ).filter((country) => associationSeed(country.code, nationByCode(country.code)?.football?.coefficients) ||
     nationByCode(country.code)?.football);
@@ -400,17 +399,5 @@ export async function recordAssociationCoefficients(
       }),
     });
   }
-  if (history.length)
-    await store.transaction(async () => {
-      const lastId = (await store.get<{ id: number }>(
-        "SELECT coalesce(max(id),0) AS id FROM history WITH (UPDLOCK,HOLDLOCK)",
-      ))!.id;
-      await store.bulkInsert(
-        "history",
-        history.map((row, index) => ({
-          id: lastId + index + 1,
-          ...row,
-        })),
-      );
-    });
+  await store.bulkInsert("history", history);
 }

@@ -28,12 +28,28 @@ export const WORLD_TABLES = [
   "player_assets",
   "registration_records",
   "minor_applications",
+  "player_registrations",
+  "competition_registrations",
   "player_season_stats",
   "player_match_appearances",
   "promises",
   "training_plans",
   "set_pieces",
+  "player_minutes_monthly",
+  "club_season_outcomes",
+  "national_team_months",
+  "player_gbe",
 ] as const;
+
+/** GBE evidence and cache tables (migration 3, server/gbe.ts). */
+export const GBE_TABLES = ["player_minutes_monthly", "club_season_outcomes", "national_team_months", "player_gbe"] as const;
+
+/** World tables added after the baseline: checkpoints written before them may omit them (restored empty). */
+export const ADDED_WORLD_TABLES: ReadonlySet<string> = new Set([
+  "player_registrations",
+  "competition_registrations",
+  ...GBE_TABLES,
+]);
 
 export const IDENTITY_TABLES: ReadonlySet<string> = new Set([
   "countries",
@@ -75,13 +91,14 @@ export interface SqlMigration {
 }
 
 export function quoteIdentifier(name: string): string {
-  if (!name || name.length > 128 || name.includes("\0"))
+  if (!name || name.length > 63 || name.includes("\0"))
     throw new Error("Invalid SQL identifier.");
-  return `[${name.replaceAll("]", "]]")}]`;
+  return `"${name.replaceAll('"', '""')}"`;
 }
 
 export function sqlLiteral(value: string): string {
-  return `N'${value.replaceAll("'", "''")}'`;
+  if (value.includes("\0")) throw new Error("Invalid SQL literal.");
+  return `'${value.replaceAll("'", "''")}'`;
 }
 
 export function tableName(schema: string, table: string): string {
@@ -89,295 +106,307 @@ export function tableName(schema: string, table: string): string {
 }
 
 export function migrationTableSql(schema: string): string {
-  const table = tableName(schema, "schema_migrations");
-  return `IF OBJECT_ID(${sqlLiteral(table)}, N'U') IS NULL
-    CREATE TABLE ${table} ([version] INT NOT NULL PRIMARY KEY,
-      [name] NVARCHAR(200) NOT NULL, [applied_at] DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME());`;
+  return `CREATE TABLE IF NOT EXISTS ${tableName(schema, "schema_migrations")} (
+    version INTEGER NOT NULL PRIMARY KEY,
+    name TEXT NOT NULL,
+    applied_at TIMESTAMPTZ NOT NULL DEFAULT now());`;
 }
 
-export function accountsTableSql(schema: string): string {
-  const table = tableName(schema, "users");
-  return `IF OBJECT_ID(${sqlLiteral(table)}, N'U') IS NULL
-    CREATE TABLE ${table} (
-      [id] UNIQUEIDENTIFIER NOT NULL PRIMARY KEY,
-      [tenant_id] UNIQUEIDENTIFIER NOT NULL,
-      [object_id] UNIQUEIDENTIFIER NOT NULL,
-      [display_name] NVARCHAR(200) NOT NULL,
-      [email] NVARCHAR(320) NULL,
-      [game_schema] NVARCHAR(128) COLLATE Latin1_General_100_CI_AS NOT NULL UNIQUE,
-      [created_at] DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
-      [updated_at] DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
-      UNIQUE ([tenant_id], [object_id]),
-      CHECK ([game_schema] <> ${sqlLiteral(schema)} AND [game_schema] NOT IN (N'accounts', N'sys', N'guest', N'information_schema'))
+const IDENTITY_COLUMNS = `issuer TEXT NOT NULL CHECK (length(issuer) BETWEEN 1 AND 2048),
+      subject TEXT NOT NULL CHECK (length(subject) BETWEEN 1 AND 255),
+      username TEXT NOT NULL CHECK (length(username) BETWEEN 1 AND 255),
+      display_name TEXT NOT NULL CHECK (length(display_name) BETWEEN 1 AND 200),
+      email TEXT NULL CHECK (email IS NULL OR (length(email) BETWEEN 1 AND 320 AND email = lower(email)))`;
+
+/**
+ * Account registry: one row per approved OIDC identity (issuer, subject), each owning one world schema.
+ * Emails are stored lowercase.
+ */
+export function usersTableSql(schema: string): string {
+  return `CREATE TABLE IF NOT EXISTS ${tableName(schema, "users")} (
+      id UUID NOT NULL PRIMARY KEY,
+      ${IDENTITY_COLUMNS},
+      game_schema TEXT NOT NULL CHECK (game_schema ~ '^[a-z][a-z0-9_]{0,62}$'),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      CONSTRAINT users_identity_key UNIQUE (issuer, subject),
+      CONSTRAINT users_game_schema_key UNIQUE (game_schema),
+      CHECK (game_schema <> ${sqlLiteral(schema.toLowerCase())}
+        AND game_schema NOT IN ('accounts', 'public', 'information_schema') AND game_schema NOT LIKE 'pg\\_%')
     );`;
 }
 
-export function inviteRequestsTableSql(schema: string): string {
-  const table = tableName(schema, "invite_requests");
-  const attempts = tableName(schema, "invite_attempts");
-  return `IF OBJECT_ID(${sqlLiteral(table)}, N'U') IS NULL
-    CREATE TABLE ${table} (
-      [id] UNIQUEIDENTIFIER NOT NULL PRIMARY KEY,
-      [email] NVARCHAR(320) COLLATE Latin1_General_100_CI_AS NOT NULL,
-      [note] NVARCHAR(500) NULL,
-      [status] NVARCHAR(16) NOT NULL,
-      [ip_hash] CHAR(64) NULL,
-      [requested_at] DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
-      [decided_at] DATETIME2 NULL,
-      [decided_by] NVARCHAR(320) NULL,
-      [account_id] UNIQUEIDENTIFIER NULL,
-      [approval_email_sent] BIT NOT NULL DEFAULT 0,
-      [accepted_email_sent] BIT NOT NULL DEFAULT 0,
-      [updated_at] DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
-      CONSTRAINT [CK_invite_requests_status] CHECK ([status] IN (N'pending', N'accepted', N'denied', N'claimed'))
-    );
-  IF COL_LENGTH(${sqlLiteral(table)}, N'note') IS NULL ALTER TABLE ${table} ADD [note] NVARCHAR(500) NULL;
-  IF COL_LENGTH(${sqlLiteral(table)}, N'ip_hash') IS NULL ALTER TABLE ${table} ADD [ip_hash] CHAR(64) NULL;
-  IF COL_LENGTH(${sqlLiteral(table)}, N'decided_at') IS NULL ALTER TABLE ${table} ADD [decided_at] DATETIME2 NULL;
-  IF COL_LENGTH(${sqlLiteral(table)}, N'decided_by') IS NULL ALTER TABLE ${table} ADD [decided_by] NVARCHAR(320) NULL;
-  IF COL_LENGTH(${sqlLiteral(table)}, N'account_id') IS NULL ALTER TABLE ${table} ADD [account_id] UNIQUEIDENTIFIER NULL;
-  IF COL_LENGTH(${sqlLiteral(table)}, N'approval_email_sent') IS NULL
-    ALTER TABLE ${table} ADD [approval_email_sent] BIT NOT NULL CONSTRAINT [DF_invite_requests_approval_email_sent] DEFAULT 0;
-  IF COL_LENGTH(${sqlLiteral(table)}, N'accepted_email_sent') IS NULL
-    ALTER TABLE ${table} ADD [accepted_email_sent] BIT NOT NULL CONSTRAINT [DF_invite_requests_accepted_email_sent] DEFAULT 0;
-  IF COL_LENGTH(${sqlLiteral(table)}, N'updated_at') IS NULL
-    ALTER TABLE ${table} ADD [updated_at] DATETIME2 NOT NULL CONSTRAINT [DF_invite_requests_updated_at] DEFAULT SYSUTCDATETIME();
-  IF NOT EXISTS (SELECT 1 FROM sys.check_constraints
-    WHERE [parent_object_id] = OBJECT_ID(${sqlLiteral(table)}) AND [name] = N'CK_invite_requests_status')
-    ALTER TABLE ${table} WITH CHECK ADD CONSTRAINT [CK_invite_requests_status]
-      CHECK ([status] IN (N'pending', N'accepted', N'denied', N'claimed'));
-  IF NOT EXISTS (SELECT 1 FROM sys.indexes
-    WHERE [object_id] = OBJECT_ID(${sqlLiteral(table)}) AND [name] = N'UX_invite_requests_email_active')
-    CREATE UNIQUE INDEX [UX_invite_requests_email_active] ON ${table}([email])
-      WHERE [status] IN (N'pending', N'accepted', N'claimed');
-  IF OBJECT_ID(${sqlLiteral(attempts)}, N'U') IS NULL
-    CREATE TABLE ${attempts} (
-      [id] BIGINT IDENTITY(1,1) NOT NULL PRIMARY KEY,
-      [ip_hash] CHAR(64) NULL,
-      [attempted_at] DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME()
-    );
-  IF NOT EXISTS (SELECT 1 FROM sys.indexes
-    WHERE [object_id] = OBJECT_ID(${sqlLiteral(attempts)}) AND [name] = N'IX_invite_attempts_attempted_at')
-    CREATE INDEX [IX_invite_attempts_attempted_at] ON ${attempts}([attempted_at]);
-  IF NOT EXISTS (SELECT 1 FROM sys.indexes
-    WHERE [object_id] = OBJECT_ID(${sqlLiteral(attempts)}) AND [name] = N'IX_invite_attempts_ip_hash_attempted_at')
-    CREATE INDEX [IX_invite_attempts_ip_hash_attempted_at] ON ${attempts}([ip_hash], [attempted_at]);`;
+/** Sign-ins awaiting (or after) an administrator's decision; approved requests point at their account. */
+export function accessRequestsTableSql(schema: string): string {
+  return `CREATE TABLE IF NOT EXISTS ${tableName(schema, "access_requests")} (
+      id UUID NOT NULL PRIMARY KEY,
+      ${IDENTITY_COLUMNS},
+      status TEXT NOT NULL CONSTRAINT access_requests_status_check
+        CHECK (status IN ('pending', 'approved', 'denied')),
+      requested_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      decided_at TIMESTAMPTZ NULL,
+      decided_by TEXT NULL CHECK (decided_by IS NULL OR length(decided_by) BETWEEN 1 AND 320),
+      account_id UUID NULL CONSTRAINT access_requests_account_fkey REFERENCES ${tableName(schema, "users")} (id),
+      CONSTRAINT access_requests_identity_key UNIQUE (issuer, subject),
+      CONSTRAINT access_requests_account_check CHECK ((status = 'approved') = (account_id IS NOT NULL))
+    );`;
 }
 
 export function schemaMigrations(schema: string): SqlMigration[] {
   const ref = (table: string) => tableName(schema, table);
   const definitions: Record<(typeof WORLD_TABLES)[number], string> = {
-    meta: `[key] NVARCHAR(200) NOT NULL PRIMARY KEY, [value] NVARCHAR(max) NOT NULL`,
+    meta: `key TEXT NOT NULL PRIMARY KEY, value TEXT NOT NULL`,
     countries: `
-      [id] INT IDENTITY(1,1) NOT NULL PRIMARY KEY, [code] NVARCHAR(16) NOT NULL UNIQUE,
-      [name] NVARCHAR(max) NOT NULL, [continent] NVARCHAR(max) NOT NULL,
-      [confederation] NVARCHAR(max) NOT NULL, [reputation] FLOAT(53) NOT NULL,
-      [language] NVARCHAR(max) NOT NULL, [region] NVARCHAR(max) NOT NULL`,
+      id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, code TEXT NOT NULL UNIQUE,
+      name TEXT NOT NULL, continent TEXT NOT NULL,
+      confederation TEXT NOT NULL, reputation DOUBLE PRECISION NOT NULL,
+      language TEXT NOT NULL, region TEXT NOT NULL`,
     leagues: `
-      [id] INT IDENTITY(1,1) NOT NULL PRIMARY KEY, [name] NVARCHAR(max) NOT NULL,
-      [country_id] INT NULL REFERENCES ${ref("countries")}([id]),
-      [confederation] NVARCHAR(max) NOT NULL, [tier] INT NOT NULL, [age_group] NVARCHAR(max) NOT NULL,
-      [kind] NVARCHAR(max) NOT NULL, [reputation] FLOAT(53) NOT NULL, [format] NVARCHAR(max) NOT NULL,
-      [data] NVARCHAR(max) NOT NULL DEFAULT N'{}'`,
+      id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, name TEXT NOT NULL,
+      country_id INTEGER NULL REFERENCES ${ref("countries")}(id),
+      confederation TEXT NOT NULL, tier INTEGER NOT NULL, age_group TEXT NOT NULL,
+      kind TEXT NOT NULL, reputation DOUBLE PRECISION NOT NULL, format TEXT NOT NULL,
+      data TEXT NOT NULL DEFAULT '{}'`,
     clubs: `
-      [id] INT IDENTITY(1,1) NOT NULL PRIMARY KEY, [name] NVARCHAR(max) NOT NULL,
-      [short_name] NVARCHAR(max) NOT NULL, [city] NVARCHAR(max) NOT NULL,
-      [country_id] INT NOT NULL REFERENCES ${ref("countries")}([id]),
-      [league_id] INT NULL REFERENCES ${ref("leagues")}([id]), [type] NVARCHAR(max) NOT NULL DEFAULT N'club',
-      [parent_id] INT NULL REFERENCES ${ref("clubs")}([id]), [age_group] NVARCHAR(max) NOT NULL DEFAULT N'Senior',
-      [color] NVARCHAR(max) NOT NULL, [reputation] FLOAT(53) NOT NULL, [academy] INT NOT NULL, [facilities] FLOAT(53) NOT NULL,
-      [balance] FLOAT(53) NOT NULL, [transfer_budget] FLOAT(53) NOT NULL, [wage_budget] FLOAT(53) NOT NULL,
-      [philosophy] NVARCHAR(max) NOT NULL, [culture] NVARCHAR(max) NOT NULL,
-      [formation] NVARCHAR(max) NOT NULL, [tactical_style] NVARCHAR(max) NOT NULL,
-      [chemistry] FLOAT(53) NOT NULL, [manager] NVARCHAR(max) NOT NULL, [manager_trust] FLOAT(53) NOT NULL,
-      [board_confidence] FLOAT(53) NOT NULL, [board_pressure] FLOAT(53) NOT NULL, [fan_mood] FLOAT(53) NOT NULL,
-      [fan_loyalty] FLOAT(53) NOT NULL, [fan_patience] FLOAT(53) NOT NULL, [expectations] INT NOT NULL,
-      [momentum] FLOAT(53) NOT NULL DEFAULT 0, [crisis] FLOAT(53) NOT NULL DEFAULT 0, [hype] FLOAT(53) NOT NULL DEFAULT 0,
-      [income] FLOAT(53) NOT NULL DEFAULT 0, [spending] FLOAT(53) NOT NULL DEFAULT 0,
-      [season_spend] FLOAT(53) NOT NULL DEFAULT 0, [ffp] FLOAT(53) NOT NULL DEFAULT 0,
-      [stadium] NVARCHAR(max) NOT NULL, [capacity] INT NOT NULL, [data] NVARCHAR(max) NOT NULL DEFAULT N'{}'`,
+      id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, name TEXT NOT NULL,
+      short_name TEXT NOT NULL, city TEXT NOT NULL,
+      country_id INTEGER NOT NULL REFERENCES ${ref("countries")}(id),
+      league_id INTEGER NULL REFERENCES ${ref("leagues")}(id), type TEXT NOT NULL DEFAULT 'club',
+      parent_id INTEGER NULL REFERENCES ${ref("clubs")}(id), age_group TEXT NOT NULL DEFAULT 'Senior',
+      color TEXT NOT NULL, reputation DOUBLE PRECISION NOT NULL, academy INTEGER NOT NULL, facilities DOUBLE PRECISION NOT NULL,
+      balance DOUBLE PRECISION NOT NULL, transfer_budget DOUBLE PRECISION NOT NULL, wage_budget DOUBLE PRECISION NOT NULL,
+      philosophy TEXT NOT NULL, culture TEXT NOT NULL,
+      formation TEXT NOT NULL, tactical_style TEXT NOT NULL,
+      chemistry DOUBLE PRECISION NOT NULL, manager TEXT NOT NULL, manager_trust DOUBLE PRECISION NOT NULL,
+      board_confidence DOUBLE PRECISION NOT NULL, board_pressure DOUBLE PRECISION NOT NULL, fan_mood DOUBLE PRECISION NOT NULL,
+      fan_loyalty DOUBLE PRECISION NOT NULL, fan_patience DOUBLE PRECISION NOT NULL, expectations INTEGER NOT NULL,
+      momentum DOUBLE PRECISION NOT NULL DEFAULT 0, crisis DOUBLE PRECISION NOT NULL DEFAULT 0, hype DOUBLE PRECISION NOT NULL DEFAULT 0,
+      income DOUBLE PRECISION NOT NULL DEFAULT 0, spending DOUBLE PRECISION NOT NULL DEFAULT 0,
+      season_spend DOUBLE PRECISION NOT NULL DEFAULT 0, ffp DOUBLE PRECISION NOT NULL DEFAULT 0,
+      stadium TEXT NOT NULL, capacity INTEGER NOT NULL, data TEXT NOT NULL DEFAULT '{}'`,
     players: `
-      [id] INT IDENTITY(1,1) NOT NULL PRIMARY KEY,
-      [name] NVARCHAR(200) COLLATE Latin1_General_100_CI_AS_SC NOT NULL, [nationality] NVARCHAR(max) NOT NULL,
-      [country_id] INT NOT NULL REFERENCES ${ref("countries")}([id]),
-      [club_id] INT NULL REFERENCES ${ref("clubs")}([id]), [parent_club_id] INT NULL REFERENCES ${ref("clubs")}([id]),
-      [position] NVARCHAR(16) NOT NULL, [secondary_position] NVARCHAR(max) NOT NULL,
-      [birth_date] NVARCHAR(max) NOT NULL, [age] INT NOT NULL, [age_group] NVARCHAR(32) NOT NULL,
-      [foot] NVARCHAR(max) NOT NULL, [ability] FLOAT(53) NOT NULL CHECK([ability] BETWEEN 1 AND 99),
-      [base_potential] FLOAT(53) NOT NULL, [potential] FLOAT(53) NOT NULL CHECK([potential] BETWEEN 1 AND 99),
-      [volatility] INT NOT NULL, [value] FLOAT(53) NOT NULL, [wage] FLOAT(53) NOT NULL,
-      [contract_end] NVARCHAR(10) NOT NULL, [morale] FLOAT(53) NOT NULL, [fitness] FLOAT(53) NOT NULL,
-      [injury_until] NVARCHAR(10) NULL, [form] FLOAT(53) NOT NULL, [goals] INT NOT NULL DEFAULT 0,
-      [assists] INT NOT NULL DEFAULT 0, [appearances] INT NOT NULL DEFAULT 0, [minutes] INT NOT NULL DEFAULT 0,
-      [role] NVARCHAR(100) NOT NULL, [training] NVARCHAR(max) NOT NULL DEFAULT N'Balanced',
-      [intensity] INT NOT NULL DEFAULT 50, [profile] NVARCHAR(max) NOT NULL,
-      [shortlisted] INT NOT NULL DEFAULT 0, [listed] INT NOT NULL DEFAULT 0,
-      [available_loan] INT NOT NULL DEFAULT 0, [knowledge] INT NOT NULL DEFAULT 0,
-      [development_bank] FLOAT(53) NOT NULL DEFAULT 0, [potential_bank] FLOAT(53) NOT NULL DEFAULT 0,
-      [loan_progress] FLOAT(53) NOT NULL DEFAULT 0`,
+      id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+      name TEXT NOT NULL, nationality TEXT NOT NULL,
+      country_id INTEGER NOT NULL REFERENCES ${ref("countries")}(id),
+      club_id INTEGER NULL REFERENCES ${ref("clubs")}(id), parent_club_id INTEGER NULL REFERENCES ${ref("clubs")}(id),
+      position TEXT NOT NULL, secondary_position TEXT NOT NULL,
+      birth_date TEXT NOT NULL, age INTEGER NOT NULL, age_group TEXT NOT NULL,
+      foot TEXT NOT NULL, ability DOUBLE PRECISION NOT NULL CHECK (ability BETWEEN 1 AND 99),
+      base_potential DOUBLE PRECISION NOT NULL, potential DOUBLE PRECISION NOT NULL CHECK (potential BETWEEN 1 AND 99),
+      volatility INTEGER NOT NULL, value DOUBLE PRECISION NOT NULL, wage DOUBLE PRECISION NOT NULL,
+      contract_end TEXT NOT NULL, morale DOUBLE PRECISION NOT NULL, fitness DOUBLE PRECISION NOT NULL,
+      injury_until TEXT NULL, form DOUBLE PRECISION NOT NULL, goals INTEGER NOT NULL DEFAULT 0,
+      assists INTEGER NOT NULL DEFAULT 0, appearances INTEGER NOT NULL DEFAULT 0, minutes INTEGER NOT NULL DEFAULT 0,
+      role TEXT NOT NULL, training TEXT NOT NULL DEFAULT 'Balanced',
+      intensity INTEGER NOT NULL DEFAULT 50, profile TEXT NOT NULL,
+      shortlisted INTEGER NOT NULL DEFAULT 0, listed INTEGER NOT NULL DEFAULT 0,
+      available_loan INTEGER NOT NULL DEFAULT 0, knowledge INTEGER NOT NULL DEFAULT 0,
+      development_bank DOUBLE PRECISION NOT NULL DEFAULT 0, potential_bank DOUBLE PRECISION NOT NULL DEFAULT 0,
+      loan_progress DOUBLE PRECISION NOT NULL DEFAULT 0`,
     standings: `
-      [league_id] INT NOT NULL REFERENCES ${ref("leagues")}([id]), [club_id] INT NOT NULL REFERENCES ${ref("clubs")}([id]),
-      [group_name] NVARCHAR(max) NOT NULL DEFAULT N'', [played] INT NOT NULL DEFAULT 0,
-      [wins] INT NOT NULL DEFAULT 0, [draws] INT NOT NULL DEFAULT 0, [losses] INT NOT NULL DEFAULT 0,
-      [gf] INT NOT NULL DEFAULT 0, [ga] INT NOT NULL DEFAULT 0, [points] INT NOT NULL DEFAULT 0,
-      [xg] FLOAT(53) NOT NULL DEFAULT 0, [xga] FLOAT(53) NOT NULL DEFAULT 0, [xpts] FLOAT(53) NOT NULL DEFAULT 0,
-      [form] NVARCHAR(max) NOT NULL DEFAULT N'', [home_record] NVARCHAR(max) NOT NULL DEFAULT N'0-0-0',
-      [away_record] NVARCHAR(max) NOT NULL DEFAULT N'0-0-0', [deducted] INT NOT NULL DEFAULT 0,
-      PRIMARY KEY([league_id], [club_id])`,
+      league_id INTEGER NOT NULL REFERENCES ${ref("leagues")}(id), club_id INTEGER NOT NULL REFERENCES ${ref("clubs")}(id),
+      group_name TEXT NOT NULL DEFAULT '', played INTEGER NOT NULL DEFAULT 0,
+      wins INTEGER NOT NULL DEFAULT 0, draws INTEGER NOT NULL DEFAULT 0, losses INTEGER NOT NULL DEFAULT 0,
+      gf INTEGER NOT NULL DEFAULT 0, ga INTEGER NOT NULL DEFAULT 0, points INTEGER NOT NULL DEFAULT 0,
+      xg DOUBLE PRECISION NOT NULL DEFAULT 0, xga DOUBLE PRECISION NOT NULL DEFAULT 0, xpts DOUBLE PRECISION NOT NULL DEFAULT 0,
+      form TEXT NOT NULL DEFAULT '', home_record TEXT NOT NULL DEFAULT '0-0-0',
+      away_record TEXT NOT NULL DEFAULT '0-0-0', deducted INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY(league_id, club_id)`,
     fixtures: `
-      [id] INT IDENTITY(1,1) NOT NULL PRIMARY KEY, [league_id] INT NULL REFERENCES ${ref("leagues")}([id]),
-      [date] NVARCHAR(10) NOT NULL, [season] INT NOT NULL,
-      [home_id] INT NOT NULL REFERENCES ${ref("clubs")}([id]), [away_id] INT NOT NULL REFERENCES ${ref("clubs")}([id]),
-      [stage] NVARCHAR(max) NOT NULL, [group_name] NVARCHAR(max) NOT NULL DEFAULT N'', [round] INT NOT NULL,
-      [status] NVARCHAR(32) NOT NULL DEFAULT N'scheduled', [home_goals] INT NULL, [away_goals] INT NULL,
-      [home_xg] FLOAT(53) NULL, [away_xg] FLOAT(53) NULL, [seed] NVARCHAR(max) NOT NULL,
-      [data] NVARCHAR(max) NOT NULL DEFAULT N'{}', CHECK([home_id] <> [away_id])`,
+      id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, league_id INTEGER NULL REFERENCES ${ref("leagues")}(id),
+      date TEXT NOT NULL, season INTEGER NOT NULL,
+      home_id INTEGER NOT NULL REFERENCES ${ref("clubs")}(id), away_id INTEGER NOT NULL REFERENCES ${ref("clubs")}(id),
+      stage TEXT NOT NULL, group_name TEXT NOT NULL DEFAULT '', round INTEGER NOT NULL,
+      status TEXT NOT NULL DEFAULT 'scheduled', home_goals INTEGER NULL, away_goals INTEGER NULL,
+      home_xg DOUBLE PRECISION NULL, away_xg DOUBLE PRECISION NULL, seed TEXT NOT NULL,
+      data TEXT NOT NULL DEFAULT '{}', CHECK (home_id <> away_id)`,
     staff: `
-      [id] INT IDENTITY(1,1) NOT NULL PRIMARY KEY, [club_id] INT NULL REFERENCES ${ref("clubs")}([id]),
-      [name] NVARCHAR(max) NOT NULL, [role] NVARCHAR(100) NOT NULL, [ability] FLOAT(53) NOT NULL,
-      [influence] INT NOT NULL, [communication] INT NOT NULL, [tactical_knowledge] FLOAT(53) NOT NULL,
-      [personality] NVARCHAR(max) NOT NULL, [ambition] INT NOT NULL, [morale] FLOAT(53) NOT NULL,
-      [wage] FLOAT(53) NOT NULL, [data] NVARCHAR(max) NOT NULL`,
+      id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, club_id INTEGER NULL REFERENCES ${ref("clubs")}(id),
+      name TEXT NOT NULL, role TEXT NOT NULL, ability DOUBLE PRECISION NOT NULL,
+      influence INTEGER NOT NULL, communication INTEGER NOT NULL, tactical_knowledge DOUBLE PRECISION NOT NULL,
+      personality TEXT NOT NULL, ambition INTEGER NOT NULL, morale DOUBLE PRECISION NOT NULL,
+      wage DOUBLE PRECISION NOT NULL, data TEXT NOT NULL`,
     club_support: `
-      [club_id] INT NOT NULL PRIMARY KEY REFERENCES ${ref("clubs")}([id]),
-      [duties] NVARCHAR(max) NOT NULL DEFAULT N'{}', [weekly_budget] FLOAT(53) NOT NULL DEFAULT 5000,
-      [last_run] NVARCHAR(max) NULL`,
+      club_id INTEGER NOT NULL PRIMARY KEY REFERENCES ${ref("clubs")}(id),
+      duties TEXT NOT NULL DEFAULT '{}', weekly_budget DOUBLE PRECISION NOT NULL DEFAULT 5000,
+      last_run TEXT NULL`,
     relationships: `
-      [id] INT IDENTITY(1,1) NOT NULL PRIMARY KEY, [club_id] INT NOT NULL REFERENCES ${ref("clubs")}([id]),
-      [source_type] NVARCHAR(100) NOT NULL, [source_id] INT NOT NULL,
-      [target_type] NVARCHAR(100) NOT NULL, [target_id] INT NOT NULL, [strength] FLOAT(53) NOT NULL,
-      [kind] NVARCHAR(max) NOT NULL, [data] NVARCHAR(max) NOT NULL DEFAULT N'{}',
-      UNIQUE([source_type], [source_id], [target_type], [target_id])`,
+      id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, club_id INTEGER NOT NULL REFERENCES ${ref("clubs")}(id),
+      source_type TEXT NOT NULL, source_id INTEGER NOT NULL,
+      target_type TEXT NOT NULL, target_id INTEGER NOT NULL, strength DOUBLE PRECISION NOT NULL,
+      kind TEXT NOT NULL, data TEXT NOT NULL DEFAULT '{}',
+      UNIQUE(source_type, source_id, target_type, target_id)`,
     assignments: `
-      [id] INT IDENTITY(1,1) NOT NULL PRIMARY KEY, [staff_id] INT NOT NULL REFERENCES ${ref("staff")}([id]),
-      [player_id] INT NULL REFERENCES ${ref("players")}([id]), [country_id] INT NULL REFERENCES ${ref("countries")}([id]),
-      [position] NVARCHAR(max) NULL, [max_age] INT NOT NULL DEFAULT 30, [budget] FLOAT(53) NOT NULL DEFAULT 100000000,
-      [start_date] NVARCHAR(max) NOT NULL, [due_date] NVARCHAR(max) NOT NULL,
-      [status] NVARCHAR(max) NOT NULL DEFAULT N'active', [data] NVARCHAR(max) NOT NULL DEFAULT N'{}'`,
+      id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, staff_id INTEGER NOT NULL REFERENCES ${ref("staff")}(id),
+      player_id INTEGER NULL REFERENCES ${ref("players")}(id), country_id INTEGER NULL REFERENCES ${ref("countries")}(id),
+      position TEXT NULL, max_age INTEGER NOT NULL DEFAULT 30, budget DOUBLE PRECISION NOT NULL DEFAULT 100000000,
+      start_date TEXT NOT NULL, due_date TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active', data TEXT NOT NULL DEFAULT '{}'`,
     reports: `
-      [id] INT IDENTITY(1,1) NOT NULL PRIMARY KEY, [player_id] INT NOT NULL REFERENCES ${ref("players")}([id]),
-      [staff_id] INT NOT NULL REFERENCES ${ref("staff")}([id]), [date] NVARCHAR(max) NOT NULL,
-      [accuracy] INT NOT NULL, [ability_low] INT NOT NULL, [ability_high] INT NOT NULL,
-      [potential_low] INT NOT NULL, [potential_high] INT NOT NULL, [fit] INT NOT NULL, [risk] INT NOT NULL,
-      [data] NVARCHAR(max) NOT NULL`,
+      id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, player_id INTEGER NOT NULL REFERENCES ${ref("players")}(id),
+      staff_id INTEGER NOT NULL REFERENCES ${ref("staff")}(id), date TEXT NOT NULL,
+      accuracy INTEGER NOT NULL, ability_low INTEGER NOT NULL, ability_high INTEGER NOT NULL,
+      potential_low INTEGER NOT NULL, potential_high INTEGER NOT NULL, fit INTEGER NOT NULL, risk INTEGER NOT NULL,
+      data TEXT NOT NULL`,
     negotiations: `
-      [id] INT IDENTITY(1,1) NOT NULL PRIMARY KEY, [player_id] INT NOT NULL REFERENCES ${ref("players")}([id]),
-      [buying_club_id] INT NOT NULL REFERENCES ${ref("clubs")}([id]),
-      [selling_club_id] INT NULL REFERENCES ${ref("clubs")}([id]), [type] NVARCHAR(max) NOT NULL,
-      [stage] NVARCHAR(max) NOT NULL, [tension] FLOAT(53) NOT NULL DEFAULT 15,
-      [asking_price] FLOAT(53) NOT NULL, [offer] FLOAT(53) NOT NULL DEFAULT 0, [wage] FLOAT(53) NOT NULL DEFAULT 0,
-      [interest] FLOAT(53) NOT NULL, [created] NVARCHAR(max) NOT NULL, [deadline] NVARCHAR(max) NOT NULL,
-      [public] INT NOT NULL DEFAULT 0, [data] NVARCHAR(max) NOT NULL DEFAULT N'{}'`,
+      id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, player_id INTEGER NOT NULL REFERENCES ${ref("players")}(id),
+      buying_club_id INTEGER NOT NULL REFERENCES ${ref("clubs")}(id),
+      selling_club_id INTEGER NULL REFERENCES ${ref("clubs")}(id), type TEXT NOT NULL,
+      stage TEXT NOT NULL, tension DOUBLE PRECISION NOT NULL DEFAULT 15,
+      asking_price DOUBLE PRECISION NOT NULL, offer DOUBLE PRECISION NOT NULL DEFAULT 0, wage DOUBLE PRECISION NOT NULL DEFAULT 0,
+      interest DOUBLE PRECISION NOT NULL, created TEXT NOT NULL, deadline TEXT NOT NULL,
+      public INTEGER NOT NULL DEFAULT 0, data TEXT NOT NULL DEFAULT '{}'`,
     loans: `
-      [id] INT IDENTITY(1,1) NOT NULL PRIMARY KEY, [player_id] INT NOT NULL REFERENCES ${ref("players")}([id]),
-      [parent_id] INT NOT NULL REFERENCES ${ref("clubs")}([id]), [destination_id] INT NOT NULL REFERENCES ${ref("clubs")}([id]),
-      [type] NVARCHAR(max) NOT NULL, [start_date] NVARCHAR(max) NOT NULL, [end_date] NVARCHAR(max) NOT NULL,
-      [status] NVARCHAR(32) NOT NULL DEFAULT N'active', [score] FLOAT(53) NOT NULL DEFAULT 50,
-      [pressure] FLOAT(53) NOT NULL DEFAULT 0, [fit] FLOAT(53) NOT NULL, [relationship] FLOAT(53) NOT NULL,
-      [terms] NVARCHAR(max) NOT NULL, [data] NVARCHAR(max) NOT NULL DEFAULT N'{}'`,
+      id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, player_id INTEGER NOT NULL REFERENCES ${ref("players")}(id),
+      parent_id INTEGER NOT NULL REFERENCES ${ref("clubs")}(id), destination_id INTEGER NOT NULL REFERENCES ${ref("clubs")}(id),
+      type TEXT NOT NULL, start_date TEXT NOT NULL, end_date TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active', score DOUBLE PRECISION NOT NULL DEFAULT 50,
+      pressure DOUBLE PRECISION NOT NULL DEFAULT 0, fit DOUBLE PRECISION NOT NULL, relationship DOUBLE PRECISION NOT NULL,
+      terms TEXT NOT NULL, data TEXT NOT NULL DEFAULT '{}'`,
     partnerships: `
-      [id] INT IDENTITY(1,1) NOT NULL PRIMARY KEY, [club_id] INT NOT NULL REFERENCES ${ref("clubs")}([id]),
-      [partner_id] INT NOT NULL REFERENCES ${ref("clubs")}([id]), [type] NVARCHAR(max) NOT NULL,
-      [strength] FLOAT(53) NOT NULL, [data] NVARCHAR(max) NOT NULL DEFAULT N'{}', UNIQUE([club_id], [partner_id])`,
+      id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, club_id INTEGER NOT NULL REFERENCES ${ref("clubs")}(id),
+      partner_id INTEGER NOT NULL REFERENCES ${ref("clubs")}(id), type TEXT NOT NULL,
+      strength DOUBLE PRECISION NOT NULL, data TEXT NOT NULL DEFAULT '{}', UNIQUE(club_id, partner_id)`,
     board_affiliate_requests: `
-      [id] INT IDENTITY(1,1) NOT NULL PRIMARY KEY, [club_id] INT NOT NULL REFERENCES ${ref("clubs")}([id]),
-      [purpose] NVARCHAR(max) NOT NULL, [preferred_club_id] INT NULL REFERENCES ${ref("clubs")}([id]),
-      [requested_date] NVARCHAR(max) NOT NULL, [due_date] NVARCHAR(max) NOT NULL,
-      [status] NVARCHAR(32) NOT NULL DEFAULT N'pending', [decision_date] NVARCHAR(max) NULL,
-      [reason] NVARCHAR(max) NOT NULL DEFAULT N'', [partner_id] INT NULL REFERENCES ${ref("clubs")}([id])`,
+      id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, club_id INTEGER NOT NULL REFERENCES ${ref("clubs")}(id),
+      purpose TEXT NOT NULL, preferred_club_id INTEGER NULL REFERENCES ${ref("clubs")}(id),
+      requested_date TEXT NOT NULL, due_date TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending', decision_date TEXT NULL,
+      reason TEXT NOT NULL DEFAULT '', partner_id INTEGER NULL REFERENCES ${ref("clubs")}(id)`,
     unexpected_events: `
-      [id] INT IDENTITY(1,1) NOT NULL PRIMARY KEY, [club_id] INT NOT NULL REFERENCES ${ref("clubs")}([id]),
-      [date] NVARCHAR(10) NOT NULL, [kind] NVARCHAR(max) NOT NULL, [title] NVARCHAR(max) NOT NULL,
-      [body] NVARCHAR(max) NOT NULL, [deadline] NVARCHAR(max) NOT NULL,
-      [status] NVARCHAR(32) NOT NULL DEFAULT N'pending', [resolved_date] NVARCHAR(max) NULL,
-      [choice_id] NVARCHAR(max) NULL, [outcome] NVARCHAR(max) NOT NULL DEFAULT N'',
-      [data] NVARCHAR(max) NOT NULL, UNIQUE([club_id], [date])`,
+      id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, club_id INTEGER NOT NULL REFERENCES ${ref("clubs")}(id),
+      date TEXT NOT NULL, kind TEXT NOT NULL, title TEXT NOT NULL,
+      body TEXT NOT NULL, deadline TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending', resolved_date TEXT NULL,
+      choice_id TEXT NULL, outcome TEXT NOT NULL DEFAULT '',
+      data TEXT NOT NULL, UNIQUE(club_id, date)`,
     sell_on_clauses: `
-      [id] INT IDENTITY(1,1) NOT NULL PRIMARY KEY, [player_id] INT NOT NULL REFERENCES ${ref("players")}([id]),
-      [beneficiary_id] INT NOT NULL REFERENCES ${ref("clubs")}([id]), [owner_id] INT NOT NULL REFERENCES ${ref("clubs")}([id]),
-      [percentage] FLOAT(53) NOT NULL CHECK([percentage] BETWEEN 0 AND 100),
-      [source_loan_id] INT NULL REFERENCES ${ref("loans")}([id]),
-      [status] NVARCHAR(max) NOT NULL DEFAULT N'active', [paid] FLOAT(53) NOT NULL DEFAULT 0`,
+      id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, player_id INTEGER NOT NULL REFERENCES ${ref("players")}(id),
+      beneficiary_id INTEGER NOT NULL REFERENCES ${ref("clubs")}(id), owner_id INTEGER NOT NULL REFERENCES ${ref("clubs")}(id),
+      percentage DOUBLE PRECISION NOT NULL CHECK (percentage BETWEEN 0 AND 100),
+      source_loan_id INTEGER NULL REFERENCES ${ref("loans")}(id),
+      status TEXT NOT NULL DEFAULT 'active', paid DOUBLE PRECISION NOT NULL DEFAULT 0`,
     transfer_payments: `
-      [id] INT IDENTITY(1,1) NOT NULL PRIMARY KEY, [negotiation_id] INT NOT NULL REFERENCES ${ref("negotiations")}([id]),
-      [player_id] INT NOT NULL REFERENCES ${ref("players")}([id]), [payer_id] INT NOT NULL REFERENCES ${ref("clubs")}([id]),
-      [payee_id] INT NOT NULL REFERENCES ${ref("clubs")}([id]), [amount] FLOAT(53) NOT NULL CHECK([amount] > 0),
-      [due_date] NVARCHAR(10) NOT NULL, [paid_date] NVARCHAR(10) NULL, [kind] NVARCHAR(max) NOT NULL DEFAULT N'fee',
-      [sell_on_clause_id] INT NULL REFERENCES ${ref("sell_on_clauses")}([id])`,
+      id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, negotiation_id INTEGER NOT NULL REFERENCES ${ref("negotiations")}(id),
+      player_id INTEGER NOT NULL REFERENCES ${ref("players")}(id), payer_id INTEGER NOT NULL REFERENCES ${ref("clubs")}(id),
+      payee_id INTEGER NOT NULL REFERENCES ${ref("clubs")}(id), amount DOUBLE PRECISION NOT NULL CHECK (amount > 0),
+      due_date TEXT NOT NULL, paid_date TEXT NULL, kind TEXT NOT NULL DEFAULT 'fee',
+      sell_on_clause_id INTEGER NULL REFERENCES ${ref("sell_on_clauses")}(id)`,
     buy_back_clauses: `
-      [id] INT IDENTITY(1,1) NOT NULL PRIMARY KEY,
-      [negotiation_id] INT NOT NULL UNIQUE REFERENCES ${ref("negotiations")}([id]),
-      [player_id] INT NOT NULL REFERENCES ${ref("players")}([id]),
-      [beneficiary_id] INT NOT NULL REFERENCES ${ref("clubs")}([id]), [owner_id] INT NOT NULL REFERENCES ${ref("clubs")}([id]),
-      [fee] FLOAT(53) NOT NULL CHECK([fee] > 0), [expires] NVARCHAR(max) NOT NULL,
-      [status] NVARCHAR(32) NOT NULL DEFAULT N'active'`,
+      id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+      negotiation_id INTEGER NOT NULL UNIQUE REFERENCES ${ref("negotiations")}(id),
+      player_id INTEGER NOT NULL REFERENCES ${ref("players")}(id),
+      beneficiary_id INTEGER NOT NULL REFERENCES ${ref("clubs")}(id), owner_id INTEGER NOT NULL REFERENCES ${ref("clubs")}(id),
+      fee DOUBLE PRECISION NOT NULL CHECK (fee > 0), expires TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active'`,
     news: `
-      [id] INT IDENTITY(1,1) NOT NULL PRIMARY KEY, [date] NVARCHAR(max) NOT NULL,
-      [category] NVARCHAR(max) NOT NULL, [title] NVARCHAR(max) NOT NULL, [body] NVARCHAR(max) NOT NULL,
-      [severity] NVARCHAR(max) NOT NULL DEFAULT N'info', [read] INT NOT NULL DEFAULT 0,
-      [action] NVARCHAR(max) NULL, [data] NVARCHAR(max) NOT NULL DEFAULT N'{}'`,
+      id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, date TEXT NOT NULL,
+      category TEXT NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL,
+      severity TEXT NOT NULL DEFAULT 'info', read INTEGER NOT NULL DEFAULT 0,
+      action TEXT NULL, data TEXT NOT NULL DEFAULT '{}'`,
     competition_favorites: `
-      [league_id] INT NOT NULL PRIMARY KEY REFERENCES ${ref("leagues")}([id]),
-      [events] NVARCHAR(max) NOT NULL, [since] NVARCHAR(max) NOT NULL, [last_phase] NVARCHAR(max) NOT NULL DEFAULT N''`,
+      league_id INTEGER NOT NULL PRIMARY KEY REFERENCES ${ref("leagues")}(id),
+      events TEXT NOT NULL, since TEXT NOT NULL, last_phase TEXT NOT NULL DEFAULT ''`,
     ledger: `
-      [id] INT IDENTITY(1,1) NOT NULL PRIMARY KEY, [club_id] INT NOT NULL REFERENCES ${ref("clubs")}([id]),
-      [date] NVARCHAR(max) NOT NULL, [category] NVARCHAR(max) NOT NULL, [amount] FLOAT(53) NOT NULL,
-      [description] NVARCHAR(max) NOT NULL`,
+      id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, club_id INTEGER NOT NULL REFERENCES ${ref("clubs")}(id),
+      date TEXT NOT NULL, category TEXT NOT NULL, amount DOUBLE PRECISION NOT NULL,
+      description TEXT NOT NULL`,
     history: `
-      [id] INT IDENTITY(1,1) NOT NULL PRIMARY KEY, [season] INT NOT NULL, [entity_type] NVARCHAR(100) NOT NULL,
-      [entity_id] INT NOT NULL, [date] NVARCHAR(10) NOT NULL, [data] NVARCHAR(max) NOT NULL`,
+      id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, season INTEGER NOT NULL, entity_type TEXT NOT NULL,
+      entity_id INTEGER NOT NULL, date TEXT NOT NULL, data TEXT NOT NULL`,
     discipline: `
-      [player_id] INT NOT NULL REFERENCES ${ref("players")}([id]), [scope] NVARCHAR(100) NOT NULL,
-      [yellow_cards] INT NOT NULL DEFAULT 0, [suspension] INT NOT NULL DEFAULT 0, [season] INT NOT NULL,
-      PRIMARY KEY([player_id], [scope])`,
+      player_id INTEGER NOT NULL REFERENCES ${ref("players")}(id), scope TEXT NOT NULL,
+      yellow_cards INTEGER NOT NULL DEFAULT 0, suspension INTEGER NOT NULL DEFAULT 0, season INTEGER NOT NULL,
+      PRIMARY KEY(player_id, scope)`,
     financial_periods: `
-      [club_id] INT NOT NULL REFERENCES ${ref("clubs")}([id]), [season] INT NOT NULL,
-      [revenue] FLOAT(53) NOT NULL DEFAULT 0, [wages] FLOAT(53) NOT NULL DEFAULT 0,
-      [operating] FLOAT(53) NOT NULL DEFAULT 0, [amortization] FLOAT(53) NOT NULL DEFAULT 0,
-      [agent_fees] FLOAT(53) NOT NULL DEFAULT 0, [sale_profit] FLOAT(53) NOT NULL DEFAULT 0,
-      [excluded_investment] FLOAT(53) NOT NULL DEFAULT 0, [equity] FLOAT(53) NOT NULL DEFAULT 0,
-      [closed] INT NOT NULL DEFAULT 0, PRIMARY KEY([club_id], [season])`,
+      club_id INTEGER NOT NULL REFERENCES ${ref("clubs")}(id), season INTEGER NOT NULL,
+      revenue DOUBLE PRECISION NOT NULL DEFAULT 0, wages DOUBLE PRECISION NOT NULL DEFAULT 0,
+      operating DOUBLE PRECISION NOT NULL DEFAULT 0, amortization DOUBLE PRECISION NOT NULL DEFAULT 0,
+      agent_fees DOUBLE PRECISION NOT NULL DEFAULT 0, sale_profit DOUBLE PRECISION NOT NULL DEFAULT 0,
+      excluded_investment DOUBLE PRECISION NOT NULL DEFAULT 0, equity DOUBLE PRECISION NOT NULL DEFAULT 0,
+      closed INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(club_id, season)`,
     player_assets: `
-      [id] INT IDENTITY(1,1) NOT NULL PRIMARY KEY, [club_id] INT NOT NULL REFERENCES ${ref("clubs")}([id]),
-      [player_id] INT NOT NULL REFERENCES ${ref("players")}([id]), [cost] FLOAT(53) NOT NULL,
-      [acquired] NVARCHAR(max) NOT NULL, [expires] NVARCHAR(max) NOT NULL, [status] NVARCHAR(32) NOT NULL DEFAULT N'active'`,
+      id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, club_id INTEGER NOT NULL REFERENCES ${ref("clubs")}(id),
+      player_id INTEGER NOT NULL REFERENCES ${ref("players")}(id), cost DOUBLE PRECISION NOT NULL,
+      acquired TEXT NOT NULL, expires TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active'`,
+    // Legacy (before migration 4): no longer written or read; kept so older checkpoints still import.
     registration_records: `
-      [player_id] INT NOT NULL REFERENCES ${ref("players")}([id]), [country_id] INT NOT NULL REFERENCES ${ref("countries")}([id]),
-      [status] NVARCHAR(max) NOT NULL, [date] NVARCHAR(max) NOT NULL, [data] NVARCHAR(max) NOT NULL,
-      PRIMARY KEY([player_id], [country_id])`,
+      player_id INTEGER NOT NULL REFERENCES ${ref("players")}(id), country_id INTEGER NOT NULL REFERENCES ${ref("countries")}(id),
+      status TEXT NOT NULL, date TEXT NOT NULL, data TEXT NOT NULL,
+      PRIMARY KEY(player_id, country_id)`,
     minor_applications: `
-      [id] INT IDENTITY(1,1) NOT NULL PRIMARY KEY, [player_id] INT NOT NULL REFERENCES ${ref("players")}([id]),
-      [club_id] INT NOT NULL REFERENCES ${ref("clubs")}([id]),
-      [source_country_id] INT NOT NULL REFERENCES ${ref("countries")}([id]),
-      [destination_country_id] INT NOT NULL REFERENCES ${ref("countries")}([id]), [route] NVARCHAR(max) NOT NULL,
-      [requested_date] NVARCHAR(max) NOT NULL, [due_date] NVARCHAR(max) NOT NULL,
-      [status] NVARCHAR(max) NOT NULL DEFAULT N'pending', [reason] NVARCHAR(max) NOT NULL DEFAULT N'',
-      [data] NVARCHAR(max) NOT NULL, UNIQUE([player_id], [club_id])`,
+      id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, player_id INTEGER NOT NULL REFERENCES ${ref("players")}(id),
+      club_id INTEGER NOT NULL REFERENCES ${ref("clubs")}(id),
+      source_country_id INTEGER NOT NULL REFERENCES ${ref("countries")}(id),
+      destination_country_id INTEGER NOT NULL REFERENCES ${ref("countries")}(id), route TEXT NOT NULL,
+      requested_date TEXT NOT NULL, due_date TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending', reason TEXT NOT NULL DEFAULT '',
+      data TEXT NOT NULL, UNIQUE(player_id, club_id)`,
+    // Association registration per player and club spell; no row = a registration on file (grandfathered).
+    player_registrations: `
+      player_id INTEGER NOT NULL REFERENCES ${ref("players")}(id), club_id INTEGER NOT NULL REFERENCES ${ref("clubs")}(id),
+      association_id INTEGER NOT NULL REFERENCES ${ref("countries")}(id),
+      status TEXT NOT NULL CHECK (status IN ('registered','pending','not_registered','refused','not_required')),
+      basis TEXT NOT NULL DEFAULT '', reasons TEXT NOT NULL DEFAULT '[]', evaluated_on TEXT NOT NULL,
+      next_review TEXT NULL, data TEXT NOT NULL DEFAULT '{}', PRIMARY KEY(player_id, club_id)`,
+    // Competition registration per player, competition and season where a list rule applies (foreign quotas).
+    competition_registrations: `
+      player_id INTEGER NOT NULL REFERENCES ${ref("players")}(id), league_id INTEGER NOT NULL REFERENCES ${ref("leagues")}(id),
+      season INTEGER NOT NULL, club_id INTEGER NOT NULL REFERENCES ${ref("clubs")}(id),
+      status TEXT NOT NULL CHECK (status IN ('registered','pending','not_registered','refused','not_required')),
+      reasons TEXT NOT NULL DEFAULT '[]', evaluated_on TEXT NOT NULL, next_review TEXT NULL,
+      PRIMARY KEY(player_id, league_id, season)`,
     player_season_stats: `
-      [player_id] INT NOT NULL REFERENCES ${ref("players")}([id]), [season] INT NOT NULL,
-      [club_id] INT NOT NULL REFERENCES ${ref("clubs")}([id]), [league_id] INT NOT NULL,
-      [minutes] INT NOT NULL DEFAULT 0, [appearances] INT NOT NULL DEFAULT 0,
-      [goals] INT NOT NULL DEFAULT 0, [assists] INT NOT NULL DEFAULT 0,
-      PRIMARY KEY([player_id], [season], [club_id], [league_id])`,
+      player_id INTEGER NOT NULL REFERENCES ${ref("players")}(id), season INTEGER NOT NULL,
+      club_id INTEGER NOT NULL REFERENCES ${ref("clubs")}(id), league_id INTEGER NOT NULL,
+      minutes INTEGER NOT NULL DEFAULT 0, appearances INTEGER NOT NULL DEFAULT 0,
+      goals INTEGER NOT NULL DEFAULT 0, assists INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY(player_id, season, club_id, league_id)`,
     player_match_appearances: `
-      [fixture_id] INT NOT NULL REFERENCES ${ref("fixtures")}([id]), [player_id] INT NOT NULL REFERENCES ${ref("players")}([id]),
-      [club_id] INT NOT NULL REFERENCES ${ref("clubs")}([id]), [season] INT NOT NULL, [date] NVARCHAR(10) NOT NULL,
-      [position] NVARCHAR(max) NOT NULL, [started] INT NOT NULL, [minutes] INT NOT NULL,
-      [minute_on] INT NOT NULL DEFAULT 0, [minute_off] INT NULL, [rating] FLOAT(53) NOT NULL,
-      [goals] INT NOT NULL, [assists] INT NOT NULL, [stats] NVARCHAR(max) NOT NULL,
-      PRIMARY KEY([fixture_id], [player_id])`,
+      fixture_id INTEGER NOT NULL REFERENCES ${ref("fixtures")}(id), player_id INTEGER NOT NULL REFERENCES ${ref("players")}(id),
+      club_id INTEGER NOT NULL REFERENCES ${ref("clubs")}(id), season INTEGER NOT NULL, date TEXT NOT NULL,
+      position TEXT NOT NULL, started INTEGER NOT NULL, minutes INTEGER NOT NULL,
+      minute_on INTEGER NOT NULL DEFAULT 0, minute_off INTEGER NULL, rating DOUBLE PRECISION NOT NULL,
+      goals INTEGER NOT NULL, assists INTEGER NOT NULL, stats TEXT NOT NULL,
+      PRIMARY KEY(fixture_id, player_id)`,
     promises: `
-      [id] INT IDENTITY(1,1) NOT NULL PRIMARY KEY, [player_id] INT NULL REFERENCES ${ref("players")}([id]),
-      [type] NVARCHAR(max) NOT NULL, [target] FLOAT(53) NOT NULL, [due_date] NVARCHAR(max) NOT NULL,
-      [status] NVARCHAR(max) NOT NULL DEFAULT N'active', [data] NVARCHAR(max) NOT NULL DEFAULT N'{}'`,
+      id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, player_id INTEGER NULL REFERENCES ${ref("players")}(id),
+      type TEXT NOT NULL, target DOUBLE PRECISION NOT NULL, due_date TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active', data TEXT NOT NULL DEFAULT '{}'`,
     training_plans: `
-      [club_id] INT NOT NULL PRIMARY KEY REFERENCES ${ref("clubs")}([id]),
-      [focus] NVARCHAR(max) NOT NULL DEFAULT N'Balanced', [intensity] INT NOT NULL DEFAULT 50,
-      [youth_focus] NVARCHAR(max) NOT NULL DEFAULT N'Technical', [data] NVARCHAR(max) NOT NULL DEFAULT N'{}'`,
+      club_id INTEGER NOT NULL PRIMARY KEY REFERENCES ${ref("clubs")}(id),
+      focus TEXT NOT NULL DEFAULT 'Balanced', intensity INTEGER NOT NULL DEFAULT 50,
+      youth_focus TEXT NOT NULL DEFAULT 'Technical', data TEXT NOT NULL DEFAULT '{}'`,
     set_pieces: `
-      [club_id] INT NOT NULL PRIMARY KEY REFERENCES ${ref("clubs")}([id]),
-      [routine] NVARCHAR(max) NOT NULL DEFAULT N'Near post', [target] NVARCHAR(max) NOT NULL DEFAULT N'Centre-back',
-      [risk] INT NOT NULL DEFAULT 50, [data] NVARCHAR(max) NOT NULL DEFAULT N'{}'`,
+      club_id INTEGER NOT NULL PRIMARY KEY REFERENCES ${ref("clubs")}(id),
+      routine TEXT NOT NULL DEFAULT 'Near post', target TEXT NOT NULL DEFAULT 'Centre-back',
+      risk INTEGER NOT NULL DEFAULT 50, data TEXT NOT NULL DEFAULT '{}'`,
+    // GBE evidence (server/gbe.ts). No foreign keys: retention prunes players, and these rows are pruned with them.
+    // One narrow row per player, club season (July-June), team, competition and kind; `data` lists the 12 months
+    // (July first) of available minutes, minutes, appearances, matchday-squad listings and unavailable minutes:
+    // 60 comma-separated integers, zeros left empty (a portable column type for checkpoints). league_id 0 = pre-game estimate.
+    player_minutes_monthly: `
+      player_id INTEGER NOT NULL, season INTEGER NOT NULL, club_id INTEGER NOT NULL, league_id INTEGER NOT NULL,
+      kind TEXT NOT NULL CHECK (kind IN ('league','cup','continental','qualifying','international','friendly')),
+      estimated BOOLEAN NOT NULL DEFAULT false, data TEXT NOT NULL,
+      PRIMARY KEY(player_id, season, club_id, league_id, kind)`,
+    // Final league position and continental run of each senior club per season (rollover, or pre-game estimate).
+    club_season_outcomes: `
+      club_id INTEGER NOT NULL, season INTEGER NOT NULL, league_id INTEGER NULL, country_code TEXT NOT NULL,
+      tier INTEGER NOT NULL, position INTEGER NULL, clubs INTEGER NULL,
+      champion BOOLEAN NOT NULL DEFAULT false, promoted BOOLEAN NOT NULL DEFAULT false, relegated BOOLEAN NOT NULL DEFAULT false,
+      continental TEXT NOT NULL DEFAULT '[]', qualified TEXT NULL, estimated BOOLEAN NOT NULL DEFAULT false,
+      PRIMARY KEY(club_id, season)`,
+    // Senior national team per month: ranking among all FIFA members and matches played (estimates before the world).
+    national_team_months: `
+      country_id INTEGER NOT NULL, month TEXT NOT NULL, rank INTEGER NULL,
+      competitive INTEGER NOT NULL DEFAULT 0, friendlies INTEGER NOT NULL DEFAULT 0, estimated BOOLEAN NOT NULL DEFAULT false,
+      PRIMARY KEY(country_id, month)`,
+    // Cached assessment per player (points, outcome and a compact per-criterion summary, server/gbe.ts compact()), refreshed
+    // by refreshGbe; club_id is the player's club when it was calculated (a move makes the row stale).
+    player_gbe: `
+      player_id INTEGER NOT NULL PRIMARY KEY, ruleset TEXT NOT NULL, as_of TEXT NOT NULL, club_id INTEGER NULL,
+      points INTEGER NOT NULL, outcome TEXT NOT NULL, assessment TEXT NOT NULL`,
   };
   const index = (
     name: string,
@@ -386,253 +415,211 @@ export function schemaMigrations(schema: string): SqlMigration[] {
     filter = "",
     unique = false,
   ) =>
-    `IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE [object_id] = OBJECT_ID(${sqlLiteral(ref(table))}) AND [name] = ${sqlLiteral(name)})
-      CREATE ${unique ? "UNIQUE " : ""}INDEX ${quoteIdentifier(name)} ON ${ref(table)} (${keys})${filter ? ` WHERE ${filter}` : ""};`;
+    `CREATE ${unique ? "UNIQUE " : ""}INDEX IF NOT EXISTS ${quoteIdentifier(name)} ON ${ref(table)} (${keys})${filter ? ` WHERE ${filter}` : ""};`;
   return [
     {
       version: 1,
-      name: "World tables",
-      statements: WORLD_TABLES.map(
-        (table) =>
-          `IF OBJECT_ID(${sqlLiteral(ref(table))}, N'U') IS NULL CREATE TABLE ${ref(table)} (${definitions[table]});`,
-      ),
+      name: "PostgreSQL world baseline",
+      statements: [
+        ...WORLD_TABLES.filter((table) => !ADDED_WORLD_TABLES.has(table)).map(
+          (table) => `CREATE TABLE IF NOT EXISTS ${ref(table)} (${definitions[table]});`,
+        ),
+        // The playing squad defaults to the registered club; a transfer clears any explicit squad assignment.
+        `ALTER TABLE ${ref("players")}
+          ADD COLUMN IF NOT EXISTS squad_club_id INTEGER NULL REFERENCES ${ref("clubs")}(id),
+          ADD COLUMN IF NOT EXISTS playing_club_id INTEGER GENERATED ALWAYS AS (COALESCE(squad_club_id, club_id)) STORED;`,
+        `CREATE OR REPLACE FUNCTION ${ref("clear_transferred_squad")}() RETURNS trigger
+          LANGUAGE plpgsql SET search_path = pg_catalog AS $$
+          BEGIN
+            IF NEW.club_id IS DISTINCT FROM OLD.club_id THEN
+              NEW.squad_club_id := NULL;
+            END IF;
+            RETURN NEW;
+          END;
+          $$;`,
+        `CREATE OR REPLACE TRIGGER clear_transferred_squad BEFORE UPDATE OF club_id ON ${ref("players")}
+          FOR EACH ROW EXECUTE FUNCTION ${ref("clear_transferred_squad")}();`,
+        // The daily simulation rewrites these rows constantly: leave page room for HOT updates and vacuum early.
+        ...["players", "standings", "clubs", "fixtures"].map(
+          (table) =>
+            `ALTER TABLE ${ref(table)} SET (fillfactor = ${table === "fixtures" ? 90 : 85},
+              autovacuum_vacuum_scale_factor = 0.02, autovacuum_analyze_scale_factor = 0.02);`,
+        ),
+        `ALTER TABLE ${ref("news")} ADD COLUMN IF NOT EXISTS notification_key TEXT
+          GENERATED ALWAYS AS (data::jsonb ->> 'notificationKey') STORED;`,
+        index("news_notification_key", "news", "notification_key", "notification_key IS NOT NULL", true),
+        index("player_club", "players", "club_id, age_group, ability"),
+        index("player_market_squad", "players", "club_id, age_group, position, role, wage"),
+        index(
+          "player_market_candidate",
+          "players",
+          "id, contract_end, injury_until",
+          "club_id IS NOT NULL AND parent_club_id IS NULL AND age >= 18 AND age <= 31 AND age_group = 'Senior' AND role <> 'Retired'",
+        ),
+        index("player_nationality", "players", "country_id, age, ability"),
+        index("player_filter", "players", "position, age, ability, potential, value"),
+        index("player_name", "players", "lower(name)"),
+        index("player_ability", "players", "ability DESC"),
+        index("player_shortlist", "players", "shortlisted", "shortlisted = 1"),
+        index("player_playing_squad", "players", "playing_club_id, age_group, ability"),
+        index("player_parent_club", "players", "parent_club_id", "parent_club_id IS NOT NULL"),
+        index("player_squad_club", "players", "squad_club_id", "squad_club_id IS NOT NULL"),
+        index("fixture_date", "fixtures", "status, date"),
+        index("fixture_home", "fixtures", "home_id, date"),
+        index("fixture_away", "fixtures", "away_id, date"),
+        index("fixture_league", "fixtures", "league_id, season, round"),
+        index("club_league", "clubs", "league_id"),
+        index("club_parent", "clubs", "parent_id", "parent_id IS NOT NULL"),
+        index("standings_club", "standings", "club_id"),
+        index("staff_club", "staff", "club_id"),
+        index(
+          "staff_director_assistant",
+          "staff",
+          "club_id",
+          "role = 'Sporting director assistant' AND club_id IS NOT NULL",
+          true,
+        ),
+        index("board_affiliate_pending", "board_affiliate_requests", "club_id", "status = 'pending'", true),
+        index("unexpected_event_club", "unexpected_events", "club_id, status, date DESC"),
+        index("loan_player", "loans", "player_id, status"),
+        index("transfer_payment_due", "transfer_payments", "paid_date, due_date"),
+        index("transfer_payment_club", "transfer_payments", "payer_id, payee_id, paid_date"),
+        index("transfer_payment_player", "transfer_payments", "player_id"),
+        index("transfer_payment_negotiation", "transfer_payments", "negotiation_id"),
+        index("transfer_payment_sell_on", "transfer_payments", "sell_on_clause_id", "sell_on_clause_id IS NOT NULL"),
+        index("sell_on_source_loan", "sell_on_clauses", "source_loan_id", "source_loan_id IS NOT NULL"),
+        index("relationship_target", "relationships", "target_type, target_id"),
+        index("buy_back_player", "buy_back_clauses", "player_id, owner_id, status"),
+        index("sell_on_player", "sell_on_clauses", "player_id"),
+        index("negotiation_player", "negotiations", "player_id"),
+        index("negotiation_buyer", "negotiations", "buying_club_id, stage"),
+        index("report_player", "reports", "player_id"),
+        index("assignment_player", "assignments", "player_id", "player_id IS NOT NULL"),
+        index("assignment_staff", "assignments", "staff_id"),
+        index("promise_player", "promises", "player_id", "player_id IS NOT NULL"),
+        index("history_entity", "history", "entity_type, entity_id, date"),
+        index("ledger_club", "ledger", "club_id, date"),
+        index("assets_club", "player_assets", "club_id, status"),
+        index("assets_player", "player_assets", "player_id, club_id, status"),
+        index("appearances_player_season", "player_match_appearances", "player_id, season, date DESC, fixture_id DESC"),
+        index("appearances_club", "player_match_appearances", "club_id, season"),
+        `CREATE TABLE IF NOT EXISTS ${ref("save_slots")} (
+          id UUID NOT NULL PRIMARY KEY, name TEXT NOT NULL,
+          career_id TEXT NULL, career_metadata TEXT NULL,
+          created_at TIMESTAMPTZ NOT NULL, automatic BOOLEAN NOT NULL, imported BOOLEAN NOT NULL DEFAULT false,
+          format_version INTEGER NOT NULL, byte_length BIGINT NOT NULL DEFAULT 0,
+          sha256 TEXT NULL, complete BOOLEAN NOT NULL DEFAULT false);`,
+        `CREATE TABLE IF NOT EXISTS ${ref("save_chunks")} (
+          save_id UUID NOT NULL REFERENCES ${ref("save_slots")}(id) ON DELETE CASCADE,
+          ordinal INTEGER NOT NULL, data BYTEA NOT NULL, PRIMARY KEY (save_id, ordinal));`,
+        // Chunks are already gzip-compressed; skip TOAST compression and store them out of line directly.
+        `ALTER TABLE ${ref("save_chunks")} ALTER COLUMN data SET STORAGE EXTERNAL;`,
+      ],
     },
     {
       version: 2,
-      name: "Playing squad assignment",
+      name: "Narrow hot player rows",
       statements: [
-        `IF COL_LENGTH(${sqlLiteral(ref("players"))}, N'squad_club_id') IS NULL
-          ALTER TABLE ${ref("players")} ADD [squad_club_id] INT NULL REFERENCES ${ref("clubs")}([id]);`,
-        `IF COL_LENGTH(${sqlLiteral(ref("players"))}, N'playing_club_id') IS NULL
-          ALTER TABLE ${ref("players")} ADD [playing_club_id] AS COALESCE([squad_club_id], [club_id]) PERSISTED;`,
-        `CREATE OR ALTER TRIGGER ${ref("clear_transferred_squad")} ON ${ref("players")} AFTER UPDATE AS
-          BEGIN
-            SET NOCOUNT ON;
-            IF UPDATE([club_id])
-              UPDATE player SET [squad_club_id] = NULL FROM ${ref("players")} AS player
-                INNER JOIN inserted AS current_row ON current_row.[id] = player.[id]
-                INNER JOIN deleted AS previous_row ON previous_row.[id] = player.[id]
-              WHERE current_row.[club_id] <> previous_row.[club_id]
-                OR (current_row.[club_id] IS NULL AND previous_row.[club_id] IS NOT NULL)
-                OR (current_row.[club_id] IS NOT NULL AND previous_row.[club_id] IS NULL);
-          END;`,
+        // Every UPDATE writes a whole new row version. Keeping the large profile JSON out of line (TOAST) leaves a
+        // narrow row whose versions share the profile pointer. Half-empty pages let a whole squad's match-day updates
+        // stay HOT on their page (measured: ~90% HOT and a smaller steady-state heap than at fillfactor 75).
+        `ALTER TABLE ${ref("players")} SET (toast_tuple_target = 128, fillfactor = 50,
+          autovacuum_vacuum_scale_factor = 0.01, autovacuum_vacuum_cost_delay = 0);`,
+        // Per-match value drift must not touch an index, or no update of a squad can be HOT.
+        `DROP INDEX IF EXISTS ${ref("player_filter")};`,
+        index("player_search", "players", "position, age, ability, potential"),
+        // Rewrites the table once so existing rows move their profile out of line under the new settings; a large
+        // live world may take longer than the per-statement timeout.
+        `SET LOCAL statement_timeout = 0;
+          ALTER TABLE ${ref("players")} ALTER COLUMN profile TYPE TEXT USING profile || '';`,
       ],
     },
     {
       version: 3,
-      name: "World indexes and notification deduplication",
+      name: "GBE evidence ledger, club season outcomes and assessment cache",
       statements: [
-        `IF COL_LENGTH(${sqlLiteral(ref("news"))}, N'notification_key') IS NULL
-          ALTER TABLE ${ref("news")} ADD [notification_key] AS
-            CONVERT(NVARCHAR(450), JSON_VALUE([data], '$.notificationKey')) COLLATE Latin1_General_100_BIN2 PERSISTED;`,
-        `IF COL_LENGTH(${sqlLiteral(ref("news"))}, N'notification_unkeyed_id') IS NULL
-          ALTER TABLE ${ref("news")} ADD [notification_unkeyed_id] AS
-            (CASE WHEN JSON_VALUE([data], '$.notificationKey') IS NULL THEN [id] ELSE 0 END) PERSISTED;`,
-        index(
-          "news_notification_key",
-          "news",
-          "[notification_key], [notification_unkeyed_id]",
-          "",
-          true,
-        ),
-        index("player_club", "players", "[club_id], [age_group], [ability]"),
-        index(
-          "player_market_squad",
-          "players",
-          "[club_id], [age_group], [position], [role], [wage]",
-        ),
-        index(
-          "player_market_candidate",
-          "players",
-          "[id], [contract_end], [injury_until]",
-          "[club_id] IS NOT NULL AND [parent_club_id] IS NULL AND [age] >= 18 AND [age] <= 31 AND [age_group] = N'Senior' AND [role] <> N'Retired'",
-        ),
-        index(
-          "player_nationality",
-          "players",
-          "[country_id], [age], [ability]",
-        ),
-        index(
-          "player_filter",
-          "players",
-          "[position], [age], [ability], [potential], [value]",
-        ),
-        index("player_name", "players", "[name]"),
-        index(
-          "player_shortlist",
-          "players",
-          "[shortlisted]",
-          "[shortlisted] = 1",
-        ),
-        index(
-          "player_playing_squad",
-          "players",
-          "[playing_club_id], [age_group], [ability]",
-        ),
-        index("fixture_date", "fixtures", "[status], [date]"),
-        index("fixture_home", "fixtures", "[home_id], [date]"),
-        index("fixture_away", "fixtures", "[away_id], [date]"),
-        index("fixture_league", "fixtures", "[league_id], [season], [round]"),
-        index("staff_club", "staff", "[club_id]"),
-        index(
-          "staff_director_assistant",
-          "staff",
-          "[club_id]",
-          "[role] = N'Sporting director assistant' AND [club_id] IS NOT NULL",
-          true,
-        ),
-        index(
-          "board_affiliate_pending",
-          "board_affiliate_requests",
-          "[club_id]",
-          "[status] = N'pending'",
-          true,
-        ),
-        index(
-          "unexpected_event_club",
-          "unexpected_events",
-          "[club_id], [status], [date] DESC",
-        ),
-        index("loan_player", "loans", "[player_id], [status]"),
-        index(
-          "transfer_payment_due",
-          "transfer_payments",
-          "[paid_date], [due_date]",
-        ),
-        index(
-          "transfer_payment_club",
-          "transfer_payments",
-          "[payer_id], [payee_id], [paid_date]",
-        ),
-        index(
-          "buy_back_player",
-          "buy_back_clauses",
-          "[player_id], [owner_id], [status]",
-        ),
-        index(
-          "history_entity",
-          "history",
-          "[entity_type], [entity_id], [date]",
-        ),
-        index("assets_club", "player_assets", "[club_id], [status]"),
-        index(
-          "assets_player",
-          "player_assets",
-          "[player_id], [club_id], [status]",
-        ),
-        index(
-          "appearances_player_season",
-          "player_match_appearances",
-          "[player_id], [season], [date] DESC, [fixture_id] DESC",
-        ),
-        index(
-          "appearances_club",
-          "player_match_appearances",
-          "[club_id], [season]",
-        ),
+        // Existing worlds are backfilled lazily (gbe.ensureGbeBaseline on the next advance or save load).
+        ...GBE_TABLES.map((table) => `CREATE TABLE IF NOT EXISTS ${ref(table)} (${definitions[table]});`),
+        // Match days rewrite the season rows of whole squads: a little room on the page keeps many of those updates HOT.
+        `ALTER TABLE ${ref("player_minutes_monthly")} SET (fillfactor = 90);`,
+        index("club_season_outcome_season", "club_season_outcomes", "season"),
       ],
     },
     {
       version: 4,
-      name: "Chunked SQL saves",
+      name: "Player and competition registrations",
       statements: [
-        `IF OBJECT_ID(${sqlLiteral(ref("save_slots"))}, N'U') IS NULL
-          CREATE TABLE ${ref("save_slots")} (
-            [id] UNIQUEIDENTIFIER NOT NULL PRIMARY KEY, [name] NVARCHAR(200) NOT NULL,
-            [career_id] NVARCHAR(100) NULL, [career_metadata] NVARCHAR(max) NULL,
-            [created_at] DATETIME2 NOT NULL, [automatic] BIT NOT NULL, [imported] BIT NOT NULL DEFAULT 0,
-            [format_version] INT NOT NULL, [byte_length] BIGINT NOT NULL DEFAULT 0,
-            [sha256] CHAR(64) NULL, [complete] BIT NOT NULL DEFAULT 0);`,
-        `IF OBJECT_ID(${sqlLiteral(ref("save_chunks"))}, N'U') IS NULL
-          CREATE TABLE ${ref("save_chunks")} (
-            [save_id] UNIQUEIDENTIFIER NOT NULL REFERENCES ${ref("save_slots")}([id]) ON DELETE CASCADE,
-            [ordinal] INT NOT NULL, [data] VARBINARY(max) NOT NULL, PRIMARY KEY([save_id], [ordinal]));`,
+        // Signing no longer implies registration: existing players keep the registration on file (no row), so live
+        // worlds need no data backfill here; quota lists are rebuilt lazily by eligibility.processRegistrations.
+        ...(["player_registrations", "competition_registrations"] as const).map(
+          (table) => `CREATE TABLE IF NOT EXISTS ${ref(table)} (${definitions[table]});`,
+        ),
+        index("player_registration_review", "player_registrations", "next_review", "next_review IS NOT NULL"),
+        index("player_registration_club", "player_registrations", "club_id, status"),
+        index("competition_registration_club", "competition_registrations", "club_id, season"),
       ],
     },
     {
       version: 5,
-      name: "Continuous rating precision",
-      statements: Object.entries({
-        countries: ["reputation"],
-        leagues: ["reputation"],
-        clubs: ["reputation", "facilities"],
-        staff: ["ability", "tactical_knowledge"],
-      }).flatMap(([table, columns]) =>
-        columns.map(
-          (column) =>
-            `ALTER TABLE ${ref(table)} ALTER COLUMN ${quoteIdentifier(column)} FLOAT(53) NOT NULL;`,
-        ),
-      ),
-    },
-    {
-      version: 6,
-      name: "Restricted world identity reseeding",
+      name: "Club approaches for the director's players",
       statements: [
-        `CREATE OR ALTER PROCEDURE ${ref("reseed_world_identity")} @table sysname
-          WITH EXECUTE AS OWNER
-          AS
-          BEGIN
-            SET NOCOUNT ON;
-            IF @table NOT IN (${[...IDENTITY_TABLES].map(sqlLiteral).join(", ")})
-              THROW 51000, 'Unknown world identity table.', 1;
-            DECLARE @target nvarchar(260) = ${sqlLiteral(`${quoteIdentifier(schema)}.`)} + QUOTENAME(@table);
-            DECLARE @maximum int, @statement nvarchar(max);
-            SET @statement = N'SELECT @maximum = MAX([id]) FROM ' + @target;
-            EXEC sys.sp_executesql @statement, N'@maximum int OUTPUT', @maximum OUTPUT;
-            IF @maximum IS NULL AND NOT EXISTS (
-              SELECT 1 FROM sys.identity_columns WHERE [object_id] = OBJECT_ID(@target) AND [last_value] IS NOT NULL)
-              RETURN;
-            SET @statement = N'DBCC CHECKIDENT (' + QUOTENAME(@target, '''') + N', RESEED, '
-              + CONVERT(nvarchar(20), COALESCE(@maximum, 0)) + N') WITH NO_INFOMSGS;';
-            EXEC sys.sp_executesql @statement;
-          END;`,
+        // market-offers reads the director's recent and open incoming offers (rolling week, pair cooldowns) daily.
+        index("negotiation_seller", "negotiations", "selling_club_id, created"),
       ],
     },
   ];
 }
 
+/** Rebuilds player_match_appearances from played fixtures' JSON for worlds imported without the index. */
 export function appearanceBackfill(schema: string): string[] {
   const ref = (table: string) => tableName(schema, table);
+  const int = (expression: string) =>
+    `(CASE WHEN (${expression}) ~ '^-?[0-9]+$' THEN (${expression})::integer END)`;
   const statements: string[] = [];
   for (const side of ["home", "away"])
     for (const group of ["lineup", "bench"])
       statements.push(`
-        ;WITH appearances AS (
-          SELECT fixture.[id] AS [fixture_id], TRY_CONVERT(INT, JSON_VALUE(roster.[value], '$.id')) AS [player_id],
-            fixture.[${side}_id] AS [club_id], fixture.[season], fixture.[date],
-            JSON_VALUE(roster.[value], '$.position') AS [position], ${group === "lineup" ? 1 : 0} AS [started],
-            TRY_CONVERT(INT, JSON_VALUE(performance.[value], '$.minutes')) AS [minutes],
-            COALESCE(sub_on.[minute], 0) AS [minute_on], COALESCE(sub_off.[minute], exit_event.[minute]) AS [minute_off],
-            COALESCE(TRY_CONVERT(FLOAT(53), JSON_VALUE(performance.[value], '$.rating')), 0) AS [rating],
-            COALESCE(TRY_CONVERT(INT, JSON_VALUE(performance.[value], '$.goals')), 0) AS [goals],
-            COALESCE(TRY_CONVERT(INT, JSON_VALUE(performance.[value], '$.assists')), 0) AS [assists],
-            performance.[value] AS [stats],
-            ROW_NUMBER() OVER (PARTITION BY fixture.[id], JSON_VALUE(roster.[value], '$.id')
-              ORDER BY TRY_CONVERT(INT, roster.[key])) AS [occurrence]
+        WITH appearances AS (
+          SELECT fixture.id AS fixture_id, ${int("roster.value ->> 'id'")} AS player_id,
+            fixture.${side}_id AS club_id, fixture.season, fixture.date,
+            roster.value ->> 'position' AS position, ${group === "lineup" ? 1 : 0} AS started,
+            ${int("performance.value ->> 'minutes'")} AS minutes,
+            COALESCE(sub_on.minute, 0) AS minute_on, COALESCE(sub_off.minute, exit_event.minute) AS minute_off,
+            COALESCE(CASE WHEN performance.value ->> 'rating' ~ '^-?[0-9]+(\\.[0-9]+)?([eE][-+]?[0-9]+)?$'
+              THEN (performance.value ->> 'rating')::double precision END, 0) AS rating,
+            COALESCE(${int("performance.value ->> 'goals'")}, 0) AS goals,
+            COALESCE(${int("performance.value ->> 'assists'")}, 0) AS assists,
+            performance.value::text AS stats,
+            ROW_NUMBER() OVER (PARTITION BY fixture.id, roster.value ->> 'id' ORDER BY roster.ordinal) AS occurrence
           FROM ${ref("fixtures")} AS fixture
-          CROSS APPLY OPENJSON(fixture.[data], '$.snapshot.${side}.${group}') AS roster
-          CROSS APPLY OPENJSON(fixture.[data], '$.players') AS performance
-          INNER JOIN ${ref("players")} AS player ON player.[id] = TRY_CONVERT(INT, JSON_VALUE(roster.[value], '$.id'))
-          OUTER APPLY (SELECT TOP (1) TRY_CONVERT(INT, JSON_VALUE([value], '$.minute')) AS [minute]
-            FROM OPENJSON(fixture.[data], '$.substitutions')
-            WHERE TRY_CONVERT(INT, JSON_VALUE([value], '$.onId')) = player.[id] ORDER BY TRY_CONVERT(INT, [key])) AS sub_on
-          OUTER APPLY (SELECT TOP (1) TRY_CONVERT(INT, JSON_VALUE([value], '$.minute')) AS [minute]
-            FROM OPENJSON(fixture.[data], '$.substitutions')
-            WHERE TRY_CONVERT(INT, JSON_VALUE([value], '$.offId')) = player.[id] ORDER BY TRY_CONVERT(INT, [key])) AS sub_off
-          OUTER APPLY (SELECT TOP (1) TRY_CONVERT(INT, JSON_VALUE([value], '$.minute')) AS [minute]
-            FROM OPENJSON(fixture.[data], '$.events')
-            WHERE TRY_CONVERT(INT, JSON_VALUE([value], '$.playerId')) = player.[id]
-              AND JSON_VALUE([value], '$.type') IN (N'red card', N'injury') ORDER BY TRY_CONVERT(INT, [key])) AS exit_event
-          WHERE fixture.[status] = N'played' AND TRY_CONVERT(INT, performance.[key]) = player.[id]
-            AND TRY_CONVERT(INT, JSON_VALUE(performance.[value], '$.minutes')) > 0
+          CROSS JOIN LATERAL jsonb_array_elements(
+            CASE WHEN jsonb_typeof(fixture.data::jsonb #> '{snapshot,${side},${group}}') = 'array'
+              THEN fixture.data::jsonb #> '{snapshot,${side},${group}}' ELSE '[]'::jsonb END
+          ) WITH ORDINALITY AS roster(value, ordinal)
+          CROSS JOIN LATERAL jsonb_each(
+            CASE WHEN jsonb_typeof(fixture.data::jsonb -> 'players') = 'object'
+              THEN fixture.data::jsonb -> 'players' ELSE '{}'::jsonb END
+          ) AS performance(key, value)
+          INNER JOIN ${ref("players")} AS player ON player.id = ${int("roster.value ->> 'id'")}
+          LEFT JOIN LATERAL (SELECT ${int("event.value ->> 'minute'")} AS minute
+            FROM jsonb_array_elements(COALESCE(fixture.data::jsonb -> 'substitutions', '[]'::jsonb)) WITH ORDINALITY AS event(value, ordinal)
+            WHERE ${int("event.value ->> 'onId'")} = player.id ORDER BY event.ordinal LIMIT 1) AS sub_on ON true
+          LEFT JOIN LATERAL (SELECT ${int("event.value ->> 'minute'")} AS minute
+            FROM jsonb_array_elements(COALESCE(fixture.data::jsonb -> 'substitutions', '[]'::jsonb)) WITH ORDINALITY AS event(value, ordinal)
+            WHERE ${int("event.value ->> 'offId'")} = player.id ORDER BY event.ordinal LIMIT 1) AS sub_off ON true
+          LEFT JOIN LATERAL (SELECT ${int("event.value ->> 'minute'")} AS minute
+            FROM jsonb_array_elements(COALESCE(fixture.data::jsonb -> 'events', '[]'::jsonb)) WITH ORDINALITY AS event(value, ordinal)
+            WHERE ${int("event.value ->> 'playerId'")} = player.id
+              AND event.value ->> 'type' IN ('red card', 'injury') ORDER BY event.ordinal LIMIT 1) AS exit_event ON true
+          WHERE fixture.status = 'played' AND ${int("performance.key")} = player.id
+            AND ${int("performance.value ->> 'minutes'")} > 0
         )
         INSERT INTO ${ref("player_match_appearances")}
-          ([fixture_id], [player_id], [club_id], [season], [date], [position], [started], [minutes],
-           [minute_on], [minute_off], [rating], [goals], [assists], [stats])
-        SELECT [fixture_id], [player_id], [club_id], [season], [date], [position], [started], [minutes],
-          [minute_on], [minute_off], [rating], [goals], [assists], [stats]
-        FROM appearances AS appearance WHERE [occurrence] = 1 AND NOT EXISTS (
-          SELECT 1 FROM ${ref("player_match_appearances")} AS existing
-          WHERE existing.[fixture_id] = appearance.[fixture_id] AND existing.[player_id] = appearance.[player_id]);`);
+          (fixture_id, player_id, club_id, season, date, position, started, minutes,
+           minute_on, minute_off, rating, goals, assists, stats)
+        SELECT fixture_id, player_id, club_id, season, date, position, started, minutes,
+          minute_on, minute_off, rating, goals, assists, stats
+        FROM appearances WHERE occurrence = 1
+        ON CONFLICT (fixture_id, player_id) DO NOTHING;`);
   return statements;
 }

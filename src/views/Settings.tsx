@@ -8,6 +8,7 @@ import {
   Handshake,
   HardDrive,
   LockKeyhole,
+  LogOut,
   Monitor,
   Moon,
   Network,
@@ -16,6 +17,7 @@ import {
   Save,
   ScanLine,
   Search,
+  ShieldCheck,
   SlidersHorizontal,
   Sun,
   Upload,
@@ -23,6 +25,7 @@ import {
   Wallet,
 } from "lucide-react";
 import { api, useCurrency, useGame, useResource } from "../game-context.tsx";
+import { adminHref, signOutAction } from "../access-state.ts";
 import {
   Badge,
   Button,
@@ -58,12 +61,30 @@ import {
 function AccountIdentity() {
   const { session } = useGame();
   if (!session) return null;
-  const details: [string, string][] = [["Account name", session.user.displayName]];
-  if (session.user.email) details.push(["Email", session.user.email]);
+  const { user } = session;
+  const local = user.id === "local";
+  const details: [string, string][] = [["Display name", user.displayName]];
+  if (!local) details.push(["Username", user.username]);
+  if (user.email) details.push(["Email", user.email]);
   return (
     <section className="account-identity" aria-label="Signed-in account">
       <SectionHeading title="Signed-in account" />
       <DetailList items={details} />
+      {!local && (
+        <div className="account-actions">
+          {user.admin && (
+            <a href={adminHref} className="button button-secondary">
+              <ShieldCheck size={16} strokeWidth={1.8} />
+              Admin
+            </a>
+          )}
+          <form method="post" action={signOutAction}>
+            <Button type="submit" icon={LogOut} variant="secondary">
+              Sign out
+            </Button>
+          </form>
+        </div>
+      )}
     </section>
   );
 }

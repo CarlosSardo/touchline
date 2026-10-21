@@ -73,9 +73,18 @@ export interface CheckpointManifest {
   };
 }
 
+export interface CheckpointSchemaTable {
+  name: string;
+  columns: CheckpointColumn[];
+  /** Columns older checkpoints may list that this schema now derives or no longer has; accepted, then ignored. */
+  legacyColumns?: string[];
+  /** Table added after older checkpoints were written: a checkpoint may omit it (it is restored empty). */
+  optional?: boolean;
+}
+
 export interface CheckpointSchema {
   version: number;
-  tables: { name: string; columns: CheckpointColumn[] }[];
+  tables: CheckpointSchemaTable[];
 }
 
 export class SaveFormatError extends Error {
@@ -176,6 +185,72 @@ export function sameColumns(
   );
 }
 
+const integerBytes: Partial<Record<ColumnType, number>> = {
+  tinyint: 1,
+  smallint: 2,
+  int: 4,
+  bigint: 8,
+};
+const characterTypes = new Set<ColumnType>(["nvarchar", "nchar", "varchar", "char"]);
+const asciiTypes = new Set<ColumnType>(["varchar", "char"]);
+
+function fitsLength(source: number | undefined, target: number | undefined) {
+  return target === undefined || target === -1 || (source !== undefined && source !== -1 && source <= target);
+}
+
+/**
+ * Whether every value a checkpoint column can hold restores losslessly into a current column: the same type, or a
+ * widening. Checkpoints written by the SQL Server version describe bounded nvarchar(n) columns that are now
+ * unbounded text, so a narrower source is accepted while a wider one is not.
+ */
+export function restorableColumn(source: CheckpointColumn, target: CheckpointColumn): boolean {
+  if (source.name !== target.name || (source.nullable && !target.nullable)) return false;
+  const from = source.type;
+  const to = target.type;
+  const sourceBytes = integerBytes[from];
+  if (sourceBytes !== undefined) {
+    const targetBytes = integerBytes[to];
+    if (targetBytes !== undefined) return sourceBytes <= targetBytes;
+    return (to === "float" && sourceBytes <= 4) || (to === "real" && sourceBytes <= 2);
+  }
+  if (from === "real") return to === "real" || to === "float";
+  if (characterTypes.has(from)) {
+    if (to === "nchar" || to === "char") return from === to && source.maxLength === target.maxLength;
+    return (
+      characterTypes.has(to) &&
+      (!asciiTypes.has(to) || asciiTypes.has(from)) &&
+      fitsLength(source.maxLength, target.maxLength)
+    );
+  }
+  if (from === "binary" || from === "varbinary") {
+    if (to === "binary") return from === to && source.maxLength === target.maxLength;
+    return to === "varbinary" && fitsLength(source.maxLength, target.maxLength);
+  }
+  if (from === "decimal" || from === "numeric") {
+    if (to !== "decimal" && to !== "numeric") return false;
+    const [precision, scale] = [source.precision ?? 18, source.scale ?? 0];
+    const [targetPrecision, targetScale] = [target.precision ?? 18, target.scale ?? 0];
+    return targetScale >= scale && targetPrecision - targetScale >= precision - scale;
+  }
+  if (from === "datetime") return to === "datetime" || to === "datetime2";
+  return from === to;
+}
+
+/** A checkpoint table restores into a schema table when every current column is present and restorable. */
+export function compatibleColumns(columns: CheckpointColumn[], target: CheckpointSchemaTable): boolean {
+  const legacy = new Set(target.legacyColumns);
+  const source = new Map(columns.map((item) => [item.name, item]));
+  return (
+    target.columns.every((item) => {
+      const match = source.get(item.name);
+      return match !== undefined && restorableColumn(match, item);
+    }) &&
+    columns.every((item) =>
+      target.columns.some((other) => other.name === item.name) ? !legacy.has(item.name) : legacy.has(item.name),
+    )
+  );
+}
+
 export function validateManifest(
   value: unknown,
   expected?: CheckpointSchema,
@@ -233,7 +308,7 @@ export function validateManifest(
     count(total, limits.rows);
     if (expected) {
       const target = expected.tables.find((item) => item.name === name);
-      if (!target || !sameColumns(columns, target.columns))
+      if (!target || !compatibleColumns(columns, target))
         throw new SaveFormatError(
           `Unknown or incompatible checkpoint table: ${name}.`,
         );
@@ -241,8 +316,7 @@ export function validateManifest(
   }
   if (
     expected &&
-    (names.size !== expected.tables.length ||
-      expected.tables.some((item) => !names.has(item.name)))
+    expected.tables.some((item) => !item.optional && !names.has(item.name))
   )
     throw new SaveFormatError("Checkpoint table inventory is incomplete.");
   if (manifest.provenance !== undefined) {
@@ -669,7 +743,30 @@ async function* lines(source: AsyncIterable<Buffer>, limits: SaveLimits) {
   if (size) throw new SaveFormatError("Truncated checkpoint line.");
 }
 
+/** Maps a checkpoint table's rows onto the current schema's column order, dropping ignored legacy columns. */
+function projection(table: CheckpointTable, expected: CheckpointSchema) {
+  const target = expected.tables.find((item) => item.name === table.name)!;
+  const indexes = target.columns.map((item) => table.columns.findIndex((other) => other.name === item.name));
+  const identical = sameColumns(table.columns, target.columns);
+  return {
+    table: { name: table.name, columns: target.columns, rowCount: table.rowCount },
+    row(values: RestoredValue[]): RestoredValue[] {
+      if (identical) return values;
+      return target.columns.map((item, index) => {
+        const value = values[indexes[index]];
+        if (item.type === "bit" && typeof value === "number") return value === 1;
+        if (item.type === "bigint" && typeof value === "number") return BigInt(value);
+        return value;
+      });
+    },
+  };
+}
+
 export interface CheckpointReader {
+  /**
+   * The current schema. Checkpoints with compatible older column descriptions are accepted, and every callback then
+   * sees tables and rows in this schema's shape rather than the file's.
+   */
   expected?: CheckpointSchema;
   limits?: Partial<SaveLimits>;
   onManifest?: (manifest: CheckpointManifest) => void | Promise<void>;
@@ -695,6 +792,7 @@ export async function readCheckpoint(
   const decoder = new TextDecoder("utf-8", { fatal: true });
   let manifest: CheckpointManifest | undefined;
   let current: CheckpointTable | undefined;
+  let view: ReturnType<typeof projection> | undefined;
   let tableHash = createHash("sha256");
   let rowCount = 0;
   let total = 0;
@@ -749,16 +847,17 @@ export async function readCheckpoint(
                   "Unexpected or duplicate checkpoint table.",
                 );
               current = manifest.tables[tables.length];
+              view = reader.expected ? projection(current, reader.expected) : undefined;
               rowCount = 0;
               tableHash = createHash("sha256");
-              await reader.onTable?.(current);
+              await reader.onTable?.(view?.table ?? current);
             } else if (item.kind === "row") {
               keys(item, ["kind", "values"]);
               if (!current || ++rowCount > current.rowCount)
                 throw new SaveFormatError("Unexpected checkpoint row.");
               const values = rowValues(item.values, current);
               tableHash.update(line);
-              await reader.onRow?.(current, values);
+              await reader.onRow?.(view?.table ?? current, view ? view.row(values) : values);
             } else if (item.kind === "table-end") {
               keys(item, ["kind", "name", "rowCount", "sha256"]);
               if (
@@ -773,8 +872,9 @@ export async function readCheckpoint(
                 throw new SaveFormatError("Checkpoint table digest mismatch.");
               tables.push({ name: current.name, rowCount, sha256 });
               total += rowCount;
-              await reader.onTableEnd?.(current);
+              await reader.onTableEnd?.(view?.table ?? current);
               current = undefined;
+              view = undefined;
             } else throw new SaveFormatError("Unknown checkpoint record.");
           }
         } catch (error) {

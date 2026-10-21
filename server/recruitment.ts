@@ -56,6 +56,8 @@ const WAGE_PREMIUM_SLOPE = 48;
 const WAGE_SHORTFALL_SLOPE = 24;
 /** Below this interest in the move itself (wages excluded) the player will not negotiate. */
 export const MOVE_REFUSAL_THRESHOLD = INTEREST_BANDS.refuse;
+/** Weight of club level, continental football and his current situation in a loan move (he returns to his club). */
+export const LOAN_CAREER_WEIGHT = 0.5;
 /** AI clubs pay at most this multiple of the player's wage expectation to win him over. */
 export const MARKET_WAGE_PREMIUM_CAP = 1.5;
 
@@ -102,6 +104,24 @@ export function personalTermsOutcome(
   return wageMet ? "agreed" : "wage";
 }
 
+/**
+ * Weekly wage at which a buying AI club agrees personal terms after club terms are accepted: the wage that brings
+ * the player to PERSONAL_TERMS_THRESHOLD, or null when he refuses or it exceeds MARKET_WAGE_PREMIUM_CAP times his
+ * expectation (the deal then collapses). `margin` asks for that many interest points of slack, so an approach made
+ * days before talks still holds after small swings in morale or form.
+ */
+export function personalTermsWage(
+  preview: Pick<PlayerInterest, "refuses" | "factors" | "expectedWage">,
+  margin = 0,
+) {
+  if (preview.refuses) return null;
+  const withoutWages =
+    60 + preview.factors.reduce((total, entry) => total + (entry.id === "wages" ? 0 : entry.impact), 0);
+  if (withoutWages - margin < MOVE_REFUSAL_THRESHOLD) return null;
+  const wage = wageForInterest(preview.expectedWage, PERSONAL_TERMS_THRESHOLD - withoutWages + margin);
+  return wage !== null && wage <= Math.round(preview.expectedWage * MARKET_WAGE_PREMIUM_CAP) ? wage : null;
+}
+
 /** Stance label for the interest bands (see INTEREST_BANDS). */
 export function interestStance(score: number, refuses: boolean) {
   return refuses
@@ -141,7 +161,8 @@ function situationImpact(player: Pick<Player, "listed" | "morale" | "contract_en
 /**
  * Query-free estimate of a player's interest in an AI club's move (wages excluded), for daily market loops:
  * the same ambition, development, situation and tactical-fit formulas as assessPlayerInterest, with the club's
- * credible role (no minutes factor), no continental factor and relocation judged on country alone.
+ * credible role (no minutes factor), no continental factor and relocation judged on country alone. `loan` weighs
+ * club level and situation as a loan does (LOAN_CAREER_WEIGHT).
  */
 export function marketMoveInterest(
   player: Player,
@@ -149,18 +170,20 @@ export function marketMoveInterest(
   buyer: Club,
   seller: Club | undefined,
   date: string,
+  loan = false,
 ) {
+  const careerWeight = loan ? LOAN_CAREER_WEIGHT : 1;
   const factors = [
     ambitionImpact(
       buyer.reputation,
       seller?.reputation ?? Math.max(20, player.ability - 8),
       profile.personality.ambition ?? 50,
-    ),
-    developmentImpact(player.age, buyer, seller, false),
+    ) * careerWeight,
+    developmentImpact(player.age, buyer, seller, loan),
     seller?.country_id === buyer.country_id || player.country_id === buyer.country_id
       ? 4
       : -(3 + (100 - (profile.personality.adaptability ?? 50)) / 16),
-    situationImpact(player, date, profile.personality.loyalty ?? 50),
+    situationImpact(player, date, profile.personality.loyalty ?? 50) * careerWeight,
     clamp((tacticalFit(player, buyer) - 65) / 5, -9, 7),
   ];
   return Math.round(clamp(60 + factors.reduce((total, impact) => total + Math.round(impact), 0), 1, 99));
@@ -270,6 +293,9 @@ export async function assessPlayerInterest(
   const wantedRank = ROLES[expectedRole] ?? 2;
   const credibleRank = ROLES[credibleRole];
   const offeredRank = ROLES[offer.role ?? credibleRole] ?? 2;
+  // A loan leaves his career anchored at the parent club: the step in club level and the situation he leaves
+  // count for less than in a permanent move (LOAN_CAREER_WEIGHT).
+  const careerWeight = offer.loan ? LOAN_CAREER_WEIGHT : 1;
   factor(
     "ambition",
     "Sporting ambition",
@@ -279,10 +305,10 @@ export async function assessPlayerInterest(
           buyer.reputation,
           seller?.reputation ?? Math.max(20, player.ability - 8),
           ambition,
-        ),
+        ) * careerWeight,
     renewal
       ? "Continuity at the current club."
-      : `${buyer.name}'s reputation is ${Math.round(buyer.reputation)} versus ${Math.round(seller?.reputation ?? player.ability)} at the player's current level. Ambition changes how much this matters.`,
+      : `${buyer.name}'s reputation is ${Math.round(buyer.reputation)} versus ${Math.round(seller?.reputation ?? player.ability)} at the player's current level. Ambition changes how much this matters${offer.loan ? "; on loan he remains the parent club's player" : ""}.`,
   );
   const unrealistic = !!offer.role && offeredRank > credibleRank + 1;
   factor(
@@ -330,7 +356,7 @@ export async function assessPlayerInterest(
         ? 9
         : 5
       : sellerEurope
-        ? -10
+        ? -10 * careerWeight
         : wantsEurope
           ? -3
           : 0,
@@ -400,7 +426,7 @@ export async function assessPlayerInterest(
   factor(
     "loyalty",
     "Current situation and loyalty",
-    renewal ? loyalty / 15 + renewalContinuity(player) : situationImpact(player, state.date, loyalty),
+    renewal ? loyalty / 15 + renewalContinuity(player) : situationImpact(player, state.date, loyalty) * careerWeight,
     renewal
       ? player.listed
         ? "The club has made him available, which undermines trust in a new contract."
@@ -437,7 +463,7 @@ export async function assessPlayerInterest(
       ? clublessWageExpectation(
           marketWage({ ...player, age_group: "Senior", age: Math.max(21, player.age), wage: 0 }, scale),
           (await store.get<{ wage: number | null }>(
-            "SELECT avg(CONVERT(float,players.wage)) AS wage FROM clubs JOIN leagues ON leagues.id = clubs.league_id JOIN players ON players.club_id = clubs.id WHERE leagues.country_id = coalesce((SELECT country_id FROM leagues WHERE id = ?),?) AND clubs.type != 'national' AND players.parent_club_id IS NULL AND players.age_group = 'Senior' AND players.role != 'Retired' AND players.ability BETWEEN ? AND ? AND coalesce(JSON_VALUE(players.profile,'$.contract.status'),'professional') = 'professional'",
+            "SELECT avg(players.wage) AS wage FROM clubs JOIN leagues ON leagues.id = clubs.league_id JOIN players ON players.club_id = clubs.id WHERE leagues.country_id = coalesce((SELECT country_id FROM leagues WHERE id = ?),?) AND clubs.type != 'national' AND players.parent_club_id IS NULL AND players.age_group = 'Senior' AND players.role != 'Retired' AND players.ability BETWEEN ? AND ? AND coalesce(players.profile::jsonb #>> '{contract,status}','professional') = 'professional'",
             buyer.league_id ?? -1,
             buyer.country_id,
             player.ability - 2,
@@ -763,7 +789,7 @@ export async function submitMinorApplication(
     : ((JSON.parse(player.profile) as PlayerProfile).registration
         ?.lastAssociationId ?? player.country_id);
   await store.run(
-    "MERGE minor_applications WITH (HOLDLOCK) AS target USING (VALUES (?,?,?,?,?,?,?,?)) AS source(player_id,club_id,source_country_id,destination_country_id,route,requested_date,due_date,data) ON target.player_id = source.player_id AND target.club_id = source.club_id WHEN MATCHED THEN UPDATE SET source_country_id=source.source_country_id,destination_country_id=source.destination_country_id,route=source.route,requested_date=source.requested_date,due_date=source.due_date,status='pending',reason='',data=source.data WHEN NOT MATCHED THEN INSERT (player_id,club_id,source_country_id,destination_country_id,route,requested_date,due_date,data) VALUES (source.player_id,source.club_id,source.source_country_id,source.destination_country_id,source.route,source.requested_date,source.due_date,source.data);",
+    "INSERT INTO minor_applications(player_id,club_id,source_country_id,destination_country_id,route,requested_date,due_date,data) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT (player_id,club_id) DO UPDATE SET source_country_id = EXCLUDED.source_country_id,destination_country_id = EXCLUDED.destination_country_id,route = EXCLUDED.route,requested_date = EXCLUDED.requested_date,due_date = EXCLUDED.due_date,status = 'pending',reason = '',data = EXCLUDED.data",
     player.id,
     buyer.id,
     source,
@@ -801,7 +827,7 @@ export async function processMinorApplications(store: Store) {
     ))!;
     const eligibility = await assessYouthTransfer(store, player, club);
     const support = !!(await store.get(
-      "SELECT TOP (1) staff.id FROM staff WHERE staff.club_id = ? AND staff.role = 'Head of youth' AND EXISTS (SELECT 1 FROM training_plans WHERE training_plans.club_id = staff.club_id)",
+      "SELECT staff.id FROM staff WHERE staff.club_id = ? AND staff.role = 'Head of youth' AND EXISTS (SELECT 1 FROM training_plans WHERE training_plans.club_id = staff.club_id) LIMIT 1",
       club.id,
     ));
     const evidence = JSON.parse(application.data);

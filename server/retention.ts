@@ -1,5 +1,5 @@
 import type { Store } from "./db.ts";
-import { tableName } from "./sql-schema.ts";
+import { quoteIdentifier, sqlLiteral, tableName } from "./sql-schema.ts";
 import type { GameState, MatchResult, MatchSnapshot } from "../shared/types.ts";
 
 /** Per-world storage budgets (decision 11). CI flags anything above them. */
@@ -34,25 +34,32 @@ export interface SchemaFootprint {
   tables: TableFootprint[];
 }
 
-const PRUNE_BATCH = 1000;
+const PRUNE_BATCH = 5000;
 const PRUNE_LIMIT = 60_000;
 const COMPACT_BATCH = 100;
-const DELETE_BATCH = 20_000;
+/** Fixtures smaller than this hold no replay detail worth compacting. */
+const COMPACT_MIN_BYTES = 8000;
 const HOME_BASED_PROTECTED_AGE = 36;
-const TERMINAL_STAGES = "N'Completed', N'Rejected', N'Withdrawn', N'Expired', N'Hijacked'";
+const TERMINAL_STAGES = "'Completed', 'Rejected', 'Withdrawn', 'Expired', 'Hijacked'";
 const DETAIL_KEYS = new Set(["snapshot", "players", "momentum", "events", "substitutions", "injuries", "stats", "actions"]);
-const IDS = "SELECT [id] FROM OPENJSON(?) WITH ([id] INT '$')";
 const PLAYER_TABLES = [
   "reports",
   "assignments",
   "discipline",
   "player_assets",
   "registration_records",
+  "player_registrations",
+  "competition_registrations",
   "minor_applications",
   "player_season_stats",
   "player_match_appearances",
   "promises",
 ];
+const KEPT_APPEARANCES = "pg_temp.touchline_kept_appearances";
+
+/** A JSON text value as an integer, NULL when it is not a whole number. */
+const jsonInteger = (expression: string) =>
+  `(CASE WHEN ${expression} ~ '^-?[0-9]+$' THEN (${expression})::integer END)`;
 
 /** Result metadata and a scorers summary; drops the snapshot, events, ratings and momentum that replays need. */
 export function compactMatchData(payload: Record<string, unknown>): Record<string, unknown> {
@@ -87,58 +94,138 @@ export function storedAppearanceStats(stats: Record<string, number>, detailed: b
   return detailed ? JSON.stringify(stats) : "{}";
 }
 
+
+const DOOMED = "= ANY(?::int[])";
+const PRUNED_ROWS = [
+  "deleted_payments",
+  "deleted_buy_backs",
+  "deleted_clauses",
+  "deleted_negotiations",
+  "deleted_loans",
+  ...PLAYER_TABLES.map((table) => `deleted_${table}`),
+  "deleted_appearance_history",
+  "deleted_relationships",
+];
+
+/**
+ * One batch of leavers in one statement. Every data-modifying CTE sees the snapshot taken before the statement, so the
+ * career summary still reads the season stats a sibling CTE deletes, and foreign keys are checked once, at its end.
+ * Each `= ANY(?::int[])` gets the id array, so the planner sees its length and uses the player_id indexes.
+ */
 const pruneBatch = `
-  DECLARE @ids TABLE ([id] INT NOT NULL PRIMARY KEY);
-  INSERT INTO @ids ([id]) SELECT [id] FROM OPENJSON(?) WITH ([id] INT '$');
-  DECLARE @negotiations TABLE ([id] INT NOT NULL PRIMARY KEY);
-  INSERT INTO @negotiations ([id]) SELECT [id] FROM negotiations WHERE [player_id] IN (SELECT [id] FROM @ids);
-  DECLARE @loans TABLE ([id] INT NOT NULL PRIMARY KEY);
-  INSERT INTO @loans ([id]) SELECT [id] FROM loans WHERE [player_id] IN (SELECT [id] FROM @ids);
-  DECLARE @clauses TABLE ([id] INT NOT NULL PRIMARY KEY);
-  INSERT INTO @clauses ([id]) SELECT [id] FROM sell_on_clauses
-    WHERE [player_id] IN (SELECT [id] FROM @ids) OR [source_loan_id] IN (SELECT [id] FROM @loans);
-  DECLARE @rows INT = 0;
-  INSERT INTO history ([season], [entity_type], [entity_id], [date], [data])
-    SELECT ?, N'careerSummary', player.[id], ?, (
-      SELECT player.[name] AS [name], player.[position] AS [position], player.[nationality] AS [nationality],
-        player.[country_id] AS [countryId], player.[birth_date] AS [birthDate],
-        JSON_VALUE(player.[profile], '$.retirement.reason') AS [reason],
-        TRY_CONVERT(INT, JSON_VALUE(player.[profile], '$.retirement.season')) AS [lastSeason],
-        career.[appearances] AS [appearances], career.[minutes] AS [minutes],
-        career.[goals] AS [goals], career.[assists] AS [assists],
-        JSON_QUERY((SELECT TOP (12) stat.[club_id] AS [clubId], club.[name] AS [club],
-            MIN(stat.[season]) AS [from], MAX(stat.[season]) AS [to],
-            SUM(stat.[appearances]) AS [appearances], SUM(stat.[goals]) AS [goals]
-          FROM player_season_stats AS stat LEFT JOIN clubs AS club ON club.[id] = stat.[club_id]
-          WHERE stat.[player_id] = player.[id]
-          GROUP BY stat.[club_id], club.[name] ORDER BY MIN(stat.[season]), stat.[club_id]
-          FOR JSON PATH)) AS [clubs]
-      FOR JSON PATH, WITHOUT_ARRAY_WRAPPER)
+  WITH input AS (SELECT ?::integer AS season, ?::text AS date),
+  negotiation_ids AS (SELECT id FROM negotiations WHERE player_id ${DOOMED}),
+  loan_ids AS (SELECT id FROM loans WHERE player_id ${DOOMED}),
+  clause_ids AS (
+    SELECT id FROM sell_on_clauses WHERE player_id ${DOOMED} OR source_loan_id IN (SELECT id FROM loan_ids)
+  ),
+  summaries AS (
+    INSERT INTO history (season, entity_type, entity_id, date, data)
+    SELECT input.season, 'careerSummary', player.id, input.date, jsonb_strip_nulls(jsonb_build_object(
+      'name', player.name, 'position', player.position, 'nationality', player.nationality,
+      'countryId', player.country_id, 'birthDate', player.birth_date,
+      'reason', player.profile::jsonb #>> '{retirement,reason}',
+      'lastSeason', ${jsonInteger("player.profile::jsonb #>> '{retirement,season}'")},
+      'appearances', career.appearances, 'minutes', career.minutes,
+      'goals', career.goals, 'assists', career.assists, 'clubs', spells.clubs
+    ))::text
     FROM players AS player
-    OUTER APPLY (SELECT SUM(stat.[appearances]) AS [appearances], SUM(stat.[minutes]) AS [minutes],
-        SUM(stat.[goals]) AS [goals], SUM(stat.[assists]) AS [assists]
-      FROM player_season_stats AS stat WHERE stat.[player_id] = player.[id]) AS career
-    WHERE player.[id] IN (SELECT [id] FROM @ids);
-  DELETE FROM transfer_payments WHERE [player_id] IN (SELECT [id] FROM @ids)
-    OR [negotiation_id] IN (SELECT [id] FROM @negotiations) OR [sell_on_clause_id] IN (SELECT [id] FROM @clauses);
-  SET @rows += @@ROWCOUNT;
-  DELETE FROM buy_back_clauses WHERE [player_id] IN (SELECT [id] FROM @ids) OR [negotiation_id] IN (SELECT [id] FROM @negotiations);
-  SET @rows += @@ROWCOUNT;
-  DELETE FROM sell_on_clauses WHERE [id] IN (SELECT [id] FROM @clauses);
-  SET @rows += @@ROWCOUNT;
-  DELETE FROM negotiations WHERE [id] IN (SELECT [id] FROM @negotiations);
-  SET @rows += @@ROWCOUNT;
-  DELETE FROM loans WHERE [id] IN (SELECT [id] FROM @loans);
-  SET @rows += @@ROWCOUNT;
-  ${PLAYER_TABLES.map((table) => `DELETE FROM ${table} WHERE [player_id] IN (SELECT [id] FROM @ids);
-  SET @rows += @@ROWCOUNT;`).join("\n  ")}
-  DELETE FROM history WHERE [entity_type] = N'appearance' AND [entity_id] IN (SELECT [id] FROM @ids);
-  SET @rows += @@ROWCOUNT;
-  DELETE FROM relationships WHERE ([source_type] = N'player' AND [source_id] IN (SELECT [id] FROM @ids))
-    OR ([target_type] = N'player' AND [target_id] IN (SELECT [id] FROM @ids));
-  SET @rows += @@ROWCOUNT;
-  DELETE FROM players WHERE [id] IN (SELECT [id] FROM @ids);
-  SELECT @@ROWCOUNT AS [players], @rows AS [rows];`;
+    CROSS JOIN input
+    CROSS JOIN LATERAL (
+      SELECT sum(stat.appearances) AS appearances, sum(stat.minutes) AS minutes,
+        sum(stat.goals) AS goals, sum(stat.assists) AS assists
+      FROM player_season_stats AS stat WHERE stat.player_id = player.id
+    ) AS career
+    CROSS JOIN LATERAL (
+      SELECT jsonb_agg(jsonb_build_object('clubId', spell.club_id, 'club', spell.club, 'from', spell.first,
+          'to', spell.last, 'appearances', spell.appearances, 'goals', spell.goals)
+        ORDER BY spell.first, spell.club_id) AS clubs
+      FROM (
+        SELECT stat.club_id, club.name AS club, min(stat.season) AS first, max(stat.season) AS last,
+          sum(stat.appearances) AS appearances, sum(stat.goals) AS goals
+        FROM player_season_stats AS stat LEFT JOIN clubs AS club ON club.id = stat.club_id
+        WHERE stat.player_id = player.id
+        GROUP BY stat.club_id, club.name ORDER BY min(stat.season), stat.club_id LIMIT 12
+      ) AS spell
+    ) AS spells
+    WHERE player.id ${DOOMED}
+    RETURNING 1
+  ),
+  deleted_payments AS (
+    DELETE FROM transfer_payments WHERE player_id ${DOOMED}
+      OR negotiation_id IN (SELECT id FROM negotiation_ids) OR sell_on_clause_id IN (SELECT id FROM clause_ids)
+    RETURNING 1
+  ),
+  deleted_buy_backs AS (
+    DELETE FROM buy_back_clauses WHERE player_id ${DOOMED} OR negotiation_id IN (SELECT id FROM negotiation_ids)
+    RETURNING 1
+  ),
+  deleted_clauses AS (DELETE FROM sell_on_clauses WHERE id IN (SELECT id FROM clause_ids) RETURNING 1),
+  deleted_negotiations AS (DELETE FROM negotiations WHERE id IN (SELECT id FROM negotiation_ids) RETURNING 1),
+  deleted_loans AS (DELETE FROM loans WHERE id IN (SELECT id FROM loan_ids) RETURNING 1),
+  ${PLAYER_TABLES.map((table) => `deleted_${table} AS (DELETE FROM ${table} WHERE player_id ${DOOMED} RETURNING 1)`).join(",\n  ")},
+  deleted_appearance_history AS (
+    DELETE FROM history WHERE entity_type = 'appearance' AND entity_id ${DOOMED} RETURNING 1
+  ),
+  deleted_relationships AS (
+    DELETE FROM relationships WHERE (source_type = 'player' AND source_id ${DOOMED})
+      OR (target_type = 'player' AND target_id ${DOOMED})
+    RETURNING 1
+  ),
+  deleted_players AS (DELETE FROM players WHERE id ${DOOMED} RETURNING 1)
+  SELECT (SELECT count(*) FROM deleted_players) AS players,
+    ${PRUNED_ROWS.map((name) => `(SELECT count(*) FROM ${name})`).join(" + ")} AS rows`;
+const PRUNE_ID_PARAMETERS = pruneBatch.split(DOOMED).length - 1;
+
+export type AppearancePruning = "auto" | "delete" | "rebuild";
+
+/**
+ * Finished seasons keep appearance rows for the user's teams only; season totals live in player_season_stats.
+ * Usually almost every row goes (a finished season of every club against the user's few). Then the kept rows are copied
+ * to a temporary table and the table is truncated and refilled: WAL is written only for the kept rows, the space is freed
+ * at once and autovacuum has no dead tuples to clean. When most rows stay, a plain DELETE writes less.
+ * TRUNCATE locks the table until commit, which the season rollover's world writer lock already implies.
+ */
+export async function pruneAppearances(
+  store: Store,
+  finishedSeason: number,
+  userClubs: readonly number[],
+  strategy: AppearancePruning = "auto",
+): Promise<number> {
+  if (!Number.isSafeInteger(finishedSeason) || !userClubs.every(Number.isSafeInteger))
+    throw new Error("Appearance pruning needs an integer season and club ids.");
+  const counts = (await store.get<{ total: number; kept: number }>(
+    `SELECT count(*) AS total, count(*) FILTER (WHERE season > ? OR club_id = ANY(?::int[])) AS kept
+     FROM player_match_appearances`,
+    finishedSeason,
+    userClubs,
+  ))!;
+  const removed = counts.total - counts.kept;
+  if (!removed) return 0;
+  const appearances = tableName(store.schemaName, "player_match_appearances");
+  const rebuild = strategy === "rebuild" || (strategy === "auto" && counts.kept * 2 < counts.total &&
+    (await store.get<{ allowed: boolean }>("SELECT has_table_privilege(?::text, 'TRUNCATE') AS allowed", appearances))
+      ?.allowed === true);
+  if (rebuild) {
+    const columns = (await store.columns("player_match_appearances")).map(quoteIdentifier).join(", ");
+    // One multi-statement call (integers checked above) keeps the temporary table on one connection.
+    await store.exec(`DROP TABLE IF EXISTS ${KEPT_APPEARANCES};
+      CREATE TEMP TABLE touchline_kept_appearances ON COMMIT DROP AS
+        SELECT ${columns} FROM ${appearances}
+        WHERE season > ${finishedSeason} OR club_id = ANY(${sqlLiteral(`{${userClubs.join(",")}}`)}::int[]);
+      TRUNCATE TABLE ${appearances};
+      INSERT INTO ${appearances} (${columns}) SELECT ${columns} FROM ${KEPT_APPEARANCES};
+      DROP TABLE ${KEPT_APPEARANCES};`);
+  } else
+    await store.run(
+      "DELETE FROM player_match_appearances WHERE season <= ? AND club_id <> ALL(?::int[])",
+      finishedSeason,
+      userClubs,
+    );
+  // The row count changed by most of the table: refresh planner statistics now rather than after autovacuum's naptime.
+  await store.exec(`ANALYZE ${appearances};`);
+  return removed;
+}
 
 /**
  * Season-end retention, called once at the end of seasonRollover. Leavers are pruned one season after they
@@ -152,45 +239,46 @@ export async function pruneSeason(
 ): Promise<RetentionResult> {
   return store.transaction(async () => {
     const state = await store.meta<GameState>("state");
-    const userClubs = JSON.stringify(
-      (await store.all<{ id: number }>(
-        "SELECT [id] FROM clubs WHERE [id] = ? OR [parent_id] = ?",
-        state.clubId,
-        state.clubId,
-      )).map((club) => club.id),
-    );
+    const userClubs = (await store.all<{ id: number }>(
+      "SELECT id FROM clubs WHERE id = ? OR parent_id = ?",
+      state.clubId,
+      state.clubId,
+    )).map((club) => club.id);
     // Leavers retired by older code carry no marker; stamp them so they are pruned next season.
     await store.run(
-      `UPDATE players SET [profile] = JSON_MODIFY([profile], '$.retirement', JSON_QUERY(?))
-       WHERE [role] = N'Retired' AND [club_id] IS NULL AND JSON_QUERY([profile], '$.retirement') IS NULL`,
+      `UPDATE players SET profile = jsonb_set(profile::jsonb, '{retirement}', ?::jsonb)::text
+       WHERE role = 'Retired' AND club_id IS NULL
+         AND COALESCE(jsonb_typeof(profile::jsonb -> 'retirement'), 'null') NOT IN ('object', 'array')`,
       JSON.stringify({ season: finishedSeason, date, reason: "retired" }),
     );
     // The highest id is never pruned: insertPlayers allocates MAX(id) + 1, so ids are never reused.
     const leavers = (await store.all<{ id: number }>(
-      `SELECT TOP (${PRUNE_LIMIT}) player.[id] FROM players AS player
-       WHERE player.[role] = N'Retired' AND player.[club_id] IS NULL AND player.[parent_club_id] IS NULL
-         AND player.[id] < (SELECT MAX([id]) FROM players)
-         AND TRY_CONVERT(INT, JSON_VALUE(player.[profile], '$.retirement.season')) < ?
-         AND NOT (JSON_VALUE(player.[profile], '$.homeBased.countryId') IS NOT NULL AND player.[age] < ${HOME_BASED_PROTECTED_AGE})
-         AND NOT EXISTS (SELECT 1 FROM transfer_payments AS payment WHERE payment.[player_id] = player.[id] AND payment.[paid_date] IS NULL)
-         AND NOT EXISTS (SELECT 1 FROM sell_on_clauses AS clause WHERE clause.[player_id] = player.[id] AND clause.[status] IN (N'active', N'triggered'))
-         AND NOT EXISTS (SELECT 1 FROM buy_back_clauses AS clause WHERE clause.[player_id] = player.[id] AND clause.[status] = N'active')
-         AND NOT EXISTS (SELECT 1 FROM loans AS loan WHERE loan.[player_id] = player.[id] AND loan.[status] = N'active')
-         AND NOT EXISTS (SELECT 1 FROM negotiations AS negotiation WHERE negotiation.[player_id] = player.[id] AND negotiation.[stage] NOT IN (${TERMINAL_STAGES}))
-         AND NOT EXISTS (SELECT 1 FROM player_assets AS asset WHERE asset.[player_id] = player.[id] AND asset.[status] = N'active')
-         AND NOT EXISTS (SELECT 1 FROM promises AS promise WHERE promise.[player_id] = player.[id] AND promise.[status] = N'active')
-         AND NOT EXISTS (SELECT 1 FROM minor_applications AS application WHERE application.[player_id] = player.[id] AND application.[status] = N'pending')
-       ORDER BY player.[id]`,
+      `SELECT player.id FROM players AS player
+       WHERE player.role = 'Retired' AND player.club_id IS NULL AND player.parent_club_id IS NULL
+         AND player.id < (SELECT MAX(id) FROM players)
+         AND ${jsonInteger("player.profile::jsonb #>> '{retirement,season}'")} < ?
+         AND NOT (player.profile::jsonb #>> '{homeBased,countryId}' IS NOT NULL AND player.age < ${HOME_BASED_PROTECTED_AGE})
+         AND NOT EXISTS (SELECT 1 FROM transfer_payments AS payment WHERE payment.player_id = player.id AND payment.paid_date IS NULL)
+         AND NOT EXISTS (SELECT 1 FROM sell_on_clauses AS clause WHERE clause.player_id = player.id AND clause.status IN ('active', 'triggered'))
+         AND NOT EXISTS (SELECT 1 FROM buy_back_clauses AS clause WHERE clause.player_id = player.id AND clause.status = 'active')
+         AND NOT EXISTS (SELECT 1 FROM loans AS loan WHERE loan.player_id = player.id AND loan.status = 'active')
+         AND NOT EXISTS (SELECT 1 FROM negotiations AS negotiation WHERE negotiation.player_id = player.id AND negotiation.stage NOT IN (${TERMINAL_STAGES}))
+         AND NOT EXISTS (SELECT 1 FROM player_assets AS asset WHERE asset.player_id = player.id AND asset.status = 'active')
+         AND NOT EXISTS (SELECT 1 FROM promises AS promise WHERE promise.player_id = player.id AND promise.status = 'active')
+         AND NOT EXISTS (SELECT 1 FROM minor_applications AS application WHERE application.player_id = player.id AND application.status = 'pending')
+       ORDER BY player.id
+       LIMIT ${PRUNE_LIMIT}`,
       finishedSeason,
     )).map((row) => row.id);
     let players = 0;
     let rows = 0;
     for (let offset = 0; offset < leavers.length; offset += PRUNE_BATCH) {
+      const ids = leavers.slice(offset, offset + PRUNE_BATCH);
       const result = await store.get<{ players: number; rows: number }>(
         pruneBatch,
-        JSON.stringify(leavers.slice(offset, offset + PRUNE_BATCH)),
         finishedSeason,
         date,
+        ...Array.from({ length: PRUNE_ID_PARAMETERS }, () => ids),
       );
       players += Number(result?.players ?? 0);
       rows += Number(result?.rows ?? 0);
@@ -198,10 +286,11 @@ export async function pruneSeason(
     let fixtures = 0;
     for (let after = 0; ; ) {
       const batch = await store.all<{ id: number; data: string }>(
-        `SELECT TOP (${COMPACT_BATCH}) [id], [data] FROM fixtures
-         WHERE [id] > ? AND [season] <= ? AND [status] = N'played' AND DATALENGTH([data]) > 16000
-           AND [home_id] NOT IN (${IDS}) AND [away_id] NOT IN (${IDS})
-         ORDER BY [id]`,
+        `SELECT id, data FROM fixtures
+         WHERE id > ? AND season <= ? AND status = 'played' AND octet_length(data) > ${COMPACT_MIN_BYTES}
+           AND home_id <> ALL(?::int[]) AND away_id <> ALL(?::int[])
+         ORDER BY id
+         LIMIT ${COMPACT_BATCH}`,
         after,
         finishedSeason,
         userClubs,
@@ -217,49 +306,21 @@ export async function pruneSeason(
       });
       if (compacted.length)
         fixtures += (await store.run(
-          `UPDATE target SET [data] = changes.[data] FROM fixtures AS target
-           JOIN OPENJSON(?) WITH ([id] INT, [data] NVARCHAR(max)) AS changes ON changes.[id] = target.[id]`,
-          JSON.stringify(compacted),
+          `UPDATE fixtures AS target SET data = changes.data
+           FROM unnest(?::int[], ?::text[]) AS changes(id, data) WHERE changes.id = target.id`,
+          compacted.map((row) => row.id),
+          compacted.map((row) => row.data),
         )).changes;
     }
-    // Finished seasons keep appearance rows for the user's teams only; season totals live in player_season_stats.
-    const appearances = tableName(store.schemaName, "player_match_appearances");
-    const truncate = (await store.get<{ allowed: number | null }>(
-      "SELECT HAS_PERMS_BY_NAME(?, N'OBJECT', N'ALTER') AS [allowed]",
-      appearances,
-    ))?.allowed === 1;
-    if (truncate) {
-      const columns = (await store.columns("player_match_appearances")).map((column) => `[${column}]`).join(", ");
-      rows += Number((await store.get<{ removed: number | string }>(
-        `SELECT * INTO #touchline_kept_appearances FROM player_match_appearances
-           WHERE [season] > ? OR [club_id] IN (${IDS});
-         DECLARE @removed BIGINT = (SELECT COUNT_BIG(*) FROM player_match_appearances)
-           - (SELECT COUNT_BIG(*) FROM #touchline_kept_appearances);
-         TRUNCATE TABLE player_match_appearances;
-         INSERT INTO player_match_appearances (${columns}) SELECT ${columns} FROM #touchline_kept_appearances;
-         DROP TABLE #touchline_kept_appearances;
-         SELECT @removed AS [removed];`,
-        finishedSeason,
-        userClubs,
-      ))?.removed ?? 0);
-    } else
-      for (;;) {
-        const { changes } = await store.run(
-          `DELETE TOP (${DELETE_BATCH}) FROM player_match_appearances WHERE [season] <= ? AND [club_id] NOT IN (${IDS})`,
-          finishedSeason,
-          userClubs,
-        );
-        rows += changes;
-        if (changes < DELETE_BATCH) break;
-      }
+    rows += await pruneAppearances(store, finishedSeason, userClubs);
     rows += (await store.run(
-      `DELETE FROM history WHERE [entity_type] = N'appearance' AND [season] < ? AND [id] < (SELECT MAX([id]) FROM history)
-         AND NOT EXISTS (SELECT 1 FROM loans WHERE loans.[player_id] = history.[entity_id]
-           AND loans.[status] = N'active' AND loans.[start_date] <= history.[date])`,
+      `DELETE FROM history WHERE entity_type = 'appearance' AND season < ? AND id < (SELECT MAX(id) FROM history)
+         AND NOT EXISTS (SELECT 1 FROM loans WHERE loans.player_id = history.entity_id
+           AND loans.status = 'active' AND loans.start_date <= history.date)`,
       finishedSeason,
     )).changes;
     rows += (await store.run(
-      "DELETE FROM news WHERE [date] < ? AND [id] < (SELECT MAX([id]) FROM news)",
+      "DELETE FROM news WHERE date < ? AND id < (SELECT MAX(id) FROM news)",
       `${finishedSeason}-07-01`,
     )).changes;
     const result = { players, fixtures, rows };
@@ -268,38 +329,37 @@ export async function pruneSeason(
   });
 }
 
-const megabytes = (kilobytes: number | string | null) =>
-  Math.round((Number(kilobytes ?? 0) / 1024) * 10) / 10;
+const megabytes = (bytes: number | null) => Math.round((Number(bytes ?? 0) / 1048576) * 10) / 10;
 
-/** Reserved and used size per table from catalog views; needs no VIEW DATABASE STATE permission. */
+/**
+ * On-disk size per table (heap, TOAST, indexes and maps) from the catalog; needs no extra privilege.
+ * Rows are the statistics collector's live-tuple count (the planner estimate before the first statistics);
+ * used space scales the size by the live share of tuples, so dead tuples awaiting vacuum show as reserved only.
+ */
 export async function databaseFootprint(
   store: Store,
   schemas: string[] = [store.schemaName],
 ): Promise<SchemaFootprint[]> {
   const footprints: SchemaFootprint[] = [];
   for (const schema of schemas) {
-    const tables = (await store.all<{
-      table: string;
-      rows: number | string;
-      reserved_kb: number | string;
-      used_kb: number | string;
-    }>(
-      `SELECT table_row.[name] AS [table],
-         SUM(CASE WHEN allocation.[type] = 1 AND partition_row.[index_id] IN (0, 1) THEN partition_row.[rows] ELSE 0 END) AS [rows],
-         SUM(allocation.[total_pages]) * 8 AS [reserved_kb], SUM(allocation.[used_pages]) * 8 AS [used_kb]
-       FROM sys.tables AS table_row
-       JOIN sys.partitions AS partition_row ON partition_row.[object_id] = table_row.[object_id]
-       JOIN sys.allocation_units AS allocation ON allocation.[container_id] =
-         CASE WHEN allocation.[type] = 2 THEN partition_row.[partition_id] ELSE partition_row.[hobt_id] END
-       WHERE table_row.[schema_id] = SCHEMA_ID(?)
-       GROUP BY table_row.[name]
-       ORDER BY SUM(allocation.[total_pages]) DESC, table_row.[name]`,
+    const tables = (await store.all<{ table: string; rows: number; reserved: number; used: number }>(
+      `SELECT relation.relname AS "table", tuples.live AS rows, sizes.total AS reserved,
+         CASE WHEN tuples.live + tuples.dead > 0 THEN sizes.total * tuples.live / (tuples.live + tuples.dead)
+           ELSE sizes.total END AS used
+       FROM pg_catalog.pg_class AS relation
+       JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+       LEFT JOIN pg_catalog.pg_stat_all_tables AS stats ON stats.relid = relation.oid
+       CROSS JOIN LATERAL (SELECT pg_total_relation_size(relation.oid) AS total) AS sizes
+       CROSS JOIN LATERAL (SELECT COALESCE(stats.n_live_tup, GREATEST(relation.reltuples, 0)::bigint) AS live,
+         COALESCE(stats.n_dead_tup, 0) AS dead) AS tuples
+       WHERE namespace.nspname = ? AND relation.relkind IN ('r', 'p')
+       ORDER BY sizes.total DESC, relation.relname`,
       schema,
     )).map((row): TableFootprint => ({
       table: row.table,
       rows: Number(row.rows),
-      reservedMB: megabytes(row.reserved_kb),
-      usedMB: megabytes(row.used_kb),
+      reservedMB: megabytes(row.reserved),
+      usedMB: megabytes(row.used),
     }));
     const sum = (items: TableFootprint[], key: "rows" | "reservedMB" | "usedMB") =>
       Math.round(items.reduce((total, item) => total + item[key], 0) * 10) / 10;
@@ -318,18 +378,14 @@ export async function databaseFootprint(
   return footprints;
 }
 
-/** Allocated and used data/log file space of the whole database. */
+/** Size of the whole database and, for pg_monitor members, of the write-ahead log directory. */
 export async function databaseSpace(store: Store) {
-  const files = await store.all<{ type: number; allocated_kb: number | string; used_kb: number | string | null }>(
-    `SELECT [type], SUM(CONVERT(BIGINT, [size])) * 8 AS [allocated_kb],
-       SUM(CONVERT(BIGINT, FILEPROPERTY([name], 'SpaceUsed'))) * 8 AS [used_kb]
-     FROM sys.database_files GROUP BY [type]`,
-  );
-  const file = (type: number) => files.find((row) => row.type === type);
-  return {
-    dataMB: megabytes(file(0)?.allocated_kb ?? 0),
-    dataUsedMB: megabytes(file(0)?.used_kb ?? 0),
-    logMB: megabytes(file(1)?.allocated_kb ?? 0),
-    logUsedMB: megabytes(file(1)?.used_kb ?? 0),
-  };
+  const { dataBytes, monitor } = (await store.get<{ dataBytes: number; monitor: boolean }>(
+    `SELECT pg_database_size(current_database()) AS "dataBytes",
+       pg_has_role(current_user, 'pg_monitor', 'USAGE') AS monitor`,
+  ))!;
+  const wal = monitor
+    ? (await store.get<{ bytes: number | null }>("SELECT sum(size) AS bytes FROM pg_ls_waldir()"))?.bytes ?? 0
+    : null;
+  return { dataMB: megabytes(dataBytes), walMB: wal === null ? null : megabytes(wal) };
 }

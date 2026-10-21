@@ -9,6 +9,7 @@ import {
 } from "react";
 import type {
   AccountSession,
+  AdvanceResult,
   Bootstrap,
   DeleteActiveCareerRequest,
   DeleteActiveCareerResult,
@@ -100,6 +101,8 @@ interface GameContextValue {
     message?: string,
   ) => Promise<ActionResult | undefined>;
   refresh: () => Promise<Bootstrap | null | undefined>;
+  /** Re-fetches /api/me from an access screen; a refusal comes back with `rechecked` set. */
+  checkAccess: () => Promise<void>;
   advance: (days: number) => Promise<void>;
   changeSettings: (settings: Settings) => Promise<void>;
   confirm: (title: string, message: string, action: () => void) => void;
@@ -166,13 +169,16 @@ async function request<Data>(
         ? (body as WorldBusyResponse)
         : null;
     const retryAfter = Number(response.headers.get("Retry-After"));
+    const signedOut = response.redirected || response.status === 401;
     const failure = new ApiError(
-      response.redirected
+      signedOut
         ? "Your session has expired. Sign in again to continue."
         : body?.error ?? "The game could not complete that action.",
-      response.redirected ? 401 : response.status,
+      signedOut ? 401 : response.status,
       {
-        code: typeof body?.code === "string" ? body.code : undefined,
+        code: signedOut
+          ? "authentication_required"
+          : typeof body?.code === "string" ? body.code : undefined,
         retryAfter: retryAfter > 0 ? retryAfter : undefined,
         activity: busy
           ? { operation: busy.operation, startedAt: busy.startedAt }
@@ -375,6 +381,7 @@ export function GameProvider({ children }: { children: ReactNode }) {
   const [bootstrap, setBootstrap] = useState<Bootstrap | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [accessIssue, setAccessIssue] = useState<AccessIssue | null>(null);
+  const accessRecheck = useRef(false);
   const [revision, setRevision] = useState(0);
   const [page, setPage] = useState<Page>(() =>
     pages.includes(location.hash.slice(1).split("/")[0] as Page)
@@ -612,7 +619,7 @@ export function GameProvider({ children }: { children: ReactNode }) {
       resetAccount();
       setLoading(false);
       if (access) {
-        setAccessIssue(access);
+        setAccessIssue({ ...access, rechecked: accessRecheck.current });
         setError(null);
       } else {
         setError(
@@ -633,6 +640,14 @@ export function GameProvider({ children }: { children: ReactNode }) {
       return await loadSession();
     } catch {
       return undefined;
+    }
+  }
+  async function checkAccess() {
+    accessRecheck.current = true;
+    try {
+      await refresh();
+    } finally {
+      accessRecheck.current = false;
     }
   }
   async function refreshAfterAction() {
@@ -692,7 +707,7 @@ export function GameProvider({ children }: { children: ReactNode }) {
       resetAccount();
       setLoading(false);
       if (access) {
-        setAccessIssue(access);
+        setAccessIssue({ ...access, rechecked: accessRecheck.current });
         setError(null);
       } else {
         setError(failure.message);
@@ -846,14 +861,16 @@ export function GameProvider({ children }: { children: ReactNode }) {
     advanceLock.current = true;
     setBusy(true);
     try {
-      const result = await api<{ date: string; days: number; matches: number }>(
+      const result = await api<AdvanceResult>(
         "advance",
         { method: "POST", body: JSON.stringify({ days }) },
       );
       if (!(await refresh()) || !currentAccount()) return;
-      notify(
-        `${plural(result.days, "day")} advanced. ${plural(result.matches, "match", "matches")} simulated.`,
-      );
+      if (result.error) notify(result.error, "error");
+      else
+        notify(
+          `${plural(result.days, "day")} advanced. ${plural(result.matches, "match", "matches")} simulated.`,
+        );
     } catch (failure) {
       notify(
         failure instanceof Error ? failure.message : "Simulation failed.",
@@ -1016,6 +1033,7 @@ export function GameProvider({ children }: { children: ReactNode }) {
         dismissToast: () => setToast(null),
         act,
         refresh,
+        checkAccess,
         advance: advanceDays,
         changeSettings,
         confirm: (title, message, action) => {

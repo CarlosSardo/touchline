@@ -88,7 +88,7 @@ describe.skipIf(process.env.SQL_INTEGRATION_TESTS !== "true")("youth national te
     }
     const onDuty = await playersOnDuty(store, addDays(first, -3));
     const away = (await store.get<Player>(
-      `SELECT TOP (1) players.* FROM players JOIN clubs ON clubs.id = players.club_id WHERE clubs.type = 'club' AND players.id IN (${[...onDuty].join(",")}) ORDER BY players.ability DESC`,
+      `SELECT players.* FROM players JOIN clubs ON clubs.id = players.club_id WHERE clubs.type = 'club' AND players.id IN (${[...onDuty].join(",")}) ORDER BY players.ability DESC LIMIT 1`,
     ))!;
     const club = (await store.get<Club>("SELECT * FROM clubs WHERE id = ?", away.club_id))!;
     const side = await matchTeam(store, club, away.age_group, addDays(first, -3));
@@ -138,7 +138,7 @@ describe.skipIf(process.env.SQL_INTEGRATION_TESTS !== "true")("youth national te
     expect(meta.squads.filter((record) => record.leagueId === u21.id)).toEqual([]);
     expect(meta.rewarded).toContain(u21.id);
     const scorer = (await store.get<{ player_id: number }>(
-      "SELECT TOP (1) player_id FROM player_season_stats WHERE league_id = ? ORDER BY appearances DESC, player_id",
+      "SELECT player_id FROM player_season_stats WHERE league_id = ? ORDER BY appearances DESC, player_id LIMIT 1",
       u21.id,
     ))!;
     const caps = await playerCaps(store, scorer.player_id);
@@ -153,7 +153,7 @@ describe.skipIf(process.env.SQL_INTEGRATION_TESTS !== "true")("youth national te
     const desk = await internationalsDesk(store);
     expect(desk.tournaments.find((row) => row.id === "uefa-u21-euro")).toMatchObject({ held: true, edition: 2027, phase: "complete" });
     const team = (await store.get<Club>(
-      "SELECT TOP (1) clubs.* FROM clubs JOIN countries ON countries.id = clubs.country_id WHERE countries.code = 'EN' AND clubs.type = 'national' AND clubs.age_group = 'U17'",
+      "SELECT clubs.* FROM clubs JOIN countries ON countries.id = clubs.country_id WHERE countries.code = 'EN' AND clubs.type = 'national' AND clubs.age_group = 'U17' LIMIT 1",
     ))!;
     const view = await nationalTeamView(store, team.id);
     expect(view.duty).toBeNull();

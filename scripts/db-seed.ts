@@ -44,7 +44,7 @@ export async function main(args = process.argv.slice(2)) {
         {
           dryRun: true,
           database: values.database ?? process.env.SQL_DATABASE ?? "touchline",
-          schema: process.env.SQL_SCHEMA ?? "dbo",
+          schema: process.env.SQL_SCHEMA ?? "public",
           options,
           note: "Offline plan only; no SQL connection or writes. Existing data is guarded at apply time.",
         },
@@ -83,7 +83,7 @@ export async function main(args = process.argv.slice(2)) {
 
 if (isMain(import.meta.url))
   void main().catch((error: unknown) => {
-    // Usage errors print their message; unexpected failures (TypeError, RequestError, ...) keep their stack.
+    // Usage errors print their message; unexpected failures (TypeError, pg DatabaseError, ...) keep their stack.
     console.error(error instanceof Error ? (error.constructor === Error ? error.message : error.stack ?? error.message) : String(error));
     process.exitCode = 1;
   });

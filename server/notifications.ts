@@ -27,7 +27,7 @@ export interface RetirementNotice {
 
 /** The spring decision for the season ending on this rollover (`finishedSeason`), if one was made. */
 export async function retirementNotice(store: Store, finishedSeason: number): Promise<ReadonlySet<number> | undefined> {
-  const row = await store.get<{ value: string }>("SELECT [value] FROM meta WHERE [key] = 'retirementNotice'");
+  const row = await store.get<{ value: string }>("SELECT value FROM meta WHERE key = 'retirementNotice'");
   const notice = row ? (JSON.parse(row.value) as RetirementNotice) : undefined;
   return notice?.season === finishedSeason ? new Set(notice.playerIds) : undefined;
 }
@@ -64,10 +64,9 @@ export async function processSquadNotices(store: Store) {
   if (await retirementNotice(store, state.season)) return;
   const end = `${state.season + 1}-06-30`;
   const clubs = await store.all<{ id: number; name: string }>("SELECT id,name FROM clubs WHERE id = ? OR parent_id = ?", state.clubId, state.clubId);
-  const family = JSON.stringify(clubs.map((club) => club.id));
-  const inFamily = "(SELECT CAST([value] AS int) FROM OPENJSON(?))";
+  const family = clubs.map((club) => club.id);
   const seniors = await store.all<Player>(
-    `SELECT id,name,position,ability,birth_date,contract_end,injury_until,club_id,squad_club_id FROM players WHERE club_id IN ${inFamily} AND parent_club_id IS NULL AND age_group = 'Senior' AND role != 'Retired' AND birth_date <= ?`,
+    "SELECT id,name,position,ability,birth_date,contract_end,injury_until,club_id,squad_club_id FROM players WHERE club_id = ANY(?::int[]) AND parent_club_id IS NULL AND age_group = 'Senior' AND role != 'Retired' AND birth_date <= ?",
     family,
     `${state.season + 1 - NOTICE_MIN_AGE}-07-01`,
   );
@@ -75,9 +74,9 @@ export async function processSquadNotices(store: Store) {
   await store.setMeta("retirementNotice", { season: state.season, date: state.date, playerIds: retiring.map((player) => player.id) } satisfies RetirementNotice);
   if (retiring.length) {
     await store.run(
-      "UPDATE target SET profile = JSON_MODIFY(target.profile,'$.retirementPlan',JSON_QUERY(?)) FROM players AS target WHERE target.id IN (SELECT CAST([value] AS int) FROM OPENJSON(?))",
+      "UPDATE players SET profile = jsonb_set(profile::jsonb,'{retirementPlan}',?::jsonb)::text WHERE id = ANY(?::int[])",
       JSON.stringify({ season: state.season, announced: state.date }),
-      JSON.stringify(retiring.map((player) => player.id)),
+      retiring.map((player) => player.id),
     );
     await news(
       store,
@@ -92,7 +91,7 @@ export async function processSquadNotices(store: Store) {
   const planned = new Set(retiring.map((player) => player.id));
   const expiring = (
     await store.all<Player>(
-      `SELECT id,name,age_group,club_id,squad_club_id,parent_club_id,contract_end FROM players WHERE ((club_id IN ${inFamily} AND parent_club_id IS NULL) OR parent_club_id IN ${inFamily}) AND role != 'Retired' AND contract_end >= ? AND contract_end <= ? AND coalesce(JSON_VALUE(profile,'$.contract.status'),'professional') = 'professional' ORDER BY contract_end,ability DESC,id`,
+      "SELECT id,name,age_group,club_id,squad_club_id,parent_club_id,contract_end FROM players WHERE ((club_id = ANY(?::int[]) AND parent_club_id IS NULL) OR parent_club_id = ANY(?::int[])) AND role != 'Retired' AND contract_end >= ? AND contract_end <= ? AND coalesce(profile::jsonb #>> '{contract,status}','professional') = 'professional' ORDER BY contract_end,ability DESC,id",
       family,
       family,
       state.date,
@@ -119,7 +118,7 @@ export async function processSquadNotices(store: Store) {
     );
   }
   const staff = await store.all<{ name: string; role: string }>(
-    "SELECT name,role FROM staff WHERE club_id = ? AND JSON_VALUE(data,'$.contractEnd') BETWEEN ? AND ? ORDER BY id",
+    "SELECT name,role FROM staff WHERE club_id = ? AND data::jsonb ->> 'contractEnd' BETWEEN ? AND ? ORDER BY id",
     state.clubId,
     state.date,
     end,
@@ -175,29 +174,27 @@ export async function notificationFeed(store: Store, input: unknown) {
     params.push(filter.category);
   }
   if (filter.status !== "all") {
-    conditions.push("news.[read] = ?");
+    conditions.push("news.read = ?");
     params.push(filter.status === "read" ? 1 : 0);
   }
   if (filter.priority === "important")
     conditions.push("news.severity IN ('important','warning')");
   if (filter.league) {
-    conditions.push(
-      "TRY_CONVERT(int, JSON_VALUE(news.data,'$.competitionId')) = ?",
-    );
-    params.push(filter.league);
+    conditions.push("news.data::jsonb ->> 'competitionId' = ?");
+    params.push(String(filter.league));
   }
   if (filter.q) {
-    const search = `%${filter.q.replace(/[!%_[]/g, "!$&")}%`;
+    const search = `%${filter.q.replace(/[!%_]/g, "!$&")}%`;
     conditions.push(
-      "(news.title LIKE ? ESCAPE '!' OR news.body LIKE ? ESCAPE '!')",
+      "(news.title ILIKE ? ESCAPE '!' OR news.body ILIKE ? ESCAPE '!')",
     );
     params.push(search, search);
   }
   return store.all<NewsItem>(
-    `SELECT * FROM news WHERE ${conditions.join(" AND ")} ORDER BY id DESC OFFSET ? ROWS FETCH NEXT ? ROWS ONLY`,
+    `SELECT * FROM news WHERE ${conditions.join(" AND ")} ORDER BY id DESC LIMIT ? OFFSET ?`,
     ...params,
-    (filter.page - 1) * filter.limit,
     filter.limit,
+    (filter.page - 1) * filter.limit,
   );
 }
 
@@ -271,7 +268,7 @@ export async function favoriteCompetition(
     ...request.events,
   };
   await store.run(
-    "MERGE competition_favorites WITH (HOLDLOCK) AS target USING (VALUES (?,?,?,?)) AS source(league_id,events,since,last_phase) ON target.league_id = source.league_id WHEN MATCHED THEN UPDATE SET events = source.events WHEN NOT MATCHED THEN INSERT (league_id,events,since,last_phase) VALUES (source.league_id,source.events,source.since,source.last_phase);",
+    "INSERT INTO competition_favorites(league_id,events,since,last_phase) VALUES (?,?,?,?) ON CONFLICT (league_id) DO UPDATE SET events = EXCLUDED.events",
     leagueId,
     JSON.stringify(events),
     (await stateOf(store)).date,
@@ -302,27 +299,19 @@ export async function processCompetitionNotifications(store: Store) {
       fixtureId?: number,
     ) => {
       if (!favorite.events[type]) return;
-      const notificationKey = `competition:${league.id}:${key}`;
-      if (
-        await store.get(
-          "SELECT id FROM news WHERE JSON_VALUE(data,'$.notificationKey') = ?",
-          notificationKey,
-        )
-      )
-        return;
-      await news(
-        store,
-        "Competitions",
+      // news.notification_key is generated from data.notificationKey; its unique index makes the alert idempotent.
+      await store.run(
+        "INSERT INTO news(date,category,title,body,severity,action,data) VALUES (?,'Competitions',?,?,?,'competitions',?) ON CONFLICT (notification_key) WHERE notification_key IS NOT NULL DO NOTHING",
+        state.date,
         title,
         body,
         type === "winners" ? "important" : "info",
-        "competitions",
-        {
+        JSON.stringify({
           competitionId: league.id,
           notificationType: type,
-          notificationKey,
+          notificationKey: `competition:${league.id}:${key}`,
           fixtureId,
-        },
+        }),
       );
     };
     const fixtures = await store.all<
@@ -368,7 +357,7 @@ export async function processCompetitionNotifications(store: Store) {
         points: number;
         played: number;
       }>(
-        "SELECT TOP (3) clubs.name,standings.points,standings.played FROM standings JOIN clubs ON clubs.id = standings.club_id WHERE standings.league_id = ? ORDER BY points DESC,(gf-ga) DESC,gf DESC,club_id",
+        "SELECT clubs.name,standings.points,standings.played FROM standings JOIN clubs ON clubs.id = standings.club_id WHERE standings.league_id = ? ORDER BY points DESC,(gf-ga) DESC,gf DESC,club_id LIMIT 3",
         league.id,
       );
       if (league.kind === "league")
@@ -386,7 +375,7 @@ export async function processCompetitionNotifications(store: Store) {
       if (
         league.kind === "league" &&
         !(await store.get(
-          "SELECT TOP (1) id FROM fixtures WHERE league_id = ? AND season = ? AND status = 'scheduled'",
+          "SELECT id FROM fixtures WHERE league_id = ? AND season = ? AND status = 'scheduled' LIMIT 1",
           league.id,
           state.season,
         )) &&

@@ -5,10 +5,10 @@ import { validateSqlSchema } from "../server/sql-config.ts";
 import { isMain } from "./data-export.ts";
 
 const USAGE = `Usage: tsx scripts/db-footprint.ts [--schema NAME]... [--all] [--top N]
-Read-only. Prints reserved and used MB per table for the chosen schemas (default: the configured schema),
-or for every schema that owns tables with --all, plus the database data/log file sizes.
-A world above the ${FOOTPRINT_BUDGET.initialMB} MB budget (decision 11) is flagged; saves are reported separately.
-On Azure, run it through scripts/azure-sql.sh.`;
+Read-only. Prints the on-disk size (pg_total_relation_size: heap, TOAST and indexes) and live rows per table for the
+chosen schemas (default: the configured schema), or for every non-system schema that owns tables with --all, plus the
+database size (pg_database_size) and, for pg_monitor members, the write-ahead log size.
+A world above the ${FOOTPRINT_BUDGET.initialMB} MB budget (decision 11) is flagged; saves are reported separately.`;
 
 export interface FootprintOptions {
   schemas: string[];
@@ -47,7 +47,8 @@ export async function main(args = process.argv.slice(2), open: () => Promise<Sto
   try {
     const schemas = options.all
       ? (await store.all<{ name: string }>(
-          "SELECT DISTINCT SCHEMA_NAME([schema_id]) AS [name] FROM sys.tables ORDER BY [name]",
+          `SELECT DISTINCT schemaname AS name FROM pg_catalog.pg_tables
+          WHERE schemaname <> 'information_schema' AND schemaname NOT LIKE 'pg\\_%' ORDER BY name`,
         )).map((row) => row.name)
       : options.schemas.length ? options.schemas : [store.schemaName];
     const footprints = await databaseFootprint(store, schemas);

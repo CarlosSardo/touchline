@@ -419,7 +419,7 @@ const META_KEY = "callUps";
 const freshMeta = (season: number): CallUpMeta => ({ season, active: [], proposals: [], debuts: {}, vetoes: {} });
 
 async function loadMeta(store: Store, season: number): Promise<CallUpMeta> {
-  const row = await store.get<{ value: string }>("SELECT [value] FROM meta WHERE [key] = ?", META_KEY);
+  const row = await store.get<{ value: string }>("SELECT value FROM meta WHERE key = ?", META_KEY);
   const meta = row ? (JSON.parse(row.value) as CallUpMeta) : undefined;
   if (!meta) return freshMeta(season);
   // Debut budgets are per season; call-ups end at the rollover (`endAllCallUps`); development requests carry over.
@@ -498,7 +498,7 @@ interface TargetFixture {
 
 async function nextFixture(store: Store, team: CallUpTeam, from: string, to?: string) {
   return store.get<TargetFixture>(
-    `SELECT TOP (1) fixtures.id,fixtures.date,fixtures.home_id,fixtures.away_id,fixtures.stage,fixtures.league_id,leagues.kind,leagues.confederation,leagues.data AS league_data,leagues.age_group FROM fixtures LEFT JOIN leagues ON leagues.id = fixtures.league_id WHERE fixtures.status = 'scheduled' AND (fixtures.home_id = ? OR fixtures.away_id = ?) AND coalesce(leagues.age_group,'Senior') = ? AND fixtures.date >= ? ${to ? "AND fixtures.date <= ?" : ""} ORDER BY fixtures.date,fixtures.id`,
+    `SELECT fixtures.id,fixtures.date,fixtures.home_id,fixtures.away_id,fixtures.stage,fixtures.league_id,leagues.kind,leagues.confederation,leagues.data AS league_data,leagues.age_group FROM fixtures LEFT JOIN leagues ON leagues.id = fixtures.league_id WHERE fixtures.status = 'scheduled' AND (fixtures.home_id = ? OR fixtures.away_id = ?) AND coalesce(leagues.age_group,'Senior') = ? AND fixtures.date >= ? ${to ? "AND fixtures.date <= ?" : ""} ORDER BY fixtures.date,fixtures.id LIMIT 1`,
     team.clubId,
     team.clubId,
     team.ageGroup,
@@ -556,7 +556,7 @@ const squadSize = async (store: Store, team: CallUpTeam) =>
 
 const hasSeniorDebut = async (store: Store, playerId: number, firstTeamId: number) =>
   !!(await store.get(
-    "SELECT TOP (1) 1 AS found FROM player_match_appearances JOIN fixtures ON fixtures.id = player_match_appearances.fixture_id LEFT JOIN leagues ON leagues.id = fixtures.league_id WHERE player_match_appearances.player_id = ? AND player_match_appearances.club_id = ? AND coalesce(leagues.age_group,'Senior') = 'Senior'",
+    "SELECT 1 AS found FROM player_match_appearances JOIN fixtures ON fixtures.id = player_match_appearances.fixture_id LEFT JOIN leagues ON leagues.id = fixtures.league_id WHERE player_match_appearances.player_id = ? AND player_match_appearances.club_id = ? AND coalesce(leagues.age_group,'Senior') = 'Senior' LIMIT 1",
     playerId,
     firstTeamId,
   ));
@@ -745,8 +745,8 @@ async function requestedPlayers(store: Store, meta: CallUpMeta, clubId: number) 
   const ids = Object.keys(meta.requests ?? {}).map(Number);
   const rows = ids.length
     ? await store.all<RequestRow>(
-        "SELECT id,fitness,injury_until,playing_club_id,age_group,club_id,squad_club_id,role FROM players WHERE id IN (SELECT CAST([value] AS int) FROM OPENJSON(?))",
-        JSON.stringify(ids),
+        "SELECT id,fitness,injury_until,playing_club_id,age_group,club_id,squad_club_id,role FROM players WHERE id = ANY(?::int[])",
+        ids,
       )
     : [];
   const onCallUp = new Set(meta.active.map((entry) => entry.playerId));
@@ -780,7 +780,7 @@ export function unavailableReason(row: Pick<RequestRow, "id" | "fitness" | "inju
 const topProspects = async (store: Store, clubId: number) =>
   (
     await store.all<{ id: number }>(
-      `SELECT TOP (${CALL_UP_RULES.prospectFloor.top}) id FROM players WHERE club_id = ? AND parent_club_id IS NULL AND role != 'Retired' AND (age_group IN ('U19','U17') OR (age_group = 'Senior' AND squad_club_id IS NOT NULL AND age <= 21)) ORDER BY potential DESC,id`,
+      `SELECT id FROM players WHERE club_id = ? AND parent_club_id IS NULL AND role != 'Retired' AND (age_group IN ('U19','U17') OR (age_group = 'Senior' AND squad_club_id IS NOT NULL AND age <= 21)) ORDER BY potential DESC,id LIMIT ${CALL_UP_RULES.prospectFloor.top}`,
       clubId,
     )
   ).map((row) => row.id);
@@ -792,7 +792,7 @@ const topProspects = async (store: Store, clubId: number) =>
 async function seasonPhase(store: Store, team: CallUpTeam, season: number) {
   const none = { endOfSeason: false, finalRound: false, deadRubber: false, remaining: 0 };
   const league = await store.get<{ league_id: number; group_name: string }>(
-    "SELECT TOP (1) standings.league_id,standings.group_name FROM standings JOIN leagues ON leagues.id = standings.league_id WHERE standings.club_id = ? AND leagues.age_group = ? AND leagues.kind IN ('league','youth') ORDER BY leagues.tier,leagues.id",
+    "SELECT standings.league_id,standings.group_name FROM standings JOIN leagues ON leagues.id = standings.league_id WHERE standings.club_id = ? AND leagues.age_group = ? AND leagues.kind IN ('league','youth') ORDER BY leagues.tier,leagues.id LIMIT 1",
     team.clubId,
     team.ageGroup,
   );
@@ -830,8 +830,8 @@ export async function processCallUps(store: Store) {
     matchIds.length
       ? (
           await store.all<{ id: number }>(
-            "SELECT id FROM fixtures WHERE status = 'scheduled' AND id IN (SELECT CAST([value] AS int) FROM OPENJSON(?))",
-            JSON.stringify(matchIds),
+            "SELECT id FROM fixtures WHERE status = 'scheduled' AND id = ANY(?::int[])",
+            matchIds,
           )
         ).map((row) => row.id)
       : [],
@@ -1031,7 +1031,7 @@ export async function processCallUps(store: Store) {
 /** Season rollover: everyone returns before age groups are recomputed; proposals and debut counts reset. */
 export async function endAllCallUps(store: Store) {
   const state = await stateOf(store);
-  const row = await store.get<{ value: string }>("SELECT [value] FROM meta WHERE [key] = ?", META_KEY);
+  const row = await store.get<{ value: string }>("SELECT value FROM meta WHERE key = ?", META_KEY);
   if (!row) return 0;
   const meta = JSON.parse(row.value) as CallUpMeta;
   const labels = new Map((await familyTeams(store)).map((team) => [teamKey(team), team.label]));
@@ -1070,7 +1070,7 @@ export async function callUpDesk(store: Store): Promise<CallUpDesk> {
   ];
   const players = new Map(
     (ids.length
-      ? await store.all<Player>("SELECT * FROM players WHERE id IN (SELECT CAST([value] AS int) FROM OPENJSON(?))", JSON.stringify(ids))
+      ? await store.all<Player>("SELECT * FROM players WHERE id = ANY(?::int[])", ids)
       : []
     ).map((player) => [player.id, player]),
   );

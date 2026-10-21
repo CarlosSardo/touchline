@@ -35,7 +35,3 @@ export function expectationText(places: number) {
 export function unreadLabel(count: number, pageLimit: number) {
   return count >= pageLimit ? `${pageLimit - 1}+` : String(count);
 }
-
-/** GBE points are an English (FA) rule: other destinations report "No FA endorsement required". */
-export const showsGbe = (registration: { status: string }) =>
-  registration.status !== "No FA endorsement required";

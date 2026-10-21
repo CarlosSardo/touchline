@@ -1,36 +1,48 @@
-import { describe, expect, it } from "vitest";
-import { bindSql } from "./db.ts";
-import { addNationals, playerFilter, playerRanking, playerSearch } from "./queries.ts";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { bindSql, Store } from "./db.ts";
+import { addNationals, likePattern, playerFilter, playerRanking, playerSearch } from "./queries.ts";
 import { GameError } from "./systems.ts";
 
+const sqlIntegration = process.env.SQL_INTEGRATION_TESTS === "true";
 const search = (query: Record<string, unknown>, context?: Parameters<typeof playerSearch>[1]) =>
   playerSearch(playerFilter.parse(query), context);
+const sqlOf = (result: ReturnType<typeof playerSearch>) => ({
+  count: `SELECT count(*) AS count FROM (SELECT players.id FROM players WHERE ${result.where} LIMIT 10001) AS matches`,
+  page: `SELECT players.id FROM players ${result.joins} WHERE ${result.where} ORDER BY ${result.order} LIMIT ? OFFSET ?`,
+});
+const searchQueries: Record<string, unknown>[] = [
+  {},
+  { q: "Smith", country: 3, sort: "club" },
+  { attribute: "passing", attributeMin: 70, sort: "nationality" },
+  { shortlisted: "1", sort: "position", direction: "asc" },
+  { position: "ST", ageMin: 17.5, ageMax: 23.9, minutesMin: 90.5, club: 4, ageGroup: "U19", sort: "height" },
+  { contractStatus: "amateur", lifestyle: "Quiet", trait: "Leader", personality: "professionalism", heightMin: 170, heightMax: 190 },
+  { listed: "1", availableLoan: "0", freeAgent: "1", injured: "0", shortlisted: "0", sort: "contract", direction: "asc" },
+];
 
 describe("player search SQL (no database)", () => {
-  it("serves the default page from nonclustered indexes only, without no-op range predicates", () => {
+  it("serves the default page from one players alias, without no-op range predicates", () => {
     const result = search({});
     expect(result).toMatchObject({
-      id: "players.id",
-      from: "FROM players AS players JOIN players AS squad ON squad.id = players.id JOIN players AS named ON named.id = players.id",
       joins: "",
-      where: "squad.role <> N'Retired'",
-      order: "players.ability DESC,named.name COLLATE Latin1_General_100_CI_AI ASC,players.id ASC",
+      where: "players.role <> 'Retired'",
+      order: "players.ability DESC,lower(players.name) ASC,players.id ASC",
       params: [],
-      indexOnly: true,
+      readsProfile: false,
       filtered: false,
     });
   });
 
-  it("keeps indexed filters index-only and types parameters like their columns", () => {
-    const result = search({ position: "ST", ageMin: 17.5, ageMax: 23.9, potentialMin: 60, club: 4, ageGroup: "U19", wageMax: 5000 });
-    expect(result.indexOnly).toBe(true);
+  it("keeps indexed filters off the profile JSON and rounds integer bounds inward", () => {
+    const result = search({ position: "ST", ageMin: 17.5, ageMax: 23.9, potentialMin: 60, club: 4, ageGroup: "U19", wageMax: 5000, minutesMin: 90.5 });
+    expect(result.readsProfile).toBe(false);
     expect(result.filtered).toBe(true);
-    expect(result.where).toContain("players.position = CAST(? AS nvarchar(16))");
-    expect(result.where).toContain("squad.age_group = CAST(? AS nvarchar(32))");
-    expect(result.where).toContain("squad.club_id = ?");
+    expect(result.where).toContain("players.position = ?");
+    expect(result.where).toContain("players.age_group = ?");
+    expect(result.where).toContain("players.club_id = ?");
     expect(result.where).not.toContain("profile");
-    // Integer bounds for the integer age column.
-    expect(result.params).toEqual([18, 23, 60, 5000, "ST", 4, "U19"]);
+    // age and minutes are integer columns: PostgreSQL rejects fractional integer parameters.
+    expect(result.params).toEqual([18, 23, 60, 5000, 91, "ST", 4, "U19"]);
   });
 
   it("drops only default bounds: an explicit limit is still applied", () => {
@@ -41,12 +53,13 @@ describe("player search SQL (no database)", () => {
     expect(limited.params).toEqual([50, 2_000_000]);
   });
 
-  it("falls back to one plain alias when a filter needs the profile JSON", () => {
+  it("reads profile JSON paths through jsonb with key-path parameters", () => {
     const result = search({ attribute: "passing", attributeMin: 70, personality: "professionalism", personalityMin: 50 });
-    expect(result.indexOnly).toBe(false);
-    expect(result.from).toBe("FROM players AS players");
-    expect(result.where).toContain("JSON_VALUE(players.profile, ?)");
-    expect(result.params).toEqual(["$.attributes.technical.passing", 70, "$.personality.professionalism", 50]);
+    expect(result.readsProfile).toBe(true);
+    expect(result.where).toContain("(players.profile::jsonb #>> ?::text[])::double precision");
+    expect(result.where).toContain("coalesce((players.profile::jsonb #>> '{baseAbility}')::double precision,players.ability)");
+    expect(result.params).toEqual([["attributes", "technical", "passing"], 70, ["personality", "professionalism"], 50]);
+    expect(search({ trait: "Leader" }).where).toContain("(players.profile::jsonb -> 'traits') @> jsonb_build_array(?::text)");
   });
 
   it("rejects unknown attribute keys before building SQL", () => {
@@ -54,73 +67,63 @@ describe("player search SQL (no database)", () => {
     expect(() => search({ personality: "x) OR 1=1 --" })).toThrow(GameError);
   });
 
-  it("matches secondary nationalities from a known id list instead of parsing every profile", () => {
+  it("matches secondary nationalities from a known int[] id list instead of parsing every profile", () => {
     const withList = search({ country: 7 }, { secondaryNationals: [4, 9] });
-    expect(withList.indexOnly).toBe(true);
-    expect(withList.where).toContain(
-      "(nation.country_id = ? OR players.id IN (SELECT CAST([value] AS int) FROM OPENJSON(?)))",
-    );
-    expect(withList.params).toEqual([7, "[4,9]"]);
-    expect(search({ country: 7 }).where).toContain("nation.country_id = ?");
+    expect(withList.readsProfile).toBe(false);
+    expect(withList.where).toContain("(players.country_id = ? OR players.id = ANY(?::int[]))");
+    expect(withList.params).toEqual([7, [4, 9]]);
+    expect(search({ country: 7 }).where).toContain("players.country_id = ?");
     expect(search({ country: 7 }).params).toEqual([7]);
   });
 
-  it("searches names, nationalities and clubs through indexes and escapes LIKE wildcards", () => {
-    const result = search({ q: "50%_[x" });
-    expect(result.indexOnly).toBe(true);
-    expect(result.where).toContain("named.name LIKE ? ESCAPE '!'");
-    expect(result.where).toContain("nation.country_id IN (SELECT countries.id FROM countries WHERE countries.name LIKE ? ESCAPE '!')");
-    expect(result.where).toContain("squad.club_id IN (SELECT clubs.id FROM clubs WHERE clubs.name LIKE ? ESCAPE '!')");
-    expect(result.params).toEqual(["%50!%!_![x%", "%50!%!_![x%", "%50!%!_![x%"]);
+  it("searches names, nationalities and clubs case-insensitively and escapes LIKE wildcards", () => {
+    const result = search({ q: "50%_[x!" });
+    expect(result.readsProfile).toBe(false);
+    expect(result.where).toContain("players.name ILIKE ? ESCAPE '!'");
+    expect(result.where).toContain(
+      "players.country_id = ANY(ARRAY(SELECT countries.id FROM countries WHERE countries.name ILIKE ? ESCAPE '!'))",
+    );
+    expect(result.where).toContain("players.club_id = ANY(ARRAY(SELECT clubs.id FROM clubs WHERE clubs.name ILIKE ? ESCAPE '!'))");
+    // [ has no meaning in PostgreSQL LIKE patterns.
+    expect(result.params).toEqual(["%50!%!_[x!!%", "%50!%!_[x!!%", "%50!%!_[x!!%"]);
   });
 
   it("adds sort joins only for the chosen sort and keeps name/id tie-breaks", () => {
     const club = search({ sort: "club", direction: "asc" });
-    expect(club.joins).toBe("LEFT JOIN clubs ON clubs.id = squad.club_id");
-    expect(club.order).toBe(
-      "CASE WHEN clubs.name IS NULL THEN 1 ELSE 0 END,clubs.name COLLATE Latin1_General_100_CI_AI ASC,named.name COLLATE Latin1_General_100_CI_AI ASC,squad.id ASC",
-    );
+    expect(club.joins).toBe("LEFT JOIN clubs ON clubs.id = players.club_id");
+    expect(club.order).toBe("lower(clubs.name) ASC NULLS LAST,lower(players.name) ASC,players.id ASC");
+    expect(search({ sort: "club" }).order).toMatch(/^lower\(clubs\.name\) DESC NULLS LAST,/);
     expect(search({ sort: "nationality" }).joins).toBe(
-      "JOIN countries AS nationality ON nationality.id = nation.country_id",
+      "JOIN countries AS nationality ON nationality.id = players.country_id",
     );
-    // Birth dates and form live only in the clustered rows.
-    expect(search({ sort: "age" }).indexOnly).toBe(false);
-    expect(search({ sort: "form" }).indexOnly).toBe(false);
-    expect(search({ sort: "value" }).indexOnly).toBe(true);
+    expect(search({ sort: "name", direction: "desc" }).order).toBe(
+      "lower(players.name) DESC,lower(players.name) ASC,players.id ASC",
+    );
+    expect(search({ sort: "age" }).order).toBe("players.age DESC,players.birth_date ASC,lower(players.name) ASC,players.id ASC");
+    expect(search({ sort: "value" }).joins).toBe("");
   });
 
-  it("reads shortlisted ids from the filtered shortlist index", () => {
+  it("filters shortlisted players with the partial shortlist index predicate", () => {
     const result = search({ shortlisted: "1" });
-    expect(result.indexOnly).toBe(true);
-    expect(result.where).toContain(
-      "players.id IN (SELECT shortlist.id FROM players AS shortlist WHERE shortlist.shortlisted = 1)",
-    );
+    expect(result.readsProfile).toBe(false);
+    expect(result.where).toBe("players.role <> 'Retired' AND players.shortlisted = 1");
   });
 
-  it("ranks a known match set through one alias", () => {
-    const ranked = playerRanking({ sort: "height", direction: "desc" });
-    expect(ranked.from).toBe("FROM players AS players");
-    expect(ranked.where).toBe("players.id IN (SELECT CAST([value] AS int) FROM OPENJSON(?))");
-    expect(ranked.order).toContain("JSON_VALUE(players.profile,'$.identity.height')");
+  it("ranks a known match set by primary key with missing values last", () => {
+    const ranked = playerRanking({ sort: "height", direction: "asc" });
+    expect(ranked.where).toBe("players.id = ANY(?::int[])");
+    expect(ranked.order).toContain("(players.profile::jsonb #>> '{identity,height}')::double precision ASC NULLS LAST");
     expect(ranked.params).toEqual([]);
   });
 
-  it("produces read-only SQL that the schema isolation binder qualifies", () => {
-    for (const query of [
-      { q: "Smith", country: 3, sort: "club" },
-      { attribute: "passing", attributeMin: 70, sort: "nationality" },
-      { shortlisted: "1", sort: "position", direction: "asc" },
-    ]) {
+  it("produces read-only single statements with ? placeholders only", () => {
+    for (const query of searchQueries) {
       const result = search(query, { secondaryNationals: [1, 2] });
-      for (const sql of [
-        `SELECT count(*) AS count FROM (SELECT TOP (10001) ${result.id} AS id ${result.from} WHERE ${result.where}) AS matches`,
-        `SELECT ${result.id} AS id ${result.from} ${result.joins} WHERE ${result.where} ORDER BY ${result.order} OFFSET ? ROWS FETCH NEXT ? ROWS ONLY`,
-      ]) {
-        const extra = sql.endsWith("ONLY") ? [0, 30] : [];
-        const bound = bindSql(sql, [...result.params, ...extra], "touchline_test_search");
+      const { count, page } = sqlOf(result);
+      for (const [sql, extra] of [[count, []], [page, [30, 0]]] as const) {
+        const bound = bindSql(sql, [...result.params, ...extra]);
         expect(bound.writes).toBe(false);
-        expect(bound.sql).toContain("[touchline_test_search].players AS");
-        expect(bound.sql).not.toMatch(/(FROM|JOIN) (players|clubs|countries)\b/);
+        expect(bound.statements).toBe(1);
       }
     }
   });
@@ -146,5 +149,38 @@ describe("player search SQL (no database)", () => {
     const started = performance.now();
     expect(addNationals(new Map(), rows).get(3)).toHaveLength(200_000);
     expect(performance.now() - started).toBeLessThan(2_000);
+  });
+});
+
+describe.skipIf(!sqlIntegration)("player search SQL on PostgreSQL", () => {
+  let store: Store;
+  beforeAll(async () => {
+    store = await Store.createTest("queries");
+  });
+  afterAll(async () => {
+    await store?.close();
+  });
+
+  it("runs every generated search and ranking statement with correctly typed parameters", async () => {
+    for (const query of searchQueries) {
+      const result = search(query, { secondaryNationals: [1, 2] });
+      const { count, page } = sqlOf(result);
+      expect(await store.get(count, ...result.params)).toEqual({ count: 0 });
+      expect(await store.all(page, ...result.params, 30, 0)).toEqual([]);
+      const ranked = playerRanking(playerFilter.parse(query));
+      expect(await store.all(sqlOf(ranked).page, [3, 1, 2], 30, 0)).toEqual([]);
+    }
+  });
+
+  it("matches LIKE patterns case-insensitively with escaped wildcards", async () => {
+    const matches = async (text: string, q: string) =>
+      (await store.get<{ hit: boolean }>("SELECT ?::text ILIKE ? ESCAPE '!' AS hit", text, likePattern(q)))!.hit;
+    expect(await matches("Erling Haaland", "haal")).toBe(true);
+    expect(await matches("ÉMILE", "émile")).toBe(true);
+    expect(await matches("100% fit", "0% f")).toBe(true);
+    expect(await matches("1000 fit", "0% f")).toBe(false);
+    expect(await matches("a_b", "a_b")).toBe(true);
+    expect(await matches("axb", "a_b")).toBe(false);
+    expect(await matches("[x]!", "[x]!")).toBe(true);
   });
 });

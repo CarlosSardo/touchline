@@ -1,22 +1,160 @@
+# Touchline on a single host (Raspberry Pi 4 / 8 GB / SSD, arm64; also works on amd64).
+#   cp .env.example .env    # set POSTGRES_PASSWORD, SQL_PASSWORD and the sign-in settings (OIDC_*, SESSION_SECRET)
+#   docker compose up -d --wait                  # PostgreSQL 18 + app on 127.0.0.1:3001
+#   docker compose --profile https up -d --wait  # also Caddy with automatic HTTPS (TOUCHLINE_DOMAIN)
+# Development only needs the database: docker compose up -d --wait postgres
+name: touchline
+
+x-logging: &logging
+  driver: local
+  options:
+    max-size: 10m
+    max-file: "3"
+
 services:
-  sql:
-    image: mcr.microsoft.com/mssql/server:2022-latest
+  postgres:
+    image: postgres:18
+    restart: unless-stopped
     environment:
-      ACCEPT_EULA: "Y"
-      MSSQL_PID: Developer
-      MSSQL_SA_PASSWORD: ${SQL_PASSWORD:?Set a strong SQL_PASSWORD in .env}
+      # Superuser "postgres": administration and backups only. The app uses SQL_USER (see deploy/postgres/initdb).
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${SQL_DATABASE:-touchline}
+      POSTGRES_INITDB_ARGS: --locale-provider=builtin --builtin-locale=C.UTF-8 --encoding=UTF8 --data-checksums
+      TOUCHLINE_APP_USER: ${SQL_USER:-touchline}
+      TOUCHLINE_APP_PASSWORD: ${SQL_PASSWORD:?Set SQL_PASSWORD in .env}
+      TZ: UTC
+    # Tuned for a Raspberry Pi 4 (4 cores, 8 GB RAM shared with the app) on an SSD; change a value and run
+    # `docker compose up -d postgres` to apply. Keep max_connections above SQL_POOL_SIZE plus a few admin/script sessions.
+    command:
+      - postgres
+      - -c
+      - max_connections=40
+      - -c
+      - shared_buffers=1GB
+      - -c
+      - effective_cache_size=4GB
+      - -c
+      - work_mem=16MB
+      - -c
+      - maintenance_work_mem=256MB
+      - -c
+      - autovacuum_work_mem=128MB
+      - -c
+      - random_page_cost=1.1
+      - -c
+      - effective_io_concurrency=200
+      - -c
+      - maintenance_io_concurrency=100
+      - -c
+      - max_worker_processes=8
+      - -c
+      - max_parallel_workers=4
+      - -c
+      - max_parallel_workers_per_gather=2
+      - -c
+      - max_parallel_maintenance_workers=2
+      # JIT compilation costs more than it saves for Touchline's short queries on the Pi's Cortex-A72.
+      - -c
+      - jit=off
+      # Fewer, larger checkpoints and compressed full-page images reduce SSD/SD-card writes.
+      - -c
+      - wal_compression=lz4
+      - -c
+      - default_toast_compression=lz4
+      - -c
+      - checkpoint_timeout=15min
+      - -c
+      - checkpoint_completion_target=0.9
+      - -c
+      - max_wal_size=2GB
+      - -c
+      - min_wal_size=256MB
+      - -c
+      - wal_buffers=16MB
+      - -c
+      - log_min_duration_statement=2s
+      - -c
+      - log_lock_waits=on
+      - -c
+      - log_temp_files=64MB
+      - -c
+      - timezone=UTC
+    shm_size: 1g
     ports:
-      - "127.0.0.1:${SQL_PORT:-1433}:1433"
+      # Loopback only: psql/scripts on the host and local development. Never publish PostgreSQL to the LAN or internet.
+      - "127.0.0.1:${POSTGRES_PUBLISH_PORT:-5432}:5432"
     volumes:
-      - sql-data:/var/opt/mssql
+      # PostgreSQL 18 images keep data under /var/lib/postgresql/18/docker; mount the parent directory.
+      - postgres-data:/var/lib/postgresql
+      - ./deploy/postgres/initdb:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test:
-        - CMD-SHELL
-        - 'SQLCMDPASSWORD="$${MSSQL_SA_PASSWORD}" /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -C -b -l 5 -t 5 -Q "SELECT 1" -o /dev/null'
+      test: ["CMD-SHELL", "pg_isready -U postgres -d \"$${POSTGRES_DB}\" -h 127.0.0.1"]
       interval: 10s
-      timeout: 15s
-      retries: 12
-      start_period: 30s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+    # Let PostgreSQL finish its shutdown checkpoint instead of being killed into crash recovery.
+    stop_grace_period: 2m
+    logging: *logging
+
+  app:
+    image: ${TOUCHLINE_IMAGE:-ghcr.io/carlossardo/touchline:latest}
+    build:
+      context: .
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: true
+    environment:
+      NODE_ENV: production
+      API_HOST: 0.0.0.0
+      API_PORT: "3001"
+      SQL_HOST: postgres
+      SQL_PORT: "5432"
+      SQL_SSL: disable
+      SQL_DATABASE: ${SQL_DATABASE:-touchline}
+      SQL_USER: ${SQL_USER:-touchline}
+      SQL_PASSWORD: ${SQL_PASSWORD:?Set SQL_PASSWORD in .env}
+      NODE_OPTIONS: ${TOUCHLINE_NODE_OPTIONS:---max-old-space-size=1536}
+      TZ: UTC
+    depends_on:
+      postgres:
+        condition: service_healthy
+        restart: true
+    ports:
+      # 127.0.0.1 keeps the app behind the reverse proxy; set TOUCHLINE_BIND=0.0.0.0 only for a trusted LAN without HTTPS.
+      - "${TOUCHLINE_BIND:-127.0.0.1}:${TOUCHLINE_PORT:-3001}:3001"
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+    stop_grace_period: 1m
+    logging: *logging
+
+  caddy:
+    image: caddy:2
+    profiles: [https]
+    restart: unless-stopped
+    environment:
+      # Required by the https profile; Caddy refuses to start without it.
+      TOUCHLINE_DOMAIN: ${TOUCHLINE_DOMAIN:-}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - app
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+    logging: *logging
 
 volumes:
-  sql-data:
+  postgres-data:
+  caddy-data:
+  caddy-config:

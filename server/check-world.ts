@@ -17,25 +17,32 @@ import type { PlayerProfile } from "../shared/types.ts";
 
 export async function checkSqlConstraints(store: Store) {
   assert(
-    store.testMode && store.schemaName !== "dbo",
+    store.testMode && store.schemaName !== "public",
     "Checks require an isolated test schema",
   );
-  const tables = await store.all<{ object_id: number; name: string }>(
-    "SELECT object_id,name FROM sys.tables WHERE schema_id = SCHEMA_ID(?) ORDER BY name",
+  const tables = await store.all<{ name: string }>(
+    "SELECT tablename AS name FROM pg_catalog.pg_tables WHERE schemaname = ? ORDER BY tablename",
     store.schemaName,
   );
   assert(tables.length > 0, "The isolated schema must contain game tables");
-  for (const table of tables) {
-    assert(Number.isSafeInteger(table.object_id));
-    const violations = await store.all(
-      `DBCC CHECKCONSTRAINTS (${table.object_id}) WITH ALL_CONSTRAINTS, ALL_ERRORMSGS`,
-    );
-    assert.equal(
-      violations.length,
-      0,
-      `${table.name}: SQL constraint violations`,
-    );
-  }
+  // PostgreSQL enforces every validated constraint on write; only NOT VALID constraints or disabled
+  // constraint triggers (foreign keys) could let violating rows in.
+  const unenforced = await store.all<{ table_name: string; constraint_name: string }>(
+    `SELECT class.relname AS table_name, constraint_row.conname AS constraint_name
+     FROM pg_catalog.pg_constraint AS constraint_row
+     JOIN pg_catalog.pg_class AS class ON class.oid = constraint_row.conrelid
+     JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = class.relnamespace
+     WHERE namespace.nspname = ? AND (NOT constraint_row.convalidated OR EXISTS (
+       SELECT 1 FROM pg_catalog.pg_trigger AS trigger_row
+       WHERE trigger_row.tgconstraint = constraint_row.oid AND trigger_row.tgenabled = 'D'))
+     ORDER BY 1, 2`,
+    store.schemaName,
+  );
+  assert.equal(
+    unenforced.length,
+    0,
+    `SQL constraints not enforced: ${unenforced.map((row) => `${row.table_name}.${row.constraint_name}`).join(", ")}`,
+  );
 }
 
 interface CountryRow { id: number; code: string }
@@ -276,7 +283,7 @@ export async function verifyWorld(
      UNION ALL SELECT 'staff.club_id', count(*) FROM staff LEFT JOIN clubs ON clubs.id = staff.club_id WHERE staff.club_id IS NOT NULL AND clubs.id IS NULL
      UNION ALL SELECT 'clubs.parent_id', count(*) FROM clubs LEFT JOIN clubs AS parents ON parents.id = clubs.parent_id WHERE clubs.parent_id IS NOT NULL AND parents.id IS NULL
      UNION ALL SELECT 'clubs.league_id', count(*) FROM clubs LEFT JOIN leagues ON leagues.id = clubs.league_id WHERE clubs.league_id IS NOT NULL AND leagues.id IS NULL
-     UNION ALL SELECT 'home-based without profile.homeBased', count(*) FROM players WHERE club_id IS NULL AND JSON_VALUE(profile,'$.homeBased.countryId') IS NULL
+     UNION ALL SELECT 'home-based without profile.homeBased', count(*) FROM players WHERE club_id IS NULL AND profile::jsonb #>> '{homeBased,countryId}' IS NULL
      UNION ALL SELECT 'staff at B-teams or national teams', count(*) FROM staff JOIN clubs ON clubs.id = staff.club_id WHERE clubs.type != 'club'`,
   );
   for (const row of orphans) if (row.total) fail(`${row.label}: ${row.total} orphan rows`);
@@ -348,20 +355,19 @@ export async function verifyWorld(
   };
 }
 
-/** Reserved and used KB and rows per table of the store's schema. */
+/** Total (reservedKb: heap, TOAST and indexes) and data-only (usedKb: heap and TOAST) KB and exact rows per table of the store's schema. */
 export async function tableSizes(store: Store) {
-  const rows = await store.all<{ name: string; rows: number | string; reservedKb: number | string; usedKb: number | string }>(
-    `SELECT tables.name, max(CASE WHEN partitions.index_id IN (0, 1) THEN partitions.rows ELSE 0 END) AS rows,
-       sum(units.total_pages) * 8 AS reservedKb, sum(units.used_pages) * 8 AS usedKb
-     FROM sys.tables AS tables
-     JOIN sys.partitions AS partitions ON partitions.object_id = tables.object_id
-     JOIN sys.allocation_units AS units ON units.container_id = partitions.partition_id
-     WHERE tables.schema_id = SCHEMA_ID(?)
-     GROUP BY tables.name ORDER BY reservedKb DESC`,
+  return store.all<{ name: string; rows: number; reservedKb: number; usedKb: number }>(
+    `SELECT tables.tablename AS name,
+       (xpath('/row/total/text()', query_to_xml(
+         format('SELECT count(*) AS total FROM %I.%I', tables.schemaname, tables.tablename), false, true, '')))[1]::text::bigint AS rows,
+       pg_total_relation_size(format('%I.%I', tables.schemaname, tables.tablename)::regclass) / 1024 AS "reservedKb",
+       pg_table_size(format('%I.%I', tables.schemaname, tables.tablename)::regclass) / 1024 AS "usedKb"
+     FROM pg_catalog.pg_tables AS tables
+     WHERE tables.schemaname = ?
+     ORDER BY "reservedKb" DESC, name`,
     store.schemaName,
   );
-  // bigint columns arrive as strings; summing them unconverted concatenated the text (reservedMb 1.6e67).
-  return rows.map((row) => ({ name: row.name, rows: Number(row.rows), reservedKb: Number(row.reservedKb), usedKb: Number(row.usedKb) }));
 }
 
 const within = (actual: number, target: number, tolerance = 0.1) =>
@@ -372,7 +378,7 @@ export async function checkWorld(options: WorldOptions = {}): Promise<boolean> {
   const store = await Store.createTest("world-check");
   try {
     assert(
-      store.testMode && store.schemaName !== "dbo",
+      store.testMode && store.schemaName !== "public",
       "World checks cannot use gameplay schemas",
     );
     await store.schema();

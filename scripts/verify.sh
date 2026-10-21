@@ -12,8 +12,8 @@ fi
 exec node "${env_args[@]}" --input-type=module - "$@" <<'NODE'
 import { randomUUID } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
-import { createWriteStream, mkdirSync, readdirSync } from 'node:fs';
-import sql from 'mssql';
+import { createWriteStream, existsSync, mkdirSync, readdirSync } from 'node:fs';
+import pg from 'pg';
 
 const args = process.argv.slice(2);
 if (args.some(argument => argument !== '--parallel')) {
@@ -27,14 +27,14 @@ process.env.SQL_TEST_MODE = 'true';
 process.env.SQL_SCHEMA = `touchline_test_verify_${Date.now()}_${process.pid}`;
 
 if (args.includes('--parallel')) {
-  if (process.env.SQL_SERVER !== '127.0.0.1' || process.env.SQL_PORT !== '14330' ||
+  if (process.env.TOUCHLINE_TEST_LOCAL !== 'true' || !['127.0.0.1', 'localhost', '::1'].includes(process.env.SQL_HOST ?? '') ||
       process.env.SQL_DATABASE !== 'touchline_checks' || !process.env.SQL_USER || !process.env.SQL_PASSWORD) {
-    throw new Error('Parallel verification requires the isolated local SQL wrapper; remote and gameplay databases are refused.');
+    throw new Error('Parallel verification requires the isolated local SQL wrapper (npm run test:local); remote and gameplay databases are refused.');
   }
   const files = readdirSync('server', { recursive: true })
     .filter(file => file.endsWith('.test.ts')).map(file => `server/${file}`).sort();
-  const gameplay = ['server/systems.test.ts', 'server/club-support.test.ts', 'server/registration.test.ts'];
-  const persistence = ['server/accounts.test.ts', 'server/app.test.ts', 'server/db.test.ts', 'server/saves.test.ts'];
+  const gameplay = ['server/systems.test.ts', 'server/club-support.test.ts', 'server/registration.test.ts'].filter(existsSync);
+  const persistence = ['server/accounts.test.ts', 'server/app.test.ts', 'server/db.test.ts', 'server/saves.test.ts'].filter(existsSync);
   const remaining = files.filter(file => !gameplay.includes(file) && !persistence.includes(file));
   const stamp = randomUUID().replaceAll('-', '');
   const jobs = [
@@ -45,11 +45,11 @@ if (args.includes('--parallel')) {
     { name: 'persistence', command: ['npx', 'vitest', 'run', ...persistence], database: true },
     { name: 'browser', command: ['npm', 'run', 'test:e2e'], database: true },
   ];
-  const pool = await new sql.ConnectionPool({
-    server: '127.0.0.1', port: 14330, database: 'master',
-    user: process.env.SQL_USER, password: process.env.SQL_PASSWORD,
-    options: { encrypt: true, trustServerCertificate: true },
-  }).connect();
+  const admin = new pg.Client({
+    host: process.env.SQL_HOST, port: Number(process.env.SQL_PORT ?? 5432), database: 'touchline_checks',
+    user: process.env.SQL_USER, password: process.env.SQL_PASSWORD, application_name: 'Touchline verify',
+  });
+  await admin.connect();
   const owned = [];
   const children = new Set();
   const stop = signal => {
@@ -61,15 +61,15 @@ if (args.includes('--parallel')) {
   const terminate = () => stop('SIGTERM');
   process.on('SIGINT', interrupt);
   process.on('SIGTERM', terminate);
-  mkdirSync('.azure/reports', { recursive: true });
+  mkdirSync('reports', { recursive: true });
   try {
     for (const job of jobs.filter(job => job.database)) {
-      job.database = `touchline_test_verify_${stamp}_${job.name}`;
-      await pool.request().query(`CREATE DATABASE [${job.database}]`);
+      job.database = `touchline_verify_${stamp.slice(0, 16)}_${job.name}`;
+      await admin.query(`CREATE DATABASE "${job.database}" LOCALE_PROVIDER builtin BUILTIN_LOCALE 'C.UTF-8' ENCODING 'UTF8' TEMPLATE template0`);
       owned.push(job.database);
     }
     const results = await Promise.all(jobs.map(job => new Promise(resolve => {
-      const log = createWriteStream(`.azure/reports/verify-${job.name}-${stamp}.log`, { flags: 'wx', mode: 0o600 });
+      const log = createWriteStream(`reports/verify-${job.name}-${stamp}.log`, { flags: 'wx', mode: 0o600 });
       const environment = { ...process.env };
       if (job.database) environment.SQL_DATABASE = job.database;
       if (job.name === 'browser') {
@@ -102,9 +102,9 @@ if (args.includes('--parallel')) {
     process.removeListener('SIGINT', interrupt);
     process.removeListener('SIGTERM', terminate);
     for (const database of owned) {
-      await pool.request().query(`ALTER DATABASE [${database}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [${database}]`);
+      await admin.query(`DROP DATABASE IF EXISTS "${database}" WITH (FORCE)`);
     }
-    await pool.close();
+    await admin.end();
   }
 } else {
 for (const args of [['run', 'lint'], ['run', 'build'], ['test'], ['run', 'test:e2e']]) {

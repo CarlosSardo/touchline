@@ -37,6 +37,8 @@
 **/data
 **/saves
 **/backups
+**/reports
+**/*.dump
 **/exports
 **/*.sqlite*
 **/*.db

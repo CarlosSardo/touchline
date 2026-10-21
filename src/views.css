@@ -525,6 +525,35 @@
   color: var(--muted);
   font-size: 0.65rem;
 }
+.eligibility-badge .badge {
+  white-space: nowrap;
+}
+.database-row-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+.eligibility-checklist {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+}
+.eligibility-checklist > div {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+.gbe-on-request {
+  margin-top: 10px;
+}
+.gbe-on-request > summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
 @media (min-width: 641px) {
   .roster-table tbody > tr:not(.roster-group-row) > td:first-child,
   .roster-table thead th:first-child {
@@ -1007,6 +1036,12 @@
 .account-identity .detail-list dd {
   min-width: 0;
   overflow-wrap: anywhere;
+}
+.account-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 12px;
 }
 .career-start-content {
   position: relative;

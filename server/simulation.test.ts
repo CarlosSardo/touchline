@@ -1,5 +1,6 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { Store } from "./db.ts";
+import { tableName } from "./sql-schema.ts";
 import { generateWorld } from "./world.ts";
 import {
   createCalendar,
@@ -39,30 +40,29 @@ import type {
 } from "../shared/types.ts";
 
 async function expectSchemaIntegrity(store: Store) {
-  const tables = await store.all<{ id: number; name: string }>(
-    "SELECT object_id AS id,name FROM sys.tables WHERE schema_id = SCHEMA_ID(?) ORDER BY name",
-    store.schemaName,
-  );
-  expect(tables.length).toBeGreaterThan(0);
+  expect(
+    (await store.get<{ count: number }>(
+      "SELECT count(*) AS count FROM pg_catalog.pg_tables WHERE schemaname = ?",
+      store.schemaName,
+    ))!.count,
+  ).toBeGreaterThan(0);
+  // PostgreSQL enforces every validated constraint on write; only NOT VALID constraints or disabled FK triggers could admit bad rows.
   expect(
     await store.all(
-      "SELECT name FROM sys.foreign_keys WHERE schema_id = SCHEMA_ID(?) AND (is_disabled = 1 OR is_not_trusted = 1)",
+      `SELECT constraint_row.conname FROM pg_catalog.pg_constraint AS constraint_row
+       JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = constraint_row.connamespace
+       WHERE namespace.nspname = ? AND (NOT constraint_row.convalidated OR EXISTS (
+         SELECT 1 FROM pg_catalog.pg_trigger AS trigger_row
+         WHERE trigger_row.tgconstraint = constraint_row.oid AND trigger_row.tgenabled = 'D'))`,
       store.schemaName,
     ),
   ).toEqual([]);
-  for (const table of tables) {
-    expect(Number.isSafeInteger(table.id)).toBe(true);
-    expect(
-      await store.all(
-        `DBCC CHECKCONSTRAINTS (${table.id}) WITH ALL_CONSTRAINTS, ALL_ERRORMSGS`,
-      ),
-      table.name,
-    ).toEqual([]);
-  }
 }
 
 describe("connected simulation", () => {
   let store: Store;
+  /** SQL text of every statement of the first week (for statement budgets). */
+  const firstWeek: string[] = [];
   beforeAll(async () => {
     store = await Store.createTest("simulation");
     await generateWorld(store, { nations: ["EN", "ES"] });
@@ -75,9 +75,16 @@ describe("connected simulation", () => {
   it("advances the calendar, develops players, updates market values and persists weekly accounts", async () => {
     // Player 1 is now an elite player at the 99 ceiling, where upward drift is clamped away: sample squads instead.
     const before = await store.all<{ id: number; potential: number }>(
-      "SELECT TOP (40) id,potential FROM players WHERE club_id IS NOT NULL AND age <= 21 AND potential < 95 AND role != 'Retired' ORDER BY id",
+      "SELECT id,potential FROM players WHERE club_id IS NOT NULL AND age <= 21 AND potential < 95 AND role != 'Retired' ORDER BY id LIMIT 40",
     );
-    const result = await advance(store, 7);
+    const spies = (["all", "get", "run"] as const).map((method) => {
+      const original = store[method].bind(store) as (sql: string, ...params: unknown[]) => Promise<unknown>;
+      return vi.spyOn(store, method).mockImplementation(((sql: string, ...params: unknown[]) => {
+        firstWeek.push(sql);
+        return original(sql, ...params);
+      }) as never);
+    });
+    const result = await advance(store, 7).finally(() => spies.forEach((spy) => spy.mockRestore()));
     expect(result.date).toBe("2026-07-08");
     expect((await stateOf(store)).week).toBe(1);
     const after = new Map(
@@ -122,10 +129,54 @@ describe("connected simulation", () => {
     ))!.amount).toBe(revenue.annualMatchday);
   });
 
+  it("keeps the week's writes narrow and set-based: out-of-line profiles, batched accounts and friendlies, vacuumed players", async () => {
+    // Runs after the 7-day advance above (its seventh day was the weekly update).
+    const storage = (await store.get<{ external: number; total: number }>(
+      "SELECT count(*) FILTER (WHERE pg_column_toast_chunk_id(profile) IS NOT NULL) AS external, count(*) AS total FROM players",
+    ))!;
+    expect(storage.external / storage.total).toBeGreaterThan(0.95);
+    // One upsert for every club: each club's FFP figure is its season period's deficit.
+    const clubs = (await store.get<{ total: number }>("SELECT count(*) AS total FROM clubs WHERE type != 'national'"))!.total;
+    expect(clubs).toBeGreaterThan(100);
+    // (Transfers and other one-off items post their own rows; the weekly accounts are one statement, not one per club.)
+    expect(firstWeek.filter((sql) => sql.includes("INTO financial_periods")).length).toBeLessThan(clubs / 10);
+    expect(firstWeek.filter((sql) => sql.includes("INTO financial_periods") && sql.includes("unnest("))).toHaveLength(1);
+    expect(firstWeek.filter((sql) => /FROM financial_periods WHERE club_id = \?/.test(sql)).length).toBeLessThan(clubs / 10);
+    // Club friendlies go through the set-based batch: per-fixture squad selection is left to the user's club family.
+    const userFixtures = (await store.get<{ total: number }>(
+      "SELECT count(*) AS total FROM fixtures JOIN clubs ON clubs.id IN (fixtures.home_id, fixtures.away_id) WHERE fixtures.status = 'played' AND (clubs.id = 1 OR clubs.parent_id = 1)",
+    ))!.total;
+    expect(firstWeek.filter((sql) => sql.startsWith("SELECT * FROM players WHERE playing_club_id = ? AND birth_date >= ?")).length)
+      .toBeLessThanOrEqual(2 * userFixtures);
+    const state = await stateOf(store);
+    expect((await store.get<{ total: number }>(
+      `SELECT count(*) AS total FROM clubs LEFT JOIN financial_periods AS period ON period.club_id = clubs.id AND period.season = ?
+       WHERE clubs.type != 'national' AND (period.club_id IS NULL
+         OR abs(clubs.ffp - GREATEST(0, period.wages + period.operating + period.amortization + period.agent_fees - period.revenue - period.sale_profit)) > 0.01)`,
+      state.season,
+    ))!.total).toBe(0);
+    // Pre-season friendlies of AI clubs are played (by the batch path), with appearances but no discipline records.
+    const friendlies = (await store.get<{ played: number; due: number; appearances: number }>(
+      `SELECT count(*) FILTER (WHERE status = 'played') AS played, count(*) FILTER (WHERE status = 'scheduled') AS due,
+         (SELECT count(*) FROM player_match_appearances JOIN fixtures AS friendly ON friendly.id = player_match_appearances.fixture_id WHERE friendly.league_id IS NULL) AS appearances
+       FROM fixtures WHERE league_id IS NULL AND date <= ?`,
+      state.date,
+    ))!;
+    expect(friendlies.due).toBe(0);
+    if (friendlies.played) expect(friendlies.appearances).toBeGreaterThan(friendlies.played * 22);
+    expect(await store.get("SELECT 1 AS found FROM discipline WHERE scope = 'friendly'")).toBeUndefined();
+    // advance() ran outside a transaction, so the weekly rewrite of every player was vacuumed straight away.
+    await expect.poll(async () =>
+      (await store.get<{ vacuumed: boolean }>(
+        "SELECT last_vacuum IS NOT NULL AS vacuumed FROM pg_stat_user_tables WHERE relid = 'players'::regclass",
+      ))!.vacuumed,
+    ).toBe(true);
+  });
+
   it("updates a complete league table from the same result used by match analytics", async () => {
     // Only the user's fixtures keep the snapshot and full stats; the rest are stored compact.
     const fixture = (await store.get<Fixture>(
-      "SELECT TOP (1) * FROM fixtures WHERE ? IN (home_id, away_id) AND stage = 'League' AND status = 'scheduled' ORDER BY date",
+      "SELECT * FROM fixtures WHERE ?::integer IN (home_id, away_id) AND stage = 'League' AND status = 'scheduled' ORDER BY date, id LIMIT 1",
       (await stateOf(store)).clubId,
     ))!;
     await playFixture(store, fixture);
@@ -198,7 +249,7 @@ describe("connected simulation", () => {
 
   it("backfills legacy saves without rewriting snapshots or duplicating appearances", async () => {
     const fixture = (await store.get<Fixture>(
-      "SELECT TOP (1) * FROM fixtures WHERE status = 'played' AND JSON_QUERY(data, '$.snapshot') IS NOT NULL ORDER BY id",
+      "SELECT * FROM fixtures WHERE status = 'played' AND jsonb_typeof(data::jsonb -> 'snapshot') = 'object' ORDER BY id LIMIT 1",
     ))!;
     const snapshot: MatchSnapshot = {
       ...JSON.parse(fixture.data).snapshot,
@@ -222,7 +273,10 @@ describe("connected simulation", () => {
         )
       ).lastInsertRowid,
     );
-    const originals = await store.all(
+    // The backfill re-serializes stats through jsonb (different key order and spacing), so compare them as JSON.
+    const appearanceRows = async (sql: string, ...params: number[]) =>
+      (await store.all<{ stats: string }>(sql, ...params)).map((row) => ({ ...row, stats: JSON.parse(row.stats) as unknown }));
+    const originals = await appearanceRows(
       "SELECT * FROM player_match_appearances ORDER BY fixture_id,player_id",
     );
     const snapshots = await store.all(
@@ -230,12 +284,12 @@ describe("connected simulation", () => {
     );
     // A legacy save has full data for every fixture; compact (non-user) fixtures keep their rows because they cannot be rebuilt.
     await store.run(
-      "DELETE FROM player_match_appearances WHERE fixture_id IN (SELECT id FROM fixtures WHERE JSON_QUERY(data, '$.players') IS NOT NULL)",
+      "DELETE FROM player_match_appearances WHERE fixture_id IN (SELECT id FROM fixtures WHERE jsonb_typeof(data::jsonb -> 'players') IN ('object', 'array'))",
     );
-    await store.run("DELETE FROM meta WHERE [key] = 'appearanceIndexVersion'");
+    await store.run("DELETE FROM meta WHERE key = 'appearanceIndexVersion'");
     await store.schema();
     expect(
-      await store.all(
+      await appearanceRows(
         "SELECT * FROM player_match_appearances WHERE fixture_id != ? ORDER BY fixture_id,player_id",
         legacyId,
       ),
@@ -287,7 +341,7 @@ describe("connected simulation", () => {
     expect(summary.academy).toBe(Object.values(intake.clubs).reduce((total, count) => total + count, 0));
     expect(summary.count).toBeGreaterThanOrEqual(summary.academy);
     const academy = await store.all<{ birth_date: string; age_group: string; profile: string }>(
-      "SELECT birth_date,age_group,profile FROM players WHERE JSON_VALUE(profile,'$.intake.source') = 'academy' AND JSON_VALUE(profile,'$.intake.season') = '2027'",
+      "SELECT birth_date,age_group,profile FROM players WHERE profile::jsonb #>> '{intake,source}' = 'academy' AND profile::jsonb #>> '{intake,season}' = '2027'",
     );
     expect(academy).toHaveLength(summary.academy);
     for (const player of academy) {
@@ -301,7 +355,7 @@ describe("connected simulation", () => {
     await checkMinors(store, "2027-07-01");
     expect(
       (await store.get<{ count: number }>(
-        "SELECT count(*) AS count FROM players WHERE role = 'Retired' AND JSON_VALUE(profile,'$.retirement.reason') IS NULL",
+        "SELECT count(*) AS count FROM players WHERE role = 'Retired' AND profile::jsonb #>> '{retirement,reason}' IS NULL",
       ))!.count,
     ).toBe(0);
     expect(
@@ -313,7 +367,7 @@ describe("connected simulation", () => {
       await store.all("SELECT * FROM standings WHERE played != 0"),
     ).toHaveLength(0);
     const oldAppearance = (await store.get<{ player_id: number }>(
-      "SELECT TOP (1) player_id FROM player_match_appearances",
+      "SELECT player_id FROM player_match_appearances ORDER BY fixture_id, player_id LIMIT 1",
     ))!;
     expect(
       (await playerCareer(store, oldAppearance.player_id, { season: 2026 }))
@@ -323,7 +377,7 @@ describe("connected simulation", () => {
 
   it("completes position training and accelerates a supported rehabilitation plan", async () => {
     const player = (await store.get<Player>(
-      "SELECT TOP (1) * FROM players WHERE club_id = 1",
+      "SELECT * FROM players WHERE club_id = 1 ORDER BY id LIMIT 1",
     ))!;
     const profile = JSON.parse(player.profile) as PlayerProfile;
     profile.development.positionTarget = "DM";
@@ -335,7 +389,7 @@ describe("connected simulation", () => {
       player.id,
     );
     const injured = (await store.get<Player>(
-      "SELECT TOP (1) * FROM players WHERE club_id = 1 AND id != ?",
+      "SELECT * FROM players WHERE club_id = 1 AND id != ? ORDER BY id LIMIT 1",
       player.id,
     ))!;
     await store.run(
@@ -364,7 +418,7 @@ describe("persisted football media", () => {
     try {
       await generateWorld(store, { nations: ["EN"] });
       const player = (await store.get<Player>(
-        "SELECT TOP (1) * FROM players WHERE club_id = 2 AND age_group = 'Senior'",
+        "SELECT * FROM players WHERE club_id = 2 AND age_group = 'Senior' ORDER BY id LIMIT 1",
       ))!;
       const input = {
         key: "test-bid",
@@ -455,8 +509,11 @@ describe("daily transfer market", () => {
         has_filter: boolean;
         filter_definition: string | null;
       }>(
-        "SELECT indexes.name,indexes.is_disabled,indexes.has_filter,indexes.filter_definition FROM sys.indexes AS indexes JOIN sys.tables AS tables ON tables.object_id = indexes.object_id WHERE tables.schema_id = SCHEMA_ID(?) AND tables.name = 'players' AND indexes.name IN ('player_market_candidate','player_market_squad')",
-        store.schemaName,
+        `SELECT index_class.relname AS name, NOT (info.indisvalid AND info.indisready) AS is_disabled,
+           info.indpred IS NOT NULL AS has_filter, pg_get_expr(info.indpred, info.indrelid) AS filter_definition
+         FROM pg_catalog.pg_index AS info JOIN pg_catalog.pg_class AS index_class ON index_class.oid = info.indexrelid
+         WHERE info.indrelid = to_regclass(?) AND index_class.relname IN ('player_market_candidate','player_market_squad')`,
+        tableName(store.schemaName, "players"),
       );
       expect(indexes).toHaveLength(2);
       expect(indexes.every((index) => !index.is_disabled)).toBe(true);
@@ -476,8 +533,14 @@ describe("daily transfer market", () => {
         ],
       ] as const) {
         const columns = await store.all<{ name: string }>(
-          "SELECT columns.name FROM sys.indexes AS indexes JOIN sys.tables AS tables ON tables.object_id = indexes.object_id JOIN sys.index_columns AS indexed ON indexed.object_id = indexes.object_id AND indexed.index_id = indexes.index_id JOIN sys.columns AS columns ON columns.object_id = indexed.object_id AND columns.column_id = indexed.column_id WHERE tables.schema_id = SCHEMA_ID(?) AND tables.name = 'players' AND indexes.name = ? AND indexed.key_ordinal > 0 ORDER BY indexed.key_ordinal",
-          store.schemaName,
+          `SELECT attribute.attname AS name
+           FROM pg_catalog.pg_index AS info
+           JOIN pg_catalog.pg_class AS index_class ON index_class.oid = info.indexrelid
+           CROSS JOIN LATERAL unnest(info.indkey::int2[]) WITH ORDINALITY AS indexed(attnum, ordinal)
+           JOIN pg_catalog.pg_attribute AS attribute ON attribute.attrelid = info.indrelid AND attribute.attnum = indexed.attnum
+           WHERE info.indrelid = to_regclass(?) AND index_class.relname = ? AND indexed.ordinal <= info.indnkeyatts
+           ORDER BY indexed.ordinal`,
+          tableName(store.schemaName, "players"),
           name,
         );
         expect(columns.map((column) => column.name)).toEqual(expectedColumns);
@@ -507,7 +570,7 @@ describe("daily transfer market", () => {
           lastId + 1,
         ]) {
           const candidate = await store.get<Player>(
-            "SELECT TOP (1) * FROM players WHERE id >= ? AND club_id IS NOT NULL AND parent_club_id IS NULL AND age BETWEEN 18 AND 31 AND age_group = 'Senior' AND role != 'Retired' AND contract_end > ? AND (injury_until IS NULL OR injury_until <= ?) AND NOT EXISTS (SELECT 1 FROM negotiations WHERE negotiations.player_id = players.id AND stage NOT IN ('Completed','Rejected','Withdrawn','Expired','Hijacked')) AND NOT EXISTS (SELECT 1 FROM history WHERE entity_type = 'transfer' AND entity_id = players.id AND date >= ?) ORDER BY id",
+            "SELECT * FROM players WHERE id >= ? AND club_id IS NOT NULL AND parent_club_id IS NULL AND age BETWEEN 18 AND 31 AND age_group = 'Senior' AND role != 'Retired' AND contract_end > ? AND (injury_until IS NULL OR injury_until <= ?) AND NOT EXISTS (SELECT 1 FROM negotiations WHERE negotiations.player_id = players.id AND stage NOT IN ('Completed','Rejected','Withdrawn','Expired','Hijacked')) AND NOT EXISTS (SELECT 1 FROM history WHERE entity_type = 'transfer' AND entity_id = players.id AND date >= ?) ORDER BY id LIMIT 1",
             lowerBound,
             date,
             date,
@@ -541,7 +604,6 @@ describe("daily transfer market", () => {
         if (result.completed) days.push(date);
         expect(await worldTransfers(store, seedrandom("duplicate"))).toEqual({
           completed: 0,
-          offers: 0,
         });
       }
       expect(days.length).toBeGreaterThan(1);
@@ -566,41 +628,7 @@ describe("daily transfer market", () => {
       });
       expect(await worldTransfers(store, seedrandom("closed-window"))).toEqual({
         completed: 0,
-        offers: 0,
       });
-    } finally {
-      await store.close();
-    }
-  });
-
-  it("considers multiple listed players while capping incoming approaches", async () => {
-    const store = await marketWorld();
-    try {
-      await store.run(
-        "UPDATE players SET listed = 1, available_loan = 0 WHERE club_id = 1 AND age_group = 'Senior'",
-      );
-      for (let index = 0; index < 7; index++) {
-        await store.setMeta("state", {
-          ...(await stateOf(store)),
-          date: addDays("2026-07-01", index),
-        });
-        await worldTransfers(store, seedrandom(`listed-market-${index}`));
-      }
-      const offers = await store.all<{ player_id: number; stage: string }>(
-        "SELECT player_id,stage FROM negotiations WHERE selling_club_id = 1",
-      );
-      expect(offers).toHaveLength(3);
-      expect(new Set(offers.map((offer) => offer.player_id)).size).toBe(3);
-      expect(offers.every((offer) => offer.stage === "Offer received")).toBe(
-        true,
-      );
-      for (const offer of offers)
-        expect(
-          (await store.get<Player>(
-            "SELECT * FROM players WHERE id = ?",
-            offer.player_id,
-          ))!.club_id,
-        ).toBe(1);
     } finally {
       await store.close();
     }
@@ -612,11 +640,11 @@ describe("daily transfer market", () => {
       const buyer = await clubOf(store, 1);
       await store.run("UPDATE clubs SET reputation = 99 WHERE id = ?", buyer.id);
       const seller = (await store.get<{ id: number }>(
-        "SELECT TOP (1) id FROM clubs WHERE type = 'club' AND country_id != ? ORDER BY id",
+        "SELECT id FROM clubs WHERE type = 'club' AND country_id != ? ORDER BY id LIMIT 1",
         buyer.country_id,
       ))!;
       const player = (await store.get<Player>(
-        "SELECT TOP (1) * FROM players WHERE club_id = ? AND age >= 18 AND parent_club_id IS NULL ORDER BY id",
+        "SELECT * FROM players WHERE club_id = ? AND age >= 18 AND parent_club_id IS NULL ORDER BY id LIMIT 1",
         seller.id,
       ))!;
       const contractEnd = (await stateOf(store)).date;

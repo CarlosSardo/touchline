@@ -71,10 +71,12 @@ import type {
   MediaData,
   MediaStory,
   CompetitionFavorite,
+  SquadData,
 } from "../../shared/api.ts";
 import type { NewsItem } from "../../shared/types.ts";
 import { TransferPaymentTable } from "./Transfers.tsx";
 import { AffiliatesPanel, EventsPanel } from "./ClubSupport.tsx";
+import { EligibilityBadge } from "../EligibilityBadge.tsx";
 
 function BudgetSheet({ close, wages }: { close: () => void; wages: number }) {
   const { bootstrap, act } = useGame();
@@ -781,9 +783,44 @@ export function Board() {
           </article>
         ))}
       </div>
+      <RegistrationPanel />
       <AffiliatesPanel />
       <EventsPanel />
     </div>
+  );
+}
+
+/** Signed senior players who are not (yet) eligible for competitive matches, with the reason. */
+function RegistrationPanel() {
+  const { data, error } = useResource<SquadData>("squad?ageGroup=Senior");
+  const exceptions = (data?.players ?? []).filter((player) => player.eligibility && player.eligibility.label !== "eligible");
+  return (
+    <Panel>
+      <SectionHeading
+        title="Squad registration"
+        subtitle="Signing and registration are separate: these players are under contract but limited to friendlies and training"
+      />
+      {error ? (
+        <ErrorState message={error} />
+      ) : !data ? (
+        <Loading label="Checking registrations" />
+      ) : exceptions.length ? (
+        <div className="padded eligibility-checklist">
+          {exceptions.map((player) => (
+            <div key={player.id}>
+              <PlayerLink id={player.id} name={player.name} />
+              <EligibilityBadge eligibility={player.eligibility} />
+              {player.eligibility?.reason && <small className="muted">{player.eligibility.reason}</small>}
+            </div>
+          ))}
+        </div>
+      ) : (
+        <Empty
+          title="Every senior player is registered"
+          detail="All signed first-team players can be selected for the club's competitions."
+        />
+      )}
+    </Panel>
   );
 }
 

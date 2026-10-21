@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import {
   ArrowLeft,
   ArrowLeftRight,
@@ -45,7 +45,9 @@ import {
   type DurationKind,
 } from "./callups.ts";
 import { CALL_UP_RULES, type CallUpDesk } from "../shared/features/callups.ts";
-import { seasonText, showsGbe } from "./format.ts";
+import { seasonText } from "./format.ts";
+import { EligibilityBadge } from "./EligibilityBadge.tsx";
+import GbeBreakdown from "./GbeBreakdown.tsx";
 import {
   Badge,
   Button,
@@ -71,6 +73,7 @@ import {
   transferWindow,
 } from "../shared/rules.ts";
 import type { PlayerCareer, PlayerDetail, StaffDesk } from "../shared/api.ts";
+import { blocking, type RegistrationStatus } from "../shared/eligibility.ts";
 import {
   bodyLabel,
   bodyOf,
@@ -1316,31 +1319,7 @@ export default function PlayerSheet() {
                       <p className="dossier-copy">No active promises.</p>
                     )}
                   </section>
-                  {data.registration && (
-                    <section className="profile-section">
-                      <h3>Registration assessment</h3>
-                      <Badge
-                        tone={data.registration.allowed ? "green" : "amber"}
-                      >
-                        {data.registration.status}
-                      </Badge>
-                      <DetailList
-                        items={
-                          showsGbe(data.registration)
-                            ? [
-                                [
-                                  "GBE points",
-                                  `${data.registration.points}/${data.registration.threshold}`,
-                                ],
-                                ...Object.entries(data.registration.breakdown).map(
-                                  ([key, value]) => [key, value] as [string, number],
-                                ),
-                              ]
-                            : []
-                        }
-                      />
-                    </section>
-                  )}
+                  <RegistrationSection data={data} clubName={bootstrap?.club.name ?? "your club"} />
                 </div>
                 <section className="profile-section">
                   <h3>Transfer value breakdown</h3>
@@ -1418,5 +1397,130 @@ export default function PlayerSheet() {
         </>
       )}
     </Modal>
+  );
+}
+
+const STATUS_TEXT: Record<RegistrationStatus, string> = {
+  registered: "Registered",
+  pending: "Pending",
+  not_registered: "Not registered",
+  refused: "Refused",
+  not_required: "Not required",
+};
+const statusTone = (status: RegistrationStatus) =>
+  status === "registered" || status === "not_required" ? "green" : status === "pending" ? "blue" : status === "refused" ? "red" : "amber";
+
+/** Contract vs association registration vs competition registration vs match eligibility, with the GBE input. */
+function RegistrationSection({ data, clubName }: { data: PlayerDetail; clubName: string }) {
+  const { eligibility, signing } = data;
+  const gbe = eligibility.association.gbe;
+  return (
+    <>
+      <section className="profile-section">
+        <h3>Registration & eligibility</h3>
+        <EligibilityBadge eligibility={eligibility} />
+        <DetailList
+          items={[
+            ["Contract", eligibility.contracted ? `Under contract until ${dateLabel(data.player.contract_end)}` : "No club contract"],
+            ...(eligibility.contracted
+              ? ([
+                  [
+                    "Association registration",
+                    <Badge key="association" tone={statusTone(eligibility.association.status)}>
+                      {STATUS_TEXT[eligibility.association.status]}
+                    </Badge>,
+                  ],
+                  ...(eligibility.association.nextReview
+                    ? ([["Next review", dateLabel(eligibility.association.nextReview)]] as [string, string][])
+                    : []),
+                  [
+                    "Next match",
+                    eligibility.nextFixture
+                      ? `${eligibility.nextFixture.competition}, ${dateLabel(eligibility.nextFixture.date)}: ${eligibility.nextFixture.eligible ? "eligible" : eligibility.nextFixture.reasons.join(" ")}`
+                      : "No fixture scheduled",
+                  ],
+                ] as [string, ReactNode][])
+              : []),
+          ]}
+        />
+        {eligibility.association.reasons.map((reason) => (
+          <p className="dossier-copy" key={reason}>
+            {reason}
+          </p>
+        ))}
+        {eligibility.friendliesOnly && (
+          <p className="dossier-copy">
+            Signed but not registered for any competition: he can train and play friendlies, and a loan can build his
+            registration case.
+          </p>
+        )}
+        {!!eligibility.competitions.length && (
+          <div className="eligibility-checklist">
+            {eligibility.competitions.map((competition) => (
+              <div key={competition.leagueId}>
+                <span>{competition.name}</span>
+                <Badge tone={statusTone(competition.status)}>{STATUS_TEXT[competition.status]}</Badge>
+                {competition.reasons.map((reason) => (
+                  <small className="muted" key={reason}>
+                    {reason}
+                  </small>
+                ))}
+              </div>
+            ))}
+          </div>
+        )}
+        {gbe ? (
+          <GbeBreakdown playerId={data.player.id} assessment={gbe} />
+        ) : (
+          !signing?.registration.gbe && <GbeOnRequest playerId={data.player.id} />
+        )}
+      </section>
+      {signing && (
+        <section className="profile-section">
+          <h3>If signed by {clubName}</h3>
+          <Badge tone={signing.ok ? "green" : "amber"}>
+            {signing.ok ? "Transfer rules allow a signing" : "Transfer rules block a signing now"}
+          </Badge>
+          {signing.reasons.map((reason) => (
+            <p className="dossier-copy" key={reason}>
+              {reason}
+            </p>
+          ))}
+          <DetailList
+            items={[
+              [
+                "Registration if signed",
+                <Badge key="registration" tone={statusTone(signing.registration.status)}>
+                  {STATUS_TEXT[signing.registration.status]}
+                </Badge>,
+              ],
+            ]}
+          />
+          {signing.registration.reasons.map((reason) => (
+            <p className="dossier-copy" key={reason}>
+              {reason}
+            </p>
+          ))}
+          {blocking(signing.registration.status) && (
+            <p className="dossier-copy">
+              Registration does not stop the signing: he would join under contract, available for friendlies and
+              training, and become eligible for competitive matches once the requirements are met.
+            </p>
+          )}
+          {signing.registration.gbe && <GbeBreakdown playerId={data.player.id} assessment={signing.registration.gbe} />}
+        </section>
+      )}
+    </>
+  );
+}
+
+/** The live FA GBE breakdown on request (players whose registration did not need the endorsement check). */
+function GbeOnRequest({ playerId }: { playerId: number }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <details className="gbe-on-request" onToggle={(event) => setOpen(event.currentTarget.open)}>
+      <summary>FA Governing Body Endorsement points</summary>
+      {open && <GbeBreakdown playerId={playerId} />}
+    </details>
   );
 }

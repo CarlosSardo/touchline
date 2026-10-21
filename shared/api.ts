@@ -22,13 +22,18 @@ import type {
   PlayerInterest,
 } from "./types.ts";
 import type { AssistantDuty } from "./rules.ts";
+import type { GbeAssessment, PlayerEligibility, RegistrationStatus } from "./eligibility.ts";
 
 export const PORTABLE_SAVE_EXTENSION = ".touchline.gz";
 
 export interface AccountUser {
   id: string;
+  /** Authelia login name (OIDC preferred_username). */
+  username: string;
   displayName: string;
   email: string | null;
+  /** Member of the configured admin group: may approve access requests at /admin. */
+  admin: boolean;
 }
 
 export type WorldOperation =
@@ -56,6 +61,19 @@ export type WorldBusyResponse = {
   code: "world_busy";
 } & WorldActivity;
 
+/**
+ * Response of POST /api/advance. Each day commits on its own: when a later day fails, the days already simulated
+ * are kept and `error` explains why the run stopped early (a failure on the first day is an error response).
+ */
+export interface AdvanceResult {
+  from: string;
+  date: string;
+  days: number;
+  matches: number;
+  seconds: number;
+  error?: string;
+}
+
 /** hasWorld is null exactly when activity is set: the world is busy and was not read. */
 export interface AccountSession {
   user: AccountUser;
@@ -81,7 +99,7 @@ export interface Health {
 }
 
 export interface HealthDetails extends Health {
-  database: "SQL Server";
+  database: "PostgreSQL";
   databaseName: string;
   schema: string;
   hosted: boolean;
@@ -89,11 +107,11 @@ export interface HealthDetails extends Health {
   date: string;
 }
 
-export type AccessIssueCode =
-  | "invite_required"
-  | "account_not_provisioned"
-  | "not_authorized"
-  | "capacity_unavailable";
+/**
+ * 403 reasons for a signed-in identity without a Touchline world: the first sign-in files an access request that an
+ * admin approves or denies at /admin; not_authorized is any other refusal.
+ */
+export type AccessIssueCode = "access_pending" | "access_denied" | "not_authorized";
 
 export interface AccessIssueResponse {
   error: string;
@@ -318,18 +336,19 @@ export interface PlayerDetail {
   }[];
   interest: PlayerInterest;
   youthTransfer: YouthTransferAssessment;
+  /** Contract, association, competition and next-fixture eligibility at the player's current club. */
+  eligibility: PlayerEligibility;
+  /**
+   * A signing by the user's club: transfer rules (never GBE or quotas) and the association registration it would
+   * get; null for the user's own players.
+   */
+  signing: {
+    ok: boolean;
+    reasons: string[];
+    registration: { status: RegistrationStatus; reasons: string[]; gbe?: GbeAssessment };
+  } | null;
   buyBackClauses: BuyBackClause[];
   sellOnClauses: SellOnClause[];
-  registration: {
-    allowed: boolean;
-    status: string;
-    points: number;
-    threshold: number;
-    automatic: boolean;
-    breakdown: Record<string, number>;
-    reasons: string[];
-    source: string;
-  };
   player: Player;
   profile: PlayerProfile;
   report: ScoutReport | null;
@@ -644,7 +663,8 @@ export interface LoanDesk {
     strength: number;
     data: string;
   }[];
-  candidates: Player[];
+  /** The director's players available for loan (and young players clubs may ask about), with open loan offers. */
+  loanList: (Player & { open_offers: number; last_offer: string | null })[];
 }
 export interface StaffDesk {
   staff: Staff[];

@@ -53,7 +53,7 @@ import {
 import { assessPlayerInterest } from "./recruitment.ts";
 
 export async function ensureClubSupport(store: Store) {
-  if (!(await store.get("SELECT [key] FROM meta WHERE [key] = 'state'")))
+  if (!(await store.get("SELECT key FROM meta WHERE key = 'state'")))
     return;
   // First teams only: B-teams share their parent's staff and are never affiliates of it.
   const clubs = await store.all<SupportClub>(
@@ -69,7 +69,7 @@ export async function ensureClubSupport(store: Store) {
   }
   await store.transaction(async () => {
     await store.run(
-      "UPDATE partnerships SET data = JSON_MODIFY(data,'$.since',coalesce(JSON_VALUE(data,'$.established'),?)) WHERE JSON_VALUE(data,'$.origin') = 'initial' AND JSON_VALUE(data,'$.since') IS NULL",
+      "UPDATE partnerships SET data = jsonb_set(data::jsonb,'{since}',to_jsonb(coalesce(data::jsonb ->> 'established',?::text)))::text WHERE data::jsonb ->> 'origin' = 'initial' AND data::jsonb ->> 'since' IS NULL",
       state.date,
     );
     const supported = new Set(
@@ -154,19 +154,19 @@ export async function ensureClubSupport(store: Store) {
       }
     }
     if (assistantRows.length)
-      await store.run(
-        "INSERT INTO staff(club_id,name,role,ability,influence,communication,tactical_knowledge,personality,ambition,morale,wage,data) SELECT incoming.club_id,incoming.name,incoming.role,incoming.ability,incoming.influence,incoming.communication,incoming.tactical_knowledge,incoming.personality,incoming.ambition,incoming.morale,incoming.wage,incoming.data FROM OPENJSON(?) WITH (club_id int '$[0]',name nvarchar(256) '$[1]',role nvarchar(80) '$[2]',ability int '$[3]',influence int '$[4]',communication int '$[5]',tactical_knowledge int '$[6]',personality nvarchar(80) '$[7]',ambition int '$[8]',morale float '$[9]',wage float '$[10]',data nvarchar(max) '$[11]') AS incoming WHERE NOT EXISTS (SELECT 1 FROM staff WITH (UPDLOCK,HOLDLOCK) WHERE staff.club_id = incoming.club_id AND staff.role = incoming.role) ORDER BY incoming.club_id",
-        JSON.stringify(assistantRows),
+      await store.exec(
+        "INSERT INTO staff(club_id,name,role,ability,influence,communication,tactical_knowledge,personality,ambition,morale,wage,data) SELECT incoming.* FROM unnest(?::integer[],?::text[],?::text[],?::double precision[],?::integer[],?::integer[],?::double precision[],?::text[],?::integer[],?::double precision[],?::double precision[],?::text[]) AS incoming(club_id,name,role,ability,influence,communication,tactical_knowledge,personality,ambition,morale,wage,data) WHERE NOT EXISTS (SELECT 1 FROM staff WHERE staff.club_id = incoming.club_id AND staff.role = incoming.role) ORDER BY incoming.club_id",
+        ...columnsOf(assistantRows, 12),
       );
     if (supportRows.length)
-      await store.run(
-        "INSERT INTO club_support(club_id,duties) SELECT incoming.club_id,incoming.duties FROM OPENJSON(?) WITH (club_id int '$[0]',duties nvarchar(max) '$[1]') AS incoming WHERE NOT EXISTS (SELECT 1 FROM club_support WITH (UPDLOCK,HOLDLOCK) WHERE club_support.club_id = incoming.club_id)",
-        JSON.stringify(supportRows),
+      await store.exec(
+        "INSERT INTO club_support(club_id,duties) SELECT * FROM unnest(?::integer[],?::text[]) ON CONFLICT (club_id) DO NOTHING",
+        ...columnsOf(supportRows, 2),
       );
     if (partnershipRows.length)
-      await store.run(
-        "INSERT INTO partnerships(club_id,partner_id,type,strength,data) SELECT incoming.club_id,incoming.partner_id,incoming.type,incoming.strength,incoming.data FROM OPENJSON(?) WITH (club_id int '$[0]',partner_id int '$[1]',type nvarchar(80) '$[2]',strength float '$[3]',data nvarchar(max) '$[4]') AS incoming WHERE NOT EXISTS (SELECT 1 FROM partnerships WITH (UPDLOCK,HOLDLOCK) WHERE partnerships.club_id = incoming.club_id AND partnerships.partner_id = incoming.partner_id) ORDER BY incoming.club_id",
-        JSON.stringify(partnershipRows),
+      await store.exec(
+        "INSERT INTO partnerships(club_id,partner_id,type,strength,data) SELECT incoming.* FROM unnest(?::integer[],?::integer[],?::text[],?::double precision[],?::text[]) AS incoming(club_id,partner_id,type,strength,data) ORDER BY incoming.club_id ON CONFLICT (club_id,partner_id) DO NOTHING",
+        ...columnsOf(partnershipRows, 5),
       );
     const settings = await store.meta<Settings>("settings");
     if (settings.unexpectedEvents === undefined)
@@ -175,6 +175,11 @@ export async function ensureClubSupport(store: Store) {
         unexpectedEvents: "medium",
       });
   });
+}
+
+/** Column arrays for an `unnest(...)` insert from row tuples. */
+function columnsOf(rows: readonly (string | number)[][], width: number) {
+  return Array.from({ length: width }, (_, index) => rows.map((row) => row[index]));
 }
 
 interface SupportClub extends Club {
@@ -245,7 +250,7 @@ export async function clubAffiliates(
 export async function affiliateDesk(store: Store): Promise<AffiliateData> {
   const state = await stateOf(store);
   const requests = await store.all<AffiliateRequest>(
-    "SELECT TOP (20) requests.*,preferred.name AS preferred_name,partner.name AS partner_name FROM board_affiliate_requests AS requests LEFT JOIN clubs AS preferred ON preferred.id = requests.preferred_club_id LEFT JOIN clubs AS partner ON partner.id = requests.partner_id WHERE requests.club_id = ? ORDER BY requests.id DESC",
+    "SELECT requests.*,preferred.name AS preferred_name,partner.name AS partner_name FROM board_affiliate_requests AS requests LEFT JOIN clubs AS preferred ON preferred.id = requests.preferred_club_id LEFT JOIN clubs AS partner ON partner.id = requests.partner_id WHERE requests.club_id = ? ORDER BY requests.id DESC LIMIT 20",
     state.clubId,
   );
   return {
@@ -288,7 +293,7 @@ export async function requestAffiliate(store: Store, input: unknown) {
     .parse(input);
   const state = await stateOf(store);
   const previous = await store.get<AffiliateRequest>(
-    "SELECT TOP (1) * FROM board_affiliate_requests WHERE club_id = ? ORDER BY id DESC",
+    "SELECT * FROM board_affiliate_requests WHERE club_id = ? ORDER BY id DESC LIMIT 1",
     state.clubId,
   );
   if (previous?.status === "pending")
@@ -361,11 +366,11 @@ export async function processAffiliateRequests(store: Store) {
       );
     } else {
       const candidates = await store.all<Club & { affiliate_count: number }>(
-        "SELECT TOP (100) clubs.*,(SELECT count(*) FROM partnerships WHERE partnerships.club_id = clubs.id OR partnerships.partner_id = clubs.id) AS affiliate_count FROM clubs WHERE type = 'club' AND id != ? AND reputation <= ? ORDER BY CASE WHEN (CASE WHEN country_id != ? THEN 1 ELSE 0 END) = ? THEN 0 ELSE 1 END,CASE WHEN league_id = ? THEN 1 ELSE 0 END,abs(reputation - ?),id",
+        "SELECT clubs.*,(SELECT count(*) FROM partnerships WHERE partnerships.club_id = clubs.id OR partnerships.partner_id = clubs.id) AS affiliate_count FROM clubs WHERE type = 'club' AND id != ? AND reputation <= ? ORDER BY CASE WHEN (country_id != ?) = ? THEN 0 ELSE 1 END,CASE WHEN league_id = ? THEN 1 ELSE 0 END,abs(reputation - ?),id LIMIT 100",
         club.id,
         club.reputation + (request.purpose === "Feeder club" ? 12 : 20),
         club.country_id,
-        overseas ? 1 : 0,
+        overseas,
         club.league_id,
         Math.max(1, club.reputation - 10),
       );
@@ -406,7 +411,7 @@ export async function processAffiliateRequests(store: Store) {
       try {
         await createPartnership(store, partner.id, request.purpose, club.id);
         await store.run(
-          "UPDATE partnerships SET data = JSON_MODIFY(JSON_MODIFY(JSON_MODIFY(data,'$.affiliate',CAST(1 AS bit)),'$.origin','board'),'$.boardRequestId',CONVERT(int,?)) WHERE club_id = ? AND partner_id = ?",
+          "UPDATE partnerships SET data = (data::jsonb || jsonb_build_object('affiliate',true,'origin','board','boardRequestId',?::integer))::text WHERE club_id = ? AND partner_id = ?",
           request.id,
           club.id,
           partner.id,
@@ -450,7 +455,7 @@ export async function assistantDesk(store: Store): Promise<AssistantData> {
     last_run: string | null;
   }>("SELECT * FROM club_support WHERE club_id = ?", state.clubId);
   const spentLastWeek = (await store.get<{ total: number }>(
-    "SELECT coalesce(sum(TRY_CONVERT(float, JSON_VALUE(data,'$.spending'))),0) AS total FROM history WHERE entity_type = 'assistantReport' AND entity_id = ? AND date BETWEEN ? AND ?",
+    "SELECT coalesce(sum(CASE WHEN jsonb_typeof(data::jsonb -> 'spending') = 'number' THEN (data::jsonb -> 'spending')::double precision END),0) AS total FROM history WHERE entity_type = 'assistantReport' AND entity_id = ? AND date BETWEEN ? AND ?",
     state.clubId,
     addDays(state.date, -6),
     state.date,
@@ -471,7 +476,7 @@ export async function assistantDesk(store: Store): Promise<AssistantData> {
     lastRun: settings?.last_run ?? null,
     reports: (
       await store.all<{ id: number; date: string; data: string }>(
-        "SELECT TOP (20) id,date,data FROM history WHERE entity_type = 'assistantReport' AND entity_id = ? ORDER BY date DESC,id DESC",
+        "SELECT id,date,data FROM history WHERE entity_type = 'assistantReport' AND entity_id = ? ORDER BY date DESC,id DESC LIMIT 20",
         state.clubId,
       )
     ).map((report) => ({
@@ -550,7 +555,7 @@ export async function processAssistant(store: Store, requested = false) {
   const targets =
     desk.duties.shortlist || desk.duties.scouting
       ? await store.all<Player>(
-          "SELECT TOP (3) * FROM players WHERE (club_id IS NULL OR club_id NOT IN (SELECT id FROM clubs WHERE id = ? OR parent_id = ?)) AND parent_club_id IS NULL AND role != 'Retired' AND age BETWEEN 18 AND 25 AND value <= ? AND ability BETWEEN ? AND ? ORDER BY shortlisted DESC,(potential - ability) DESC,ability DESC,id",
+          "SELECT * FROM players WHERE (club_id IS NULL OR club_id NOT IN (SELECT id FROM clubs WHERE id = ? OR parent_id = ?)) AND parent_club_id IS NULL AND role != 'Retired' AND age BETWEEN 18 AND 25 AND value <= ? AND ability BETWEEN ? AND ? ORDER BY shortlisted DESC,(potential - ability) DESC,ability DESC,id LIMIT 3",
           club.id,
           club.id,
           Math.max(0, club.transfer_budget),
@@ -585,8 +590,8 @@ export async function processAssistant(store: Store, requested = false) {
     );
     const recentAssignments = targets.length
       ? await store.all<{ player_id: number }>(
-          `SELECT DISTINCT player_id FROM assignments WHERE player_id IN (${targets.map(() => "?").join(",")}) AND (status = 'active' OR start_date >= ?)`,
-          ...targets.map((player) => player.id),
+          "SELECT DISTINCT player_id FROM assignments WHERE player_id = ANY(?::integer[]) AND (status = 'active' OR start_date >= ?)",
+          targets.map((player) => player.id),
           addDays(state.date, -30),
         )
       : [];
@@ -628,7 +633,7 @@ export async function processAssistant(store: Store, requested = false) {
   }
   if (desk.duties.contracts) {
     const player = await store.get<Player>(
-      "SELECT TOP (1) * FROM players WHERE club_id = ? AND parent_club_id IS NULL AND role != 'Retired' AND contract_end > ? AND contract_end <= ? AND NOT EXISTS (SELECT 1 FROM negotiations WHERE player_id = players.id AND (stage NOT IN ('Completed','Rejected','Expired','Withdrawn','Hijacked') OR created >= ?)) ORDER BY contract_end,ability DESC,id",
+      "SELECT * FROM players WHERE club_id = ? AND parent_club_id IS NULL AND role != 'Retired' AND contract_end > ? AND contract_end <= ? AND NOT EXISTS (SELECT 1 FROM negotiations WHERE player_id = players.id AND (stage NOT IN ('Completed','Rejected','Expired','Withdrawn','Hijacked') OR created >= ?)) ORDER BY contract_end,ability DESC,id LIMIT 1",
       club.id,
       state.date,
       addDays(state.date, 365),
@@ -700,7 +705,7 @@ export async function processAssistant(store: Store, requested = false) {
   }
   if (desk.duties.training) {
     const { changes: changed } = await store.run(
-      "UPDATE roster SET training = plans.training FROM players AS roster CROSS APPLY (VALUES (CASE WHEN roster.injury_until > ? THEN 'Injury rehab' WHEN roster.training = 'Position' THEN 'Position' WHEN roster.age < 21 THEN 'Youth development' WHEN roster.fitness < 65 THEN 'Balanced' ELSE 'Role' END)) AS plans(training) WHERE roster.club_id = ? AND roster.role != 'Retired' AND roster.training != plans.training",
+      "UPDATE players AS roster SET training = plans.training FROM (SELECT id,CASE WHEN injury_until > ? THEN 'Injury rehab' WHEN training = 'Position' THEN 'Position' WHEN age < 21 THEN 'Youth development' WHEN fitness < 65 THEN 'Balanced' ELSE 'Role' END AS training FROM players WHERE club_id = ? AND role != 'Retired') AS plans WHERE roster.id = plans.id AND roster.training != plans.training",
       state.date,
       club.id,
     );
@@ -716,7 +721,7 @@ export async function processAssistant(store: Store, requested = false) {
       score: number;
       pressure: number;
     }>(
-      "SELECT TOP (5) loans.player_id,players.name,loans.score,loans.pressure FROM loans JOIN players ON players.id = loans.player_id WHERE loans.parent_id = ? AND loans.status = 'active' AND (loans.score < 50 OR loans.pressure > 60) ORDER BY loans.pressure DESC,loans.id",
+      "SELECT loans.player_id,players.name,loans.score,loans.pressure FROM loans JOIN players ON players.id = loans.player_id WHERE loans.parent_id = ? AND loans.status = 'active' AND (loans.score < 50 OR loans.pressure > 60) ORDER BY loans.pressure DESC,loans.id LIMIT 5",
       club.id,
     );
     for (const loan of concerns)
@@ -821,7 +826,7 @@ const contractEndFor = (season: number, random: () => number) => {
  */
 export async function processStaffCareers(store: Store) {
   const state = await stateOf(store);
-  const row = await store.get<{ value: string }>("SELECT [value] FROM meta WHERE [key] = 'staffCareers'");
+  const row = await store.get<{ value: string }>("SELECT value FROM meta WHERE key = 'staffCareers'");
   const last = row ? (JSON.parse(row.value) as { date: string }).date : null;
   const pass = !last || daysBetween(last, state.date) >= 28;
   if (pass) {
@@ -866,11 +871,16 @@ async function staffPass(store: Store, state: GameState) {
     if (changed || ability !== member.ability || morale !== member.morale)
       updates.push({ id: member.id, ability, morale, data: JSON.stringify(data) });
   }
-  for (let offset = 0; offset < updates.length; offset += 1000)
+  for (let offset = 0; offset < updates.length; offset += 5000) {
+    const batch = updates.slice(offset, offset + 5000);
     await store.run(
-      "UPDATE target SET ability = changes.ability, morale = changes.morale, data = changes.data FROM staff AS target JOIN OPENJSON(?) WITH (id int, ability float, morale float, data nvarchar(max)) AS changes ON changes.id = target.id",
-      JSON.stringify(updates.slice(offset, offset + 1000)),
+      "UPDATE staff AS target SET ability = changes.ability, morale = changes.morale, data = changes.data FROM unnest(?::integer[],?::double precision[],?::double precision[],?::text[]) AS changes(id,ability,morale,data) WHERE changes.id = target.id",
+      batch.map((update) => update.id),
+      batch.map((update) => update.ability),
+      batch.map((update) => update.morale),
+      batch.map((update) => update.data),
     );
+  }
   if (retiring.length) await retireStaff(store, state, retiring);
   const decay = SCOUTING_KNOWLEDGE_DECAY;
   await store.run(
@@ -898,8 +908,8 @@ async function retireStaff(store: Store, state: GameState, members: readonly Sta
   const clubs = new Map(
     (
       await store.all<Club>(
-        "SELECT * FROM clubs WHERE id IN (SELECT CAST([value] AS int) FROM OPENJSON(?))",
-        JSON.stringify([...new Set(members.flatMap((member) => (member.club_id === null ? [] : [member.club_id])))]),
+        "SELECT * FROM clubs WHERE id = ANY(?::integer[])",
+        [...new Set(members.flatMap((member) => (member.club_id === null ? [] : [member.club_id])))],
       )
     ).map((club) => [club.id, club]),
   );
@@ -915,7 +925,7 @@ async function retireStaff(store: Store, state: GameState, members: readonly Sta
     ))!.found;
     if (referenced)
       await store.run(
-        "UPDATE staff SET ability = 1, data = JSON_MODIFY(JSON_MODIFY(data,'$.retired',CAST(1 AS bit)),'$.contractEnd',NULL) WHERE id = ?",
+        "UPDATE staff SET ability = 1, data = (jsonb_set(data::jsonb,'{retired}','true') - 'contractEnd')::text WHERE id = ?",
         member.id,
       );
     else {
@@ -961,7 +971,7 @@ async function leaveClub(store: Store, staffId: number) {
 async function replaceStaff(store: Store, state: GameState, club: Pick<Club, "id" | "reputation" | "country_id">, role: string) {
   const random = seedrandom(`${state.seed}:staff-hire:${club.id}:${role}:${state.date}`);
   const candidate = await store.get<Staff>(
-    "SELECT TOP (1) * FROM staff WHERE club_id IS NULL AND role = ? AND JSON_VALUE(data,'$.retired') IS NULL AND ability BETWEEN ? AND ? ORDER BY ability DESC,id",
+    "SELECT * FROM staff WHERE club_id IS NULL AND role = ? AND data::jsonb ->> 'retired' IS NULL AND ability BETWEEN ? AND ? ORDER BY ability DESC,id LIMIT 1",
     role,
     club.reputation - 20,
     club.reputation + 8,
@@ -969,7 +979,7 @@ async function replaceStaff(store: Store, state: GameState, club: Pick<Club, "id
   const contractEnd = contractEndFor(state.season, random);
   if (candidate) {
     await store.run(
-      "UPDATE staff SET club_id = ?, morale = 75, wage = ?, data = JSON_MODIFY(data,'$.contractEnd',?) WHERE id = ? AND club_id IS NULL",
+      "UPDATE staff SET club_id = ?, morale = 75, wage = ?, data = jsonb_set(data::jsonb,'{contractEnd}',to_jsonb(?::text))::text WHERE id = ? AND club_id IS NULL",
       club.id,
       staffWage(candidate.ability),
       contractEnd,
@@ -1011,7 +1021,7 @@ async function replaceStaff(store: Store, state: GameState, club: Pick<Club, "id
 async function staffExpiries(store: Store, state: GameState) {
   const rule = CAREER_RULES.staff;
   const due = await store.all<CareerStaff>(
-    `SELECT TOP (${rule.expiryBatch}) staff.*,clubs.reputation,clubs.country_id,countries.code FROM staff JOIN clubs ON clubs.id = staff.club_id JOIN countries ON countries.id = clubs.country_id WHERE JSON_VALUE(staff.data,'$.contractEnd') < ? ORDER BY JSON_VALUE(staff.data,'$.contractEnd'),staff.id`,
+    `SELECT staff.*,clubs.reputation,clubs.country_id,countries.code FROM staff JOIN clubs ON clubs.id = staff.club_id JOIN countries ON countries.id = clubs.country_id CROSS JOIN LATERAL (SELECT staff.data::jsonb ->> 'contractEnd' AS contract_end) AS terms WHERE terms.contract_end < ? ORDER BY terms.contract_end,staff.id LIMIT ${rule.expiryBatch}`,
     state.date,
   );
   const year = Number(state.date.slice(0, 4));
@@ -1028,7 +1038,7 @@ async function staffExpiries(store: Store, state: GameState) {
     if (own || random() < rule.renewChance) {
       const contractEnd = own ? `${state.season + 2}-06-30` : contractEndFor(state.season, random);
       const wage = Math.round(member.wage * rule.renewalRaise);
-      await store.run("UPDATE staff SET wage = ?, data = JSON_MODIFY(data,'$.contractEnd',?) WHERE id = ?", wage, contractEnd, member.id);
+      await store.run("UPDATE staff SET wage = ?, data = jsonb_set(data::jsonb,'{contractEnd}',to_jsonb(?::text))::text WHERE id = ?", wage, contractEnd, member.id);
       if (own)
         await news(
           store,
@@ -1041,7 +1051,7 @@ async function staffExpiries(store: Store, state: GameState) {
       continue;
     }
     await leaveClub(store, member.id);
-    await store.run("UPDATE staff SET data = JSON_MODIFY(data,'$.contractEnd',NULL) WHERE id = ?", member.id);
+    await store.run("UPDATE staff SET data = (data::jsonb - 'contractEnd')::text WHERE id = ?", member.id);
     await replaceStaff(store, state, { id: member.club_id!, reputation: member.reputation, country_id: member.country_id }, member.role);
   }
   if (retiring.length) await retireStaff(store, state, retiring);

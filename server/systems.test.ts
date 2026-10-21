@@ -9,6 +9,8 @@ import {
   WAGE_INTEREST_CAP,
 } from "./recruitment.ts";
 import { heldNationalities, passportGroup } from "./registration.ts";
+import { gbeAssessment } from "./gbe.ts";
+import { playerEligibility } from "./eligibility.ts";
 import { addDays, DEFAULT_TRANSFER_TERMS } from "../shared/rules.ts";
 import {
   assignScout,
@@ -21,6 +23,7 @@ import {
   exerciseBuyBack,
   expireLoans,
   finishScouting,
+  loanTermsIssue,
   negotiate,
   negotiationStep,
   progressDealMilestones,
@@ -85,7 +88,7 @@ describe("director decisions and ownership boundaries", () => {
 
   it("moves eligible players reversibly between club squads without changing contracts, wages or ownership", async () => {
     const player = (await store.get<Player>(
-      "SELECT TOP (1) * FROM players WHERE club_id = 1 AND age_group = 'U17'",
+      "SELECT * FROM players WHERE club_id = 1 AND age_group = 'U17' ORDER BY id LIMIT 1",
     ))!;
     const initialWages = await weeklyWages(store, 1);
     const originalContract = player.contract_end;
@@ -141,7 +144,7 @@ describe("director decisions and ownership boundaries", () => {
 
   it("keeps personal salary terms unchanged while negotiating the club fee", async () => {
     const player = (await store.get<Player>(
-      "SELECT TOP (1) * FROM players WHERE club_id = 2 AND age >= 18",
+      "SELECT * FROM players WHERE club_id = 2 AND age >= 18 ORDER BY id LIMIT 1",
     ))!;
     await keenToJoin(player.id, 1);
     const enquiry = await enquire(store, player.id, "Permanent transfer");
@@ -164,7 +167,7 @@ describe("director decisions and ownership boundaries", () => {
 
   it("explains role credibility, wages and promises rather than treating money as automatic consent", async () => {
     const player = (await store.get<Player>(
-      "SELECT TOP (1) * FROM players WHERE club_id = 2 AND age_group = 'Senior'",
+      "SELECT * FROM players WHERE club_id = 2 AND age_group = 'Senior' ORDER BY id LIMIT 1",
     ))!;
     const buyer = await clubOf(store);
     await store.run(
@@ -207,7 +210,7 @@ describe("director decisions and ownership boundaries", () => {
 
   it("can decline personal terms despite a high wage when the sporting move is unacceptable", async () => {
     const target = (await store.get<Player>(
-      "SELECT TOP (1) * FROM players WHERE club_id = 2 AND age >= 18 AND age_group = 'Senior' AND parent_club_id IS NULL ORDER BY id",
+      "SELECT * FROM players WHERE club_id = 2 AND age >= 18 AND age_group = 'Senior' AND parent_club_id IS NULL ORDER BY id LIMIT 1",
     ))!;
     const deal = await enquire(store, target.id, "Permanent transfer");
     // Club 2's first senior is an elite player priced above the default £100M budget; the fee is not under test.
@@ -260,7 +263,7 @@ describe("director decisions and ownership boundaries", () => {
 
   it("closes an approach before any fee talks when move interest is below 50", async () => {
     const target = (await store.get<Player>(
-      "SELECT TOP (1) * FROM players WHERE club_id = 2 AND age >= 18 AND age_group = 'Senior' AND parent_club_id IS NULL ORDER BY id",
+      "SELECT * FROM players WHERE club_id = 2 AND age >= 18 AND age_group = 'Senior' AND parent_club_id IS NULL ORDER BY id LIMIT 1",
     ))!;
     await unwillingToJoin(target, 1);
     const deal = await enquire(store, target.id, "Permanent transfer");
@@ -281,7 +284,7 @@ describe("director decisions and ownership boundaries", () => {
 
   it("agrees personal terms only at 85% interest, keeping a 50-84% player talking", async () => {
     const target = (await store.get<Player>(
-      "SELECT TOP (1) * FROM players WHERE club_id = 2 AND country_id = 1 AND age >= 18 AND age_group = 'Senior' AND parent_club_id IS NULL ORDER BY value",
+      "SELECT * FROM players WHERE club_id = 2 AND country_id = 1 AND age >= 18 AND age_group = 'Senior' AND parent_club_id IS NULL ORDER BY value LIMIT 1",
     ))!;
     await keenToJoin(target.id, 1);
     const deal = await enquire(store, target.id, "Permanent transfer");
@@ -306,7 +309,7 @@ describe("director decisions and ownership boundaries", () => {
 
   it("lets a player being sold refuse the buying club's personal terms", async () => {
     const player = (await store.get<Player>(
-      "SELECT TOP (1) * FROM players WHERE club_id = 1 AND age_group = 'Senior' AND parent_club_id IS NULL ORDER BY id",
+      "SELECT * FROM players WHERE club_id = 1 AND age_group = 'Senior' AND parent_club_id IS NULL ORDER BY id LIMIT 1",
     ))!;
     const profile = JSON.parse(player.profile);
     profile.personality.ambition = 99;
@@ -359,7 +362,7 @@ describe("director decisions and ownership boundaries", () => {
 
   it("counters lowball bids without eroding the asking price and budgets the agreed fee in personal talks", async () => {
     const player = (await store.get<Player>(
-      "SELECT TOP (1) * FROM players WHERE club_id = 2 AND country_id = 1 AND age >= 18 ORDER BY value",
+      "SELECT * FROM players WHERE club_id = 2 AND country_id = 1 AND age >= 18 ORDER BY value LIMIT 1",
     ))!;
     await keenToJoin(player.id, 1);
     const deal = await enquire(store, player.id, "Permanent transfer");
@@ -395,7 +398,7 @@ describe("director decisions and ownership boundaries", () => {
       "SELECT * FROM staff WHERE club_id = 2 AND role = 'Scout'",
     ))!;
     const target = (await store.get<Player>(
-      "SELECT TOP (1) * FROM players WHERE club_id = 2",
+      "SELECT * FROM players WHERE club_id = 2 ORDER BY id LIMIT 1",
     ))!;
     await expect(
       assignScout(store, {
@@ -445,7 +448,7 @@ describe("director decisions and ownership boundaries", () => {
 
   it("does not spend funds on a rejected offer and rejects another club's squad edits", async () => {
     const target = (await store.get<Player>(
-      "SELECT TOP (1) * FROM players WHERE club_id = 2",
+      "SELECT * FROM players WHERE club_id = 2 ORDER BY id LIMIT 1",
     ))!;
     await expect(squadRole(store, target.id, "Captain")).rejects.toThrow(
       "not contracted",
@@ -473,7 +476,7 @@ describe("director decisions and ownership boundaries", () => {
 
   it("progresses accepted incoming offers without seller-controlled personal terms or early payment", async () => {
     const player = (await store.get<Player>(
-      "SELECT TOP (1) * FROM players WHERE club_id = 1 AND age_group = 'Senior'",
+      "SELECT * FROM players WHERE club_id = 1 AND age_group = 'Senior' ORDER BY id LIMIT 1",
     ))!;
     await keenToJoin(player.id, 2);
     const data: NegotiationData = {
@@ -553,7 +556,7 @@ describe("director decisions and ownership boundaries", () => {
 
   async function agreedTransfer(transferTerms: TransferTerms) {
     const player = (await store.get<Player>(
-      "SELECT TOP (1) * FROM players WHERE club_id = 2 AND country_id = 1 AND age >= 18 ORDER BY value",
+      "SELECT * FROM players WHERE club_id = 2 AND country_id = 1 AND age >= 18 ORDER BY value LIMIT 1",
     ))!;
     await keenToJoin(player.id, 1);
     const before = {
@@ -623,11 +626,11 @@ describe("director decisions and ownership boundaries", () => {
   it("schedules a pre-contract as a free transfer after expiry", async () => {
     const buyer = await clubOf(store, 1);
     const seller = (await store.get<{ id: number }>(
-      "SELECT TOP (1) id FROM clubs WHERE type = 'club' AND country_id != ? ORDER BY id",
+      "SELECT id FROM clubs WHERE type = 'club' AND country_id != ? ORDER BY id LIMIT 1",
       buyer.country_id,
     ))!;
     const player = (await store.get<Player>(
-      "SELECT TOP (1) * FROM players WHERE club_id = ? AND age >= 18 AND parent_club_id IS NULL ORDER BY value",
+      "SELECT * FROM players WHERE club_id = ? AND age >= 18 AND parent_club_id IS NULL ORDER BY value LIMIT 1",
       seller.id,
     ))!;
     const contractEnd = addDays((await stateOf(store)).date, 100);
@@ -746,7 +749,7 @@ describe("director decisions and ownership boundaries", () => {
 
   it("splits deferred sale proceeds without paying sell-on beneficiaries early or twice", async () => {
     const player = (await store.get<Player>(
-      "SELECT TOP (1) * FROM players WHERE club_id = 2 AND country_id = 1 AND age >= 18 ORDER BY value",
+      "SELECT * FROM players WHERE club_id = 2 AND country_id = 1 AND age >= 18 ORDER BY value LIMIT 1",
     ))!;
     await store.run(
       "INSERT INTO sell_on_clauses(player_id,beneficiary_id,owner_id,percentage) VALUES (?,3,2,15)",
@@ -796,7 +799,7 @@ describe("director decisions and ownership boundaries", () => {
 
   it("rejects invalid instalment structures before committing club terms", async () => {
     const player = (await store.get<Player>(
-      "SELECT TOP (1) * FROM players WHERE club_id = 2 AND age >= 18",
+      "SELECT * FROM players WHERE club_id = 2 AND age >= 18 ORDER BY id LIMIT 1",
     ))!;
     const deal = await enquire(store, player.id, "Permanent transfer");
     await negotiationStep(store, deal.id, "formalize");
@@ -921,7 +924,7 @@ describe("director decisions and ownership boundaries", () => {
 
   it("can counter incoming offers with binding club clauses before autonomous personal talks", async () => {
     const player = (await store.get<Player>(
-      "SELECT TOP (1) * FROM players WHERE club_id = 1 AND age_group = 'Senior'",
+      "SELECT * FROM players WHERE club_id = 1 AND age_group = 'Senior' ORDER BY id LIMIT 1",
     ))!;
     const data: NegotiationData = {
       workflowVersion: 2,
@@ -971,14 +974,14 @@ describe("director decisions and ownership boundaries", () => {
 
   it("can counter incoming loan offers with borrower wage-share ceilings", async () => {
     const player = (await store.get<Player>(
-      "SELECT TOP (1) * FROM players WHERE club_id = 1 AND age_group = 'Senior'",
+      "SELECT * FROM players WHERE club_id = 1 AND age_group = 'Senior' ORDER BY id LIMIT 1",
     ))!;
     await store.run(
       "UPDATE players SET available_loan = 1,value = 5000000,wage = 10000,ability = 70,position = 'CM',contract_end = '2028-06-30' WHERE id = ?",
       player.id,
     );
     await store.run("UPDATE players SET position = 'GK' WHERE club_id = 2 AND position = 'CM'");
-    await store.run("UPDATE TOP (5) players SET age_group = 'U19' WHERE club_id = 2 AND age_group = 'Senior'");
+    await store.run("UPDATE players SET age_group = 'U19' WHERE id IN (SELECT id FROM players WHERE club_id = 2 AND age_group = 'Senior' ORDER BY id LIMIT 5)");
     await store.run(
       "UPDATE clubs SET reputation = 60,transfer_budget = 2000000,wage_budget = 10000000,balance = 200000000 WHERE id = 2",
     );
@@ -1019,7 +1022,7 @@ describe("director decisions and ownership boundaries", () => {
 
   it("extends accepted incoming-offer deadlines for buyer-managed automation", async () => {
     const player = (await store.get<Player>(
-      "SELECT TOP (1) * FROM players WHERE club_id = 1 AND age_group = 'Senior'",
+      "SELECT * FROM players WHERE club_id = 1 AND age_group = 'Senior' ORDER BY id LIMIT 1",
     ))!;
     const data: NegotiationData = {
       workflowVersion: 2,
@@ -1052,7 +1055,7 @@ describe("director decisions and ownership boundaries", () => {
 
   async function agreedLoan(recall: boolean, type = "Development loan") {
     const player = (await store.get<Player>(
-      "SELECT TOP (1) * FROM players WHERE club_id = 1 AND age_group = ?",
+      "SELECT * FROM players WHERE club_id = 1 AND age_group = ? ORDER BY ability, id LIMIT 1",
       "Senior",
     ))!;
     await store.run(
@@ -1063,9 +1066,7 @@ describe("director decisions and ownership boundaries", () => {
     await keenToJoin(player.id, 2);
     await store.run("UPDATE clubs SET reputation = 70 WHERE id = 2");
     await store.run("UPDATE players SET position = 'GK' WHERE club_id = 2 AND position = 'CM'");
-    await store.run("UPDATE TOP (5) players SET age_group = 'U19' WHERE club_id = 2 AND age_group = 'Senior'");
-    const negotiation = await enquire(store, player.id, type, 2);
-    await negotiationStep(store, negotiation.id, "formalize");
+    await store.run("UPDATE players SET age_group = 'U19' WHERE id IN (SELECT id FROM players WHERE club_id = 2 AND age_group = 'Senior' ORDER BY id LIMIT 5)");
     const loanPlayer = await playerOf(store, player.id);
     const terms = {
       ...defaultLoanTerms(
@@ -1073,22 +1074,42 @@ describe("director decisions and ownership boundaries", () => {
         await clubOf(store, 2),
       ),
       recall,
-      duration: 365,
+      duration: type === "Two-year loan" ? 730 : 365,
       ...(type === "Loan with obligation" ? { optionFee: Math.round(loanPlayer.value * 0.95) } : {}),
       // Above the parent's 70% reference: no wage subsidy to price (transfer-finance.test covers the subsidy).
       salarySplit: 75,
       // A two-season loan's minutes bonus needs at least half of two seasons' league minutes.
       ...(type === "Two-year loan" ? { mandatoryMinutes: 3600 } : {}),
     };
-    const input = {
-      fee: 0,
-      wage: player.wage * 2,
-      years: 3,
-      role: "Regular starter",
-      promises: ["First-team minutes"],
+    // Clubs approach the director with loan offers (market-offers.ts); the director accepts this one.
+    const date = (await stateOf(store)).date;
+    const data: NegotiationData = {
+      workflowVersion: 2,
+      origin: "approach",
+      reason: { code: "development-pathway", text: "A development pathway with regular minutes." },
+      plannedStart: date,
+      log: [],
+      agent: JSON.parse(loanPlayer.profile).agent,
       terms,
+      loanReferenceSplit: terms.salarySplit,
+      years: 3,
+      role: terms.role,
+      promises: [],
     };
-    await negotiate(store, negotiation.id, input);
+    const negotiation = { id: Number(
+      (
+        await store.run(
+          "INSERT INTO negotiations(player_id,buying_club_id,selling_club_id,type,stage,asking_price,offer,wage,interest,created,deadline,data) VALUES (?,2,1,?,'Offer received',0,0,?,85,?,?,?)",
+          player.id,
+          type,
+          loanPlayer.wage,
+          date,
+          addDays(date, 7),
+          JSON.stringify(data),
+        )
+      ).lastInsertRowid,
+    ) };
+    expect((await negotiationStep(store, negotiation.id, "accept")).stage).toBe("Agent talks");
     for (const date of ["2026-07-02", "2026-07-03"]) {
       await store.setMeta("state", { ...(await stateOf(store)), date });
       await progressDealMilestones(
@@ -1186,7 +1207,8 @@ describe("director decisions and ownership boundaries", () => {
       date: "2027-07-04",
     });
     await store.run("UPDATE clubs SET transfer_budget = 0 WHERE id = 2");
-    await reviewLoans(store);
+    // Loans end in the daily expiry, before the weekly review.
+    await expireLoans(store);
     expect(
       (await store.get<Loan>("SELECT * FROM loans WHERE id = ?", loan.id))!
         .status,
@@ -1213,7 +1235,7 @@ describe("director decisions and ownership boundaries", () => {
     ).rejects.toThrow("not awaiting");
     const details = JSON.parse(completed.data) as NegotiationData;
     expect(details.log.map((entry) => entry.type)).toEqual(
-      expect.arrayContaining(["Enquiry", "Agent talks", "Medical"]),
+      expect.arrayContaining(["Club talks", "Agent talks", "Medical"]),
     );
     await expect(completeNegotiation(store, completed)).rejects.toThrow(
       "registration has changed",
@@ -1283,32 +1305,34 @@ describe("director decisions and ownership boundaries", () => {
 
   it("refuses international loans longer than one season but allows domestic two-season loans", async () => {
     const player = (await store.get<Player>(
-      "SELECT TOP (1) * FROM players WHERE club_id = 1 AND age_group = 'Senior' AND age >= 18 AND parent_club_id IS NULL ORDER BY id",
+      "SELECT * FROM players WHERE club_id = 1 AND age_group = 'Senior' AND age >= 18 AND parent_club_id IS NULL ORDER BY id LIMIT 1",
     ))!;
     await store.run("UPDATE players SET contract_end = '2030-06-30' WHERE id = ?", player.id);
-    const foreign = (await store.get<{ id: number }>(
-      "SELECT TOP (1) id FROM clubs WHERE country_id = 2 AND type = 'club' ORDER BY id",
-    ))!;
-    await expect(enquire(store, player.id, "Two-year loan", foreign.id)).rejects.toThrow("one year");
-    const domestic = await enquire(store, player.id, "Two-year loan", 2);
-    expect(JSON.parse(domestic.data).loanReferenceSplit).toBeGreaterThanOrEqual(25);
+    const terms = defaultLoanTerms(player, await clubOf(store, 2));
+    const pricing = { type: "Two-year loan", value: player.value, days: 730 };
+    expect(loanTermsIssue({ ...pricing, international: true }, { ...terms, mandatoryMinutes: 3600 })).toContain("one year");
+    expect(loanTermsIssue({ ...pricing, international: false }, { ...terms, mandatoryMinutes: 3600 })).toBeNull();
+    // The director no longer shops his players around: clubs approach him with loan offers instead.
+    await expect(enquire(store, player.id, "Two-year loan")).rejects.toThrow("contract renewal");
   });
 
-  it("does not grant English registration based on ability alone", async () => {
+  it("signs regardless of GBE and does not grant English registration based on ability alone", async () => {
     // Some v4 Spaniards hold British citizenship through a parent (domestic work rights), so skip them.
     const foreign = (
       await store.all<Player>(
-        "SELECT TOP (50) * FROM players WHERE country_id = 2 AND club_id IN (SELECT id FROM clubs WHERE country_id = 2) ORDER BY id",
+        "SELECT * FROM players WHERE country_id = 2 AND club_id IN (SELECT id FROM clubs WHERE country_id = 2) ORDER BY id LIMIT 50",
       )
     ).find((player) =>
       heldNationalities("ES", JSON.parse(player.profile)).every(
         (code) => !["GB", "IE"].includes(passportGroup(code)),
       ),
     )!;
+    const evidence = (await gbeAssessment(store, foreign.id)).points;
     await store.run(
       "UPDATE players SET ability = 99, potential = 99, wage = 5000, value = 1000000, age = 25 WHERE id = ?",
       foreign.id,
     );
+    expect((await gbeAssessment(store, foreign.id)).points).toBe(evidence);
     const enquiry = await enquire(store, foreign.id, "Permanent transfer");
     const data = JSON.parse(enquiry.data) as NegotiationData;
     data.medicalDate = "2026-07-01";
@@ -1333,14 +1357,21 @@ describe("director decisions and ownership boundaries", () => {
         "SELECT * FROM negotiations WHERE id = ?",
         enquiry.id,
       ))!.stage,
-    ).toBe("Rejected");
-    expect((await clubOf(store)).balance).toBe(balance);
-    expect((await playerOf(store, foreign.id)).club_id).toBe(foreign.club_id);
+    ).toBe("Completed");
+    expect((await clubOf(store)).balance).toBeLessThan(balance);
+    expect((await playerOf(store, foreign.id)).club_id).toBe((await stateOf(store)).clubId);
+    // Registration follows the GBE evidence (never the rating); a refusal leaves him signed for friendlies only.
+    const { association, contracted } = await playerEligibility(store, foreign.id);
+    expect(contracted).toBe(true);
+    const outcome = association.gbe?.outcome;
+    expect(association.status).toBe(
+      !outcome || ["auto_pass", "pass", "exempt"].includes(outcome) ? "registered" : outcome === "no_data" ? "pending" : "refused",
+    );
   });
 
   it("cannot skip enquiry, agreement or registration stages", async () => {
     const target = (await store.get<Player>(
-      "SELECT TOP (1) * FROM players WHERE club_id = 2",
+      "SELECT * FROM players WHERE club_id = 2 ORDER BY id LIMIT 1",
     ))!;
     const deal = await enquire(store, target.id, "Permanent transfer");
     const terms = {

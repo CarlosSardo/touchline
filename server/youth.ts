@@ -234,11 +234,11 @@ interface Member {
   role: string;
   contract_status: string | null;
   injury_until?: string | null;
-  /** profile.identity.nationalities (JSON), for quota and passport checks. */
-  citizenships?: string | null;
-  /** profile.identity.birthCountryId and profile.familyMove (JSON): the family's nation, for minors' registrations. */
+  /** profile.identity.nationalities, for quota and passport checks. */
+  citizenships?: { code: string }[] | null;
+  /** profile.identity.birthCountryId and profile.familyMove: the family's nation, for minors' registrations. */
   birth_country_id?: number | null;
-  family_move?: string | null;
+  family_move?: PlayerProfile["familyMove"] | null;
   age: number;
   locked: boolean;
 }
@@ -253,25 +253,43 @@ interface Available extends Member {
 
 type Reason = "retired" | "left-football";
 
+/** An integer from a JSON text value, or NULL when it is missing or not an integer. */
+const jsonInteger = (text: string) => `(CASE WHEN ${text} ~ '^-?[0-9]+$' THEN (${text})::integer END)`;
+
+/** A JSON object member as jsonb, `{}` when it is missing or not an object. */
+const jsonObject = (member: string) => `(CASE WHEN jsonb_typeof(${member}) = 'object' THEN ${member} ELSE '{}'::jsonb END)`;
+
+/** A JSON text column rewritten by `edit`, which sees it parsed once as `doc`. */
+const editJson = (column: string, edit: string) =>
+  `(SELECT (${edit})::text FROM (SELECT ${column}::jsonb AS doc OFFSET 0) AS parsed)`;
+
 /** Players leaving the modeled game (retired or left football, `profile.retirement` for Data's retention). */
 const LEAVE_ASSIGNMENTS =
-  "club_id = NULL, squad_club_id = NULL, wage = 0, value = 0, role = 'Retired', listed = 0, available_loan = 0, shortlisted = 0, profile = JSON_MODIFY(target.profile,'$.retirement',JSON_QUERY(changes.retirement))";
+  "club_id = NULL, squad_club_id = NULL, wage = 0, value = 0, role = 'Retired', listed = 0, available_loan = 0, shortlisted = 0, profile = jsonb_set(target.profile::jsonb, '{retirement}', changes.retirement::jsonb)::text";
 
+type ColumnType = "integer" | "text" | "double precision";
+
+/** Per-player changes, one `UPDATE ... FROM unnest(...)` per 5 000 rows; `columns` (with `id`) are visible as `changes.*`. */
 async function updatePlayers(
   store: Store,
-  rows: Record<string, string | number | null>[],
-  columns: string,
+  rows: readonly Record<string, string | number | null>[],
+  columns: Record<string, ColumnType>,
   assignments: string,
 ) {
-  for (let offset = 0; offset < rows.length; offset += 1000)
+  const names = Object.keys(columns);
+  for (let offset = 0; offset < rows.length; offset += 5000) {
+    const batch = rows.slice(offset, offset + 5000);
     await store.run(
-      `UPDATE target SET ${assignments} FROM players AS target JOIN OPENJSON(?) WITH (${columns}) AS changes ON changes.id = target.id`,
-      JSON.stringify(rows.slice(offset, offset + 1000)),
+      `UPDATE players AS target SET ${assignments}
+       FROM unnest(${names.map((name) => `?::${columns[name]}[]`).join(", ")}) AS changes(${names.join(", ")})
+       WHERE changes.id = target.id`,
+      ...names.map((name) => batch.map((row) => row[name] ?? null)),
     );
+  }
 }
 
 const CLUB_ROWS =
-  "SELECT clubs.id,clubs.name,clubs.type,clubs.parent_id,clubs.country_id,clubs.league_id,clubs.reputation,clubs.academy,clubs.facilities,clubs.balance,clubs.wage_budget,clubs.philosophy,clubs.data,countries.code,countries.reputation AS nation_level,leagues.tier,(SELECT code FROM countries AS league_country WHERE league_country.id = leagues.country_id) AS league_code,coalesce(leagues.reputation,countries.reputation) AS league_reputation,coalesce((SELECT max(ability) FROM staff WHERE staff.club_id = clubs.id AND staff.role = 'Head of youth'),50) AS head_of_youth,coalesce((SELECT avg(CONVERT(float,ability)) FROM staff WHERE staff.club_id = clubs.id AND staff.role = 'Scout'),50) AS recruitment FROM clubs JOIN countries ON countries.id = clubs.country_id LEFT JOIN leagues ON leagues.id = clubs.league_id";
+  "SELECT clubs.id,clubs.name,clubs.type,clubs.parent_id,clubs.country_id,clubs.league_id,clubs.reputation,clubs.academy,clubs.facilities,clubs.balance,clubs.wage_budget,clubs.philosophy,clubs.data,countries.code,countries.reputation AS nation_level,leagues.tier,(SELECT code FROM countries AS league_country WHERE league_country.id = leagues.country_id) AS league_code,coalesce(leagues.reputation,countries.reputation) AS league_reputation,coalesce((SELECT max(ability) FROM staff WHERE staff.club_id = clubs.id AND staff.role = 'Head of youth'),50) AS head_of_youth,coalesce((SELECT avg(ability) FROM staff WHERE staff.club_id = clubs.id AND staff.role = 'Scout'),50) AS recruitment FROM clubs JOIN countries ON countries.id = clubs.country_id LEFT JOIN leagues ON leagues.id = clubs.league_id";
 
 interface CreateContext {
   people: PeopleContext;
@@ -436,7 +454,7 @@ export async function runYouthIntake(
 
   // Youth registrations carry on until a club releases the player (amateur registrations for every club).
   await store.run(
-    "UPDATE players SET contract_end = ? WHERE club_id IS NOT NULL AND parent_club_id IS NULL AND role != 'Retired' AND age_group IN ('U17','U19') AND contract_end < ? AND (coalesce(JSON_VALUE(profile,'$.contract.status'),'professional') = 'amateur' OR club_id NOT IN (SELECT id FROM clubs WHERE id = ? OR parent_id = ?))",
+    "UPDATE players SET contract_end = ? WHERE club_id IS NOT NULL AND parent_club_id IS NULL AND role != 'Retired' AND age_group IN ('U17','U19') AND contract_end < ? AND (profile::jsonb #>> '{contract,status}' = 'amateur' OR club_id NOT IN (SELECT id FROM clubs WHERE id = ? OR parent_id = ?))",
     `${season + 1}-06-30`,
     date,
     state.clubId,
@@ -452,7 +470,11 @@ export async function runYouthIntake(
   );
   const members = (
     await store.all<Member>(
-      "SELECT id,club_id,squad_club_id,parent_club_id,country_id,age_group,position,ability,potential,birth_date,contract_end,wage,role,injury_until,JSON_VALUE(profile,'$.contract.status') AS contract_status,JSON_QUERY(profile,'$.identity.nationalities') AS citizenships,TRY_CONVERT(int,JSON_VALUE(profile,'$.identity.birthCountryId')) AS birth_country_id,JSON_QUERY(profile,'$.familyMove') AS family_move FROM players WHERE club_id IS NOT NULL AND role != 'Retired'",
+      `SELECT id,club_id,squad_club_id,parent_club_id,country_id,age_group,position,ability,potential,birth_date,contract_end,wage,role,injury_until,
+         doc #>> '{contract,status}' AS contract_status,doc #> '{identity,nationalities}' AS citizenships,
+         ${jsonInteger("doc #>> '{identity,birthCountryId}'")} AS birth_country_id,doc -> 'familyMove' AS family_move
+       FROM players CROSS JOIN LATERAL (SELECT players.profile::jsonb AS doc OFFSET 0) AS parsed
+       WHERE club_id IS NOT NULL AND role != 'Retired'`,
     )
   ).map((member) => ({
     ...member,
@@ -492,7 +514,7 @@ export async function runYouthIntake(
   const nationalitiesOf = (member: Member) => {
     let held = heldBy.get(member.id);
     if (!held) {
-      const extra = JSON.parse(member.citizenships || "[]") as { code: string }[];
+      const extra = member.citizenships ?? [];
       held = heldNationalities(people.byId.get(member.country_id)?.code ?? "", { identity: { nationalities: extra } } as Pick<PlayerProfile, "identity">).filter(Boolean);
       heldBy.set(member.id, held);
     }
@@ -975,12 +997,7 @@ export async function runYouthIntake(
 
   // 7. Persist.
   const retirementRows = [...leavers].map(([id, reason]) => ({ id, retirement: JSON.stringify({ season: season - 1, date, reason }) }));
-  await updatePlayers(
-    store,
-    retirementRows,
-    "id int, retirement nvarchar(max)",
-    LEAVE_ASSIGNMENTS,
-  );
+  await updatePlayers(store, retirementRows, { id: "integer", retirement: "text" }, LEAVE_ASSIGNMENTS);
   await updatePlayers(
     store,
     [...changed.values()].map((member) => ({
@@ -992,46 +1009,69 @@ export async function runYouthIntake(
       wage: member.wage,
       role: member.role,
     })),
-    "id int, club_id int, squad_club_id int, age_group nvarchar(10), contract_end nvarchar(10), wage float, role nvarchar(40)",
+    {
+      id: "integer",
+      club_id: "integer",
+      squad_club_id: "integer",
+      age_group: "text",
+      contract_end: "text",
+      wage: "double precision",
+      role: "text",
+    },
     "club_id = changes.club_id, squad_club_id = changes.squad_club_id, parent_club_id = CASE WHEN changes.club_id IS NULL THEN NULL ELSE target.parent_club_id END, age_group = changes.age_group, contract_end = changes.contract_end, wage = changes.wage, role = changes.role, listed = CASE WHEN changes.club_id IS NULL OR changes.club_id != coalesce(target.club_id,0) THEN 0 ELSE target.listed END, available_loan = CASE WHEN changes.club_id IS NULL OR changes.club_id != coalesce(target.club_id,0) THEN 0 ELSE target.available_loan END",
   );
   await updatePlayers(
     store,
     [...releasedFrom].map(([id, association]) => ({ id, association })),
-    "id int, association int",
-    "profile = JSON_MODIFY(JSON_MODIFY(target.profile,'$.registration',JSON_QUERY(coalesce(JSON_QUERY(target.profile,'$.registration'),N'{}'))),'$.registration.lastAssociationId',changes.association)",
+    { id: "integer", association: "integer" },
+    `profile = ${editJson(
+      "target.profile",
+      `jsonb_set(doc, '{registration}', ${jsonObject("doc -> 'registration'")} || jsonb_build_object('lastAssociationId', changes.association))`,
+    )}`,
   );
   await updatePlayers(
     store,
     [...professional].map((id) => ({ id, date })),
-    "id int, date nvarchar(10)",
-    "profile = JSON_MODIFY(JSON_MODIFY(JSON_MODIFY(target.profile,'$.contract.status','professional'),'$.contract.futureProfessionalContract',CAST(0 AS bit)),'$.contract.signedDate',changes.date)",
+    { id: "integer", date: "text" },
+    `profile = ${editJson(
+      "target.profile",
+      `jsonb_set(doc, '{contract}', ${jsonObject("doc -> 'contract'")} ||
+        jsonb_build_object('status', 'professional', 'futureProfessionalContract', false, 'signedDate', changes.date))`,
+    )}`,
   );
   await updatePlayers(
     store,
     [...clearHome].map((id) => ({ id })),
-    "id int",
-    "profile = JSON_MODIFY(target.profile,'$.homeBased',NULL)",
+    { id: "integer" },
+    "profile = (target.profile::jsonb - 'homeBased')::text",
   );
   await updatePlayers(
     store,
     [...joinPool].map(([id, countryId]) => ({ id, home: JSON.stringify({ countryId, since: date }) })),
-    "id int, home nvarchar(200)",
-    "role = 'Home-based', profile = JSON_MODIFY(target.profile,'$.homeBased',JSON_QUERY(changes.home))",
+    { id: "integer", home: "text" },
+    "role = 'Home-based', profile = jsonb_set(target.profile::jsonb, '{homeBased}', changes.home::jsonb)::text",
   );
   await store.run(
-    "UPDATE players SET contract_end = ? WHERE club_id IS NULL AND role != 'Retired' AND JSON_VALUE(profile,'$.homeBased.countryId') IS NOT NULL AND contract_end < ?",
+    "UPDATE players SET contract_end = ? WHERE club_id IS NULL AND role != 'Retired' AND contract_end < ? AND profile::jsonb #>> '{homeBased,countryId}' IS NOT NULL",
     `${season + 1}-06-30`,
     `${season + 1}-06-30`,
   );
   await insertPlayers(store, created);
-  for (let offset = 0; offset < transfers.length; offset += 1000)
+  for (let offset = 0; offset < transfers.length; offset += 5000) {
+    const batch = transfers.slice(offset, offset + 5000);
+    // A released player's transfer omits "from" rather than storing null.
     await store.run(
-      "INSERT INTO history(season,entity_type,entity_id,date,data) SELECT ?,'transfer',moves.id,?,(SELECT players.name,moves.[from],moves.[to],clubs.name AS club,0 AS fee,'Squad registration' AS type FOR JSON PATH,WITHOUT_ARRAY_WRAPPER) FROM OPENJSON(?) WITH (id int, [from] int, [to] int) AS moves JOIN players ON players.id = moves.id JOIN clubs ON clubs.id = moves.[to]",
+      `INSERT INTO history(season,entity_type,entity_id,date,data)
+       SELECT ?::integer,'transfer',moves.id,?::text,json_strip_nulls(json_build_object('name',players.name,'from',moves.from_id,'to',moves.to_id,'club',clubs.name,'fee',0,'type','Squad registration'))::text
+       FROM unnest(?::int[], ?::int[], ?::int[]) AS moves(id, from_id, to_id)
+       JOIN players ON players.id = moves.id JOIN clubs ON clubs.id = moves.to_id`,
       season,
       date,
-      JSON.stringify(transfers.slice(offset, offset + 1000)),
+      batch.map((move) => move.id),
+      batch.map((move) => move.from),
+      batch.map((move) => move.to),
     );
+  }
   await store.setMeta("youthIntake", {
     season,
     date,
@@ -1098,7 +1138,7 @@ export function minorMayJoin(
   if (member.age >= 18) return true;
   const family = profile ?? {
     identity: { birthCountryId: member.birth_country_id ?? undefined },
-    ...(member.family_move ? { familyMove: JSON.parse(member.family_move) as PlayerProfile["familyMove"] } : {}),
+    ...(member.family_move ? { familyMove: member.family_move } : {}),
   };
   const residence = familyResidence(family, member.birth_date, date, (id) => people.byId.get(id)?.code);
   return minorPresenceLegal({ age: member.age, nationalities, destination: registration, residence });
@@ -1149,14 +1189,15 @@ async function freeAgentDepartures(store: Store, state: Pick<GameState, "date" |
     )).map((row) => [row.country_id, row.reputation]),
   );
   const unsigned = await store.all<{ id: number; age: number; ability: number; potential: number; contract_end: string; association: number }>(
-    `SELECT id,age,ability,potential,contract_end,coalesce(TRY_CONVERT(int,JSON_VALUE(profile,'$.registration.lastAssociationId')),country_id) AS association FROM players WHERE club_id IS NULL AND role = 'Free agent' AND contract_end <= ? AND NOT EXISTS (SELECT 1 FROM negotiations WHERE negotiations.player_id = players.id AND stage NOT IN ${TERMINAL_STAGES})`,
+    `SELECT id,age,ability,potential,contract_end,coalesce(${jsonInteger("doc #>> '{registration,lastAssociationId}'")},country_id) AS association
+     FROM players CROSS JOIN LATERAL (SELECT players.profile::jsonb AS doc OFFSET 0) AS parsed WHERE club_id IS NULL AND role = 'Free agent' AND contract_end <= ? AND NOT EXISTS (SELECT 1 FROM negotiations WHERE negotiations.player_id = players.id AND stage NOT IN ${TERMINAL_STAGES})`,
     closedAt,
   );
   const leaving = unsigned.filter((player) =>
     leavesFreeAgency(player, leaveThreshold(weakest.get(player.association) ?? 0), daysBetween(player.contract_end, state.date)),
   );
   const retirement = JSON.stringify({ season: state.season, date: state.date, reason: "left-football" });
-  await updatePlayers(store, leaving.map(({ id }) => ({ id, retirement })), "id int, retirement nvarchar(max)", LEAVE_ASSIGNMENTS);
+  await updatePlayers(store, leaving.map(({ id }) => ({ id, retirement })), { id: "integer", retirement: "text" }, LEAVE_ASSIGNMENTS);
   return leaving.length;
 }
 
@@ -1183,7 +1224,7 @@ interface Promotable {
 export async function maintainSquads(store: Store, state: Pick<GameState, "date" | "season" | "clubId">) {
   const result = { moved: 0, left: 0, promoted: 0, signed: 0, registered: 0 };
   if (state.date >= `${state.season + 1}-06-01`) return result;
-  const last = await store.get<{ value: string }>("SELECT [value] FROM meta WHERE [key] = 'youthSquadCheck'");
+  const last = await store.get<{ value: string }>("SELECT value FROM meta WHERE key = 'youthSquadCheck'");
   const previous = last ? (JSON.parse(last.value) as { date: string; season: number; totals?: typeof result }) : undefined;
   if (previous && previous.season === state.season && daysBetween(previous.date, state.date) < 7) return result;
   result.moved = (await moveOverageYouth(store, state.season, state.clubId, false)).moved;
@@ -1274,7 +1315,7 @@ export async function maintainSquads(store: Store, state: Pick<GameState, "date"
     if (!buyer) return false;
     const level = buyer.reputation * 0.66 + 22;
     const candidates = await store.all<Player>(
-      `SELECT TOP (8) * FROM players WHERE club_id IS NULL AND ${pool ? "role = 'Home-based'" : "role = 'Free agent' AND contract_end <= ?"} AND age_group = 'Senior' AND age BETWEEN 18 AND ? AND ability BETWEEN ? AND ? AND (injury_until IS NULL OR injury_until <= ?) AND ${need === "GK" ? "position = 'GK'" : "position != 'GK'"} AND NOT EXISTS (SELECT 1 FROM negotiations WHERE negotiations.player_id = players.id AND stage NOT IN ${TERMINAL_STAGES}) ORDER BY CASE WHEN position = ? THEN 0 ELSE 1 END,abs(ability - ?),id`,
+      `SELECT * FROM players WHERE club_id IS NULL AND ${pool ? "role = 'Home-based'" : "role = 'Free agent' AND contract_end <= ?"} AND age_group = 'Senior' AND age BETWEEN 18 AND ? AND ability BETWEEN ? AND ? AND (injury_until IS NULL OR injury_until <= ?) AND ${need === "GK" ? "position = 'GK'" : "position != 'GK'"} AND NOT EXISTS (SELECT 1 FROM negotiations WHERE negotiations.player_id = players.id AND stage NOT IN ${TERMINAL_STAGES}) ORDER BY CASE WHEN position = ? THEN 0 ELSE 1 END,abs(ability - ?),id LIMIT 8`,
       ...(pool ? [] : [window ? state.date : closedAt]),
       maxAge,
       level - 10,
@@ -1334,7 +1375,7 @@ export async function maintainSquads(store: Store, state: Pick<GameState, "date"
   await updatePlayers(
     store,
     promotions,
-    "id int, club_id int, age_group nvarchar(10), squad_club_id int, role nvarchar(40)",
+    { id: "integer", club_id: "integer", age_group: "text", squad_club_id: "integer", role: "text" },
     "club_id = changes.club_id, age_group = changes.age_group, squad_club_id = changes.squad_club_id, role = changes.role",
   );
   if (short.length) {
@@ -1342,8 +1383,8 @@ export async function maintainSquads(store: Store, state: Pick<GameState, "date"
     const settings = await store.meta<Settings>("settings");
     const rows = new Map(
       (await store.all<ClubRow>(
-        `${CLUB_ROWS} WHERE clubs.id IN (SELECT CAST([value] AS int) FROM OPENJSON(?)) ORDER BY clubs.id`,
-        JSON.stringify([...new Set(short.map((entry) => entry.clubId))]),
+        `${CLUB_ROWS} WHERE clubs.id = ANY(?::int[]) ORDER BY clubs.id`,
+        [...new Set(short.map((entry) => entry.clubId))],
       )).map((club) => [club.id, club]),
     );
     const context: CreateContext = {
@@ -1374,7 +1415,14 @@ export async function maintainSquads(store: Store, state: Pick<GameState, "date"
 /** Fee-free professional registration of a club-less player at `buyer`, recorded as a free transfer. */
 async function registerFreeAgent(store: Store, state: Pick<GameState, "date" | "season">, player: Player, buyer: Club, wage: number, years: number) {
   const moved = await store.run(
-    "UPDATE players SET club_id = ?, squad_club_id = NULL, parent_club_id = NULL, wage = ?, contract_end = ?, role = 'Squad player', listed = 0, available_loan = 0, profile = JSON_MODIFY(JSON_MODIFY(JSON_MODIFY(JSON_MODIFY(profile,'$.homeBased',NULL),'$.contract.status','professional'),'$.registration',JSON_QUERY(coalesce(JSON_QUERY(profile,'$.registration'),N'{}'))),'$.registration.lastAssociationId',?) WHERE id = ? AND club_id IS NULL",
+    `UPDATE players SET club_id = ?, squad_club_id = NULL, parent_club_id = NULL, wage = ?, contract_end = ?, role = 'Squad player', listed = 0, available_loan = 0,
+       profile = ${editJson(
+         "players.profile",
+         `(doc - 'homeBased') || jsonb_build_object(
+           'contract', ${jsonObject("doc -> 'contract'")} || jsonb_build_object('status', 'professional'),
+           'registration', ${jsonObject("doc -> 'registration'")} || jsonb_build_object('lastAssociationId', ?::integer))`,
+       )}
+     WHERE id = ? AND club_id IS NULL`,
     buyer.id,
     wage,
     `${state.season + years}-06-30`,
@@ -1405,7 +1453,7 @@ export async function signClublessPlayers(
 ): Promise<number> {
   const maxId = (await store.get<{ id: number }>("SELECT max(id) AS id FROM players"))?.id ?? 0;
   const candidates = await store.all<Player>(
-    `SELECT TOP (${Math.max(1, Math.round(limit) * 4)}) * FROM players WHERE club_id IS NULL AND role != 'Retired' AND age_group = 'Senior' AND age BETWEEN 18 AND 33 AND id >= ? AND (injury_until IS NULL OR injury_until <= ?) AND NOT EXISTS (SELECT 1 FROM negotiations WHERE negotiations.player_id = players.id AND stage NOT IN ${TERMINAL_STAGES}) ORDER BY id`,
+    `SELECT * FROM players WHERE club_id IS NULL AND role != 'Retired' AND age_group = 'Senior' AND age BETWEEN 18 AND 33 AND id >= ? AND (injury_until IS NULL OR injury_until <= ?) AND NOT EXISTS (SELECT 1 FROM negotiations WHERE negotiations.player_id = players.id AND stage NOT IN ${TERMINAL_STAGES}) ORDER BY id LIMIT ${Math.max(1, Math.round(limit) * 4)}`,
     Math.floor(random() * maxId),
     state.date,
   );
@@ -1414,7 +1462,7 @@ export async function signClublessPlayers(
     if (signed >= limit) break;
     // Club level ≈ reputation × 0.66 + 22 (the generation anchor): the player fits clubs 6 above to 10 below.
     const buyers = await store.all<Club>(
-      "SELECT TOP (6) * FROM clubs WHERE type = 'club' AND id != ? AND reputation BETWEEN ? AND ? AND (SELECT count(*) FROM players WHERE players.club_id = clubs.id AND players.squad_club_id IS NULL AND age_group = 'Senior' AND role != 'Retired') < ? ORDER BY (SELECT count(*) FROM players WHERE players.club_id = clubs.id AND players.position = ? AND age_group = 'Senior' AND role != 'Retired'),abs(reputation - ?),id",
+      "SELECT * FROM clubs WHERE type = 'club' AND id != ? AND reputation BETWEEN ? AND ? AND (SELECT count(*) FROM players WHERE players.club_id = clubs.id AND players.squad_club_id IS NULL AND age_group = 'Senior' AND role != 'Retired') < ? ORDER BY (SELECT count(*) FROM players WHERE players.club_id = clubs.id AND players.position = ? AND age_group = 'Senior' AND role != 'Retired'),abs(reputation - ?),id LIMIT 6",
       state.clubId,
       (player.ability - 6 - 22) / 0.66,
       (player.ability + 10 - 22) / 0.66,

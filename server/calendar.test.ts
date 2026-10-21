@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { Store } from "./db.ts";
 import { generateWorld, planWorld } from "./world.ts";
 import {
@@ -221,7 +221,7 @@ describe("football calendar", () => {
 
   it("creates a double round-robin with no self-matches or domestic matches in international breaks", async () => {
     const premier = (await store.get<League>(
-      "SELECT * FROM leagues WHERE JSON_VALUE(data,'$.catalogKey') = 'L:EN:1'",
+      "SELECT * FROM leagues WHERE data::jsonb ->> 'catalogKey' = 'L:EN:1'",
     ))!;
     const fixtures = await store.all<Fixture>(
       "SELECT * FROM fixtures WHERE league_id = ? AND stage = 'League'",
@@ -293,7 +293,7 @@ describe("football calendar", () => {
       }[];
       const clubs = (
         await store.all<{ club_id: number }>(
-          "SELECT standings.club_id FROM standings JOIN leagues ON leagues.id = standings.league_id WHERE leagues.id = ? OR JSON_VALUE(leagues.data,'$.qualificationFor') = ?",
+          "SELECT standings.club_id FROM standings JOIN leagues ON leagues.id = standings.league_id WHERE leagues.id = ? OR leagues.data::jsonb ->> 'qualificationFor' = ?::text",
           main.id,
           main.id,
         )
@@ -330,7 +330,7 @@ describe("football calendar", () => {
       ))!.date;
       if (latest > lastDate) lastDate = latest;
       await store.run(
-        "UPDATE fixtures SET status = 'played', home_goals = CASE JSON_VALUE(data,'$.tie.leg') WHEN 2 THEN 0 ELSE 1 END, away_goals = 0 WHERE league_id = ?",
+        "UPDATE fixtures SET status = 'played', home_goals = CASE data::jsonb #>> '{tie,leg}' WHEN '2' THEN 0 ELSE 1 END, away_goals = 0 WHERE league_id = ?",
         qualifying.id,
       );
       await progressCompetitions(store, lastDate);
@@ -358,12 +358,12 @@ describe("football calendar", () => {
       `WITH appearances AS (
          SELECT fixtures.id,fixtures.date,coalesce(leagues.age_group,'Senior') AS age_group,teams.club_id
          FROM fixtures LEFT JOIN leagues ON leagues.id = fixtures.league_id
-         CROSS APPLY (VALUES (fixtures.home_id),(fixtures.away_id)) AS teams(club_id)
+         CROSS JOIN LATERAL (VALUES (fixtures.home_id),(fixtures.away_id)) AS teams(club_id)
        ), ordered AS (
          SELECT id,date,LAG(date) OVER (PARTITION BY club_id,age_group ORDER BY date,id) AS previous_date
          FROM appearances
        )
-       SELECT TOP (1) id FROM ordered WHERE DATEDIFF(day,previous_date,date) < 3`,
+       SELECT id FROM ordered WHERE date::date - previous_date::date < 3 LIMIT 1`,
     );
     expect(collisions).toHaveLength(0);
   });
@@ -423,7 +423,7 @@ describe("football calendar", () => {
     const season = (await store.meta<{ season: number }>("state")).season;
     expect(
       await store.all(
-        "SELECT TOP (5) id,date,league_id FROM fixtures WHERE season = ? AND (date < ? OR date > ?)",
+        "SELECT id,date,league_id FROM fixtures WHERE season = ? AND (date < ? OR date > ?) LIMIT 5",
         season,
         `${season}-07-01`,
         `${season + 1}-06-30`,
@@ -454,7 +454,7 @@ describe("football calendar", () => {
     expect(first.length).toBeGreaterThan(0);
     expect(first.every((fixture) => JSON.parse(fixture.data).qualifyingStage === "q1")).toBe(true);
     await store.run(
-      "UPDATE fixtures SET status = 'played', home_goals = CASE JSON_VALUE(data,'$.tie.leg') WHEN 2 THEN 0 ELSE 1 END, away_goals = 0 WHERE league_id = ? AND round = 1",
+      "UPDATE fixtures SET status = 'played', home_goals = CASE data::jsonb #>> '{tie,leg}' WHEN '2' THEN 0 ELSE 1 END, away_goals = 0 WHERE league_id = ? AND round = 1",
       europa.id,
     );
     await progressCompetitions(store, "2026-10-02");
@@ -583,6 +583,37 @@ describe("competition-specific knockout regulations", () => {
     );
   });
 
+  it("schedules a cup round from its own clubs' fixtures only, still keeping their recovery days", async () => {
+    const id = Number(
+      (
+        await store.run(
+          "INSERT INTO leagues(name,confederation,tier,age_group,kind,reputation,format,data) VALUES ('Lazy batch cup','UEFA',0,'Senior','continental',80,'Knockout',?)",
+          JSON.stringify({ spec: COMPETITIONS.find((competition) => competition.name === "UEFA Conference League") }),
+        )
+      ).lastInsertRowid,
+    );
+    // Clubs 21 and 22 already play on the round's date: the tie must move at least three days on.
+    await store.run(
+      "INSERT INTO fixtures(league_id,home_id,away_id,date,season,round,stage,seed,status,data) VALUES (NULL,21,22,'2027-03-10',2026,1,'Friendly','lazy-batch','scheduled','{}')",
+    );
+    const queries: string[] = [];
+    const all = store.all.bind(store);
+    const spy = vi.spyOn(store, "all").mockImplementation((sql, ...params) => {
+      queries.push(sql);
+      return all(sql, ...params);
+    });
+    try {
+      await scheduleKnockout(store, id, [21, 22], 2026, "2027-03-10");
+    } finally {
+      spy.mockRestore();
+    }
+    const reads = queries.filter((sql) => sql.includes("FROM fixtures LEFT JOIN leagues"));
+    expect(reads).toHaveLength(1);
+    expect(reads[0]).toContain("fixtures.home_id = ANY(");
+    const [final] = await store.all<Fixture>("SELECT * FROM fixtures WHERE league_id = ?", id);
+    expect(final.date >= "2027-03-13").toBe(true);
+  });
+
   it("starts the knockout at once when a small league phase leaves one club for the play-offs", async () => {
     const spec = COMPETITIONS.find((competition) => competition.name === "UEFA Conference League")!;
     const id = Number(
@@ -690,7 +721,7 @@ describe("world v4 domestic formats and cups (structureOnly)", () => {
   let season: number;
   const leagueOf = async (catalogKey: string) =>
     (await store.get<League>(
-      "SELECT * FROM leagues WHERE JSON_VALUE(data,'$.catalogKey') = ?",
+      "SELECT * FROM leagues WHERE data::jsonb ->> 'catalogKey' = ?",
       catalogKey,
     ))!;
   const perClub = (fixtures: Fixture[]) => {
@@ -782,7 +813,7 @@ describe("world v4 domestic formats and cups (structureOnly)", () => {
       await progressCompetitions(store, `${season + 1}-05-20`);
     }
     const playoff = await store.get<League>(
-      "SELECT * FROM leagues WHERE kind = 'cup' AND country_id = ? AND JSON_VALUE(data,'$.key') = '1:0'",
+      "SELECT * FROM leagues WHERE kind = 'cup' AND country_id = ? AND data::jsonb ->> 'key' = '1:0'",
       tiers[0].country_id,
     );
     expect(JSON.parse(playoff!.data)).toMatchObject({ season, leagueId: tiers[0].id });

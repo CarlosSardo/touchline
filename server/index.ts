@@ -17,12 +17,7 @@ async function openDatabase(configuration: ApiConfiguration): Promise<AppDatabas
     if (configuration.requireAuth) {
       phase = "account registry validation";
       const accounts = new Accounts(store, "accounts", {
-        limits: {
-          maxPlayers: configuration.maxPlayers,
-          sizeLimitGb: configuration.inviteDbSizeLimitGb,
-          ownerObjectId: configuration.ownerObjectId,
-          ownerEmail: configuration.ownerEmail,
-        },
+        limits: { maxPlayers: configuration.maxPlayers, sizeLimitGb: configuration.dbSizeLimitGb },
       });
       await accounts.assertReady();
       return { store, accounts };
@@ -44,8 +39,11 @@ async function start() {
   let configuration: ReturnType<typeof readApiConfiguration>;
   try {
     configuration = readApiConfiguration();
-    if (configuration.hosted && configuration.emailTransport === "disabled")
-      console.warn("Touchline: hosted email delivery is disabled; invite email flags will remain unset until SMTP is configured.");
+    for (const warning of configuration.warnings) console.warn(`Touchline: ${warning}`);
+    if (configuration.auth)
+      console.log(
+        `Touchline: OpenID Connect sign-in via ${configuration.auth.issuer} (redirect URI ${configuration.auth.redirectUri}); admin group "${configuration.adminGroup}"; trusting proxies: ${String(configuration.trustProxy)}.`,
+      );
   } catch (error) {
     console.error(
       `Touchline: ${error instanceof Error ? error.message : "Invalid API configuration."}`,
@@ -70,7 +68,7 @@ async function start() {
       });
       console.log("Touchline maintenance mode: SQL is not opened; game access is disabled.");
     } else {
-      // Opening SQL at boot would resume the serverless database for every stray request that starts a replica.
+      // PostgreSQL may still be starting next to the app after a reboot; requests that need SQL wait and retry.
       database = openOnFirstUse(() => openDatabase(configuration), {
         retryable: (error) => !(error instanceof StartupCheckError),
       });
