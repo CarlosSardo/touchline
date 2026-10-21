@@ -102,6 +102,12 @@ docker compose --profile https up -d --wait
 
 Invited players' worlds are created empty on first sign-in, and each player starts a career in the app. Startup never migrates or seeds.
 
+### Existing PostgreSQL and reverse proxy
+
+If the host already runs PostgreSQL 18 in Docker and a reverse proxy, run only the app with [deploy/compose.external-postgres.yaml](deploy/compose.external-postgres.yaml): copy it as `compose.yaml` next to a `.env`, create the database and an owner role for it (no superuser rights needed), and set `POSTGRES_NETWORK` to the Docker network PostgreSQL is on (default `postgres`) and `TOUCHLINE_PORT` to the loopback port your proxy forwards to. Build the image on the Pi with `docker buildx build --load -t local/touchline:latest .` (Ubuntu's `docker.io` package has no buildx: install `docker-buildx`, or the static binary into `~/.docker/cli-plugins/`) and set `TOUCHLINE_IMAGE=local/touchline:latest`. Since the role is only the database owner, tune it per database, for example `ALTER DATABASE touchline SET random_page_cost = 1.1`, `effective_io_concurrency = 200`, `work_mem = '16MB'`, `jit = off`.
+
+On a fresh registry the owner signs in through the invite flow: request an invite for `OWNER_EMAIL` at `/invite`, accept it at `/admin/invites` (the owner and `APPROVER_EMAIL` may review while signed in) and sign in again to claim the world.
+
 ### HTTPS and reverse proxy
 
 `docker compose --profile https up -d` starts Caddy, which needs `TOUCHLINE_DOMAIN` resolving to your public IP and ports 80 and 443 forwarded to the Pi. Without port forwarding, keep the app on `127.0.0.1:3001` and publish it with a tunnel (for example Cloudflare Tunnel or Tailscale Funnel) or your own proxy; set `APP_ORIGIN` to the public HTTPS origin and `TRUST_PROXY` to the number of proxies in front of the app. Sign-in needs HTTPS. Never publish PostgreSQL.

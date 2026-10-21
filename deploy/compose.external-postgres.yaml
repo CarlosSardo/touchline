@@ -1,0 +1,47 @@
+# Touchline app only, for a host that already runs PostgreSQL 18 and a reverse proxy (for example a Pi with a
+# shared `postgres` container on the Docker network "postgres" and Caddy on the host network).
+#   cp deploy/compose.external-postgres.yaml compose.yaml   # next to a .env (see .env.example)
+#   docker compose run --rm app npm run accounts:migrate -- --apply --yes   # once, creates the account registry
+#   docker compose up -d --wait
+# The database and its owner role (SQL_DATABASE / SQL_USER) must exist; the role needs no superuser rights.
+name: touchline
+
+services:
+  app:
+    image: ${TOUCHLINE_IMAGE:-ghcr.io/carlossardo/touchline:latest}
+    container_name: touchline
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: true
+    environment:
+      NODE_ENV: production
+      API_HOST: 0.0.0.0
+      API_PORT: "3001"
+      SQL_HOST: ${SQL_HOST:-postgres}
+      SQL_PORT: ${SQL_PORT:-5432}
+      SQL_SSL: ${SQL_SSL:-disable}
+      SQL_DATABASE: ${SQL_DATABASE:-touchline}
+      SQL_USER: ${SQL_USER:-touchline}
+      SQL_PASSWORD: ${SQL_PASSWORD:?Set SQL_PASSWORD in .env}
+      NODE_OPTIONS: ${TOUCHLINE_NODE_OPTIONS:---max-old-space-size=1536}
+      TZ: UTC
+    ports:
+      # Loopback only: the reverse proxy on the host forwards HTTPS traffic here.
+      - "${TOUCHLINE_BIND:-127.0.0.1}:${TOUCHLINE_PORT:-3001}:3001"
+    networks: [postgres]
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+    stop_grace_period: 1m
+    logging:
+      driver: local
+      options:
+        max-size: 10m
+        max-file: "3"
+
+networks:
+  postgres:
+    name: ${POSTGRES_NETWORK:-postgres}
+    external: true
