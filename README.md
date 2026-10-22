@@ -137,6 +137,16 @@ If the host already runs PostgreSQL 18 in Docker and a reverse proxy, run only t
 
 Sign-in works the same as above ([Sign-in and access](#sign-in-and-access)): point `OIDC_ISSUER` at your provider (for example Authelia behind the same proxy), set `OIDC_LOGOUT_URL` to its `/logout` page and `TRUST_PROXY=1`. The app container itself must reach `OIDC_ISSUER` over HTTPS (discovery, token and UserInfo requests); if the provider's hostname only resolves on the host, for example through Tailscale MagicDNS, map it with `extra_hosts` in the compose file. On a fresh registry, sign in first as a member of `ADMIN_GROUP`: admins get their account and world automatically and then approve everyone else at `/admin`.
 
+#### Deploying from a checkout
+
+[scripts/deploy.sh](scripts/deploy.sh) deploys this setup without a registry: it streams a commit as a tarball over SSH, and the host builds the image from it (~4 minutes on a Pi 4) and runs it with this compose file:
+
+```sh
+scripts/deploy.sh carlos@raspberrypi          # HEAD; or: scripts/deploy.sh <ssh-host> <git-ref>
+```
+
+On the host, in `~/touchline` (`TOUCHLINE_DIR` to change it), [deploy/host-deploy.sh](deploy/host-deploy.sh) from the deployed commit unpacks the source to `src/`, builds `local/touchline:<commit>` and `:latest` with `docker buildx`, installs [deploy/compose.external-postgres.yaml](deploy/compose.external-postgres.yaml) as `compose.yaml`, creates or checks the account registry, migrates the registered worlds, starts the app and checks `/api/health`. It keeps the three newest images. The host needs Docker with buildx, `curl`, and a `.env` in that directory before the first deploy, with the database settings, the sign-in settings and `TOUCHLINE_PORT`. The script adds `TOUCHLINE_IMAGE=local/touchline:latest` and `TOUCHLINE_PULL_POLICY=never`, so `docker compose pull` (for example a weekly image update) skips the app. A failed build leaves the running container untouched; roll back with a database backup, not an older image.
+
 ### HTTPS and reverse proxy
 
 `docker compose --profile https up -d` starts Caddy, which needs `TOUCHLINE_DOMAIN` resolving to your public IP and ports 80 and 443 forwarded to the Pi. Without port forwarding, keep the app on `127.0.0.1:3001` and publish it with a tunnel (for example Cloudflare Tunnel or Tailscale Funnel) or your own proxy; set `APP_ORIGIN` to the public HTTPS origin and `TRUST_PROXY` to the number of proxies in front of the app. Sign-in needs HTTPS. Never publish PostgreSQL.

@@ -6,11 +6,14 @@
 #   then sign in as a member of ADMIN_GROUP and approve players at https://<host>/admin
 # The database and its owner role (SQL_DATABASE / SQL_USER) must exist; the role needs no superuser rights.
 # The container must reach OIDC_ISSUER (for example Authelia behind the same proxy) over HTTPS.
+# scripts/deploy.sh installs this file on the host and builds the image there (README, "Deploying from a checkout").
 name: touchline
 
 services:
   app:
     image: ${TOUCHLINE_IMAGE:-ghcr.io/carlossardo/touchline:latest}
+    # "never" for an image built on the host (local/touchline), so `docker compose pull` skips it.
+    pull_policy: ${TOUCHLINE_PULL_POLICY:-missing}
     container_name: touchline
     restart: unless-stopped
     env_file:
