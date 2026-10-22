@@ -8,8 +8,8 @@
 [![Image](https://github.com/CarlosSardo/touchline/actions/workflows/image.yml/badge.svg)](https://github.com/CarlosSardo/touchline/actions/workflows/image.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-22c55e.svg)](LICENSE)
 
-[![Node.js 22](https://img.shields.io/badge/Node.js-22-5FA04E?logo=nodedotjs&logoColor=white)](.nvmrc)
-[![TypeScript](https://img.shields.io/badge/TypeScript-6-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
+[![Node.js 24](https://img.shields.io/badge/Node.js-24-5FA04E?logo=nodedotjs&logoColor=white)](.nvmrc)
+[![TypeScript 7](https://img.shields.io/badge/TypeScript-7-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![React 19](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)](https://react.dev/)
 [![Vite](https://img.shields.io/badge/Vite-8-646CFF?logo=vite&logoColor=white)](https://vite.dev/)
 [![Express 5](https://img.shields.io/badge/Express-5-000000?logo=express&logoColor=white)](https://expressjs.com/)
@@ -51,7 +51,7 @@ All names, clubs, attributes and results are procedurally generated, not license
 
 ## Quick start
 
-You need **Node.js 22.13 or newer** (see [.nvmrc](.nvmrc)), npm and Docker (or an existing PostgreSQL 18).
+You need **Node.js 24.11 or newer** (see [.nvmrc](.nvmrc)), npm and Docker (or an existing PostgreSQL 18).
 
 ```sh
 npm ci

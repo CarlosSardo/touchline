@@ -1,18 +1,18 @@
 # Multi-arch (linux/arm64 for the Raspberry Pi, linux/amd64). The UI/type-check stage runs on the build
 # platform because its output is architecture-independent; only the production dependencies install per target.
-FROM --platform=$BUILDPLATFORM node:22-bookworm-slim AS build
+FROM --platform=$BUILDPLATFORM node:24-trixie-slim AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN --mount=type=cache,target=/root/.npm npm ci --include=dev --no-audit --no-fund
 COPY . .
 RUN npm run build
 
-FROM node:22-bookworm-slim AS deps
+FROM node:24-trixie-slim AS deps
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN --mount=type=cache,target=/root/.npm npm ci --omit=dev --no-audit --no-fund
 
-FROM node:22-bookworm-slim AS runtime
+FROM node:24-trixie-slim AS runtime
 ARG SOURCE_REVISION=unknown
 LABEL org.opencontainers.image.source="https://github.com/CarlosSardo/touchline" \
       org.opencontainers.image.description="Touchline football sporting-director simulation (PostgreSQL)" \

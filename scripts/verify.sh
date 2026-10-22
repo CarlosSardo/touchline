@@ -2,7 +2,7 @@
 set -euo pipefail
 
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
-command -v node >/dev/null || { printf 'Node.js 22.13+ is required.\n' >&2; exit 1; }
+command -v node >/dev/null || { printf 'Node.js 24.11+ is required.\n' >&2; exit 1; }
 command -v npm >/dev/null || { printf 'npm is required.\n' >&2; exit 1; }
 env_args=()
 if [[ -f .env ]]; then

@@ -41,8 +41,9 @@ const statKeys = [
 const newStats = () => Object.fromEntries(statKeys.map((key) => [key, 0]));
 
 export function expectedPoints(homeXg: number, awayXg: number) {
-  const home = poissonDistribution(Math.max(0.001, homeXg));
-  const away = poissonDistribution(Math.max(0.001, awayXg));
+  // simple-statistics returns undefined only for a non-positive or huge rate, which the clamp and xG ranges rule out.
+  const home = poissonDistribution(Math.max(0.001, homeXg)) ?? [1];
+  const away = poissonDistribution(Math.max(0.001, awayXg)) ?? [1];
   let homePoints = 0;
   let awayPoints = 0;
   for (const [homeGoals, homeProbability] of Object.entries(home)) {
