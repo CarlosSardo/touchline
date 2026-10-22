@@ -10,6 +10,11 @@ rev=${1:?Usage: deploy/host-deploy.sh <revision> (started by scripts/deploy.sh)}
 [ -d src.new ] || { echo "Run from the deploy directory with the source in ./src.new" >&2; exit 2; }
 docker buildx version >/dev/null 2>&1 || { echo "docker buildx is missing (Ubuntu: sudo apt-get install docker-buildx)" >&2; exit 1; }
 [ -f .env ] || { echo "No .env in $PWD: create it first, see .env.example and README (Deploying from a checkout)" >&2; exit 1; }
+# Without it compose falls back to port 3001 and the reverse proxy in front loses the app (502).
+grep -Eq '^TOUCHLINE_PORT=[0-9]+$' .env || {
+  echo "Set TOUCHLINE_PORT in $PWD/.env to the loopback port your reverse proxy forwards to; nothing was changed." >&2
+  exit 1
+}
 
 # The image is built here, so compose must run it and never try to pull it.
 [ -z "$(tail -c 1 .env)" ] || echo >> .env

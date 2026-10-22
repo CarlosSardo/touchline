@@ -1873,7 +1873,8 @@ test("appearance settings persist light and dark themes on desktop and mobile", 
   await expect(
     appearance.getByRole("radio", { name: "Dark", exact: true }),
   ).toBeChecked();
-  const contrast = await page.evaluate(() => {
+  // Sampled until the reloaded page settles: the Continue control can still be in a busy state right after reload.
+  const contrast = () => page.evaluate(() => {
     const context = document.createElement("canvas").getContext("2d")!;
     const luminance = (color: string) => {
       context.fillStyle = color;
@@ -1902,7 +1903,7 @@ test("appearance settings persist light and dark themes on desktop and mobile", 
       );
     });
   });
-  expect(contrast.every((ratio) => ratio >= 4.5)).toBe(true);
+  await expect.poll(async () => (await contrast()).every((ratio) => ratio >= 4.5)).toBe(true);
   await page.goto("/#office");
   await expect(
     page.getByRole("heading", { name: "Good morning, Alex." }),
