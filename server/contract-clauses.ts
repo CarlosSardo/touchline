@@ -19,11 +19,19 @@ function cutSql(tier: string) {
 }
 
 interface ClauseSweep {
-  /** Set once every contract existing at the time has its terms (one statement per world or loaded older save). */
+  /** Set once every contract existing at the time has its terms. */
   backfilled?: boolean;
+  /** First player id the backfill has not reached yet (older worlds are termed a range of ids per day). */
+  cursor?: number;
   /** Last day whose signings were termed. */
   date?: string;
 }
+
+/**
+ * Player ids the backfill of an older world terms per day: one bounded statement (a few thousand contracts) instead
+ * of one rewrite of every contract, which outlasts the statement timeout on a full world on a Raspberry Pi.
+ */
+export const CLAUSE_BACKFILL_IDS = 10_000;
 
 const eligible = "player.age_group = 'Senior' AND player.role <> 'Retired' AND club.type = 'club'";
 const termsOf = (doc: string, cut: string, clubId: string) =>
@@ -32,16 +40,18 @@ const termsOf = (doc: string, cut: string, clubId: string) =>
 
 /**
  * Daily: contracts signed since the last run (players with a transfer recorded since then) get the relegation clause
- * terms of their new club. Contracts that existed before the clauses (a new world, an older save) get theirs once, in a
- * single statement that reads only the ids and writes only the contracts with a clause. Contracts without terms on
- * file have none of their club's clause: the terms are a deterministic function of player and club, which relegation
- * applies (season rollover) whether or not they were stamped.
+ * terms of their new club. Contracts that existed before the clauses (an older save) get theirs once, `idsPerDay`
+ * player ids per day in one statement that reads only the ids and writes only the contracts with a clause. Contracts
+ * without terms on file have none of their club's clause yet: the terms are a deterministic function of player and
+ * club, which relegation applies (season rollover) whether or not they were stamped.
  */
-export async function sweepRelegationClauses(store: Store, date: string) {
+export async function sweepRelegationClauses(store: Store, date: string, idsPerDay = CLAUSE_BACKFILL_IDS) {
   const stored = (await store.get<{ value: string }>("SELECT value FROM meta WHERE key = 'clauseSweep'"))?.value;
   const sweep: ClauseSweep = stored ? JSON.parse(stored) : {};
   let changes = 0;
-  if (!sweep.backfilled)
+  let cursor: number | undefined;
+  if (!sweep.backfilled) {
+    const from = sweep.cursor ?? 0;
     changes += (
       await store.run(
         `UPDATE players AS target SET profile = ${termsOf("target.profile::jsonb", "terms.cut", "terms.club_id")}
@@ -50,13 +60,19 @@ export async function sweepRelegationClauses(store: Store, date: string) {
            FROM players AS player
            JOIN clubs AS club ON club.id = coalesce(player.parent_club_id, player.club_id)
            LEFT JOIN leagues ON leagues.id = club.league_id
-           WHERE ${eligible}
+           WHERE player.id >= ? AND player.id < ? AND ${eligible}
          ) AS terms
          WHERE target.id = terms.id AND terms.cut IS NOT NULL
            AND strpos(target.profile, '"relegationClauseClubId"') = 0 AND target.profile !~ '"status": ?"amateur"'`,
+        from,
+        from + idsPerDay,
       )
     ).changes;
-  else if (sweep.date) {
+    const last = (await store.get<{ id: number | null }>("SELECT max(id) AS id FROM players"))?.id ?? 0;
+    if (from + idsPerDay <= last) cursor = from + idsPerDay;
+  }
+  // Signings are termed from the day after the sweep started, also while older contracts are still being backfilled.
+  if (sweep.date) {
     const signed = (
       await store.all<{ id: number }>(
         "SELECT DISTINCT entity_id AS id FROM history WHERE entity_type = 'transfer' AND date >= ?",
@@ -82,7 +98,7 @@ export async function sweepRelegationClauses(store: Store, date: string) {
         )
       ).changes;
   }
-  await store.setMeta("clauseSweep", { backfilled: true, date });
+  await store.setMeta("clauseSweep", cursor === undefined ? { backfilled: true, date } : { cursor, date });
   return changes;
 }
 
