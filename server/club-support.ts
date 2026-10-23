@@ -191,7 +191,7 @@ interface SupportClub extends Club {
 /** Deepest league tier whose clubs start with a feeder/development partner (amateur clubs lower down do not). */
 export const STARTER_AFFILIATE_MAX_TIER = 4;
 /** Deepest tier a starter partner may come from. */
-const STARTER_PARTNER_MAX_TIER = 6;
+export const STARTER_PARTNER_MAX_TIER = 6;
 
 /** Whether a first team starts the world with an affiliate: professional-level tiers, or a big club in a low tier. */
 export function starterAffiliateEligible(club: { tier: number; reputation: number }) {
@@ -813,8 +813,8 @@ interface StaffData {
 
 type CareerStaff = Staff & { reputation: number; country_id: number; code: string };
 
-const staffWage = (ability: number) => Math.round(ability ** 2 * 0.4);
-const contractEndFor = (season: number, random: () => number) => {
+export const staffWage = (ability: number) => Math.round(ability ** 2 * 0.4);
+export const contractEndFor = (season: number, random: () => number) => {
   const [min, max] = CAREER_RULES.staff.contractYears;
   return `${season + min + Math.floor(random() * (max - min + 1))}-06-30`;
 };
@@ -961,7 +961,7 @@ async function retireStaff(store: Store, state: GameState, members: readonly Sta
 }
 
 /** A staff member leaves his club: backroom relationships and the director's active assignments end with him. */
-async function leaveClub(store: Store, staffId: number) {
+export async function leaveClub(store: Store, staffId: number) {
   await store.run("UPDATE staff SET club_id = NULL WHERE id = ?", staffId);
   await store.run("DELETE FROM relationships WHERE source_type = 'staff' AND (source_id = ? OR target_id = ?)", staffId, staffId);
   await store.run("UPDATE assignments SET status = 'cancelled' WHERE staff_id = ? AND status = 'active'", staffId);

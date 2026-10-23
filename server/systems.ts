@@ -25,6 +25,9 @@ import {
 } from "./media.ts";
 import { startOnwardLoan } from "./affiliates.ts";
 import { acceptIncomingOffer, committedWages } from "./market-offers.ts";
+import { clubPolicySnapshot, plannedWageBudget } from "./club-policy.ts";
+import { completeExchange, contractReleaseClause, exchangeIssue, exchangePart } from "./deal-clauses.ts";
+import { relatedPartyTerms } from "./ownership.ts";
 import {
   addDays,
   addMonths,
@@ -339,6 +342,17 @@ export async function ledger(
       Math.abs(amount),
     );
 }
+/**
+ * Whether a weekly wage bill fits a buyer's wage budget. An AI club plans its window's room like the world market
+ * (club-policy.ts plannedWageBudget: contracts ending and planned sales count), so deals agreed with the director are
+ * judged by the same room as its own signings; the director's club family keeps the strict budget.
+ */
+export async function fitsWageBudget(store: Store, buyer: Pick<Club, "id" | "wage_budget">, wages: number, date: string) {
+  if (wages <= buyer.wage_budget) return true;
+  const policy = (await clubPolicySnapshot(store, date)).get(buyer.id);
+  return !!policy && !policy.managed && wages <= plannedWageBudget(buyer, policy);
+}
+
 export async function weeklyWages(store: Store, clubId: number) {
   const salaries = (await store.get<{ total: number }>(
     "SELECT coalesce(sum(wage),0) AS total FROM players WHERE club_id = ?",
@@ -2186,6 +2200,10 @@ export async function negotiate(
     terms?: LoanTerms;
     signingBonus?: number;
     transferTerms?: TransferTerms;
+    /** Release clause written into the contract (personal terms); null removes it where the law allows. */
+    releaseClause?: number | null;
+    /** A player of the director offered as part of the fee (club talks); null withdraws him. */
+    exchangePlayerId?: number | null;
   },
   automated = false,
 ) {
@@ -2384,21 +2402,28 @@ export async function negotiate(
     const finalOffers =
       data.battle?.status === "final-offers" &&
       state.date <= data.battle.finalOffersDeadline!;
+    if (input.exchangePlayerId !== undefined) {
+      if (input.exchangePlayerId === null) delete data.exchange;
+      else if (!seller) throw new GameError("A player can only be offered as part of a permanent transfer from another club.");
+      else data.exchange = await exchangePart(store, input.exchangePlayerId, seller, player);
+    }
+    // Player-plus-cash: the selling club counts the offered player's valuation towards the fee.
+    const offered = input.fee + (data.exchange?.valuation ?? 0);
     if (negotiation.interest < MOVE_REFUSAL_THRESHOLD) {
       stage = "Rejected";
       message =
         "The player has declined: the proposed club and career pathway do not fit their ambitions.";
-    } else if (input.fee >= floor && finalOffers) {
+    } else if (offered >= floor && finalOffers) {
       // Best-and-final round: the selling club decides between all bidders on the deadline.
-      data.battle!.userFinalOffer = input.fee;
+      data.battle!.userFinalOffer = offered;
       message = `Final offer of ${money(input.fee)} lodged. The selling club decides on ${data.battle!.finalOffersDeadline}; bids within 5% of the best stand and the player then chooses.`;
-    } else if (input.fee >= floor) {
+    } else if (offered >= floor) {
       fee = input.fee;
       stage = "Agent talks";
       tension = Math.max(5, tension - 8);
-      message = `Club terms agreed at ${money(fee)}${loanBackSummary(checkedTransferTerms(data.transferTerms))}. Personal terms and the medical remain outstanding.`;
+      message = `Club terms agreed at ${money(fee)}${data.exchange ? ` plus ${data.exchange.name} (valued at ${money(data.exchange.valuation)})` : ""}${loanBackSummary(checkedTransferTerms(data.transferTerms))}. Personal terms and the medical remain outstanding.`;
     } else {
-      tension += input.fee < floor * 0.65 ? 24 : 12;
+      tension += offered < floor * 0.65 ? 24 : 12;
       data.counter = clubCounter(askingPrice, floor);
       message = `Offer rejected. The club counters at ${money(data.counter)}.`;
     }
@@ -2426,12 +2451,7 @@ export async function negotiate(
       const addedWage = loan
         ? (player.wage * data.terms.salarySplit) / 100
         : input.wage;
-      if (
-        currentWages -
-          (player.club_id === buyer.id ? player.wage : 0) +
-          addedWage >
-        buyer.wage_budget
-      )
+      if (!(await fitsWageBudget(store, buyer, currentWages - (player.club_id === buyer.id ? player.wage : 0) + addedWage, state.date)))
         throw new GameError(
           buyer.id === state.clubId
             ? "The proposed wage exceeds the club's weekly wage budget. Rebalance the budget first."
@@ -2453,6 +2473,7 @@ export async function negotiate(
         data.role = input.role;
         data.promises = input.promises;
         data.signingBonus = input.signingBonus ?? 0;
+        if (input.releaseClause !== undefined) data.contractReleaseClause = input.releaseClause;
         message =
           data.workflowVersion === 2
             ? "Personal terms agreed. Review the complete contract, agent commission and promises before signing the conditional agreement."
@@ -2775,6 +2796,12 @@ export async function completeNegotiation(
         loan ? "loan_in" : !negotiation.selling_club_id ? "free" : negotiation.type === "Youth approach" ? "youth" : "transfer",
         { emergency: negotiation.type === "Emergency loan" },
       );
+  const exchangeProblem = !loan && !renewal && data.exchange ? await exchangeIssue(store, data.exchange, buyer.id) : null;
+  if (exchangeProblem) {
+    await closeNegotiation(store, negotiation, "Rejected", exchangeProblem);
+    await news(store, "Transfers", `${player.name}: deal cannot complete`, exchangeProblem, "warning", "transfers");
+    return;
+  }
   if (!signing.ok) {
     await closeNegotiation(store, negotiation, "Rejected", `Transfer rules prevent completion: ${signing.reasons.join(" ")}`);
     await news(
@@ -2849,15 +2876,24 @@ export async function completeNegotiation(
       buyer.id,
     );
   }
+  // AI clubs never complete a signing that takes them past their FFP limit (the director's club is reviewed at year end).
+  if (!renewal && (await settingsOf(store)).ffp && buyer.id !== state.clubId && buyer.parent_id !== state.clubId && compliance.ffpHeadroom < 0) {
+    await closeNegotiation(store, negotiation, "Rejected", `${buyer.name} cannot fit the deal within their financial regulations (${compliance.policy}).`);
+    await news(
+      store,
+      "Transfers",
+      `${player.name}: deal cannot complete`,
+      `${buyer.name} have pulled out: the signing would take them past their ${compliance.policy} limit.`,
+      "warning",
+      loan ? "loans" : "transfers",
+      { playerId: player.id, clubId: buyer.id },
+    );
+    return;
+  }
   const addedWage = loan
     ? (player.wage * data.terms.salarySplit) / 100
     : negotiation.wage;
-  if (
-    (await weeklyWages(store, buyer.id)) -
-      (renewal ? player.wage : 0) +
-      addedWage >
-    buyer.wage_budget
-  ) {
+  if (!(await fitsWageBudget(store, buyer, (await weeklyWages(store, buyer.id)) - (renewal ? player.wage : 0) + addedWage, state.date))) {
     await closeNegotiation(
       store,
       negotiation,
@@ -2962,6 +2998,10 @@ export async function completeNegotiation(
             }
           : undefined,
       );
+    // Sister clubs (one owner group): income above fair value does not count in the seller's football earnings.
+    const related = loan ? null : await relatedPartyTerms(store, buyer.id, negotiation.selling_club_id, negotiation.offer, player.value);
+    if (related?.related && related.adjustment < 0)
+      await recordFinancialItem(store, negotiation.selling_club_id, "sale_profit", related.adjustment);
   }
   if (loan) {
     const terms = data.terms;
@@ -3009,6 +3049,7 @@ export async function completeNegotiation(
         player.id,
         (data.affiliatePlacement?.fee ?? 0) +
           negotiation.offer +
+          (data.exchange?.valuation ?? 0) +
           trainingCompensation,
         state.date,
         contractEnd,
@@ -3027,6 +3068,7 @@ export async function completeNegotiation(
       status: "professional",
       futureProfessionalContract: false,
       signedDate: state.date,
+      releaseClause: await contractReleaseClause(store, buyer, player, data.contractReleaseClause, renewal),
     };
     playerProfile.registration = {
       workPermitPoints: playerProfile.registration?.workPermitPoints ?? 0,
@@ -3040,6 +3082,8 @@ export async function completeNegotiation(
       player.id,
     );
     if (!renewal) await registerSpell(store, player.id, "signing", previousSpell);
+    if (!renewal && data.exchange && negotiation.selling_club_id)
+      await completeExchange(store, data.exchange, buyer, await clubOf(store, negotiation.selling_club_id), player.id);
   }
   const transferClauseBeneficiaryId =
     data.affiliatePlacement?.originalSellerId ?? negotiation.selling_club_id;
@@ -3124,7 +3168,8 @@ export async function completeNegotiation(
         to: buyer.id,
         club: buyer.name,
         fee: negotiation.offer,
-        type: negotiation.type,
+        type: data.exchange ? (negotiation.offer > 0 ? "Player-plus-cash" : "Swap deal") : data.releaseClause ? "Release clause" : negotiation.type,
+        ...(data.exchange ? { swapWith: data.exchange.playerId } : {}),
       }),
     );
     await publishTransferStory(store, {
@@ -3378,10 +3423,21 @@ export async function exerciseOption(
     );
 }
 
+/**
+ * Loans with the detailed weekly review and end-of-loan handling: every loan except those between two AI clubs that
+ * the world market made (world-market.ts reviews and ends those set-based), unless the director's club is involved.
+ */
+const DIRECTOR_LOANS = `(coalesce(data::jsonb ->> 'world', '') <> 'true'
+  OR parent_id IN (SELECT id FROM clubs WHERE id = ? OR parent_id = ?) OR destination_id IN (SELECT id FROM clubs WHERE id = ? OR parent_id = ?))`;
+
 export async function reviewLoans(store: Store) {
   const state = await stateOf(store);
   for (const loan of await store.all<Loan>(
-    "SELECT * FROM loans WHERE status = 'active' ORDER BY id",
+    `SELECT * FROM loans WHERE status = 'active' AND ${DIRECTOR_LOANS} ORDER BY id`,
+    state.clubId,
+    state.clubId,
+    state.clubId,
+    state.clubId,
   )) {
     const player = await playerOf(store, loan.player_id);
     const terms = JSON.parse(loan.terms) as LoanTerms;
@@ -3600,8 +3656,12 @@ export async function reviewLoans(store: Store) {
 export async function expireLoans(store: Store) {
   const state = await stateOf(store);
   for (const loan of await store.all<Loan>(
-    "SELECT * FROM loans WHERE status = 'active' AND end_date <= ? ORDER BY id",
+    `SELECT * FROM loans WHERE status = 'active' AND end_date <= ? AND ${DIRECTOR_LOANS} ORDER BY id`,
     state.date,
+    state.clubId,
+    state.clubId,
+    state.clubId,
+    state.clubId,
   )) {
     const terms = JSON.parse(loan.terms) as LoanTerms;
     const details = JSON.parse(loan.data);
@@ -3757,7 +3817,8 @@ export async function staffAction(
   const club = await clubOf(store);
   if (!staff) throw new GameError("Staff member not found.");
   if (action === "hire") {
-    if (staff.club_id || JSON.parse(staff.data || "{}").retired)
+    // The director runs the user's recruitment; directors of football work for AI clubs only.
+    if (staff.club_id || JSON.parse(staff.data || "{}").retired || staff.role === "Director of football")
       throw new GameError("This staff member is not available.");
     if (
       staff.role === ASSISTANT_ROLE &&

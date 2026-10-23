@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import {
   Bookmark,
   ChevronLeft,
@@ -32,7 +32,9 @@ import {
   PERSONALITY_KEYS,
   POSITIONS,
 } from "../../shared/rules.ts";
-import type { PlayerPage } from "../../shared/api.ts";
+import type { PlayerPage, WorldClubPage } from "../../shared/api.ts";
+import type { League } from "../../shared/types.ts";
+import type { PlayerSearchRange } from "../../shared/player-search.ts";
 import {
   PLAYER_COLUMNS,
   type PlayerSortKey,
@@ -40,8 +42,25 @@ import {
   type SortState,
 } from "../sort.ts";
 import { createDebouncer, totalLabel } from "../resource-cache.ts";
-import { plural } from "../format.ts";
 import { EligibilityBadge } from "../EligibilityBadge.tsx";
+import {
+  amountText,
+  defaultFilters,
+  FILTER_GROUPS,
+  isActiveRange,
+  parseAmount,
+  playerQuery,
+  RANGE_FILTERS,
+  rangeHint,
+  rangeSpec,
+  rangeText,
+  readRange,
+  SELECT_FILTERS,
+  withFilter,
+  type FilterGroupId,
+  type Filters,
+  type RangeSpec,
+} from "../database-filters.ts";
 
 const TYPING_DELAY_MS = 300;
 
@@ -91,113 +110,169 @@ const DATABASE_COLUMNS: PlayerTableColumn[] = [
 const sortDirection = (key: DatabaseSortKey): SortDirection =>
   key === "minutes" ? "desc" : (PLAYER_COLUMNS[key].defaultDirection ?? "asc");
 
-type Filters = Record<string, string>;
-const defaultFilters: Filters = {
-  position: "",
-  ageMax: "",
-  ageMin: "",
-  country: "",
-  abilityMin: "",
-  potentialMin: "",
-  valueMax: "",
-  wageMax: "",
-  foot: "",
-  ageGroup: "",
-  contractStatus: "",
-  attribute: "",
-  attributeMin: "",
-  personality: "",
-  personalityMin: "",
-  lifestyle: "",
-  trait: "",
-  listed: "",
-  availableLoan: "",
-  contractMonths: "",
-  formMin: "",
-  heightMin: "",
-  heightMax: "",
-  goalsMin: "",
-  minutesMin: "",
-  injured: "",
-  freeAgent: "",
-};
-
-const filterLabels: Record<string, string> = {
-  position: "Position",
-  ageMax: "Maximum age",
-  ageMin: "Minimum age",
-  country: "Nationality",
-  abilityMin: "Minimum ability",
-  potentialMin: "Minimum potential",
-  valueMax: "Maximum value",
-  wageMax: "Maximum weekly wage",
-  foot: "Preferred foot",
-  ageGroup: "Age group",
-  contractStatus: "Contract status",
-  attribute: "Attribute",
-  attributeMin: "Attribute minimum",
-  personality: "Personality",
-  personalityMin: "Personality minimum",
-  lifestyle: "Lifestyle",
-  trait: "Trait",
+const LIFESTYLES = ["disciplined", "nightlife", "family-focused", "luxury-obsessed", "gym-rat"];
+const TRAITS = [
+  "Cuts inside",
+  "Shoots from distance",
+  "Dribbles often",
+  "Aggressive presser",
+  "Big-game player",
+  "Lazy trainer",
+  "Plays one-twos",
+  "Dictates tempo",
+  "Arrives late in box",
+  "Stays on feet",
+  "Tries killer balls",
+  "Leads by example",
+  "Runs with ball",
+  "Plays safe passes",
+  "Likes to beat offside trap",
+  "Long throw specialist",
+];
+const AVAILABILITY_LABELS: Record<string, string> = {
   listed: "Transfer listed",
   availableLoan: "Loan listed",
-  contractMonths: "Expiry within",
-  formMin: "Minimum match rating",
-  heightMin: "Minimum height",
-  heightMax: "Maximum height",
-  goalsMin: "Minimum goals",
-  minutesMin: "Minimum minutes",
-  injured: "Fitness",
   freeAgent: "Free agents & home-based",
 };
 
-function MoneyFilter({
+interface RangeProps {
+  spec: RangeSpec;
+  /** What the inputs show (updates on every keystroke). */
+  filters: Filters;
+  /** What the search uses (after the typing pause); corrections are explained against it. */
+  applied: Filters;
+  onType: (key: string, value: string) => void;
+  title?: string;
+  disabled?: boolean;
+}
+
+/** A labelled min–max pair with an inline note when the search had to correct it. */
+function RangeLayout({
+  id,
   title,
-  value,
-  onChange,
+  help,
+  hint,
+  children,
 }: {
+  id: string;
   title: string;
-  value: string;
-  onChange: (value: string) => void;
+  help?: string;
+  hint: string | null;
+  children: [ReactNode, ReactNode];
 }) {
-  const { currency, displayAmount, accountingAmount } = useCurrency();
-  const [draft, setDraft] = useState<{
-    base: string;
-    currency: string;
-    text: string;
-  } | null>(null);
-  const text =
-    draft?.base === value && draft.currency === currency
-      ? draft.text
-      : value === ""
-        ? ""
-        : displayAmount(Number(value));
   return (
-    <Field label={`${title} (${currency})`}>
-      <span className="money-input">
-        <input
-          type="number"
-          min="0"
-          step="any"
-          placeholder="No limit"
-          value={text}
-          onChange={(event) => {
-            const nextText = event.target.value;
-            if (nextText !== "" && !Number.isFinite(Number(nextText))) return;
-            const base =
-              nextText === ""
-                ? ""
-                : String(accountingAmount(Number(nextText)));
-            setDraft({ base, currency, text: nextText });
-            onChange(base);
-          }}
-          onBlur={() => setDraft(null)}
-        />
-        <span aria-hidden="true">{currency}</span>
+    <div className="range-filter" role="group" aria-labelledby={`${id}-label`}>
+      <span className="range-filter-label" id={`${id}-label`}>
+        {title}
+        {help && <small> · {help}</small>}
       </span>
-    </Field>
+      <div className="range-filter-inputs">
+        {children[0]}
+        <span className="range-filter-separator" aria-hidden="true">–</span>
+        {children[1]}
+      </div>
+      <p className="range-filter-hint" id={`${id}-hint`} aria-live="polite">{hint}</p>
+    </div>
   );
+}
+
+function RangeField({ spec, filters, applied, onType, title, disabled = false }: RangeProps) {
+  const id = useId();
+  const reading = readRange(spec, applied[`${spec.key}Min`], applied[`${spec.key}Max`]);
+  const hint = disabled ? null : rangeHint(spec, reading);
+  const input = (side: "min" | "max") => {
+    const key = `${spec.key}${side === "min" ? "Min" : "Max"}`;
+    return (
+      <input
+        type="number"
+        inputMode={spec.step ? "decimal" : "numeric"}
+        aria-label={`${spec.label} ${side === "min" ? "minimum" : "maximum"}`}
+        aria-describedby={hint ? `${id}-hint` : undefined}
+        aria-invalid={(!disabled && reading.clamped.includes(side)) || undefined}
+        placeholder={side === "min" ? "Min" : "Max"}
+        min={spec.min}
+        max={spec.max}
+        step={spec.step ?? 1}
+        disabled={disabled}
+        value={filters[key]}
+        onChange={(event) => onType(key, event.target.value)}
+      />
+    );
+  };
+  return (
+    <RangeLayout
+      id={id}
+      title={`${title ?? spec.label}${spec.unit ? ` (${spec.unit})` : ""}`}
+      help={spec.help}
+      hint={hint}
+    >
+      {input("min")}
+      {input("max")}
+    </RangeLayout>
+  );
+}
+
+/** Amounts are typed in the display currency ("750k", "2.5m") and stored in the accounting currency. */
+function MoneyRangeField({ spec, filters, applied, onType }: RangeProps) {
+  const id = useId();
+  const { currency, money, displayAmount, accountingAmount } = useCurrency();
+  const [drafts, setDrafts] = useState<
+    Record<string, { base: string; currency: string; text: string } | undefined>
+  >({});
+  const draftOf = (key: string) => {
+    const draft = drafts[key];
+    return draft?.base === filters[key] && draft.currency === currency ? draft : undefined;
+  };
+  const keys = [`${spec.key}Min`, `${spec.key}Max`];
+  const unreadable = keys.filter((key) => {
+    const draft = draftOf(key);
+    return draft !== undefined && parseAmount(draft.text) === null;
+  });
+  const reading = readRange(spec, applied[keys[0]], applied[keys[1]]);
+  const hint = unreadable.length
+    ? "Type an amount such as 750k or 2.5m."
+    : rangeHint(spec, reading, (value) => money(value));
+  const input = (key: string, side: "minimum" | "maximum") => (
+    <input
+      type="text"
+      autoComplete="off"
+      spellCheck={false}
+      aria-label={`${spec.label} ${side}`}
+      aria-describedby={hint ? `${id}-hint` : undefined}
+      aria-invalid={unreadable.includes(key) || undefined}
+      placeholder={side === "minimum" ? "Min" : "Max"}
+      value={
+        draftOf(key)?.text ??
+        (filters[key] === "" ? "" : amountText(displayAmount(Number(filters[key]))))
+      }
+      onChange={(event) => {
+        const text = event.target.value;
+        const amount = parseAmount(text);
+        const base =
+          amount === undefined ? "" : amount === null ? filters[key] : String(accountingAmount(amount));
+        setDrafts((current) => ({ ...current, [key]: { base, currency, text } }));
+        if (amount !== null) onType(key, base);
+      }}
+      onBlur={() => {
+        if (!unreadable.includes(key)) setDrafts((current) => ({ ...current, [key]: undefined }));
+      }}
+    />
+  );
+  return (
+    <RangeLayout id={id} title={`${spec.label} (${currency})`} hint={hint}>
+      {input(keys[0], "minimum")}
+      {input(keys[1], "maximum")}
+    </RangeLayout>
+  );
+}
+
+interface FilterChip {
+  key: string;
+  /** Names the chip's remove button: "Remove {name} filter". */
+  name: string;
+  text: string;
+  group: FilterGroupId;
+  clear: string[];
 }
 
 export default function Database() {
@@ -211,6 +286,7 @@ export default function Database() {
     const debouncer = typing.current;
     return () => debouncer.cancel();
   }, []);
+  const [generation, setGeneration] = useState(0);
   const [advanced, setAdvanced] = useState(false);
   const [shortlisted, setShortlisted] = useState(false);
   const [sorting, setSorting] = useState<SortState<DatabaseSortKey>>({
@@ -221,10 +297,10 @@ export default function Database() {
   const [pagination, setPagination] = useState({ key: "", page: 1 });
   const [pageSize, setPageSize] = useState(30);
   const deferredSearch = useTypedValue(search);
-  const deferredFilters = appliedFilters;
+  const query = playerQuery(appliedFilters);
   const filterKey = JSON.stringify([
     deferredSearch,
-    deferredFilters,
+    query,
     sort,
     direction,
     shortlisted,
@@ -240,8 +316,7 @@ export default function Database() {
     page: String(page),
     pageSize: String(pageSize),
   });
-  for (const [key, value] of Object.entries(deferredFilters))
-    if (value !== "") params.set(key, value);
+  for (const [key, value] of Object.entries(query)) params.set(key, value);
   if (shortlisted) params.set("shortlisted", "1");
   const next = new URLSearchParams(params);
   next.set("page", String(page + 1));
@@ -259,24 +334,85 @@ export default function Database() {
   const totalText = data
     ? totalLabel(data.total, data.totalCapped === true)
     : "...";
-  const activeFilters =
-    Object.values(filters).filter(Boolean).length + (shortlisted ? 1 : 0);
-  const advancedCount = [
-    "attribute", "attributeMin", "personality", "personalityMin", "lifestyle",
-    "trait", "formMin", "minutesMin", "goalsMin", "heightMin", "foot",
-  ].filter((key) => filters[key] !== "").length;
-  function filterValue(key: string, value: string) {
-    if (key === "country")
-      return bootstrap?.countries.find((country) => String(country.id) === value)?.name ?? value;
-    if (key === "valueMax" || key === "wageMax") return money(Number(value), true);
+  // League options load with the club filters (or for a chip); the club list once a league is chosen.
+  const { data: leagues } = useResource<League[]>(
+    advanced || filters.clubCountry || filters.league
+      ? "leagues?kind=league&age=Senior&limit=500"
+      : null,
+    { cache: true },
+  );
+  const { data: leagueClubs } = useResource<WorldClubPage>(
+    filters.league
+      ? `world/clubs?league=${filters.league}&sort=name&direction=asc&pageSize=100`
+      : null,
+    { cache: true },
+  );
+  const sortedLeagues = [...(leagues ?? [])].sort(
+    (left, right) =>
+      (left.country_name ?? "").localeCompare(right.country_name ?? "") ||
+      left.tier - right.tier ||
+      left.name.localeCompare(right.name),
+  );
+  const clubCountries = [
+    ...new Map(
+      sortedLeagues.map((league) => [league.country_id, league.country_name ?? ""]),
+    ),
+  ].filter(([id]) => id !== null);
+  const leagueOptions = sortedLeagues.filter(
+    (league) => !filters.clubCountry || String(league.country_id) === filters.clubCountry,
+  );
+  const leagueLabel = (league: League) =>
+    `${league.name}${league.tier > 0 ? ` (tier ${league.tier})` : " (reserves)"}`;
+  const countryName = (id: string) =>
+    bootstrap?.countries.find((country) => String(country.id) === id)?.name ?? `#${id}`;
+  function selectText(key: string, value: string) {
+    if (key === "country" || key === "clubCountry") return countryName(value);
+    if (key === "league")
+      return leagues?.find((league) => String(league.id) === value)?.name ?? `#${value}`;
+    if (key === "club")
+      return leagueClubs?.clubs.find((club) => String(club.id) === value)?.name ?? `#${value}`;
     if (key === "injured") return value === "1" ? "Injured" : "Fit";
-    if (key === "contractMonths") return plural(Number(value), "month");
-    if (key === "heightMin" || key === "heightMax") return `${value} cm`;
-    if (key === "contractStatus")
-      return value === "amateur" ? "Non-professional" : "Protected";
-    if (["listed", "availableLoan", "freeAgent"].includes(key)) return "";
+    if (key === "contractStatus") return value === "amateur" ? "Non-professional" : "Protected";
+    if (key === "availability") return AVAILABILITY_LABELS[value] ?? value;
     return ["attribute", "personality", "lifestyle"].includes(key) ? label(value) : value;
   }
+  // One chip per select and per range of the search in use, in panel order: "Age 18–21", "Value ≤ £5M".
+  const chips: FilterChip[] = FILTER_GROUPS.flatMap(({ id: group }) => [
+    ...SELECT_FILTERS.filter((select) => select.group === group && appliedFilters[select.key]).map(
+      (select): FilterChip => ({
+        key: select.key,
+        name: select.label,
+        text: `${select.label}: ${selectText(select.key, appliedFilters[select.key])}`,
+        group,
+        clear: [select.key],
+      }),
+    ),
+    ...RANGE_FILTERS.filter(
+      (spec) => spec.group === group && (!spec.requires || appliedFilters[spec.requires]),
+    ).flatMap((spec): FilterChip[] => {
+      const reading = readRange(
+        spec,
+        appliedFilters[`${spec.key}Min`],
+        appliedFilters[`${spec.key}Max`],
+      );
+      if (!isActiveRange(reading)) return [];
+      const title = spec.requires ? label(appliedFilters[spec.requires]) : spec.label;
+      const format = spec.money ? (value: number) => money(value) : String;
+      return [
+        {
+          key: `${spec.key}Range`,
+          name: spec.requires ? `${spec.label} level` : spec.label,
+          text: `${title} ${rangeText(reading, format, spec.unit)}`,
+          group,
+          clear: [`${spec.key}Min`, `${spec.key}Max`],
+        },
+      ];
+    }),
+  ]);
+  const advancedGroups = new Set(
+    FILTER_GROUPS.filter((group) => group.advanced).map((group) => group.id),
+  );
+  const advancedCount = chips.filter((chip) => advancedGroups.has(chip.group)).length;
   function change(transform: (current: Filters) => Filters, typed = false) {
     const nextFilters = transform(filters);
     setFilters(nextFilters);
@@ -284,17 +420,264 @@ export default function Database() {
     if (typed) typing.current.schedule(applyFilters);
     else typing.current.now(applyFilters);
   }
-  function update(key: string, value: string, typed = false) {
-    change((current) => ({
-      ...current,
-      [key]: value,
-      ...(key === "attribute" && !value ? { attributeMin: "" } : {}),
-      ...(key === "personality" && !value ? { personalityMin: "" } : {}),
-    }), typed);
-  }
-  const typeFilter = (key: string, value: string) => update(key, value, true);
+  const update = (key: string, value: string) =>
+    change((current) => withFilter(current, key, value));
+  const typeFilter = (key: string, value: string) =>
+    change((current) => ({ ...current, [key]: value }), true);
+  const range = (key: PlayerSearchRange, props: Partial<RangeProps> = {}) => {
+    const spec = rangeSpec(key);
+    const Range = spec.money ? MoneyRangeField : RangeField;
+    return (
+      <Range
+        // A new generation after "Clear all" also drops unreadable amount drafts.
+        key={`${key}:${generation}`}
+        spec={spec}
+        filters={filters}
+        applied={appliedFilters}
+        onType={typeFilter}
+        {...props}
+      />
+    );
+  };
+  const select = (
+    key: string,
+    title: string,
+    options: ReactNode,
+    props: { wide?: boolean; ariaLabel?: string; disabled?: boolean } = {},
+  ) => (
+    <Field label={title} className={props.wide ? "wide" : ""} key={key}>
+      <select
+        aria-label={props.ariaLabel}
+        value={filters[key]}
+        disabled={props.disabled}
+        onChange={(event) => update(key, event.target.value)}
+      >
+        {options}
+      </select>
+    </Field>
+  );
+  const fields: Record<FilterGroupId, ReactNode> = {
+    player: [
+      select(
+        "country",
+        "Nationality",
+        <>
+          <option value="">All countries</option>
+          {bootstrap?.countries.map((country) => (
+            <option value={country.id} key={country.id}>
+              {country.name}
+            </option>
+          ))}
+        </>,
+      ),
+      select(
+        "position",
+        "Position",
+        <>
+          <option value="">All positions</option>
+          {POSITIONS.map((position) => <option key={position}>{position}</option>)}
+        </>,
+        { ariaLabel: "Position filter" },
+      ),
+      select(
+        "ageGroup",
+        "Age group",
+        <>
+          <option value="">All players</option>
+          <option>Senior</option>
+          <option>U19</option>
+          <option>U17</option>
+        </>,
+      ),
+      select(
+        "foot",
+        "Preferred foot",
+        <>
+          <option value="">Either foot</option>
+          <option>Right</option>
+          <option>Left</option>
+          <option>Both</option>
+        </>,
+      ),
+      range("age"),
+    ],
+    ability: [
+      range("ability"),
+      range("potential"),
+      select(
+        "injured",
+        "Fitness status",
+        <>
+          <option value="">Any status</option>
+          <option value="0">Fit players</option>
+          <option value="1">Injured players</option>
+        </>,
+        { wide: true },
+      ),
+    ],
+    contract: [
+      range("value"),
+      range("wage"),
+      range("contractMonths"),
+      select(
+        "contractStatus",
+        "Contract status",
+        <>
+          <option value="">All registrations</option>
+          <option value="professional">Protected contract</option>
+          <option value="amateur">Non-professional registration</option>
+        </>,
+      ),
+      select(
+        "availability",
+        "Availability",
+        <>
+          <option value="">Any availability</option>
+          {Object.entries(AVAILABILITY_LABELS).map(([value, text]) => (
+            <option key={value} value={value}>
+              {text}
+            </option>
+          ))}
+        </>,
+      ),
+    ],
+    club: [
+      select(
+        "clubCountry",
+        "Club country",
+        <>
+          <option value="">All countries</option>
+          {clubCountries.map(([id, name]) => (
+            <option key={id} value={id!}>
+              {name}
+            </option>
+          ))}
+        </>,
+        { wide: true },
+      ),
+      select(
+        "league",
+        "League",
+        <>
+          <option value="">All leagues</option>
+          {filters.clubCountry
+            ? leagueOptions.map((league) => (
+                <option key={league.id} value={league.id}>
+                  {leagueLabel(league)}
+                </option>
+              ))
+            : clubCountries.map(([id, name]) => (
+                <optgroup key={id} label={name}>
+                  {leagueOptions
+                    .filter((league) => league.country_id === id)
+                    .map((league) => (
+                      <option key={league.id} value={league.id}>
+                        {leagueLabel(league)}
+                      </option>
+                    ))}
+                </optgroup>
+              ))}
+        </>,
+        { wide: true },
+      ),
+      select(
+        "club",
+        "Club",
+        <>
+          <option value="">{filters.league ? "All clubs" : "Choose a league first"}</option>
+          {leagueClubs?.clubs.map((club) => (
+            <option key={club.id} value={club.id}>
+              {club.name}
+            </option>
+          ))}
+        </>,
+        { wide: true, disabled: !filters.league },
+      ),
+      range("tier"),
+    ],
+    physical: [
+      range("height"),
+      range("weight"),
+      select(
+        "attribute",
+        "Attribute",
+        <>
+          <option value="">Any attribute</option>
+          {Object.entries(ATTRIBUTE_GROUPS).map(([group, keys]) => (
+            <optgroup key={group} label={label(group)}>
+              {keys.map((key) => (
+                <option key={key} value={key}>
+                  {label(key)}
+                </option>
+              ))}
+            </optgroup>
+          ))}
+        </>,
+        { wide: true },
+      ),
+      range("attribute", {
+        title: filters.attribute ? `${label(filters.attribute)} level` : "Attribute level",
+        disabled: !filters.attribute,
+      }),
+    ],
+    personality: [
+      select(
+        "personality",
+        "Personality",
+        <>
+          <option value="">Any personality</option>
+          {PERSONALITY_KEYS.map((key) => (
+            <option key={key} value={key}>
+              {label(key)}
+            </option>
+          ))}
+        </>,
+        { wide: true },
+      ),
+      range("personality", {
+        title: filters.personality ? `${label(filters.personality)} level` : "Personality level",
+        disabled: !filters.personality,
+      }),
+      select(
+        "lifestyle",
+        "Lifestyle",
+        <>
+          <option value="">All lifestyles</option>
+          {LIFESTYLES.map((value) => (
+            <option key={value} value={value}>
+              {label(value)}
+            </option>
+          ))}
+        </>,
+      ),
+      select(
+        "trait",
+        "Player trait",
+        <>
+          <option value="">Any trait</option>
+          {TRAITS.map((value) => (
+            <option key={value}>{value}</option>
+          ))}
+        </>,
+      ),
+    ],
+    performance: [
+      range("form"),
+      range("appearances"),
+      range("minutes"),
+      range("goals"),
+      range("assists"),
+    ],
+  };
+  const filterGroup = (group: (typeof FILTER_GROUPS)[number]) => (
+    <fieldset className="filter-group" key={group.id}>
+      <legend>{group.title}</legend>
+      <div className="filter-fields">{fields[group.id]}</div>
+    </fieldset>
+  );
   function reset() {
     change(() => defaultFilters);
+    setGeneration((current) => current + 1);
     setSearch("");
     setShortlisted(false);
     setPage(1);
@@ -306,7 +689,7 @@ export default function Database() {
         JSON.stringify(
           {
             date: bootstrap?.state.date,
-            filters,
+            filters: query,
             total: data.total,
             page: data.page,
             players: data.players.map(
@@ -393,27 +776,26 @@ export default function Database() {
             onClick={() => setShortlisted(!shortlisted)}
           />
         </div>
-        {(activeFilters > 0 || search) && (
+        {(chips.length > 0 || shortlisted || search) && (
           <div className="active-filter-list" role="group" aria-label="Active player filters">
             {search && (
               <button type="button" className="filter-chip" aria-label={`Remove search: ${search}`} onClick={() => setSearch("")}>
                 <span>Search: {search}</span><X size={13} aria-hidden="true" />
               </button>
             )}
-            {Object.entries(filters).filter(([, value]) => value !== "").map(([key, value]) => (
+            {chips.map((chip) => (
               <button
-                key={key}
+                key={chip.key}
                 type="button"
                 className="filter-chip"
-                aria-label={`Remove ${filterLabels[key]}`}
-                onClick={() => change((current) => ({
-                  ...current,
-                  [key]: "",
-                  ...(key === "attribute" ? { attributeMin: "" } : {}),
-                  ...(key === "personality" ? { personalityMin: "" } : {}),
-                }))}
+                aria-label={`Remove ${chip.name} filter`}
+                onClick={() =>
+                  change((current) =>
+                    chip.clear.reduce((next, key) => withFilter(next, key, ""), current),
+                  )
+                }
               >
-                <span>{filterLabels[key]}{filterValue(key, value) ? `: ${filterValue(key, value)}` : ""}</span>
+                <span>{chip.text}</span>
                 <X size={13} aria-hidden="true" />
               </button>
             ))}
@@ -426,294 +808,15 @@ export default function Database() {
           </div>
         )}
         <div className="database-filter-groups">
-          <fieldset className="filter-group">
-            <legend>Identity & location</legend>
-            <div className="filter-fields">
-            <Field label="Nationality">
-              <select
-                value={filters.country}
-                onChange={(event) => update("country", event.target.value)}
-              >
-                <option value="">All countries</option>
-                {bootstrap?.countries.map((country) => (
-                  <option value={country.id} key={country.id}>
-                    {country.name}
-                  </option>
-                ))}
-              </select>
-            </Field>
-            <Field label="Age group">
-              <select
-                value={filters.ageGroup}
-                onChange={(event) => update("ageGroup", event.target.value)}
-              >
-                <option value="">All players</option>
-                <option>Senior</option>
-                <option>U19</option>
-                <option>U17</option>
-              </select>
-            </Field>
-            <Field label="Age">
-              <select aria-label="Age filter" value={filters.ageMax} onChange={(event) => update("ageMax", event.target.value)}>
-                <option value="">Any age</option>
-                <option value="17">Under 18</option>
-                <option value="20">Under 21</option>
-                <option value="23">Under 24</option>
-                <option value="29">Under 30</option>
-              </select>
-            </Field>
-            </div>
-          </fieldset>
-          <fieldset className="filter-group">
-            <legend>Position & ability</legend>
-            <div className="filter-fields">
-            <Field label="Position">
-              <select aria-label="Position filter" value={filters.position} onChange={(event) => update("position", event.target.value)}>
-                <option value="">All positions</option>
-                {POSITIONS.map((position) => <option key={position}>{position}</option>)}
-              </select>
-            </Field>
-            <Field label="Minimum ability">
-              <input
-                type="number"
-                min="1"
-                max="99"
-                placeholder="1-99"
-                value={filters.abilityMin}
-                onChange={(event) => typeFilter("abilityMin", event.target.value)}
-              />
-            </Field>
-            <Field label="Minimum potential">
-              <input
-                type="number"
-                min="1"
-                max="99"
-                placeholder="1-99"
-                value={filters.potentialMin}
-                onChange={(event) => typeFilter("potentialMin", event.target.value)}
-              />
-            </Field>
-            <Field label="Fitness status">
-              <select
-                value={filters.injured}
-                onChange={(event) => update("injured", event.target.value)}
-              >
-                <option value="">Any status</option>
-                <option value="0">Fit players</option>
-                <option value="1">Injured players</option>
-              </select>
-            </Field>
-            </div>
-          </fieldset>
-          <fieldset className="filter-group">
-            <legend>Contract & availability</legend>
-            <div className="filter-fields">
-            <MoneyFilter title="Maximum value" value={filters.valueMax} onChange={(value) => typeFilter("valueMax", value)} />
-            <MoneyFilter title="Maximum wage / week" value={filters.wageMax} onChange={(value) => typeFilter("wageMax", value)} />
-            <Field label="Contract status">
-              <select
-                value={filters.contractStatus}
-                onChange={(event) =>
-                  update("contractStatus", event.target.value)
-                }
-              >
-                <option value="">All registrations</option>
-                <option value="professional">Protected contract</option>
-                <option value="amateur">Non-professional registration</option>
-              </select>
-            </Field>
-            <Field label="Expiring within">
-              <select
-                value={filters.contractMonths}
-                onChange={(event) =>
-                  update("contractMonths", event.target.value)
-                }
-              >
-                <option value="">Any contract</option>
-                <option value="6">6 months</option>
-                <option value="12">12 months</option>
-                <option value="24">24 months</option>
-              </select>
-            </Field>
-            <Field label="Availability">
-              <select
-                value={filters.freeAgent ? "freeAgent" : filters.availableLoan ? "availableLoan" : filters.listed ? "listed" : ""}
-                onChange={(event) => change((current) => ({
-                  ...current,
-                  freeAgent: event.target.value === "freeAgent" ? "1" : "",
-                  availableLoan: event.target.value === "availableLoan" ? "1" : "",
-                  listed: event.target.value === "listed" ? "1" : "",
-                }))}
-              >
-                <option value="">Any availability</option>
-                <option value="listed">Transfer listed</option>
-                <option value="availableLoan">Loan listed</option>
-                <option value="freeAgent">Free agents & home-based</option>
-              </select>
-            </Field>
-            </div>
-          </fieldset>
+          {FILTER_GROUPS.filter((group) => !group.advanced).map(filterGroup)}
         </div>
-          <div className="database-filter-groups advanced-filter-groups" id="player-database-filters" hidden={!advanced}>
-          <fieldset className="filter-group">
-            <legend>Attributes & physical profile</legend>
-            <div className="filter-fields">
-            <Field label="Attribute">
-              <select
-                value={filters.attribute}
-                onChange={(event) => update("attribute", event.target.value)}
-              >
-                <option value="">Any attribute</option>
-                {Object.entries(ATTRIBUTE_GROUPS).map(([group, keys]) => (
-                  <optgroup key={group} label={label(group)}>
-                    {keys.map((key) => (
-                      <option key={key} value={key}>
-                        {label(key)}
-                      </option>
-                    ))}
-                  </optgroup>
-                ))}
-              </select>
-            </Field>
-            <Field label="Attribute minimum">
-              <input
-                aria-label="Attribute minimum"
-                disabled={!filters.attribute}
-                type="number"
-                min="1"
-                max="99"
-                value={filters.attributeMin}
-                onChange={(event) => typeFilter("attributeMin", event.target.value)}
-                placeholder="1-99"
-              />
-            </Field>
-            <Field label="Preferred foot">
-              <select value={filters.foot} onChange={(event) => update("foot", event.target.value)}>
-                <option value="">Either foot</option>
-                <option>Right</option>
-                <option>Left</option>
-                <option>Both</option>
-              </select>
-            </Field>
-            <Field label="Height minimum (cm)">
-              <input type="number" min="140" max="220" placeholder="Any" value={filters.heightMin} onChange={(event) => typeFilter("heightMin", event.target.value)} />
-            </Field>
-            </div>
-          </fieldset>
-          <fieldset className="filter-group">
-            <legend>Personality & traits</legend>
-            <div className="filter-fields">
-            <Field label="Personality">
-              <select
-                value={filters.personality}
-                onChange={(event) => update("personality", event.target.value)}
-              >
-                <option value="">Any personality</option>
-                {PERSONALITY_KEYS.map((key) => (
-                  <option key={key} value={key}>
-                    {label(key)}
-                  </option>
-                ))}
-              </select>
-            </Field>
-            <Field label="Personality minimum">
-              <input
-                disabled={!filters.personality}
-                type="number"
-                min="1"
-                max="99"
-                value={filters.personalityMin}
-                onChange={(event) =>
-                  typeFilter("personalityMin", event.target.value)
-                }
-                placeholder="1-99"
-              />
-            </Field>
-            <Field label="Lifestyle">
-              <select
-                value={filters.lifestyle}
-                onChange={(event) => update("lifestyle", event.target.value)}
-              >
-                <option value="">All lifestyles</option>
-                {[
-                  "disciplined",
-                  "nightlife",
-                  "family-focused",
-                  "luxury-obsessed",
-                  "gym-rat",
-                ].map((value) => (
-                  <option key={value} value={value}>
-                    {label(value)}
-                  </option>
-                ))}
-              </select>
-            </Field>
-            <Field label="Player trait">
-              <select
-                value={filters.trait}
-                onChange={(event) => update("trait", event.target.value)}
-              >
-                <option value="">Any trait</option>
-                {[
-                  "Cuts inside",
-                  "Shoots from distance",
-                  "Dribbles often",
-                  "Aggressive presser",
-                  "Big-game player",
-                  "Lazy trainer",
-                  "Plays one-twos",
-                  "Dictates tempo",
-                  "Arrives late in box",
-                  "Stays on feet",
-                  "Tries killer balls",
-                  "Leads by example",
-                  "Runs with ball",
-                  "Plays safe passes",
-                  "Likes to beat offside trap",
-                  "Long throw specialist",
-                ].map((value) => (
-                  <option key={value}>{value}</option>
-                ))}
-              </select>
-            </Field>
-            </div>
-          </fieldset>
-          <fieldset className="filter-group">
-            <legend>Match performance</legend>
-            <div className="filter-fields">
-            <Field label="Minimum match rating">
-              <input
-                type="number"
-                min="0"
-                max="10"
-                step=".1"
-                placeholder="0-10"
-                value={filters.formMin}
-                onChange={(event) => typeFilter("formMin", event.target.value)}
-              />
-            </Field>
-            <Field label="Minimum minutes">
-              <input
-                type="number"
-                min="0"
-                step="90"
-                placeholder="Any"
-                value={filters.minutesMin}
-                onChange={(event) => typeFilter("minutesMin", event.target.value)}
-              />
-            </Field>
-            <Field label="Minimum goals">
-              <input
-                type="number"
-                min="0"
-                placeholder="Any"
-                value={filters.goalsMin}
-                onChange={(event) => typeFilter("goalsMin", event.target.value)}
-              />
-            </Field>
-            </div>
-          </fieldset>
-          </div>
+        <div
+          className="database-filter-groups advanced-filter-groups"
+          id="player-database-filters"
+          hidden={!advanced}
+        >
+          {FILTER_GROUPS.filter((group) => group.advanced).map(filterGroup)}
+        </div>
         <div className="filter-summary" role="status" aria-live="polite">
           <DatabaseIcon size={13} aria-hidden="true" />
           <span className="filter-total">
@@ -745,7 +848,11 @@ export default function Database() {
           <Empty
             icon={Search}
             title="No players match this brief"
-            detail="Adjust your filters to widen the search."
+            detail={
+              data.totalCapped
+                ? "Skill, lifestyle, trait and contract-status filters check the first 10,000 players in this order. Add a position, age, club or other filter to search further."
+                : "Adjust your filters to widen the search."
+            }
           >
             <Button icon={X} variant="secondary" onClick={reset}>
               Clear filters

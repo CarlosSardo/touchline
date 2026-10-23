@@ -9,11 +9,11 @@ import { generateWorld } from "./world.ts";
 import { createCalendar } from "./calendar.ts";
 import { createApp, isCalendarDate, loanDurationError, MAX_LOAN_DAYS, readApiConfiguration } from "./app.ts";
 import { sessionCookieName, signSession, type AuthenticatedIdentity } from "./auth.ts";
-import { playerSearchChanged } from "./queries.ts";
+import { playerSearchChanged, players as searchPlayers } from "./queries.ts";
 import { initialInbox, stateOf } from "./systems.ts";
 import { Saves } from "./saves.ts";
 import { tableName, WORLD_TABLES } from "./sql-schema.ts";
-import { ageOn, addDays, DEFAULT_ASSISTANT_DUTIES, groupCareerSaves } from "../shared/rules.ts";
+import { ageOn, addDays, addMonths, DEFAULT_ASSISTANT_DUTIES, groupCareerSaves } from "../shared/rules.ts";
 import { CALL_UP_RULES } from "../shared/features/callups.ts";
 import { clubTransfersChanged } from "./club-transfers.ts";
 import type { AccountUser, SaveSlot } from "../shared/api.ts";
@@ -946,6 +946,109 @@ describe.skipIf(!sqlIntegration)("game HTTP API and SQL saves", () => {
     );
     expect(attributes.status).toBe(200);
     expect(attributes.body.total).toBeGreaterThan(0);
+  });
+
+  it("filters numeric ranges from both ends and scopes clubs by country, league and division", async () => {
+    type Row = { id: number; age: number; ability: number; club_id: number | null; contract_end: string };
+    const count = async (where: string, ...params: (number | string)[]) =>
+      (await store.get<{ count: number }>(
+        `SELECT count(*) AS count FROM players WHERE role <> 'Retired' AND ${where}`,
+        ...params,
+      ))!.count;
+    // A reversed pair is searched in order.
+    const between = await request(app)
+      .get("/api/players")
+      .query({ ageMin: 21, ageMax: 18, abilityMin: 40, abilityMax: 70, pageSize: 100 });
+    expect(between.status).toBe(200);
+    expect(between.body.total).toBe(
+      Math.min(10_000, await count("age BETWEEN 18 AND 21 AND ability BETWEEN 40 AND 70")),
+    );
+    expect(between.body.total).toBeGreaterThan(0);
+    for (const player of between.body.players as Row[]) {
+      expect(player.age).toBeGreaterThanOrEqual(18);
+      expect(player.age).toBeLessThanOrEqual(21);
+      expect(player.ability).toBeGreaterThanOrEqual(40);
+      expect(player.ability).toBeLessThanOrEqual(70);
+    }
+    const league = (await store.get<{ id: number; country_id: number }>(
+      "SELECT leagues.id, leagues.country_id FROM leagues WHERE kind = 'league' AND age_group = 'Senior' AND tier = 1 AND EXISTS (SELECT 1 FROM clubs WHERE clubs.league_id = leagues.id) ORDER BY leagues.id LIMIT 1",
+    ))!;
+    const clubs = await request(app)
+      .get("/api/world/clubs")
+      .query({ league: league.id, sort: "name", direction: "asc", pageSize: 100 });
+    expect(clubs.status).toBe(200);
+    const clubIds = new Set<number>(clubs.body.clubs.map((club: { id: number }) => club.id));
+    expect(clubs.body.total).toBe(
+      (await store.get<{ count: number }>("SELECT count(*) AS count FROM clubs WHERE league_id = ?", league.id))!.count,
+    );
+    expect(clubs.body.clubs.every((club: { league_id: number }) => club.league_id === league.id)).toBe(true);
+    const inLeague = await request(app).get("/api/players").query({ league: league.id, pageSize: 100 });
+    expect(inLeague.status).toBe(200);
+    expect(inLeague.body.total).toBe(
+      await count("club_id IN (SELECT id FROM clubs WHERE league_id = ?)", league.id),
+    );
+    expect((inLeague.body.players as Row[]).every((player) => clubIds.has(player.club_id!))).toBe(true);
+    const club = [...clubIds][0];
+    const atClub = await request(app).get("/api/players").query({ league: league.id, club, pageSize: 100 });
+    expect(atClub.body.total).toBe(await count("club_id = ?", club));
+    const topFlight = await request(app)
+      .get("/api/players")
+      .query({ clubCountry: league.country_id, tierMax: 1, pageSize: 10 });
+    expect(topFlight.status).toBe(200);
+    expect(topFlight.body.total).toBe(
+      await count(
+        "club_id IN (SELECT clubs.id FROM clubs JOIN leagues ON leagues.id = clubs.league_id WHERE clubs.country_id = ? AND leagues.tier = 1)",
+        league.country_id,
+      ),
+    );
+    // Contract ranges count whole months from today.
+    const { date } = await stateOf(store);
+    const expiring = await request(app)
+      .get("/api/players")
+      .query({ contractMonthsMin: 12, contractMonthsMax: 24, pageSize: 100 });
+    expect(expiring.status).toBe(200);
+    expect(expiring.body.total).toBe(
+      Math.min(
+        10_000,
+        await count("contract_end >= ? AND contract_end <= ?", addMonths(date, 12), addMonths(date, 24)),
+      ),
+    );
+    for (const player of expiring.body.players as Row[]) {
+      expect(player.contract_end >= addMonths(date, 12)).toBe(true);
+      expect(player.contract_end <= addMonths(date, 24)).toBe(true);
+    }
+    expect((await request(app).get("/api/players").query({ abilityMax: 100 })).status).toBe(400);
+  });
+
+  it("checks profile-JSON filters on a bounded candidate set in sort order and reports a lower bound", async () => {
+    const query = { position: "CM", attribute: "passing", attributeMin: 50, sort: "ability", direction: "desc", pageSize: 10 };
+    const passing =
+      "(profile::jsonb #>> '{attributes,technical,passing}')::double precision + (ability - coalesce((profile::jsonb #>> '{baseAbility}')::double precision, ability)) >= 50";
+    const candidates = (await store.all<{ id: number }>(
+      "SELECT id FROM players WHERE role <> 'Retired' AND position = 'CM' ORDER BY ability DESC, lower(name), id LIMIT 40",
+    )).map((row) => row.id);
+    const expected = (await store.all<{ id: number }>(
+      `SELECT id FROM players WHERE id = ANY(?::int[]) AND ${passing} ORDER BY ability DESC, lower(name), id`,
+      candidates,
+    )).map((row) => row.id);
+    expect(expected.length).toBeGreaterThanOrEqual(10);
+    playerSearchChanged(store);
+    const bounded = await store.readTransaction(() => searchPlayers(store, query, { profileCandidates: 40 }));
+    // Only the 40 best central midfielders were checked: the total is a lower bound, the first page is exact.
+    expect(bounded).toMatchObject({ total: expected.length, totalCapped: true });
+    expect(bounded.players.map((player) => player.id)).toEqual(expected.slice(0, 10));
+    const exact = await store.readTransaction(() => searchPlayers(store, query));
+    expect(exact).toMatchObject({
+      total: (await store.get<{ count: number }>(
+        `SELECT count(*) AS count FROM players WHERE role <> 'Retired' AND position = 'CM' AND ${passing}`,
+      ))!.count,
+      totalCapped: false,
+    });
+    expect(exact.players.map((player) => player.id)).toEqual(expected.slice(0, 10));
+    // Height and weight are indexed columns now, equal to the profile values.
+    expect(await store.get(
+      "SELECT count(*) AS mismatched FROM players WHERE height IS DISTINCT FROM (profile::jsonb #>> '{identity,height}')::double precision OR weight IS DISTINCT FROM (profile::jsonb #>> '{identity,weight}')::double precision",
+    )).toEqual({ mismatched: 0 });
   });
 
   it("pages and sorts player searches consistently with exact totals below the cap", async () => {
@@ -2114,7 +2217,7 @@ describe.skipIf(!sqlIntegration)("game HTTP API and SQL saves", () => {
       await record("loan", `${season + 1}-01-15`, { from: away.id, to: home.id, club: home.name, fee: 250_000, type: "Standard loan" }, season);
       // A move between two other clubs mentioning the club only by name is not the club's.
       await record("transfer", `${season}-09-01`, { from: away.id, to: state.clubId, club: home.name, fee: 1 });
-      // A call-up and its return are listed (marked) but never counted.
+      // A call-up and its return are one squad movement, never a transfer.
       await record("squad", `${season}-10-01`, { fromClubId: away.id, toClubId: home.id, label: "First team", callUp: true, until: `${season}-10-05` });
       await record("squad", `${season}-10-06`, { fromClubId: home.id, toClubId: away.id, label: "B team", callUpReturn: true });
 
@@ -2140,15 +2243,24 @@ describe.skipIf(!sqlIntegration)("game HTTP API and SQL saves", () => {
       });
       expect(group.transfers.map((entry: { kind: string; direction: string; club: { id: number } | null; fee: number }) => [entry.kind, entry.direction, entry.club?.id ?? null, entry.fee])).toEqual([
         ["loan", "in", away.id, 250_000],
-        ["squad", "out", away.id, null],
-        ["squad", "in", away.id, null],
         ["transfer", "out", away.id, 4_500_000],
         ["free", "in", null, 0],
       ]);
       expect(group.transfers[0]).not.toHaveProperty("callUp");
-      expect(group.transfers[1]).toMatchObject({ callUpReturn: true });
-      expect(group.transfers[2]).toMatchObject({ callUp: true, until: `${season}-10-05` });
-      const sale = group.transfers[3];
+      expect(response.body.squadMoves).toEqual({
+        total: 1,
+        moves: [
+          expect.objectContaining({
+            kind: "callUp",
+            date: `${season}-10-01`,
+            until: `${season}-10-05`,
+            returnedOn: `${season}-10-06`,
+            days: 5,
+            player: expect.objectContaining({ id: player.id, name: player.name }),
+          }),
+        ],
+      });
+      const sale = group.transfers[1];
       expect(sale.player).toEqual({
         id: player.id,
         name: player.name,
@@ -2156,7 +2268,7 @@ describe.skipIf(!sqlIntegration)("game HTTP API and SQL saves", () => {
         ageAtMove: ageOn(player.birth_date, `${season}-08-20`),
       });
       expect(sale.terms).toMatchObject({ installments: 3, sellOnPercent: 15 });
-      expect(group.transfers[4].terms).toBeNull();
+      expect(group.transfers[2].terms).toBeNull();
 
       const outgoing = await request(app).get(`/api/clubs/${away.id}/transfers?season=${season}&direction=out&type=loan,transfer`);
       expect(outgoing.status).toBe(200);
@@ -2167,8 +2279,8 @@ describe.skipIf(!sqlIntegration)("game HTTP API and SQL saves", () => {
       ]);
 
       const paged = await request(app).get(`/api/clubs/${home.id}/transfers?season=${season}&pageSize=2&page=2`);
-      expect(paged.body).toMatchObject({ total: 5, pages: 3, page: 2, pageSize: 2 });
-      expect(paged.body.groups[0].transfers).toHaveLength(2);
+      expect(paged.body).toMatchObject({ total: 3, pages: 2, page: 2, pageSize: 2 });
+      expect(paged.body.groups[0].transfers).toHaveLength(1);
 
       // A newly recorded move is seen at once: only history ids above the cached scan are read.
       await record("transfer", `${season}-08-25`, { from: away.id, to: home.id, club: home.name, fee: 1_000_000, type: "Permanent transfer" });
@@ -2177,7 +2289,7 @@ describe.skipIf(!sqlIntegration)("game HTTP API and SQL saves", () => {
       expect(again.body.groups[0].totals.spent).toBe(1_250_000);
 
       expect((await request(app).get("/api/clubs/99999999/transfers")).status).toBe(404);
-      for (const query of ["page=0", "pageSize=501", "direction=sideways", "type=gift", "season=abc"])
+      for (const query of ["page=0", "pageSize=501", "direction=sideways", "type=gift", "type=squad", "season=abc"])
         expect((await request(app).get(`/api/clubs/${home.id}/transfers?${query}`)).status, query).toBe(400);
       expect((await request(app).get("/api/clubs/abc/transfers")).status).toBe(400);
     } finally {

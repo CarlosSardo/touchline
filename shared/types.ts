@@ -14,6 +14,13 @@ export interface PlayerProfile {
     trainingStartAge?: number;
     expenseAllowance?: number;
     signedDate?: string;
+    /** Wage reduction (fraction) on the contract club's relegation; null when the contract has none (shared/contract-clauses.ts). */
+    relegationWageCut?: number | null;
+    /** Club whose contract the relegation clause belongs to (a move re-terms it). */
+    relegationClauseClubId?: number;
+    relegationCutApplied?: { season: number; cut: number; from: number; to: number };
+    /** Fee that obliges the club to release the player (mandatory in Spain, shared/release-clauses.ts); null/absent: none. */
+    releaseClause?: number | null;
   };
   familyMove?: {
     countryId: number;
@@ -564,6 +571,8 @@ export interface Negotiation {
   buyer_color?: string;
   buyer_reputation?: number;
   seller_name?: string;
+  /** Release clause in the player's current contract (transfer list read model). */
+  release_clause?: number | null;
   /** Transfer desk only: rivals for this player as the director knows them (data.rivals is removed). */
   rivals?: RivalInterest[];
   battle?: TransferBattleView | null;
@@ -813,8 +822,24 @@ export interface NegotiationData {
   reason?: OfferReason;
   /** Expected start: the loan start or arrival date (the window opening for pre-window approaches). */
   plannedStart?: string;
+  /** The buying club paid the player's release clause: the selling club cannot refuse (personal terms still apply). */
+  releaseClause?: boolean;
+  /** Player-plus-cash or swap: a player of the buying club who moves to the selling club as part of the deal. */
+  exchange?: ExchangePart;
+  /** Release clause agreed in personal terms for the new contract (null: none; absent: the club's default). */
+  contractReleaseClause?: number | null;
   /** Why an open approach was withdrawn by the club or closed by another agreement. */
   closedReason?: "accepted-elsewhere" | "needs-changed" | "window" | "injury" | "budget" | "unavailable";
+}
+
+export interface ExchangePart {
+  playerId: number;
+  name: string;
+  /** What the selling club credits for him against the fee. */
+  valuation: number;
+  /** His weekly wage at the selling club (agreed when the selling club accepts the package). */
+  wage: number;
+  years: number;
 }
 
 export type OfferReasonCode =

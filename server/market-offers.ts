@@ -1,6 +1,7 @@
 import seedrandom from "seedrandom";
 import { Store } from "./db.ts";
-import { transferEmbargo } from "./finance.ts";
+import { clubPolicySnapshot, plannedWageBudget, TARGET_DEPTH } from "./club-policy.ts";
+import { signingHeadroomCost, transferEmbargo } from "./finance.ts";
 import { publishTransferStory } from "./media.ts";
 import { canSign, eligibilitySummaries, predictRegistration } from "./eligibility.ts";
 import { registrationAssociationId } from "./registration.ts";
@@ -8,6 +9,7 @@ import { assessPlayerInterest, assessYouthTransfer, marketMoveInterest, personal
 import {
   closeNegotiation,
   defaultLoanTerms,
+  fitsWageBudget,
   internationalLoanIssue,
   loanBorrowerWillingness,
   loanEndDate,
@@ -39,7 +41,6 @@ import type {
   OfferReason,
   Player,
   PlayerProfile,
-  Position,
   Settings,
 } from "../shared/types.ts";
 
@@ -89,20 +90,6 @@ const WAGE_ROOM_SHARE = 0.85;
 const MAX_SENIORS = 28;
 const MOVE_INTEREST_FLOOR = 52;
 const MAX_VALIDATIONS = 14;
-
-/** First-team depth a club wants per position (24 seniors). */
-export const TARGET_DEPTH: Record<Position, number> = {
-  GK: 2,
-  CB: 4,
-  LB: 2,
-  RB: 2,
-  DM: 2,
-  CM: 3,
-  AM: 2,
-  LW: 2,
-  RW: 2,
-  ST: 3,
-};
 
 const NOMINAL_LOAN_TERMS = {
   playingTime: 55,
@@ -209,9 +196,15 @@ interface Demand {
   injuredSeniors: number;
   positions: Map<string, PositionStats>;
   transferRoom: number;
+  /** The weekly wage budget as the world market plans it (club-policy.ts plannedWageBudget). */
+  wageBudget: number;
   wageRoom: number;
   wages: number;
   openApproaches: number;
+  /** Annual squad cost the club may still add under its FFP limit (Infinity when enforcement is off). */
+  ffpHeadroom: number;
+  /** Share of a fee that also uses the headroom (finance.ts signingHeadroomCost). */
+  feeCashShare: number;
 }
 
 interface Pair {
@@ -403,12 +396,17 @@ async function demandSnapshot(store: Store, state: GameState) {
     if (deal.selling_club_id === state.clubId && deal.stage === "Offer received") entry.approaches++;
     committed.set(deal.buying_club_id, entry);
   }
+  const policies = await clubPolicySnapshot(store, state.date);
+  const ffp = (await settingsOf(store)).ffp !== false;
   const demand: Demand[] = [];
   for (const club of clubs) {
     const squad = squads.get(club.id);
-    if (!squad) continue;
+    const policy = policies.get(club.id);
+    // A club under a registration embargo cannot sign anyone.
+    if (!squad || policy?.embargo) continue;
     const commitment = committed.get(club.id) ?? { fees: 0, wages: 0, approaches: 0 };
     const wages = squad.wages + (loanShares.get(club.id) ?? 0);
+    const wageBudget = plannedWageBudget(club, policy);
     demand.push({
       club,
       level: levels.get(club.id) ?? 0,
@@ -416,9 +414,12 @@ async function demandSnapshot(store: Store, state: GameState) {
       injuredSeniors: squad.injured,
       positions: positions.get(club.id) ?? new Map(),
       transferRoom: Math.min(club.transfer_budget - commitment.fees, Math.max(0, club.balance)),
-      wageRoom: club.wage_budget - wages - commitment.wages,
+      wageBudget,
+      wageRoom: wageBudget - wages - commitment.wages,
       wages: wages + commitment.wages,
       openApproaches: commitment.approaches,
+      ffpHeadroom: ffp && policy ? policy.ffpHeadroom : Infinity,
+      feeCashShare: policy?.feeCashShare ?? 0,
     });
   }
   return demand;
@@ -464,7 +465,7 @@ function matchPair(candidate: Candidate, demand: Demand, user: Club, date: strin
       playerAge: player.age,
       borrowerReputation: demand.club.reputation,
       borrowerTransferBudget: Math.max(0, demand.transferRoom),
-      borrowerWageBudget: demand.club.wage_budget,
+      borrowerWageBudget: demand.wageBudget,
       borrowerCurrentWages: demand.wages,
       seniorSquadSize: demand.seniors,
       positionCount: stats.depth,
@@ -652,7 +653,7 @@ async function buildOffer(
       playerAge: player.age,
       borrowerReputation: buyer.reputation,
       borrowerTransferBudget: Math.max(0, pair.demand.transferRoom),
-      borrowerWageBudget: buyer.wage_budget,
+      borrowerWageBudget: pair.demand.wageBudget,
       borrowerCurrentWages: pair.demand.wages,
       seniorSquadSize: pair.demand.seniors,
       positionCount: pair.demand.positions.get(player.position)?.depth ?? 0,
@@ -681,6 +682,7 @@ async function buildOffer(
     if (cost > pair.demand.transferRoom || transferEmbargo(buyer.balance, terms.fee)) return null;
     const addedWage = (player.wage * terms.salarySplit) / 100;
     if (addedWage > pair.demand.wageRoom * WAGE_ROOM_SHARE) return null;
+    if (addedWage * 52 * (days / 365) + terms.fee * (1 + pair.demand.feeCashShare) > pair.demand.ffpHeadroom) return null;
     const preview = await assessPlayerInterest(store, player, buyer, {
       loan: true,
       role: terms.role,
@@ -729,6 +731,7 @@ async function buildOffer(
     fee = floorTo(room, 10_000);
   }
   if (fee <= 0 || transferEmbargo(buyer.balance, fee) || buyer.balance < fee) return null;
+  if (signingHeadroomCost({ wage, fee, years, agentFee }, pair.demand.feeCashShare) > pair.demand.ffpHeadroom) return null;
   return {
     type: "Permanent transfer",
     fee,
@@ -836,6 +839,7 @@ export async function generateUserClubOffers(store: Store, state: GameState) {
       if (!offer) continue;
       await insertApproach(store, state, option.candidate, pair.demand.club, offer);
       pair.demand.transferRoom -= offer.cost;
+      pair.demand.ffpHeadroom -= offer.addedWage * 52 + offer.cost * (1 + pair.demand.feeCashShare);
       pair.demand.wageRoom -= offer.addedWage;
       pair.demand.wages += offer.addedWage;
       pair.demand.openApproaches++;
@@ -949,7 +953,7 @@ export async function approachIssue(store: Store, negotiation: Negotiation, date
   if (cost > buyer.transfer_budget || transferEmbargo(buyer.balance, negotiation.offer))
     return { reason: "budget" as const, message: `${buyer.name} no longer have the funds and have withdrawn.` };
   const addedWage = loan ? (player.wage * data.terms.salarySplit) / 100 : negotiation.wage;
-  if ((await weeklyWages(store, buyer.id)) + (await committedWages(store, buyer.id, negotiation.id)) + addedWage > buyer.wage_budget)
+  if (!(await fitsWageBudget(store, buyer, (await weeklyWages(store, buyer.id)) + (await committedWages(store, buyer.id, negotiation.id)) + addedWage, date)))
     return { reason: "budget" as const, message: `${buyer.name} can no longer fit the wage and have withdrawn.` };
   const signed = await store.get<{ name: string }>(
     "SELECT players.name FROM history JOIN players ON players.id = history.entity_id WHERE history.entity_type IN ('transfer','loan') AND history.date >= ? AND (history.data::jsonb ->> 'to')::integer = ? AND players.position = ? AND players.id <> ? LIMIT 1",

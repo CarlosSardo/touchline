@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  FIRST_SEASON_FILL,
   FULL_WORLD_FIXTURES,
   MIN_SEASON_BUDGET_MB,
   PLAYER_ROW_BUDGET_BYTES,
@@ -87,6 +88,9 @@ describe("season footprint budget", () => {
         });
         const grown = await reportFootprint(store, "grown", start.accumulatedMB - MIN_SEASON_BUDGET_MB - 1, 1000);
         expect(grown).toMatchObject({ over: true, budgetMB: MIN_SEASON_BUDGET_MB });
+        // The first season also fills the rolling tables: it gets FIRST_SEASON_FILL times the budget.
+        const first = await reportFootprint(store, "first", start.accumulatedMB - MIN_SEASON_BUDGET_MB - 1, 1000, true);
+        expect(first).toMatchObject({ over: false, budgetMB: Math.round(MIN_SEASON_BUDGET_MB * FIRST_SEASON_FILL) });
         // On GitHub Actions an ::error annotation follows the plain line, so search every logged line.
         const logged = () => log.mock.calls.map((call) => String(call[0]));
         expect(logged()).toContainEqual(

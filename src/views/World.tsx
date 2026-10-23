@@ -20,6 +20,7 @@ import {
   TextLink,
 } from "../ui.tsx";
 import type { WorldAudit, WorldClubPage } from "../../shared/api.ts";
+import OwnershipBrowser from "../OwnershipBrowser.tsx";
 import { compactNumber, label } from "../../shared/rules.ts";
 
 // Keyed by string so catalog-backed policy modes and evidence levels degrade to a neutral label.
@@ -285,6 +286,7 @@ export default function World() {
           </>
         )}
       </Panel>
+      <OwnershipBrowser />
       <details className="association-audit section-space">
         <summary>
           Association rules{" "}

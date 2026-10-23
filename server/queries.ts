@@ -18,6 +18,7 @@ import {
 } from "./affiliates.ts";
 import {
   addDays,
+  addMonths,
   ATTRIBUTE_GROUPS,
   LOAN_TYPES,
   PERSONALITY_KEYS,
@@ -71,6 +72,7 @@ import {
   clubValuation,
   projectedOperatingRevenue,
 } from "./finance.ts";
+import { clubSanctions } from "./sanctions.ts";
 import { canSign, eligibilitySummaries, playerEligibility, predictRegistration } from "./eligibility.ts";
 import { assessPlayerInterest, assessYouthTransfer } from "./recruitment.ts";
 import { clubAffiliates } from "./club-support.ts";
@@ -79,6 +81,12 @@ import { marketValueFactor } from "../shared/world-catalog/market.ts";
 import { associationNotes, reservePolicy } from "../shared/world-rules.ts";
 import { notificationFeed, notificationVisibility } from "./notifications.ts";
 import { withBattleViews } from "./transfer-battles.ts";
+import {
+  PLAYER_SEARCH_RANGE_KEYS,
+  PLAYER_SEARCH_RANGES,
+  searchBounds,
+  type PlayerSearchRange,
+} from "../shared/player-search.ts";
 
 const playerSelect = `SELECT players.*, clubs.name AS club_name, clubs.color AS club_color, countries.name AS country_name, countries.code AS country_code FROM players LEFT JOIN clubs ON clubs.id = players.club_id JOIN countries ON countries.id = players.country_id`;
 const fixtureSelect = `SELECT fixtures.*, home.name AS home_name, away.name AS away_name, home.color AS home_color, away.color AS away_color, leagues.name AS competition_name, coalesce(leagues.age_group,'Senior') AS age_group FROM fixtures JOIN clubs AS home ON home.id = fixtures.home_id JOIN clubs AS away ON away.id = fixtures.away_id LEFT JOIN leagues ON leagues.id = fixtures.league_id`;
@@ -120,6 +128,7 @@ export async function worldClubs(
         .optional(),
       type: z.enum(["club", "bteam", "national"]).optional(),
       tier: z.coerce.number().int().min(1).max(20).optional(),
+      league: z.coerce.number().int().positive().optional(),
       reputationMin: z.coerce.number().min(0).max(99).default(0),
       sort: z
         .enum(["name", "reputation", "academy", "capacity", "division"])
@@ -153,6 +162,10 @@ export async function worldClubs(
   if (filter.tier) {
     conditions.push("leagues.tier = ?");
     params.push(filter.tier);
+  }
+  if (filter.league) {
+    conditions.push("clubs.league_id = ?");
+    params.push(filter.league);
   }
   const joins =
     "FROM clubs JOIN countries ON countries.id = clubs.country_id LEFT JOIN leagues ON leagues.id = clubs.league_id";
@@ -390,35 +403,32 @@ export async function dashboard(store: Store): Promise<Dashboard> {
   };
 }
 
+const rangeBound = (key: PlayerSearchRange) =>
+  z.coerce.number().min(0).max(PLAYER_SEARCH_RANGES[key].high).optional();
+/** `${range}Min` / `${range}Max` for every numeric range; an omitted bound restricts nothing. */
+const rangeParameters = Object.fromEntries(
+  PLAYER_SEARCH_RANGE_KEYS.flatMap((key) => [
+    [`${key}Min`, rangeBound(key)],
+    [`${key}Max`, rangeBound(key)],
+  ]),
+) as { [Key in PlayerSearchRange as `${Key}Min` | `${Key}Max`]: ReturnType<typeof rangeBound> };
+
 export const playerFilter = z.object({
+  ...rangeParameters,
   q: z.string().max(100).default(""),
   position: z.enum(POSITIONS).optional(),
   country: z.coerce.number().int().positive().optional(),
   club: z.coerce.number().int().positive().optional(),
-  ageMin: z.coerce.number().min(0).max(100).default(0),
-  ageMax: z.coerce.number().min(0).max(100).default(100),
-  abilityMin: z.coerce.number().min(0).max(99).default(0),
-  abilityMax: z.coerce.number().min(1).max(99).default(99),
-  potentialMin: z.coerce.number().min(0).max(99).default(0),
-  potentialMax: z.coerce.number().min(1).max(99).default(99),
-  valueMin: z.coerce.number().min(0).default(0),
-  valueMax: z.coerce.number().min(0).default(1_000_000_000),
-  wageMax: z.coerce.number().min(0).default(1_000_000_000),
+  /** Country of the player's club (not the player's nationality). */
+  clubCountry: z.coerce.number().int().positive().optional(),
+  league: z.coerce.number().int().positive().optional(),
   ageGroup: z.enum(["Senior", "U19", "U17", "U20", "U21"]).optional(),
   contractStatus: z.enum(["professional", "amateur"]).optional(),
   foot: z.enum(["Right", "Left", "Both"]).optional(),
   lifestyle: z.string().max(40).optional(),
   trait: z.string().max(80).optional(),
   attribute: z.string().max(60).optional(),
-  attributeMin: z.coerce.number().min(0).max(99).default(0),
   personality: z.string().max(60).optional(),
-  personalityMin: z.coerce.number().min(0).max(99).default(0),
-  heightMin: z.coerce.number().min(0).max(230).default(0),
-  heightMax: z.coerce.number().min(0).max(230).default(230),
-  formMin: z.coerce.number().min(0).max(10).default(0),
-  goalsMin: z.coerce.number().int().min(0).default(0),
-  minutesMin: z.coerce.number().min(0).default(0),
-  contractMonths: z.coerce.number().min(0).max(120).optional(),
   shortlisted: z.enum(["1", "0"]).optional(),
   listed: z.enum(["1", "0"]).optional(),
   availableLoan: z.enum(["1", "0"]).optional(),
@@ -455,14 +465,24 @@ export const playerFilter = z.object({
 type PlayerFilter = z.infer<typeof playerFilter>;
 /** Player searches count at most this many matches; larger results report `totalCapped`. */
 export const PLAYER_SEARCH_CAP = 10_000;
-/** The zod default of valueMax/wageMax, i.e. "no limit". */
-const NO_MONEY_LIMIT = 1_000_000_000;
+/**
+ * A profile-JSON condition (skill level, lifestyle, trait, contract status) is checked on at most this many
+ * candidates: the players passing every column condition, taken in the requested order. Parsing a profile costs
+ * about 20 µs here (several times that on a Raspberry Pi), so a rare match can no longer scan the whole world. The
+ * pages shown are exact; beyond the candidates the total is a lower bound ("1,234+").
+ */
+export const PROFILE_SEARCH_CANDIDATES = 10_000;
 /** Names sort case-insensitively; lower(players.name) is the player_name index. */
 const sortName = (column: string) => `lower(${column})`;
 
 type SearchColumn = (name: string) => string;
 type SearchClause = (column: SearchColumn) => string;
 type SearchOrder = (column: SearchColumn) => { order: string; joins: string[] };
+/** One WHERE condition and the parameters of its placeholders. */
+interface SearchCondition {
+  clause: SearchClause;
+  params: SqlParameter[];
+}
 
 /** The player search over `FROM players`: one alias, so the planner can combine the player indexes (bitmap AND/OR). */
 export interface PlayerSearch {
@@ -471,35 +491,52 @@ export interface PlayerSearch {
   where: string;
   order: string;
   params: SqlParameter[];
-  /** A filter or the sort parses the profile JSON of every candidate row. */
+  /** A filter parses the profile JSON of every row it examines (no index can serve it). */
   readsProfile: boolean;
+  /** The conditions on table columns (all of `where` unless `readsProfile`) and their parameters. */
+  columnWhere: string;
+  columnParams: SqlParameter[];
+  /** The profile-JSON conditions over `profile_json.doc` (PROFILE_JSON parses each profile once), or null. */
+  profileWhere: string | null;
+  profileParams: SqlParameter[];
   /** Anything beyond "not retired". */
   filtered: boolean;
 }
 
-function compileSearch(
-  clauses: SearchClause[],
-  params: SqlParameter[],
-  orderOf: SearchOrder,
-): PlayerSearch {
-  const used = new Set<string>();
-  const column: SearchColumn = (name) => {
-    used.add(name);
-    return `players.${name}`;
-  };
-  const where = clauses.map((clause) => clause(column)).join(" AND ");
+/** Join exposing each row's profile as jsonb, parsed once however many conditions read it (OFFSET 0 keeps it a subquery). */
+const PROFILE_JSON = "CROSS JOIN LATERAL (SELECT players.profile::jsonb AS doc OFFSET 0) AS profile_json";
+
+function compileSearch(conditions: SearchCondition[], orderOf: SearchOrder): PlayerSearch {
+  const column: SearchColumn = (name) => `players.${name}`;
+  const compiled = conditions.map(({ clause, params }) => {
+    let profile = false;
+    const sql = clause((name) => {
+      if (name === "profile") profile = true;
+      return column(name);
+    });
+    // `profile_json.doc::jsonb` is a no-op cast.
+    const parsed = profile ? clause((name) => (name === "profile" ? "profile_json.doc" : column(name))) : sql;
+    return { sql, parsed, params, profile };
+  });
+  const columns = compiled.filter((condition) => !condition.profile);
+  const profile = compiled.filter((condition) => condition.profile);
+  const where = (items: typeof compiled) => items.map((condition) => condition.sql).join(" AND ");
   const ordered = orderOf(column);
   return {
     joins: ordered.joins.join(" "),
-    where,
+    where: where(compiled),
     order: ordered.order,
-    params,
-    readsProfile: used.has("profile"),
-    filtered: clauses.length > 1,
+    params: compiled.flatMap((condition) => condition.params),
+    readsProfile: profile.length > 0,
+    columnWhere: where(columns),
+    columnParams: columns.flatMap((condition) => condition.params),
+    profileWhere: profile.length ? profile.map((condition) => condition.parsed).join(" AND ") : null,
+    profileParams: profile.flatMap((condition) => condition.params),
+    filtered: compiled.length > 1,
   };
 }
 
-/** A numeric profile field; `path` is a literal key path such as `{identity,height}`. */
+/** A numeric profile field; `path` is a literal key path such as `{baseAbility}`. */
 const profileNumber = (column: SearchColumn, path: string) =>
   `(${column("profile")}::jsonb #>> '${path}')::double precision`;
 
@@ -541,8 +578,8 @@ function playerOrder(
       minutes: () => `${column("minutes")} ${order}`,
       contract,
       contract_end: contract,
-      height: () => missingLast(profileNumber(column, "{identity,height}")),
-      weight: () => missingLast(profileNumber(column, "{identity,weight}")),
+      height: () => missingLast(column("height")),
+      weight: () => missingLast(column("weight")),
     };
     return {
       order: `${keys[sort]()},${sortName(column("name"))} ASC,${column("id")} ASC`,
@@ -551,33 +588,47 @@ function playerOrder(
   };
 }
 
+/** Ranges over one player column, in clause order; skill, contract and division ranges have their own SQL. */
+const rangeColumns: Partial<Record<PlayerSearchRange, (column: SearchColumn) => string>> = {
+  age: (column) => column("age"),
+  ability: (column) => column("ability"),
+  potential: (column) => column("potential"),
+  value: (column) => column("value"),
+  wage: (column) => column("wage"),
+  form: (column) => column("form"),
+  appearances: (column) => column("appearances"),
+  goals: (column) => column("goals"),
+  assists: (column) => column("assists"),
+  minutes: (column) => column("minutes"),
+  // Plain columns copied from the profile (migration 11), indexed.
+  height: (column) => column("height"),
+  weight: (column) => column("weight"),
+};
+
 /**
  * The player-search WHERE/ORDER BY. Default ranges are omitted so the planner only sees real restrictions;
- * `secondaryNationals` are the ids holding `filter.country` as a second nationality.
+ * `today` dates contract ranges and `secondaryNationals` are the ids holding `filter.country` as a second nationality.
  */
 export function playerSearch(
   filter: PlayerFilter,
-  context: { contractBefore?: string; secondaryNationals?: readonly number[] } = {},
+  context: { today?: string; secondaryNationals?: readonly number[] } = {},
 ): PlayerSearch {
-  const clauses: SearchClause[] = [(column) => `${column("role")} <> 'Retired'`];
-  const params: SqlParameter[] = [];
-  const where = (clause: SearchClause, ...values: SqlParameter[]) => {
-    clauses.push(clause);
-    params.push(...values);
+  const conditions: SearchCondition[] = [{ clause: (column) => `${column("role")} <> 'Retired'`, params: [] }];
+  const where = (clause: SearchClause, ...params: SqlParameter[]) => conditions.push({ clause, params });
+  const bounds = (key: PlayerSearchRange) =>
+    searchBounds(key, filter[`${key}Min`], filter[`${key}Max`]);
+  /** `valueParams` bind the placeholders inside `value` (repeated for each bound). */
+  const range = (
+    key: PlayerSearchRange,
+    value: (column: SearchColumn) => string,
+    ...valueParams: SqlParameter[]
+  ) => {
+    const { from, to } = bounds(key);
+    if (from !== undefined) where((column) => `${value(column)} >= ?`, ...valueParams, from);
+    if (to !== undefined) where((column) => `${value(column)} <= ?`, ...valueParams, to);
   };
-  // Integer columns reject fractional parameters: round the bounds inward.
-  if (filter.ageMin > 0) where((column) => `${column("age")} >= ?`, Math.ceil(filter.ageMin));
-  if (filter.ageMax < 100) where((column) => `${column("age")} <= ?`, Math.floor(filter.ageMax));
-  if (filter.abilityMin > 1) where((column) => `${column("ability")} >= ?`, filter.abilityMin);
-  if (filter.abilityMax < 99) where((column) => `${column("ability")} <= ?`, filter.abilityMax);
-  if (filter.potentialMin > 1) where((column) => `${column("potential")} >= ?`, filter.potentialMin);
-  if (filter.potentialMax < 99) where((column) => `${column("potential")} <= ?`, filter.potentialMax);
-  if (filter.valueMin > 0) where((column) => `${column("value")} >= ?`, filter.valueMin);
-  if (filter.valueMax < NO_MONEY_LIMIT) where((column) => `${column("value")} <= ?`, filter.valueMax);
-  if (filter.wageMax < NO_MONEY_LIMIT) where((column) => `${column("wage")} <= ?`, filter.wageMax);
-  if (filter.formMin > 0) where((column) => `${column("form")} >= ?`, filter.formMin);
-  if (filter.goalsMin > 0) where((column) => `${column("goals")} >= ?`, filter.goalsMin);
-  if (filter.minutesMin > 0) where((column) => `${column("minutes")} >= ?`, Math.ceil(filter.minutesMin));
+  for (const [key, value] of Object.entries(rangeColumns) as [PlayerSearchRange, (column: SearchColumn) => string][])
+    range(key, value);
   if (filter.q) {
     const search = likePattern(filter.q);
     // = ANY(ARRAY(subquery)) runs each lookup once and keeps country_id/club_id index scans open to a BitmapOr.
@@ -601,6 +652,31 @@ export function playerSearch(
     else where((column) => `${column("country_id")} = ?`, filter.country);
   }
   if (filter.club) where((column) => `${column("club_id")} = ?`, filter.club);
+  // A semi-join on the (small) clubs table: the planner sees how many players the club set covers, so a broad
+  // set (all top flights) still walks player_ability for the first page and a narrow one uses player_club.
+  const tier = bounds("tier");
+  const tiered = tier.from !== undefined || tier.to !== undefined;
+  if (filter.clubCountry || filter.league || tiered) {
+    const scope: string[] = [];
+    const values: SqlParameter[] = [];
+    if (filter.clubCountry) {
+      scope.push("clubs.country_id = ?");
+      values.push(filter.clubCountry);
+    }
+    if (filter.league) {
+      scope.push("clubs.league_id = ?");
+      values.push(filter.league);
+    }
+    if (tiered) {
+      scope.push("leagues.tier >= ? AND leagues.tier <= ?");
+      values.push(tier.from ?? PLAYER_SEARCH_RANGES.tier.low, tier.to ?? PLAYER_SEARCH_RANGES.tier.high);
+    }
+    where(
+      (column) =>
+        `${column("club_id")} IN (SELECT clubs.id FROM clubs${tiered ? " JOIN leagues ON leagues.id = clubs.league_id" : ""} WHERE ${scope.join(" AND ")})`,
+      ...values,
+    );
+  }
   if (filter.ageGroup) where((column) => `${column("age_group")} = ?`, filter.ageGroup);
   if (filter.contractStatus)
     where(
@@ -616,33 +692,36 @@ export function playerSearch(
       filter.trait,
     );
   if (filter.attribute) {
-    const group = Object.entries(ATTRIBUTE_GROUPS).find(([, keys]) =>
-      keys.includes(filter.attribute!),
-    )?.[0];
+    const attribute = filter.attribute;
+    const group = Object.entries(ATTRIBUTE_GROUPS).find(([, keys]) => keys.includes(attribute))?.[0];
     if (!group) throw new GameError("Unknown player attribute.");
     // SQL mirror of shared `currentAttribute` (a missing baseAbility means no change since generation).
-    where(
+    range(
+      "attribute",
       (column) =>
-        `(${column("profile")}::jsonb #>> ?::text[])::double precision + (${column("ability")} - coalesce(${profileNumber(column, "{baseAbility}")},${column("ability")})) >= ?`,
-      ["attributes", group, filter.attribute],
-      filter.attributeMin,
+        `((${column("profile")}::jsonb #>> ?::text[])::double precision + (${column("ability")} - coalesce(${profileNumber(column, "{baseAbility}")},${column("ability")})))`,
+      ["attributes", group, attribute],
     );
   }
   if (filter.personality) {
-    if (!PERSONALITY_KEYS.includes(filter.personality))
+    const personality = filter.personality;
+    if (!PERSONALITY_KEYS.includes(personality))
       throw new GameError("Unknown personality attribute.");
-    where(
-      (column) => `(${column("profile")}::jsonb #>> ?::text[])::double precision >= ?`,
-      ["personality", filter.personality],
-      filter.personalityMin,
+    range(
+      "personality",
+      (column) => `(${column("profile")}::jsonb #>> ?::text[])::double precision`,
+      ["personality", personality],
     );
   }
-  if (filter.heightMin > 0)
-    where((column) => `${profileNumber(column, "{identity,height}")} >= ?`, filter.heightMin);
-  if (filter.heightMax < 230)
-    where((column) => `${profileNumber(column, "{identity,height}")} <= ?`, filter.heightMax);
-  if (context.contractBefore !== undefined)
-    where((column) => `${column("contract_end")} <= ?`, context.contractBefore);
+  const contract = bounds("contractMonths");
+  if (contract.from !== undefined || contract.to !== undefined) {
+    const today = context.today;
+    if (!today) throw new Error("A contract range needs today's date.");
+    if (contract.from !== undefined)
+      where((column) => `${column("contract_end")} >= ?`, addMonths(today, contract.from));
+    if (contract.to !== undefined)
+      where((column) => `${column("contract_end")} <= ?`, addMonths(today, contract.to));
+  }
   // Matches the predicate of the partial index player_shortlist.
   if (filter.shortlisted === "1") where((column) => `${column("shortlisted")} = 1`);
   if (filter.shortlisted === "0") where((column) => `${column("shortlisted")} = 0`);
@@ -652,19 +731,19 @@ export function playerSearch(
   if (filter.freeAgent === "1") where((column) => `${column("club_id")} IS NULL`);
   if (filter.injured === "1") where((column) => `${column("injury_until")} IS NOT NULL`);
   if (filter.injured === "0") where((column) => `${column("injury_until")} IS NULL`);
-  return compileSearch(clauses, params, playerOrder(filter.sort, filter.direction));
+  return compileSearch(conditions, playerOrder(filter.sort, filter.direction));
 }
 
 /** Ranks a known id set (int[] parameter) by the search sort: primary-key lookups, no scan. */
 export function playerRanking(filter: Pick<PlayerFilter, "sort" | "direction">): PlayerSearch {
   return compileSearch(
-    [(column) => `${column("id")} = ANY(?::int[])`],
-    [],
+    [{ clause: (column) => `${column("id")} = ANY(?::int[])`, params: [] }],
     playerOrder(filter.sort, filter.direction),
   );
 }
 
-type SearchMatches = { at: number; count: number; ids?: number[] };
+/** `partial`: a profile-JSON search had more candidates than it checks, so `count` is a lower bound. */
+type SearchMatches = { at: number; count: number; ids?: number[]; partial?: boolean };
 interface SearchCounts {
   generation: number;
   matches: Map<string, SearchMatches>;
@@ -740,6 +819,33 @@ async function secondaryNationals(
   return known.byCountry.get(countryId) ?? [];
 }
 
+/**
+ * Matches of a profile-JSON search: the column conditions pick at most `limit` candidates in the search order
+ * (indexes serve them), then the profile conditions are checked on those rows only, by primary key. The ids are
+ * kept, so ranking and paging never parse a profile again.
+ */
+async function profileMatches(store: Store, search: PlayerSearch, limit: number): Promise<SearchMatches> {
+  const candidates = (
+    await store.all<{ id: number }>(
+      `SELECT players.id FROM players ${search.joins} WHERE ${search.columnWhere} ORDER BY ${search.order} LIMIT ?`,
+      ...search.columnParams,
+      limit + 1,
+    )
+  ).map((row) => row.id);
+  const partial = candidates.length > limit;
+  const examined = candidates.slice(0, limit);
+  const ids = examined.length
+    ? (
+        await store.all<{ id: number }>(
+          `SELECT players.id FROM players ${PROFILE_JSON} WHERE players.id = ANY(?::int[]) AND ${search.profileWhere}`,
+          examined,
+          ...search.profileParams,
+        )
+      ).map((row) => row.id)
+    : [];
+  return { at: Date.now(), count: ids.length, ids, partial };
+}
+
 /** Exact count of non-retired players for the unfiltered search (retirements and new players only happen on new days/ids). */
 async function activePlayers(
   store: Store,
@@ -784,58 +890,62 @@ function searchRow(player: Player) {
 export async function players(
   store: Store,
   query: unknown,
+  limits: { profileCandidates?: number } = {},
 ): Promise<PlayerPage> {
+  const candidates = limits.profileCandidates ?? PROFILE_SEARCH_CANDIDATES;
   const filter = playerFilter.parse(query);
   const state = await stateOf(store);
   const search = playerSearch(filter, {
-    contractBefore:
-      filter.contractMonths === undefined
-        ? undefined
-        : addDays(state.date, Math.floor(filter.contractMonths * 30.44)),
+    today: state.date,
     secondaryNationals: filter.country
       ? await secondaryNationals(store, state, filter.country)
       : [],
   });
-  // The match set ignores sort and paging, so changing either reuses it until the world changes.
+  // A column-only match set ignores sort and paging, so changing either reuses it until the world changes; a
+  // profile-JSON one depends on the order its candidates are taken in.
   const counts = searchCountsOf(store);
   const key = JSON.stringify([
     state.careerId,
     state.seed,
     state.date,
-    { ...filter, sort: undefined, direction: undefined, page: undefined, pageSize: undefined },
+    {
+      ...filter,
+      ...(search.readsProfile ? {} : { sort: undefined, direction: undefined }),
+      page: undefined,
+      pageSize: undefined,
+    },
+    search.readsProfile ? candidates : null,
   ]);
   const cached = counts.matches.get(key);
-  const top = `SELECT players.id FROM players WHERE ${search.where} LIMIT ${PLAYER_SEARCH_CAP + 1}`;
   const matches: SearchMatches =
     cached && Date.now() - cached.at <= MATCH_CACHE_MS
       ? cached
-      : !search.readsProfile
-        ? {
+      : search.readsProfile
+        ? await profileMatches(store, search, candidates)
+        : {
             at: Date.now(),
             count: (await store.get<{ count: number }>(
-              `SELECT count(*) AS count FROM (${top}) AS matches`,
+              `SELECT count(*) AS count FROM (SELECT players.id FROM players WHERE ${search.where} LIMIT ${PLAYER_SEARCH_CAP + 1}) AS matches`,
               ...search.params,
             ))!.count,
-          }
-        : // A JSON-filtered search reads the wide rows; keep its ids so ranking and paging don't scan again.
-          await store
-            .all<{ id: number }>(top, ...search.params)
-            .then((rows) => ({ at: Date.now(), count: rows.length, ids: rows.map((row) => row.id) }));
+          };
   counts.matches.delete(key);
   counts.matches.set(key, matches);
   while (counts.matches.size > MATCH_CACHE_SIZE)
     counts.matches.delete(counts.matches.keys().next().value!);
-  const capped = matches.count > PLAYER_SEARCH_CAP;
-  const total = !capped
-    ? matches.count
-    : search.filtered
-      ? PLAYER_SEARCH_CAP
-      : await activePlayers(store, state);
+  const partial = matches.partial === true;
+  const capped = partial || matches.count > PLAYER_SEARCH_CAP;
+  const total =
+    partial || !capped
+      ? matches.count
+      : search.filtered
+        ? PLAYER_SEARCH_CAP
+        : await activePlayers(store, state);
   const pages = Math.max(1, Math.ceil(total / filter.pageSize));
   const page = Math.min(filter.page, pages);
   let ids: number[] = [];
   if (total > 0) {
-    const known = !capped ? matches.ids : undefined;
+    const known = partial || !capped ? matches.ids : undefined;
     const ranked = known ? playerRanking(filter) : search;
     const params = known ? [known] : search.params;
     ids = (
@@ -1152,7 +1262,7 @@ export async function transfers(store: Store): Promise<TransferDesk> {
   const negotiations = await withBattleViews(
     store,
     await store.all<Negotiation>(
-      "SELECT negotiations.*, players.name AS player_name, players.position, players.age, players.ability, players.potential, buyer.name AS buyer_name, buyer.color AS buyer_color, buyer.reputation AS buyer_reputation, seller.name AS seller_name FROM negotiations JOIN players ON players.id = negotiations.player_id JOIN clubs AS buyer ON buyer.id = negotiations.buying_club_id LEFT JOIN clubs AS seller ON seller.id = negotiations.selling_club_id WHERE buying_club_id = ? OR selling_club_id = ? ORDER BY negotiations.id DESC",
+      "SELECT negotiations.*, players.name AS player_name, players.position, players.age, players.ability, players.potential, (players.profile::jsonb #>> '{contract,releaseClause}')::double precision AS release_clause, buyer.name AS buyer_name, buyer.color AS buyer_color, buyer.reputation AS buyer_reputation, seller.name AS seller_name FROM negotiations JOIN players ON players.id = negotiations.player_id JOIN clubs AS buyer ON buyer.id = negotiations.buying_club_id LEFT JOIN clubs AS seller ON seller.id = negotiations.selling_club_id WHERE buying_club_id = ? OR selling_club_id = ? ORDER BY negotiations.id DESC",
       id,
       id,
     ),
@@ -1250,7 +1360,7 @@ export async function staff(store: Store): Promise<StaffDesk> {
       id,
     ),
     candidates: await store.all<Staff>(
-      "SELECT * FROM staff WHERE club_id IS NULL AND (data::jsonb ->> 'retired') IS DISTINCT FROM 'true' ORDER BY ability DESC,id LIMIT 40",
+      "SELECT * FROM staff WHERE club_id IS NULL AND role <> 'Director of football' AND (data::jsonb ->> 'retired') IS DISTINCT FROM 'true' ORDER BY ability DESC,id LIMIT 40",
     ),
     relationships: await store.all(
       "SELECT relationships.*, source.name AS source_name, target.name AS target_name FROM relationships JOIN staff AS source ON source.id = source_id JOIN staff AS target ON target.id = target_id WHERE relationships.club_id = ? AND source_type = 'staff' AND source.club_id = ? AND target.club_id = ?",
@@ -1395,6 +1505,7 @@ export async function finances(store: Store): Promise<FinanceData> {
       (await stateOf(store)).date,
     ),
     compliance: await assessFinances(store, club.id),
+    sanctions: await clubSanctions(store, club.id),
     transferPayments: await transferPayments(store, club.id),
     futureTransferReserved: (await store.get<{ total: number }>(
       "SELECT coalesce(sum((data::jsonb ->> 'reservedBudget')::double precision),0) AS total FROM negotiations WHERE buying_club_id = ? AND stage IN ('Scheduled','Medical','Registration')",

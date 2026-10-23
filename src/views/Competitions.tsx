@@ -28,6 +28,7 @@ import {
   TextLink,
   ZoneLegend,
 } from "../ui.tsx";
+import TopScorers from "../TopScorers.tsx";
 import { leagueZones } from "../table-zones.ts";
 import { seasonText } from "../format.ts";
 import {
@@ -396,6 +397,7 @@ export default function Competitions() {
                   items={[
                     { id: "table", label: "Standings" },
                     { id: "fixtures", label: "Fixtures & results" },
+                    { id: "scorers", label: "Top scorers" },
                     { id: "qualification", label: "Qualification" },
                     { id: "history", label: "History" },
                   ]}
@@ -493,6 +495,9 @@ export default function Competitions() {
                       />
                     )}
                   </>
+                )}
+                {tab === "scorers" && (
+                  <TopScorers key={data.league.id} league={data.league} />
                 )}
                 {tab === "qualification" && (
                   <div className="padded">

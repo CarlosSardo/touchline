@@ -275,7 +275,10 @@ export interface Dashboard {
 }
 export interface PlayerPage {
   players: Player[];
-  /** Capped at 10,000 when `totalCapped` (more players match: show "10,000+"). */
+  /**
+   * A lower bound when `totalCapped` (show "10,000+"): counting stops at 10,000, and skill, lifestyle, trait and
+   * contract-status filters check only the first 10,000 candidates in the requested order (server/queries.ts).
+   */
   total: number;
   totalCapped?: boolean;
   page: number;
@@ -459,9 +462,9 @@ export interface PlayerHistoryClub {
   color: string | null;
 }
 /**
- * transfer: permanent move between clubs; free: joined without a fee (from no club or a free deal);
- * loan / loanReturn / loanRecall / loanPurchase: loan spells and how they ended; registration: automatic move
- * inside a club family (B-team, age group); squad: the user's own squad assignment (e.g. a youth promotion).
+ * Moves between different clubs: transfer: permanent move; free: joined without a fee (from no club or a free deal);
+ * loan / loanReturn / loanRecall / loanPurchase: loan spells and how they ended; registration: an academy-age
+ * registration with another club. Moves inside one club family are squad movements (PlayerSquadMove).
  */
 export type PlayerMoveKind =
   | "transfer"
@@ -470,8 +473,7 @@ export type PlayerMoveKind =
   | "loanReturn"
   | "loanRecall"
   | "loanPurchase"
-  | "registration"
-  | "squad";
+  | "registration";
 export interface PlayerMove {
   kind: PlayerMoveKind;
   /** null: the move happened but its date was not recorded (loan recalls and purchases before recording began). */
@@ -488,46 +490,128 @@ export interface PlayerMove {
   dealType: string | null;
   /** Loans only: the scheduled end of the spell. */
   loanUntil: string | null;
-  /** Squad moves only. */
-  ageGroup: { from: string | null; to: string | null } | null;
-  /** Squad moves only, present only when true: a temporary call-up / the return from one. */
-  callUp?: boolean;
-  callUpReturn?: boolean;
-  /** Call-ups only: the recorded end (match date or chosen date). */
+}
+/**
+ * A move inside one club family (first team, B-team, U19, U17). callUp: a temporary call-up, folded together with
+ * its return; move: a squad assignment; registration: an automatic registration with the family's other club.
+ */
+export type SquadMoveKind = "callUp" | "move" | "registration";
+export interface PlayerSquadMove {
+  kind: SquadMoveKind;
+  date: string;
+  season: number;
+  from: PlayerHistoryClub | null;
+  fromGroup: string | null;
+  to: PlayerHistoryClub | null;
+  toGroup: string | null;
+  /** The destination squad as recorded, e.g. "Harbour FC / U19"; null if not recorded. */
+  label: string | null;
+  /** Up: to a more senior team (U17 < U19 < B-team < first team). */
+  direction: "up" | "down" | "across";
+  /** Call-ups only: the planned end, the day he went back (null: still there) and the length in days once back. */
   until?: string | null;
+  returnedOn?: string | null;
+  days?: number | null;
+  /** Call-ups only, present only when true: a possible first-team debut. */
+  debut?: boolean;
+}
+export type HonourKind = "league" | "cup" | "continental" | "international" | "youthInternational";
+/** A trophy won by a team he appeared for in that competition and season. */
+export interface PlayerHonour {
+  season: number;
+  kind: HonourKind;
+  title: string;
+  /** The winning team (a national team for international honours). */
+  club: PlayerHistoryClub | null;
+  competitionId: number | null;
+  /** Youth competitions only. */
+  ageGroup: string | null;
+  appearances: number;
+  /** The team's matches in the competition; null if not recorded. */
+  matches: number | null;
+  /** regular: half the matches or more; squad: a fifth or more; fringe: fewer. */
+  role: "regular" | "squad" | "fringe";
+}
+export type MilestoneKind =
+  | "seniorDebut"
+  | "clubDebut"
+  | "internationalDebut"
+  | "firstGoal"
+  | "firstInternationalGoal"
+  | "appearances"
+  | "clubAppearances"
+  | "goals"
+  | "caps";
+export interface PlayerMilestone {
+  kind: MilestoneKind;
+  /** Counting milestones: the appearance, goal or cap number reached. */
+  value: number | null;
+  date: string;
+  /** true: reached during that season (recorded before milestones were tracked); `date` is the season's end. */
+  dateEstimated: boolean;
+  season: number;
+  /** The club (or national team) he played for. */
+  club: PlayerHistoryClub | null;
+  competition: string | null;
+  fixtureId: number | null;
+  age: number;
 }
 /**
  * appearances and minutes cover every recorded match. goals, assists and averageRating come only from
  * full-engine matches (the user's club family): null means not recorded, which is different from 0.
  */
+/** Appearances, minutes, goals and assists cover every match of the line (competitive: the season statistics). */
 export interface PlayerStatLine {
   appearances: number;
   minutes: number;
-  /** Full-engine matches in this line; goals, assists and averageRating cover exactly these. */
-  recordedAppearances: number;
-  goals: number | null;
-  assists: number | null;
+  goals: number;
+  assists: number;
+  /**
+   * Appearances with a match rating on record (match rows: every match of the current season, the user's teams'
+   * matches of earlier seasons); averageRating covers exactly these and is null without any.
+   */
+  ratedAppearances: number;
   averageRating: number | null;
-  coverage: "full" | "partial" | "none";
+  ratingCoverage: "full" | "partial" | "none";
 }
 export interface PlayerCompetitionStats extends PlayerStatLine {
   club: PlayerHistoryClub;
   /** id null: friendlies. */
   competition: { id: number | null; name: string; ageGroup: string | null };
 }
+/** One club's (or national team's) competitive lines of a season. */
+export interface PlayerClubSeasonStats {
+  club: PlayerHistoryClub;
+  competitions: PlayerCompetitionStats[];
+  total: PlayerStatLine;
+}
 export interface PlayerSeasonStats {
   season: number;
-  competitions: PlayerCompetitionStats[];
+  /** Clubs by appearances, competitions by appearances. */
+  clubs: PlayerClubSeasonStats[];
+  /** Friendly lines per club (competition id null); not part of `total`. */
+  friendlies: PlayerCompetitionStats[];
+  /** Competitive matches only. */
   total: PlayerStatLine;
 }
 /** GET /api/players/:id/history. Moves oldest first; seasons newest first. */
 export interface PlayerHistory {
   playerId: number;
-  moves: PlayerMove[];
-  /** true: only the latest 500 moves are listed. */
+  /** Transfers, free moves, loans (with their ends) and registrations between different clubs. */
+  transfers: PlayerMove[];
+  /** Moves inside one club family, call-ups folded with their returns. */
+  squadMoves: PlayerSquadMove[];
+  /** true: only the latest 500 recorded moves were read. */
   movesTruncated: boolean;
   seasons: PlayerSeasonStats[];
+  /** Competitive matches of every season. */
   career: PlayerStatLine;
+  /** Friendlies of every season; null when he played none. */
+  careerFriendlies: PlayerStatLine | null;
+  /** Honours newest first. */
+  honours: PlayerHonour[];
+  /** Milestones oldest first. */
+  milestones: PlayerMilestone[];
 }
 export interface ClubTransferClub extends PlayerHistoryClub {
   country: { id: number; name: string; code: string } | null;
@@ -552,10 +636,11 @@ export interface ClubTransfer {
   loanUntil: string | null;
   /** Instalments, sell-on and buy-back agreed in the director's own negotiations; null for AI deals. */
   terms: TransferTerms | null;
-  /** Squad moves only, present only when true; call-ups never count in the season totals. */
-  callUp?: boolean;
-  callUpReturn?: boolean;
-  until?: string | null;
+}
+/** A move inside the club's family (first team, B-team, youth squads), call-ups folded with their returns. */
+export interface ClubSquadMove extends PlayerSquadMove {
+  key: string;
+  player: { id: number; name: string; position: string | null; ageAtMove: number | null };
 }
 /** Fees count in the season of the move, at the agreed amount (instalments are not spread). */
 export interface ClubTransferTotals {
@@ -566,7 +651,7 @@ export interface ClubTransferTotals {
   /** Moves with another club: transfers, free signings, loan starts and loan purchases. */
   countIn: number;
   countOut: number;
-  /** Registrations and squad moves inside the club family, both directions (call-ups excluded). */
+  /** Squad movements inside the club family, both directions (call-ups excluded). */
   countInternal?: number;
   /** Loans ending (returns and recalls), both directions. */
   countLoanEnds?: number;
@@ -597,6 +682,36 @@ export interface ClubTransfers {
   pages: number;
   /** true: only the club's latest 20,000 recorded moves were read. */
   truncated: boolean;
+  /** Moves inside the club family in the selected season (all seasons when none), newest first; never transfers. */
+  squadMoves: { moves: ClubSquadMove[]; total: number };
+}
+export type InjurySeverity = "minor" | "moderate" | "serious" | "long-term";
+export interface PlayerInjury {
+  id: number;
+  kind: string;
+  severity: InjurySeverity;
+  start: string;
+  /** The (expected) return date. */
+  end: string | null;
+  days: number | null;
+  /** null: recorded when injury tracking began (start is that day). */
+  context: "match" | "training" | null;
+  /** His club when it happened. */
+  club: PlayerHistoryClub | null;
+  fixtureId: number | null;
+  backfilled: boolean;
+  ongoing: boolean;
+}
+/** GET /api/players/:id/medical */
+export interface PlayerMedical {
+  playerId: number;
+  today: string;
+  injuredUntil: string | null;
+  daysLeft: number | null;
+  current: PlayerInjury | null;
+  /** Newest first. */
+  injuries: PlayerInjury[];
+  summary: { injuries: number; daysMissed: number; seasonInjuries: number; seasonDaysMissed: number };
 }
 export interface Assignment {
   id: number;
@@ -686,6 +801,49 @@ export interface CompetitionDetail {
   qualifiers: League[];
   history: { season: number; data: string }[];
 }
+/** A club or national team a scorer played for in the competition season (several after a mid-season move). */
+export interface CompetitionScorerTeam {
+  id: number;
+  name: string;
+  color: string;
+  type: string;
+  goals: number;
+  appearances: number;
+  minutes: number;
+}
+export interface CompetitionScorer {
+  /** Shared by players level on goals (1, 2, 2, 4). */
+  rank: number;
+  playerId: number;
+  name: string;
+  position: string;
+  age: number;
+  nationality: string;
+  countryCode: string | null;
+  goals: number;
+  assists: number;
+  appearances: number;
+  minutes: number;
+  minutesPerGoal: number;
+  /** Most goals first. */
+  teams: CompetitionScorerTeam[];
+}
+/** Top-scorer race of one competition season (GET /api/competitions/:id/scorers). */
+export interface CompetitionScorers {
+  leagueId: number;
+  season: number;
+  currentSeason: number;
+  /** The current season, then past seasons that still have goals on record (newest first). */
+  seasons: number[];
+  /** Players with at least one goal. */
+  total: number;
+  /** Goals credited to those players. */
+  goals: number;
+  /** Players level on the most goals (joint leaders when above 1). */
+  leaders: number;
+  /** Goals desc, then fewer minutes, more assists and name. */
+  scorers: CompetitionScorer[];
+}
 export interface MatchDetail {
   fixture: Fixture;
   snapshot?: MatchSnapshot;
@@ -712,6 +870,8 @@ export interface FinanceData {
     allowableLoss: number | null;
     lossHeadroom: number | null;
     costHeadroom: number | null;
+    /** Annual squad cost the club may still add before breaching its binding rule (planning gate). */
+    ffpHeadroom: number;
     yearsObserved: number;
     projected: boolean;
     status: string;
@@ -719,6 +879,17 @@ export interface FinanceData {
     levyApplies: boolean;
     source: string;
   };
+  /** Points deductions, embargoes, fines and settlements imposed on the club, newest first (server/sanctions.ts). */
+  sanctions: {
+    id: number;
+    season: number;
+    kind: "points" | "embargo" | "fine" | "settlement";
+    points: number;
+    amount: number;
+    start_date: string;
+    end_date: string | null;
+    reason: string;
+  }[];
   ledger: {
     id: number;
     date: string;
@@ -831,4 +1002,124 @@ export interface SaveSlot {
     date: string;
     season: number;
   };
+}
+export interface WorldNewsItem {
+  id: number;
+  date: string;
+  title: string;
+  body: string;
+  kind: string;
+  clubs: { id: number; name: string; color: string }[];
+  playerId?: number;
+  playerName?: string;
+}
+export interface WorldNewsData {
+  items: WorldNewsItem[];
+  total: number;
+  page: number;
+  pages: number;
+  kinds: { kind: string; count: number }[];
+  countries: { id: number; name: string }[];
+  club: { id: number; name: string } | null;
+}
+export type DofPolicy = "balanced" | "youth" | "value" | "stars";
+export type ClubProjectKind = "facilities" | "academy" | "stadium_expansion" | "new_stadium";
+export interface ClubProjectView {
+  id: number;
+  kind: ClubProjectKind;
+  cost: number;
+  start_date: string;
+  end_date: string;
+  status: "planned" | "building" | "complete" | "cancelled";
+  effect: { facilities?: number; academy?: number; capacity?: number; stadium?: string };
+  cash: number;
+  debt: number;
+  weeklyRepayment: number;
+  repayUntil: string | null;
+}
+export interface ClubAdministration {
+  since: string;
+  season: number;
+  reason: string;
+  points: number;
+  pendingPoints: number;
+  embargoUntil: string;
+  forcedSales: { playerId: number; name: string }[];
+}
+export interface ClubLifeData {
+  clubId: number;
+  director: { id: number; name: string; ability: number; style: DofPolicy; since: string | null } | null;
+  dofPolicy: DofPolicy;
+  projects: ClubProjectView[];
+  administration: ClubAdministration | null;
+  administrations: { since: string; until: string; points: number; outcome: string }[];
+  managers: { date: string; departed: string; appointed: string; formation?: string; style?: string }[];
+}
+export type OwnerTypeId = "local" | "billionaire" | "state" | "private_equity" | "members";
+export interface OwnerSummary {
+  id: number;
+  name: string;
+  type: OwnerTypeId;
+  typeLabel: string;
+  countryName: string | null;
+  wealth: number;
+  ambition: number;
+  patience: number;
+}
+export interface OwnershipClubLink {
+  id: number;
+  name: string;
+  color: string;
+  countryName: string;
+  leagueName: string | null;
+  tier: number | null;
+  stake: number;
+  blindTrust: boolean;
+}
+export interface OwnershipEventView {
+  id: number;
+  date: string;
+  clubId: number;
+  clubName: string;
+  kind: string;
+  title: string;
+  detail: string;
+}
+export interface ClubOwnershipView {
+  clubId: number;
+  /** False until the world's owners exist (older worlds get them on the next simulated day). */
+  ready: boolean;
+  owner: OwnerSummary | null;
+  stake: number;
+  since: string | null;
+  memberOwned: boolean;
+  president: string | null;
+  presidentSince: string | null;
+  nextElection: string | null;
+  termYears: number | null;
+  rule: string | null;
+  exemption: string | null;
+  blindTrust: boolean;
+  debt: number;
+  investors: { ownerId: number; name: string; stake: number }[];
+  group: { ownerId: number; name: string; clubs: OwnershipClubLink[] } | null;
+  pending: { stage: "rumour" | "talks"; buyerName: string | null; buyerType: string; expected: string } | null;
+  election: { date: string; candidates: { name: string; promise: string; incumbent: boolean }[] } | null;
+  events: OwnershipEventView[];
+}
+export interface OwnershipOverview {
+  ready: boolean;
+  types: { type: OwnerTypeId; label: string; clubs: number }[];
+  groups: { owner: OwnerSummary; clubs: OwnershipClubLink[] }[];
+  events: OwnershipEventView[];
+}
+/** The director's club: a takeover in progress, the new owners' review, or a presidential election. */
+export interface OwnershipNotice {
+  clubId: number;
+  stage: "rumour" | "talks" | "review" | "election";
+  title: string;
+  detail: string;
+  due: string | null;
+  target: number | null;
+  confidence: number | null;
 }

@@ -1,0 +1,146 @@
+.top-scorers[aria-busy="true"] {
+  opacity: 0.7;
+  transition: opacity 0.15s;
+}
+.top-scorers-total {
+  font-size: 0.73rem;
+}
+.golden-boot {
+  display: flex;
+  align-items: center;
+  gap: 15px;
+  padding: 18px 22px;
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--amber) 9%, var(--surface));
+}
+.golden-boot-icon {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 46px;
+  height: 46px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--amber) 16%, var(--surface));
+  color: var(--amber);
+}
+.golden-boot-leader {
+  display: grid;
+  flex: 1;
+  gap: 4px;
+  min-width: 0;
+}
+.golden-boot-leader small {
+  color: var(--amber);
+  font-size: 0.6rem;
+  font-weight: 700;
+}
+.golden-boot-leader strong {
+  font-size: 1.05rem;
+  overflow-wrap: anywhere;
+}
+.golden-boot-detail {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 14px;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+.golden-boot-stats {
+  display: flex;
+  gap: 18px;
+  margin: 0;
+  text-align: center;
+}
+.golden-boot-stats dt {
+  color: var(--muted);
+  font-size: 0.6rem;
+  font-weight: 600;
+}
+.golden-boot-stats dd {
+  margin: 2px 0 0;
+  font-size: 1rem;
+  font-weight: 700;
+}
+.golden-boot-stats .golden-boot-goals dd {
+  color: var(--amber);
+  font-size: 1.6rem;
+  line-height: 1.1;
+}
+.top-scorers-table {
+  min-width: 860px;
+}
+.top-scorers-table td {
+  height: 52px;
+}
+.top-scorers-table th:nth-child(3),
+.top-scorers-table td:nth-child(3) {
+  min-width: 200px;
+}
+.scorer-rank {
+  font-weight: 700;
+}
+.scorer-player {
+  display: grid;
+  gap: 2px;
+}
+.scorer-player .profile-link {
+  font-weight: 600;
+}
+.scorer-player small {
+  color: var(--muted);
+  font-size: 0.66rem;
+}
+.scorer-teams {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+}
+.scorer-team {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+.scorer-team small {
+  min-width: 18px;
+  padding: 1px 5px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  color: var(--muted);
+  font-size: 0.6rem;
+  font-weight: 650;
+  text-align: center;
+}
+.scorer-country {
+  color: var(--muted);
+  font-size: 0.66rem;
+  font-weight: 600;
+}
+.top-scorers-table .scorer-goals {
+  font-weight: 750;
+}
+.top-scorers-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 16px;
+  padding: 14px 20px;
+  border-top: 1px solid var(--line);
+  font-size: 0.72rem;
+}
+@media (max-width: 520px) {
+  .golden-boot {
+    flex-wrap: wrap;
+    padding: 16px;
+  }
+  .golden-boot-leader {
+    flex-basis: calc(100% - 61px);
+  }
+  .golden-boot-stats {
+    width: 100%;
+    justify-content: space-around;
+  }
+}

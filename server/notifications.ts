@@ -12,6 +12,7 @@ import { GameError, news, settingsOf, stateOf } from "./systems.ts";
 import { CAREER_RULES, contractYearsLeft, seniorRetirementChance } from "./people.ts";
 import type { Fixture, League, NewsItem, Player } from "../shared/types.ts";
 import type { CompetitionFavorite } from "../shared/api.ts";
+import { WORLD_NEWS_CATEGORY } from "./world-news.ts";
 
 /** Day (MM-DD) of the spring squad notice: retirements at the end of the season and contracts ending on 30 June. */
 export const SQUAD_NOTICE_DAY = "05-01";
@@ -167,8 +168,9 @@ export async function notificationFeed(store: Store, input: unknown) {
     filter.archive === "1"
       ? { where: "1 = 1", params: [] as (string | number)[] }
       : await notificationVisibility(store);
-  const conditions = [visible.where];
-  const params = [...visible.params];
+  // The world feed has its own page (Media); the inbox keeps the director's own news.
+  const conditions = [visible.where, "news.category <> ?"];
+  const params = [...visible.params, WORLD_NEWS_CATEGORY];
   if (filter.category) {
     conditions.push("news.category = ?");
     params.push(filter.category);

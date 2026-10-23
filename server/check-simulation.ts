@@ -3,6 +3,7 @@ import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
 import { MATCH_RULES_VERSION, simulateMatch } from "./match.ts";
 import { Store } from "./db.ts";
+import { assessFinancesBatch } from "./finance.ts";
 import { generateWorld } from "./world.ts";
 import { checkSqlConstraints } from "./check-world.ts";
 import { advance } from "./simulation.ts";
@@ -18,7 +19,7 @@ import { databaseFootprint, FOOTPRINT_BUDGET } from "./retention.ts";
 import { quoteIdentifier } from "./sql-schema.ts";
 import { COMPETITIONS } from "./calendar.ts";
 import { continentalEntries } from "./qualification.ts";
-import { ageOn, daysBetween, VALUE_RANGE } from "../shared/rules.ts";
+import { addDays, ageOn, daysBetween, deadlineDay, transferWindow, VALUE_RANGE } from "../shared/rules.ts";
 import { clubCompetitionEligible } from "../shared/competition-rules.ts";
 import { boundaryMoves, readLeagueData, reserveTierAllowed } from "../shared/league-rules.ts";
 import { MIN_GOALKEEPERS, SQUAD_MINIMUMS } from "../shared/world-rules.ts";
@@ -210,6 +211,15 @@ export const MIN_SEASON_BUDGET_MB = 32;
 export const PLAYER_ROW_BUDGET_BYTES = 10_240;
 
 /**
+ * The first season after generation also fills the rolling tables (monthly minutes, discipline, the next season's
+ * fixtures, GBE evidence, registrations) and the row-version space of tables updated every day (clubs, staff, loans)
+ * to their steady size. Measured on soak worlds: +60 MB in the first season and +34/+23 MB in the next two (EN+ES,
+ * 14k fixtures), +69 MB then +39 MB (EN+ES+DE, 16k), +60 MB on the pre-market code (EN+ES+DE). The first rollover is
+ * allowed this multiple of the season budget; later seasons keep the plain budget.
+ */
+export const FIRST_SEASON_FILL = 1.75;
+
+/**
  * The season growth budget of a soak world: decision 11 allows FOOTPRINT_BUDGET.seasonMB for the full world's
  * ~110k fixtures; smaller worlds get the same megabytes per fixture played, with a floor.
  */
@@ -241,6 +251,7 @@ export async function reportFootprint(
   label: string,
   previousMB?: number,
   fixtures = FULL_WORLD_FIXTURES,
+  firstSeason = false,
 ): Promise<FootprintCheck> {
   await store.exec(`ANALYZE ${(await store.worldTables()).map(quoteIdentifier).join(", ")}`);
   const [footprint] = await databaseFootprint(store);
@@ -248,7 +259,7 @@ export async function reportFootprint(
   const playersMB = players?.reservedMB ?? 0;
   const accumulatedMB = Math.round((footprint.worldMB - playersMB) * 10) / 10;
   const seasonMB = previousMB === undefined ? undefined : Math.round((accumulatedMB - previousMB) * 10) / 10;
-  const budgetMB = seasonBudgetMB(fixtures);
+  const budgetMB = Math.round(seasonBudgetMB(fixtures) * (firstSeason ? FIRST_SEASON_FILL : 1));
   const playerBytesPerRow = players?.rows ? Math.round((playersMB * 1048576) / players.rows) : 0;
   const seasonOver = seasonMB !== undefined && seasonMB > budgetMB;
   const playersOver = playerBytesPerRow > PLAYER_ROW_BUDGET_BYTES;
@@ -722,6 +733,117 @@ export async function checkRollover(
   };
 }
 
+/** Calibration bands for incoming senior moves per club per market season (incl. loans and free signings), by tier. */
+export const MARKET_TARGETS: Record<string, [number, number]> = { "1": [8, 15], "2": [6, 12], "3": [4, 10], "4+": [2, 10], lowest: [2, 6] };
+export const LOAN_SHARE_TARGET: [number, number] = [0.3, 0.45];
+
+/**
+ * Market and FFP metrics of the market season [from, to): incoming senior moves per first team by league tier (and
+ * the lowest tier of each pyramid), the loan and free-agent shares, deadline-day and between-window shares, the
+ * sanctions imposed by kind and the clubs breaching a regulatory limit at the year-end review.
+ */
+export async function marketMetrics(store: Store, from: string, to: string) {
+  const clubs = await store.all<{ id: number; tier: number | null; lowest: boolean }>(
+    `SELECT clubs.id, leagues.tier, leagues.tier = (SELECT max(other.tier) FROM leagues AS other WHERE other.country_id = leagues.country_id AND other.kind = 'league' AND other.age_group = 'Senior') AS lowest
+     FROM clubs LEFT JOIN leagues ON leagues.id = clubs.league_id WHERE clubs.type = 'club'`,
+  );
+  const moves = await store.all<{ club_id: number; kind: string; type: string | null; date: string }>(
+    `SELECT (data::jsonb ->> 'to')::integer AS club_id, entity_type AS kind, data::jsonb ->> 'type' AS type, date FROM history
+     WHERE entity_type IN ('transfer','loan') AND date >= ? AND date < ? AND data::jsonb ->> 'to' IS NOT NULL`,
+    from,
+    to,
+  );
+  const tierOf = new Map(clubs.map((club) => [club.id, club.lowest && (club.tier ?? 0) >= 4 ? "lowest" : club.tier === null ? "4+" : club.tier >= 4 ? "4+" : String(club.tier)]));
+  const counts = new Map<number, number>();
+  for (const move of moves) if (tierOf.has(move.club_id)) counts.set(move.club_id, (counts.get(move.club_id) ?? 0) + 1);
+  const byTier: Record<string, { clubs: number; moves: number; perClub: number; inBand: number; target: [number, number] }> = {};
+  for (const [id, tier] of tierOf) {
+    const entry = (byTier[tier] ??= { clubs: 0, moves: 0, perClub: 0, inBand: 0, target: MARKET_TARGETS[tier] });
+    const count = counts.get(id) ?? 0;
+    entry.clubs++;
+    entry.moves += count;
+    if (count >= entry.target[0] && count <= entry.target[1]) entry.inBand++;
+  }
+  for (const entry of Object.values(byTier)) {
+    entry.perClub = Math.round((entry.moves / Math.max(1, entry.clubs)) * 10) / 10;
+    entry.inBand = Math.round((entry.inBand / Math.max(1, entry.clubs)) * 100) / 100;
+  }
+  const counted = moves.filter((move) => tierOf.has(move.club_id));
+  const share = (filter: (move: (typeof counted)[number]) => boolean) =>
+    Math.round((counted.filter(filter).length / Math.max(1, counted.length)) * 1000) / 1000;
+  const sanctions = await store.all<{ kind: string; total: number }>(
+    "SELECT kind, count(*) AS total FROM sanctions WHERE start_date >= ? AND start_date <= ? GROUP BY kind ORDER BY kind",
+    from,
+    addDays(to, 20),
+  );
+  const breaches = (await store.get<{ total: number }>(
+    "SELECT count(DISTINCT club_id) AS total FROM sanctions WHERE start_date >= ? AND start_date <= ? AND data::jsonb ->> 'rule' IN ('squad-cost','earnings')",
+    from,
+    addDays(to, 20),
+  ))!.total;
+  return {
+    from,
+    to,
+    moves: counted.length,
+    byTier,
+    loanShare: share((move) => move.kind === "loan"),
+    freeShare: share((move) => move.type === "Free transfer"),
+    deadlineDayShare: share((move) => deadlineDay(move.date)),
+    outsideWindowShare: share((move) => !transferWindow(move.date)),
+    swaps: counted.filter((move) => move.type === "Swap deal").length,
+    releaseClauses: counted.filter((move) => move.type === "Release clause").length,
+    sanctions: Object.fromEntries(sanctions.map((row) => [row.kind, row.total])),
+    ffpBreaches: breaches,
+  };
+}
+
+/**
+ * Club finances at a season end, by league tier: clubs with a negative cash balance (in debt), in administration
+ * (clubs.data.administration), and the regulatory status of the closed season's accounts (compliant / review).
+ */
+export async function financeMetrics(store: Store, season: number) {
+  const clubs = await store.all<{ id: number; tier: number | null; balance: number; administration: boolean }>(
+    `SELECT clubs.id, leagues.tier, clubs.balance, (clubs.data::jsonb -> 'administration') IS NOT NULL AND jsonb_typeof(clubs.data::jsonb -> 'administration') <> 'null' AS administration
+     FROM clubs LEFT JOIN leagues ON leagues.id = clubs.league_id WHERE clubs.type = 'club'`,
+  );
+  const assessments = await assessFinancesBatch(store, { clubIds: clubs.map((club) => club.id), season });
+  const byTier: Record<string, { clubs: number; inDebt: number; administration: number; review: number; debtShare: number }> = {};
+  for (const club of clubs) {
+    const tier = club.tier === null ? "none" : club.tier >= 6 ? "6+" : String(club.tier);
+    const entry = (byTier[tier] ??= { clubs: 0, inDebt: 0, administration: 0, review: 0, debtShare: 0 });
+    entry.clubs++;
+    if (club.balance < 0) entry.inDebt++;
+    if (club.administration) entry.administration++;
+    if (assessments.get(club.id)?.status === "review") entry.review++;
+  }
+  for (const entry of Object.values(byTier)) entry.debtShare = Math.round((entry.inDebt / Math.max(1, entry.clubs)) * 100) / 100;
+  return { season, byTier };
+}
+
+export const describeFinances = (metrics: Awaited<ReturnType<typeof financeMetrics>>) =>
+  Object.entries(metrics.byTier)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([tier, entry]) => `tier ${tier}: ${entry.inDebt}/${entry.clubs} in debt, ${entry.administration} in administration, ${entry.review} FFP review`)
+    .join("; ");
+
+export const describeMarket = (metrics: Awaited<ReturnType<typeof marketMetrics>>) =>
+  `${metrics.moves} incoming senior moves (${Object.entries(metrics.byTier)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([tier, entry]) => `tier ${tier}: ${entry.perClub}/club, ${Math.round(entry.inBand * 100)}% in ${entry.target.join("-")}`)
+    .join("; ")}); loans ${Math.round(metrics.loanShare * 100)}%, free ${Math.round(metrics.freeShare * 100)}%, deadline day ${Math.round(metrics.deadlineDayShare * 100)}%, between windows ${Math.round(metrics.outsideWindowShare * 100)}%; ${metrics.swaps} swaps, ${metrics.releaseClauses} release clauses; FFP breaches ${metrics.ffpBreaches}; sanctions ${JSON.stringify(metrics.sanctions)}`;
+
+/**
+ * Other client sessions of this database holding a snapshot (a long transaction, a client idle in a transaction,
+ * another soak generating its world): VACUUM keeps every row version they might still see, so the players table
+ * grows with dead versions it cannot reuse and the footprint check measures the bloat, not the world.
+ */
+async function otherSnapshots(store: Store) {
+  return (await store.get<{ total: number }>(
+    `SELECT count(*) AS total FROM pg_catalog.pg_stat_activity
+     WHERE datname = current_database() AND pid <> pg_backend_pid() AND backend_type = 'client backend' AND backend_xmin IS NOT NULL`,
+  ))!.total;
+}
+
 export async function seasonSoak(seasons: number, fullWorld = false, nations: readonly string[] = SOAK_NATIONS) {
   assert(
     Number.isInteger(seasons) && seasons > 0,
@@ -750,6 +872,8 @@ export async function seasonSoak(seasons: number, fullWorld = false, nations: re
     const rollovers: (Omit<Awaited<ReturnType<typeof checkRollover>>, "heights"> & FootprintCheck & {
       seasonStartPlayers: number;
       playersBeforeRollover: number;
+      market: Awaited<ReturnType<typeof marketMetrics>>;
+      finances: Awaited<ReturnType<typeof financeMetrics>>;
     })[] = [];
     const squadChecks: SquadCheck[] = [];
     let seasonStartPlayers = initialPlayers;
@@ -757,6 +881,7 @@ export async function seasonSoak(seasons: number, fullWorld = false, nations: re
     let seasonMatches = 0;
     let weeks = 0;
     let advanceSeconds = 0;
+    let contended = 0;
     const timing = () => {
       const perWeek = advanceSeconds / Math.max(1, weeks);
       return {
@@ -779,6 +904,7 @@ export async function seasonSoak(seasons: number, fullWorld = false, nations: re
       const before =
         daysBetween(current.date, `${current.season + 1}-07-01`) <= step ? await seniorPlaces(store) : undefined;
       const playersBeforeRollover = before ? await activePlayers(store) : undefined;
+      if (await otherSnapshots(store)) contended++;
       const result = await advance(store, step);
       seasonMatches += result.matches;
       const now = await stateOf(store);
@@ -795,10 +921,16 @@ export async function seasonSoak(seasons: number, fullWorld = false, nations: re
           `Population ${summary.season - 1}/${String(summary.season).slice(-2)}: ${seasonStartPlayers} at the start; ${playersBeforeRollover} before the rollover (${change(playersBeforeRollover - seasonStartPlayers)}; weekly squad check: ${describeInSeason(inSeason)}); ` +
             `${summary.players} after it (${change(summary.players - playersBeforeRollover)}; ${flows.count} created incl. ${flows.academy} academy, ${flows.topUps} top-up places, ${flows.pools} home-pool entrants, ${flows.retired} retired, ${flows.leftFootball} left football)`,
         );
-        const footprint = await reportFootprint(store, `after the ${summary.season} rollover`, accumulatedMB, seasonMatches);
+        const market = await marketMetrics(store, `${summary.season - 1}-06-15`, `${summary.season}-06-15`);
+        console.log(`Market ${summary.season - 1}/${String(summary.season).slice(-2)}: ${describeMarket(market)}`);
+        const finances = await financeMetrics(store, summary.season - 1);
+        console.log(`Finances at the end of ${summary.season - 1}/${String(summary.season).slice(-2)}: ${describeFinances(finances)}`);
+        const footprint = await reportFootprint(store, `after the ${summary.season} rollover`, accumulatedMB, seasonMatches, !rollovers.length);
+        if (contended)
+          console.log(`Footprint caveat: other sessions of this database held snapshots at ${contended} of ${weeks + 1} steps, so VACUUM could not reclaim the players' dead row versions; run the soak alone for a clean measurement.`);
         accumulatedMB = footprint.accumulatedMB;
         seasonMatches = 0;
-        rollovers.push({ ...summary, ...footprint, seasonStartPlayers, playersBeforeRollover });
+        rollovers.push({ ...summary, ...footprint, seasonStartPlayers, playersBeforeRollover, market, finances });
         seasonStartPlayers = summary.players;
       }
       simulated += result.matches;
@@ -833,7 +965,8 @@ export async function seasonSoak(seasons: number, fullWorld = false, nations: re
     assert.equal(
       overBudget.length,
       0,
-      `The world grew past its footprint budget: ${overBudget.map((rollover) => `${rollover.season - 1}/${String(rollover.season).slice(-2)} other tables +${rollover.seasonMB} MB (budget ${rollover.budgetMB} MB), players ${rollover.playerBytesPerRow} bytes per row (budget ${PLAYER_ROW_BUDGET_BYTES})`).join(", ")}`,
+      `The world grew past its footprint budget: ${overBudget.map((rollover) => `${rollover.season - 1}/${String(rollover.season).slice(-2)} other tables +${rollover.seasonMB} MB (budget ${rollover.budgetMB} MB), players ${rollover.playerBytesPerRow} bytes per row (budget ${PLAYER_ROW_BUDGET_BYTES})`).join(", ")}` +
+        (contended ? ` (other sessions held snapshots in this database at ${contended} of ${weeks} steps: run the soak alone)` : ""),
     );
     const failedChecks = squadChecks.filter((check) => !check.ok);
     assert.equal(

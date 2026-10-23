@@ -10,6 +10,9 @@ import type { SqlParameter, Store } from "./db.ts";
 import { ADDED_WORLD_TABLES, WORLD_TABLES, quoteIdentifier, schemaMigrations, tableName as qualifiedTable } from "./sql-schema.ts";
 import { ensureClubSupport } from "./club-support.ts";
 import { ensureGbeBaseline } from "./gbe.ts";
+import { ensurePlayerRecords } from "./player-records.ts";
+import { bodyColumns } from "./people.ts";
+import { ensureOwnership } from "./ownership.ts";
 import {
   clubOf,
   GameError,
@@ -21,7 +24,7 @@ import { generateWorld } from "./world.ts";
 import { createCalendar } from "./calendar.ts";
 import { SETTING_DEFINITIONS } from "../shared/rules.ts";
 import type { DeleteActiveCareerRequest, DeleteActiveCareerResult, SaveSlot } from "../shared/api.ts";
-import type { GameState, Settings } from "../shared/types.ts";
+import type { GameState, PlayerProfile, Settings } from "../shared/types.ts";
 import {
   SAVE_FORMAT_VERSION,
   SAVE_SCHEMA_VERSION,
@@ -190,6 +193,10 @@ const DERIVED_COLUMNS: Readonly<Record<string, readonly string[]>> = {
   players: ["playing_club_id"],
   news: ["notification_key"],
 };
+/** Plain copies of profile values (migration 11): left out of checkpoints, so the format is unchanged, and rebuilt on restore. */
+const PROFILE_COPY_COLUMNS: Readonly<Record<string, readonly string[]>> = {
+  players: ["height", "weight"],
+};
 /** Columns that SQL Server checkpoints may name and this schema derives or dropped; accepted and ignored on import. */
 const LEGACY_COLUMNS: Readonly<Record<string, readonly string[]>> = {
   players: ["playing_club_id"],
@@ -302,8 +309,9 @@ export async function checkpointSchema(
     const derived = DERIVED_COLUMNS[name] ?? [];
     if (rows.some((row) => row.generated && !derived.includes(row.name)))
       throw new SaveFormatError(`Unknown computed column in ${name}.`);
-    const writable = await store.columns(name);
-    const stored = rows.filter((row) => !row.generated);
+    const copies = PROFILE_COPY_COLUMNS[name] ?? [];
+    const writable = (await store.columns(name)).filter((column) => !copies.includes(column));
+    const stored = rows.filter((row) => !row.generated && !copies.includes(row.name));
     if (
       writable.length !== stored.length ||
       stored.some((row, index) => row.name !== writable[index])
@@ -647,14 +655,17 @@ export async function restoreCheckpointFile(
       if (batch.length)
         await store.bulkInsert(
           table.name,
-          batch.map((values) =>
-            Object.fromEntries(
+          batch.map((values) => {
+            const row = Object.fromEntries(
               table.columns.map((column, index) => [
                 column.name,
                 values[index],
               ]),
-            ),
-          ),
+            );
+            return table.name === "players" && typeof row.profile === "string"
+              ? { ...row, ...bodyColumns((JSON.parse(row.profile) as PlayerProfile).identity ?? {}) }
+              : row;
+          }),
         );
       const total = (processed.get(table.name) ?? 0) + batch.length;
       processed.set(table.name, total);
@@ -703,6 +714,10 @@ export async function restoreCheckpointFile(
       await ensureClubSupport(store);
       // Checkpoints older than the GBE ledger: pre-game estimate and the months already played, rebuilt once.
       await ensureGbeBaseline(store);
+      // Checkpoints older than the player records: honours, milestones and running injuries, backfilled once.
+      await ensurePlayerRecords(store);
+      // Checkpoints older than club ownership: owners and groups generated from the world seed, once.
+      await ensureOwnership(store);
       const settings = await store.meta<Settings>("settings");
       if (settings.cloudSync !== false)
         await store.setMeta("settings", { ...settings, cloudSync: false });

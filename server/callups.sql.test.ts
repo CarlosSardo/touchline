@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { Store } from "./db.ts";
 import { createCalendar } from "./calendar.ts";
-import { callUpDesk, callUpPlayer, endAllCallUps, endCallUp, processCallUps, setDevelopmentRequest } from "./callups.ts";
+import { callUpDesk, callUpPlayer, endAllCallUps, endCallUp, processCallUps, seasonPhase, setDevelopmentRequest } from "./callups.ts";
 import { stateOf } from "./systems.ts";
 import { updateSettings } from "./app.ts";
 import { generateWorld } from "./world.ts";
@@ -186,5 +186,36 @@ describe.skipIf(process.env.SQL_INTEGRATION_TESTS !== "true")("call-ups in the u
     expect(active.every((entry) => entry.by === "coach" && entry.duration === "match" && entry.fixtureId === fixture.id)).toBe(true);
     expect(await endAllCallUps(store)).toBe(active.length);
     expect((await callUpDesk(store)).active).toEqual([]);
+  });
+
+  it("reads end-of-season standings net of points deductions", async () => {
+    const state = await stateOf(store);
+    const league = (await store.get<{ league_id: number; group_name: string }>(
+      "SELECT standings.league_id, standings.group_name FROM standings JOIN leagues ON leagues.id = standings.league_id WHERE standings.club_id = ? AND leagues.age_group = 'Senior' AND leagues.kind = 'league'",
+      clubId,
+    ))!;
+    // Two league games left for the club.
+    const left = await store.all<{ id: number }>(
+      "SELECT id FROM fixtures WHERE league_id = ? AND season = ? AND status = 'scheduled' AND (home_id = ? OR away_id = ?) ORDER BY date, id",
+      league.league_id,
+      state.season,
+      clubId,
+      clubId,
+    );
+    await store.run("UPDATE fixtures SET status = 'played' WHERE id = ANY(?::integer[])", left.slice(2).map((row) => row.id));
+    const rival = (await store.get<{ club_id: number }>(
+      "SELECT club_id FROM standings WHERE league_id = ? AND group_name = ? AND club_id <> ? ORDER BY club_id LIMIT 1",
+      league.league_id,
+      league.group_name,
+      clubId,
+    ))!.club_id;
+    await store.run("UPDATE standings SET played = 30, points = 0, deducted = 0 WHERE league_id = ? AND group_name = ?", league.league_id, league.group_name);
+    await store.run("UPDATE standings SET points = 46 WHERE league_id = ? AND club_id = ?", league.league_id, clubId);
+    // The rival's 40 points are already net of a 6-point deduction: two wins would draw level, so nothing is settled.
+    await store.run("UPDATE standings SET points = 40, deducted = 6 WHERE league_id = ? AND club_id = ?", league.league_id, rival);
+    const phase = await seasonPhase(store, { clubId, ageGroup: "Senior" }, state.season);
+    expect(phase).toMatchObject({ endOfSeason: true, remaining: 2, deadRubber: false });
+    await store.run("UPDATE standings SET points = 39 WHERE league_id = ? AND club_id = ?", league.league_id, rival);
+    expect((await seasonPhase(store, { clubId, ageGroup: "Senior" }, state.season)).deadRubber).toBe(true);
   });
 });

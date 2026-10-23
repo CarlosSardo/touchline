@@ -6,7 +6,7 @@ import {
   type Locator,
   type Page,
 } from "@playwright/test";
-import type { AcademyData, Bootstrap, PlayerPage, SquadData } from "../shared/api.ts";
+import type { AcademyData, Bootstrap, CompetitionScorers, PlayerPage, SquadData } from "../shared/api.ts";
 import {
   POSITIONS,
   compactNumber,
@@ -214,6 +214,31 @@ test("association rules expose the catalog coverage of every seeded association"
     path: "test-results/association-audit-mobile.png",
     fullPage: true,
   });
+});
+
+test("club profiles show their owner and the world browser lists owners and groups", async ({
+  page,
+  request,
+}) => {
+  const bootstrap = await (await request.get("/api/bootstrap")).json();
+  const ownership = await (await request.get(`/api/clubs/${bootstrap.club.id}/ownership`)).json();
+  expect(ownership.ready).toBe(true);
+  expect(ownership.owner.name).toBeTruthy();
+  const overview = await (await request.get("/api/ownership")).json();
+  expect(overview.types.reduce((total: number, entry: { clubs: number }) => total + entry.clubs, 0)).toBeGreaterThan(0);
+  await page.goto("/#world");
+  await expect(page.getByRole("heading", { name: "Owners & multi-club groups" })).toBeVisible();
+  await expect(page.locator(".panel").filter({ hasText: "Owners & multi-club groups" })).toContainText(overview.types[0].label);
+  await page.getByRole("region", { name: "Teams" }).getByRole("button", { name: bootstrap.club.name }).first().click();
+  const team = page.getByRole("dialog", { name: "Team profile" });
+  await team.getByRole("tab", { name: "Ownership", exact: true }).click();
+  await expect(team).toContainText(ownership.owner.name);
+  await expect(team).toContainText("Ownership history");
+  await noOverflow(page);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await noOverflow(page);
+  await page.screenshot({ path: "test-results/club-ownership-mobile.png" });
+  await page.setViewportSize({ width: 1440, height: 1000 });
 });
 
 test("competition favorites and notification preferences persist with an accessible muted archive", async ({
@@ -1465,6 +1490,142 @@ test("startup waits for a local engine that is still generating the world", asyn
   await expect(page.locator(".error-state")).toHaveCount(0);
 });
 
+test("a youth player's call-ups are squad movements in his dossier and the club's transfers, never transfers", async ({
+  page,
+  request,
+}) => {
+  const checkpointTimeout = 900_000;
+  test.setTimeout(checkpointTimeout * 2 + 240_000);
+  page.setDefaultTimeout(15000);
+  const checkpoint = await (
+    await request.post("/api/saves", {
+      data: { name: "Call-up history checkpoint" },
+      timeout: checkpointTimeout,
+    })
+  ).json();
+  let primaryError: unknown;
+  try {
+    const before = await bootstrapOf(request);
+    const squad = await (await request.get("/api/squad?ageGroup=U19")).json();
+    const player = squad.players.find(
+      (candidate: { name: string; injury_until: string | null; squad_club_id: number | null }) =>
+        !candidate.squad_club_id &&
+        (!candidate.injury_until || candidate.injury_until <= before.state.date) &&
+        squad.players.filter((other: { name: string }) => other.name === candidate.name).length === 1,
+    );
+    expect(player).toBeTruthy();
+    await retryBusyResponse(() =>
+      request.post("/api/action", {
+        data: {
+          type: "call-up",
+          playerId: player.id,
+          clubId: before.club.id,
+          ageGroup: "Senior",
+          duration: { kind: "days", days: 3 },
+        },
+      }),
+    );
+    await retryBusyResponse(() =>
+      request.post("/api/action", { data: { type: "call-up-end", playerId: player.id } }),
+    );
+    const history = await (
+      await retryBusyResponse(() => request.get(`/api/players/${player.id}/history`))
+    ).json();
+    expect(history.squadMoves.at(-1)).toMatchObject({
+      kind: "callUp",
+      date: before.state.date,
+      fromGroup: "U19",
+      toGroup: "Senior",
+      returnedOn: before.state.date,
+    });
+    expect(
+      history.transfers.filter((move: { date: string | null }) => move.date === before.state.date),
+    ).toEqual([]);
+    const clubTransfers = await (
+      await retryBusyResponse(() => request.get(`/api/clubs/${before.club.id}/transfers`))
+    ).json();
+    expect(
+      clubTransfers.groups
+        .flatMap((group: { transfers: { player: { id: number } }[] }) => group.transfers)
+        .filter((move: { player: { id: number } }) => move.player.id === player.id),
+    ).toEqual([]);
+    expect(clubTransfers.squadMoves.moves[0]).toMatchObject({ kind: "callUp", player: { id: player.id } });
+
+    await page.goto("/#squad");
+    await page.getByRole("combobox", { name: "Squad age group", exact: true }).selectOption("U19");
+    await page.getByRole("button").filter({ has: page.getByText(player.name, { exact: true }) }).click();
+    const dossier = page.getByRole("dialog", { name: "Player dossier" });
+    await expect(dossier.getByRole("tab")).toHaveText([
+      "Overview",
+      "Career",
+      "Attributes & development",
+      "Scouting",
+      "Contract & registration",
+      "Medical",
+    ]);
+    await expect(dossier.getByRole("heading", { name: "Current status", exact: true })).toBeVisible();
+    await expect(dossier.getByRole("heading", { name: "Squad assignment", exact: true })).toBeVisible();
+    await dossier.getByRole("tab", { name: "Career", exact: true }).click();
+    const moves = dossier.getByRole("region", { name: "Squad movements" });
+    await expect(moves.locator("tbody tr").first()).toContainText("Called up to");
+    await expect(moves.locator("tbody tr").first()).toContainText("Call-up");
+    await expect(dossier.getByRole("heading", { name: "Transfers & loans", exact: true })).toBeVisible();
+    const transfers = dossier.getByRole("region", { name: "Transfers and loans" });
+    if (await transfers.count()) await expect(transfers).not.toContainText("Call-up");
+    else await expect(dossier.getByText("No transfers or loans recorded for this player yet.")).toBeVisible();
+    await dossier.getByRole("radio", { name: "Season statistics", exact: true }).check();
+    await expect(
+      dossier
+        .getByRole("region", { name: "Season statistics" })
+        .or(dossier.getByText("No appearances recorded yet.")),
+    ).toBeVisible();
+    await dossier.getByRole("tab", { name: "Medical", exact: true }).click();
+    await expect(dossier.getByRole("heading", { name: "Injury history", exact: true })).toBeVisible();
+    await dossier.getByRole("tab", { name: "Contract & registration", exact: true }).click();
+    await expect(dossier.getByRole("heading", { name: "Registration & eligibility", exact: true })).toBeVisible();
+    await dossier.getByRole("tab", { name: "Attributes & development", exact: true }).click();
+    await expect(dossier.getByRole("heading", { name: "Dynamic potential", exact: true })).toBeVisible();
+    await page.screenshot({ path: "test-results/player-sheet-desktop.png" });
+    await page.setViewportSize({ width: 390, height: 844 });
+    for (const name of ["Overview", "Career", "Attributes & development", "Scouting", "Contract & registration", "Medical"]) {
+      await dossier.getByRole("tab", { name, exact: true }).click();
+      await expect(dossier.locator(".profile-body")).toBeVisible();
+      await noOverflow(page);
+    }
+    await dossier.getByRole("tab", { name: "Career", exact: true }).click();
+    await expect(moves).toBeVisible();
+    await noOverflow(page);
+    await page.screenshot({ path: "test-results/player-sheet-career-mobile.png" });
+    await page.setViewportSize({ width: 1440, height: 1000 });
+
+    await dossier.locator(".profile-meta .team-link").click();
+    const team = page.getByRole("dialog", { name: "Team profile" });
+    await team.getByRole("tab", { name: "Transfers", exact: true }).click();
+    await expect(team.locator(".club-transfers")).toBeVisible();
+    await expect(team.locator(".club-transfer-table").filter({ hasText: player.name })).toHaveCount(0);
+    await team.locator(".club-squad-moves > summary").click();
+    await expect(team.getByRole("region", { name: "Club squad movements" })).toContainText(player.name);
+    await page.screenshot({ path: "test-results/club-squad-movements-desktop.png" });
+  } catch (error) {
+    primaryError = error;
+  } finally {
+    try {
+      await retryBusyResponse(() =>
+        request.post("/api/saves/restore", {
+          data: { file: checkpoint.file },
+          timeout: checkpointTimeout,
+        }),
+      );
+    } catch (cleanupError) {
+      primaryError =
+        primaryError === undefined
+          ? cleanupError
+          : new AggregateError([primaryError, cleanupError], "Call-up history failed and checkpoint restoration also failed");
+    }
+  }
+  if (primaryError !== undefined) throw primaryError;
+});
+
 test("player filters and complete faceless dossier work", async ({ page }) => {
   await page.goto("/#database");
   await expect(
@@ -1476,7 +1637,8 @@ test("player filters and complete faceless dossier work", async ({ page }) => {
   );
   await page.getByLabel("Search players", { exact: true }).fill("");
   await page.getByLabel("Position filter").selectOption("ST");
-  await page.getByLabel("Age filter").selectOption("20");
+  await page.getByRole("spinbutton", { name: "Age maximum", exact: true }).fill("20");
+  await expect(page.getByRole("button", { name: "Remove Age filter", exact: true })).toHaveText("Age ≤ 20");
   await expect(page.locator(".player-table tbody tr").first()).toBeVisible();
   await expect(
     page.locator(".player-table tbody tr").first().locator("td").nth(1),
@@ -1488,10 +1650,11 @@ test("player filters and complete faceless dossier work", async ({ page }) => {
     dialog.getByRole("img", { name: "Faceless player silhouette" }),
   ).toBeVisible();
   for (const name of [
-    "Attributes",
-    "Development",
-    "Scout report",
-    "Contract & value",
+    "Career",
+    "Attributes & development",
+    "Scouting",
+    "Contract & registration",
+    "Medical",
     "Overview",
   ]) {
     await dialog.getByRole("tab", { name, exact: true }).click();
@@ -1503,7 +1666,7 @@ test("player filters and complete faceless dossier work", async ({ page }) => {
   await noOverflow(page);
 });
 
-test("database filter groups reset dependent fields, clear chips and restart pagination", async ({
+test("database range filters keep min–max pairs, dependent fields and chips in step with the API", async ({
   page,
 }) => {
   const results = databaseQuery(page);
@@ -1536,18 +1699,17 @@ test("database filter groups reset dependent fields, clear chips and restart pag
 
   const initial = await resultsAfter(() => page.goto("/#database"), {});
   expect(initial.pages).toBeGreaterThan(1);
-  for (const name of [
-    "Identity & location",
-    "Position & ability",
-    "Contract & availability",
-  ]) {
+  for (const name of ["Player", "Ability & fitness", "Contract & money"])
     await expect(page.getByRole("group", { name, exact: true })).toBeVisible();
-  }
   const advanced = page.getByRole("button", { name: /^Advanced filters/ });
-  const attributes = page.getByRole("group", { name: "Attributes & physical profile", exact: true });
+  const advancedGroups = ["Club & competition", "Physical & attributes", "Personality & traits", "Season performance"];
+  const physical = page.getByRole("group", { name: "Physical & attributes", exact: true });
   const personalityGroup = page.getByRole("group", { name: "Personality & traits", exact: true });
+  const clubGroup = page.getByRole("group", { name: "Club & competition", exact: true });
   await expect(advanced).toHaveAttribute("aria-expanded", "false");
-  await expect(attributes).not.toBeVisible();
+  for (const name of advancedGroups)
+    await expect(page.getByRole("group", { name, exact: true })).not.toBeVisible();
+  const chips = page.getByRole("group", { name: "Active player filters", exact: true });
   const next = page.getByRole("button", { name: "Next player page", exact: true });
   await resultsAfter(() => next.click(), { page: "2" });
   const position = initial.players[0].position;
@@ -1555,69 +1717,128 @@ test("database filter groups reset dependent fields, clear chips and restart pag
     () => page.getByRole("combobox", { name: "Position filter", exact: true }).selectOption(position),
     { position, page: "1" },
   );
-  expect(filtered.pages).toBeGreaterThan(1);
   expect(filtered.players.every((player) => player.position === position)).toBe(true);
   await expect(page.getByRole("button", { name: "Previous player page", exact: true })).toBeDisabled();
 
+  // Age is a min–max pair: a reversed pair is searched in order and explained inline.
+  const ageGroup = page.getByRole("group", { name: "Age", exact: true });
+  const ageMin = ageGroup.getByRole("spinbutton", { name: "Age minimum", exact: true });
+  const ageMax = ageGroup.getByRole("spinbutton", { name: "Age maximum", exact: true });
+  await resultsAfter(() => ageMin.fill("18"), { ageMin: "18" });
+  const young = await resultsAfter(() => ageMax.fill("21"), { ageMax: "21" });
+  expect(young.players.every((player) => player.age >= 18 && player.age <= 21)).toBe(true);
+  await expect(chips.getByRole("button", { name: "Remove Age filter", exact: true })).toHaveText("Age 18–21");
+  await resultsAfter(() => ageMin.fill("30"), { ageMin: "21", ageMax: "30" });
+  await expect(ageGroup.getByText("Minimum above maximum: searching 21–30.", { exact: true })).toBeVisible();
+  await expect(chips.getByRole("button", { name: "Remove Age filter", exact: true })).toHaveText("Age 21–30");
+  await resultsAfter(() => ageMin.fill("18"), { ageMin: "18", ageMax: "21" });
+  await expect(ageGroup.locator(".range-filter-hint")).toBeEmpty();
+
+  // Money ranges take shorthand amounts and show compact chips.
+  const valueGroup = page.getByRole("group", { name: "Value (GBP)", exact: true });
+  const valueMax = valueGroup.getByRole("textbox", { name: "Value maximum", exact: true });
+  await resultsAfter(() => valueMax.fill("50m"), { valueMax: "50000000" });
+  await expect(chips.getByRole("button", { name: "Remove Value filter", exact: true })).toHaveText("Value ≤ £50M");
+  await valueMax.fill("lots");
+  await expect(valueGroup.getByText("Type an amount such as 750k or 2.5m.", { exact: true })).toBeVisible();
+  await expect(valueMax).toHaveAttribute("aria-invalid", "true");
+  await resultsAfter(() => valueMax.fill(""), { valueMax: null });
+  await expect(chips.getByRole("button", { name: "Remove Value filter", exact: true })).toHaveCount(0);
+
   await advanced.click();
   await expect(advanced).toHaveAttribute("aria-expanded", "true");
-  await expect(attributes).toBeVisible();
-  await expect(personalityGroup).toBeVisible();
-  await expect(page.getByRole("group", { name: "Match performance", exact: true })).toBeVisible();
-  const attribute = attributes.getByRole("combobox", { name: "Attribute", exact: true });
-  const attributeMin = attributes.getByRole("spinbutton", { name: "Attribute minimum", exact: true });
+  for (const name of advancedGroups)
+    await expect(page.getByRole("group", { name, exact: true })).toBeVisible();
+  const attribute = physical.getByRole("combobox", { name: "Attribute", exact: true });
+  const attributeMin = physical.getByRole("spinbutton", { name: "Attribute minimum", exact: true });
+  const attributeMax = physical.getByRole("spinbutton", { name: "Attribute maximum", exact: true });
   const personality = personalityGroup.getByRole("combobox", { name: "Personality", exact: true });
   const personalityMin = personalityGroup.getByRole("spinbutton", { name: "Personality minimum", exact: true });
   await expect(attributeMin).toBeDisabled();
+  await expect(attributeMax).toBeDisabled();
   await expect(personalityMin).toBeDisabled();
   const attributeKey = await attribute.locator("option").nth(1).getAttribute("value");
+  const attributeName = await attribute.locator("option").nth(1).textContent();
   const personalityKey = await personality.locator("option").nth(1).getAttribute("value");
   expect(attributeKey).toBeTruthy();
   expect(personalityKey).toBeTruthy();
-  await resultsAfter(() => attribute.selectOption(attributeKey!), { attribute: attributeKey, attributeMin: null, page: "1" });
+  await resultsAfter(() => attribute.selectOption(attributeKey!), { attribute: attributeKey });
   await expect(attributeMin).toBeEnabled();
-  await resultsAfter(() => attributeMin.fill("60"), { attribute: attributeKey, attributeMin: "60" });
-  await resultsAfter(() => personality.selectOption(personalityKey!), { personality: personalityKey, personalityMin: null });
+  await expect(physical.getByRole("group", { name: `${attributeName} level`, exact: true })).toBeVisible();
+  await resultsAfter(() => attributeMin.fill("60"), { attributeMin: "60" });
+  await resultsAfter(() => attributeMax.fill("80"), { attributeMax: "80" });
+  await expect(chips.getByRole("button", { name: "Remove Attribute level filter", exact: true })).toHaveText(
+    `${attributeName} 60–80`,
+  );
+  await resultsAfter(() => personality.selectOption(personalityKey!), { personality: personalityKey });
   await expect(personalityMin).toBeEnabled();
-  await resultsAfter(() => personalityMin.fill("60"), { personality: personalityKey, personalityMin: "60" });
-  const chips = page.getByRole("group", { name: "Active player filters", exact: true });
-  await expect(chips.getByRole("button", { name: "Remove Attribute minimum", exact: true })).toBeVisible();
-  await expect(chips.getByRole("button", { name: "Remove Personality minimum", exact: true })).toBeVisible();
+  await resultsAfter(() => personalityMin.fill("40"), { personalityMin: "40" });
+  await expect(chips.getByRole("button", { name: "Remove Personality level filter", exact: true })).toBeVisible();
+  await expect(advanced).toHaveAccessibleName("Advanced filters (4)");
+
+  // Club & competition: the club list follows the chosen league, and changing the parent clears its children.
+  const league = clubGroup.getByRole("combobox", { name: "League", exact: true });
+  const club = clubGroup.getByRole("combobox", { name: "Club", exact: true });
+  const clubCountry = clubGroup.getByRole("combobox", { name: "Club country", exact: true });
+  await expect(club).toBeDisabled();
+  await expect(league.locator("option").nth(1)).toBeAttached();
+  const leagueId = await league.locator("option").nth(1).getAttribute("value");
+  await resultsAfter(() => league.selectOption(leagueId!), { league: leagueId });
+  await expect(club).toBeEnabled();
+  await expect(club.locator("option").nth(1)).toBeAttached();
+  const clubId = await club.locator("option").nth(1).getAttribute("value");
+  const clubName = await club.locator("option").nth(1).textContent();
+  await resultsAfter(() => club.selectOption(clubId!), { club: clubId });
+  await expect(chips.getByRole("button", { name: "Remove Club filter", exact: true })).toHaveText(`Club: ${clubName}`);
+  const countryId = await clubCountry.locator("option").nth(1).getAttribute("value");
+  await resultsAfter(() => clubCountry.selectOption(countryId!), { clubCountry: countryId, league: null, club: null });
+  await expect(league).toHaveValue("");
+  await expect(club).toHaveValue("");
+  await expect(club).toBeDisabled();
+  await resultsAfter(
+    () => clubGroup.getByRole("spinbutton", { name: "Division maximum", exact: true }).fill("1"),
+    { tierMax: "1" },
+  );
+  await expect(chips.getByRole("button", { name: "Remove Division filter", exact: true })).toHaveText("Division ≤ 1");
+
   await noOverflow(page);
   await page.screenshot({ path: "test-results/database-filter-groups-desktop.png", fullPage: true });
   for (const width of [390, 320]) {
     await page.setViewportSize({ width, height: 844 });
     await expect(advanced).toBeVisible();
     await expect(attribute).toBeVisible();
+    await expect(attributeMax).toBeVisible();
     await expect(personality).toBeVisible();
     await noOverflow(page);
     await page.screenshot({ path: `test-results/database-filter-groups-mobile-${width}.png`, fullPage: true });
   }
+  await page.setViewportSize({ width: 1440, height: 1000 });
 
-  await advanced.click();
-  await expect(advanced).toHaveAttribute("aria-expanded", "false");
-  await expect(attributes).not.toBeVisible();
   await resultsAfter(
-    () => chips.getByRole("button", { name: "Remove Attribute", exact: true }).click(),
-    { attribute: null, attributeMin: null, personality: personalityKey, personalityMin: "60", page: "1" },
+    () => chips.getByRole("button", { name: "Remove Attribute filter", exact: true }).click(),
+    { attribute: null, attributeMin: null, attributeMax: null },
   );
-  await expect(chips.getByRole("button", { name: "Remove Attribute minimum", exact: true })).toHaveCount(0);
-  await advanced.click();
+  await expect(chips.getByRole("button", { name: "Remove Attribute level filter", exact: true })).toHaveCount(0);
   await expect(attribute).toHaveValue("");
   await expect(attributeMin).toHaveValue("");
   await expect(attributeMin).toBeDisabled();
-  await expect(personalityMin).toHaveValue("60");
-  await resultsAfter(
-    () => personality.selectOption(""),
-    { personality: null, personalityMin: null, position, page: "1" },
-  );
+  await expect(personalityMin).toHaveValue("40");
+  await resultsAfter(() => personality.selectOption(""), { personality: null, personalityMin: null });
   await expect(personalityMin).toHaveValue("");
   await expect(personalityMin).toBeDisabled();
-  await expect(chips.getByRole("button", { name: "Remove Personality minimum", exact: true })).toHaveCount(0);
-  await resultsAfter(() => next.click(), { position, page: "2" });
+  await resultsAfter(
+    () => chips.getByRole("button", { name: "Remove Club country filter", exact: true }).click(),
+    { clubCountry: null },
+  );
+  await resultsAfter(
+    () => chips.getByRole("button", { name: "Remove Age filter", exact: true }).click(),
+    { ageMin: null, ageMax: null },
+  );
+  await expect(ageMin).toHaveValue("");
+  await expect(ageMax).toHaveValue("");
   const cleared = await resultsAfter(
-    () => chips.getByRole("button", { name: "Remove Position", exact: true }).click(),
-    { position: null, attributeMin: null, personalityMin: null, page: "1" },
+    () => chips.getByRole("button", { name: "Clear all filters", exact: true }).click(),
+    { position: null, tierMax: null, page: "1" },
   );
   expect(cleared.total).toBe(initial.total);
   await expect(chips).toHaveCount(0);
@@ -2997,7 +3218,8 @@ test("every player's seasonal history opens their complete individual match repo
     .first()
     .click();
   const dossier = page.getByRole("dialog", { name: "Player dossier" });
-  await dossier.getByRole("tab", { name: "Career & matches" }).click();
+  await dossier.getByRole("tab", { name: "Career", exact: true }).click();
+  await dossier.getByRole("radio", { name: "Matches", exact: true }).check();
   await expect(dossier.getByLabel("Player career season")).toHaveValue(
     String(fixtures[0].season),
   );
@@ -3492,4 +3714,232 @@ test("shortlist groups, filters and sorts targets without overflow at every widt
     await page.setViewportSize({ width: 1440, height: 1000 });
     await shortlist(false);
   }
+});
+
+test("the world football feed follows AI clubs' activity with kind, country and club filters", async ({
+  page,
+  request,
+}) => {
+  expect(
+    (await request.post("/api/advance", { data: { days: 7 }, timeout: 180000 })).status(),
+  ).toBe(200);
+  const feed = await (await request.get("/api/world-news")).json();
+  expect(feed.total).toBeGreaterThan(0);
+  const kind = feed.kinds[0].kind as string;
+  const filtered = await (await request.get(`/api/world-news?kind=${kind}`)).json();
+  expect(filtered.items.every((item: { kind: string }) => item.kind === kind)).toBe(true);
+  // World items stay out of the director's inbox.
+  const inbox = await (await request.get("/api/news?archive=1&limit=200")).json();
+  expect(inbox.some((item: { category: string }) => item.category === "Worldwide")).toBe(false);
+  await page.goto("/#media");
+  await page.getByRole("tab", { name: "World football", exact: true }).click();
+  await expect(page.locator(".world-item").first()).toBeVisible();
+  await page.getByLabel("World news kind", { exact: true }).selectOption(kind);
+  await expect(page.locator(".world-item .badge").first()).toBeVisible();
+  const first = page.locator(".world-item").first();
+  const club = filtered.items[0].clubs[0] as { id: number; name: string };
+  await first.getByRole("button", { name: "Only this club", exact: true }).first().click();
+  await expect(page.getByRole("button", { name: club.name, exact: true }).first()).toBeVisible();
+  await expect(page.locator(".world-item").first()).toContainText(club.name);
+  for (const width of [390, 320]) {
+    await page.setViewportSize({ width, height: 844 });
+    await noOverflow(page);
+  }
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.goto("/#board");
+  await expect(page.getByRole("heading", { name: "Club infrastructure & finances" })).toBeVisible();
+  const life = await (await request.get("/api/club-life")).json();
+  expect(life.director).toBeNull();
+  expect(Array.isArray(life.projects)).toBe(true);
+});
+
+test("every competition page runs a top-scorer race with the Golden Boot leader and linked scorers", async ({
+  page,
+  request,
+}) => {
+  test.setTimeout(900_000);
+  await retryBusyResponse(() => request.patch("/api/settings", { data: { autosave: "off" } }));
+  const bootstrap = await bootstrapOf(request);
+  const leagueId = bootstrap.club.league_id as number;
+  const raceOf = async (id: number, query = "") =>
+    (await (
+      await retryBusyResponse(() => request.get(`/api/competitions/${id}/scorers${query}`))
+    ).json()) as CompetitionScorers;
+  const competition = await (await retryBusyResponse(() => request.get(`/api/leagues/${leagueId}`))).json();
+  // Play into the director's league season (no later spec relies on the date) until somebody has scored.
+  const opening = competition.fixtures[0]?.date as string | undefined;
+  expect(opening).toBeTruthy();
+  let date = bootstrap.state.date as string;
+  let race = await raceOf(leagueId);
+  while (!race.total) {
+    const days = Math.max(1, Math.min(28, Math.ceil((Date.parse(opening!) - Date.parse(date)) / 86_400_000) + 1));
+    const response = await request.post("/api/advance", { data: { days }, timeout: 600_000 });
+    expect(response.status(), await response.text()).toBe(200);
+    date = (await response.json()).date;
+    expect(Date.parse(date) - Date.parse(opening!)).toBeLessThan(35 * 86_400_000);
+    race = await raceOf(leagueId);
+  }
+  expect(race).toMatchObject({ leagueId, season: race.currentSeason });
+  expect(race.seasons[0]).toBe(race.currentSeason);
+  expect(race.scorers.length).toBe(Math.min(20, race.total));
+  expect(race.scorers.map((scorer) => scorer.goals)).toEqual(
+    [...race.scorers.map((scorer) => scorer.goals)].sort((first, second) => second - first),
+  );
+
+  await page.goto("/#competitions");
+  await page.getByRole("tab", { name: "Top scorers", exact: true }).click();
+  const leader = race.scorers[0];
+  const boot = page.getByRole("region", { name: "Golden Boot leader", exact: true });
+  await expect(boot).toContainText(leader.name);
+  await expect(boot.locator(".golden-boot-goals dd")).toHaveText(String(leader.goals));
+  await expect(page.getByRole("combobox", { name: "Top scorer season", exact: true })).toHaveValue(
+    String(race.currentSeason),
+  );
+  const table = page.getByRole("region", { name: `${competition.league.name} top scorers`, exact: true });
+  const rows = page.locator(".top-scorers-table tbody tr");
+  await expect(table).toBeVisible();
+  await expect(rows.locator(".scorer-player .profile-link")).toHaveText(race.scorers.map((scorer) => scorer.name));
+  await expect(rows.locator(".scorer-rank")).toHaveText(race.scorers.map((scorer) => String(scorer.rank)));
+  await expect(rows.locator(".scorer-goals")).toHaveText(race.scorers.map((scorer) => String(scorer.goals)));
+  if (race.total > 20) {
+    await page.getByRole("button", { name: "Show more scorers", exact: true }).click();
+    await expect(rows).toHaveCount(Math.min(40, race.total));
+    const more = await raceOf(leagueId, "?limit=40");
+    await expect(rows.locator(".scorer-player .profile-link")).toHaveText(more.scorers.map((scorer) => scorer.name));
+  } else {
+    await expect(page.getByRole("button", { name: "Show more scorers", exact: true })).toHaveCount(0);
+  }
+  await page.screenshot({ path: "test-results/competition-scorers-desktop.png", fullPage: true });
+  for (const width of [390, 320]) {
+    await page.setViewportSize({ width, height: 844 });
+    await noOverflow(page);
+    // The table scrolls sideways instead of squeezing club names letter by letter.
+    const clubCell = await rows.first().locator("td").nth(2).boundingBox();
+    expect(clubCell?.width).toBeGreaterThanOrEqual(190);
+    expect(clubCell?.height).toBeLessThan(110);
+  }
+  await page.screenshot({ path: "test-results/competition-scorers-mobile.png", fullPage: true });
+  await page.setViewportSize({ width: 1440, height: 1000 });
+
+  await boot.getByRole("button", { name: leader.name, exact: true }).click();
+  await expect(page.getByRole("dialog", { name: "Player dossier" })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("dialog", { name: "Player dossier" })).toHaveCount(0);
+  await rows.first().locator(".scorer-teams .profile-link").first().click();
+  const team = page.getByRole("dialog", { name: "Team profile" });
+  await expect(team.getByRole("heading", { name: race.scorers[0].teams[0].name, exact: true })).toBeVisible();
+  await page.keyboard.press("Escape");
+
+  // Cups, continental and international competitions have the same race, empty until their first goal.
+  for (const kind of ["cup", "continental", "international"] as const) {
+    const [entry] = (await (
+      await retryBusyResponse(() => request.get(`/api/leagues?kind=${kind}&limit=1`))
+    ).json()) as { id: number; name: string }[];
+    expect(entry, kind).toBeTruthy();
+    const other = await raceOf(entry.id);
+    await page.getByLabel("Competition type").selectOption(kind);
+    await page.getByLabel("Search competitions").fill(entry.name);
+    await page.locator(".competition-button").filter({ hasText: entry.name }).first().click();
+    await expect(page.getByRole("heading", { level: 2, name: entry.name, exact: true })).toBeVisible();
+    await page.getByRole("tab", { name: "Top scorers", exact: true }).click();
+    if (other.total) {
+      await expect(boot).toContainText(other.scorers[0].name);
+      await expect(rows.locator(".scorer-player .profile-link")).toHaveText(other.scorers.map((scorer) => scorer.name));
+    } else {
+      await expect(page.getByRole("heading", { name: "No goals yet", exact: true })).toBeVisible();
+      await expect(rows).toHaveCount(0);
+    }
+  }
+  await page.getByRole("button", { name: "Reset competition filters" }).click();
+});
+
+test("a player's season statistics count every competitive goal, consistent with his season totals", async ({
+  page,
+  request,
+}) => {
+  test.setTimeout(900_000);
+  await request.patch("/api/settings", { data: { autosave: "off" } });
+  // League football starts on 8 August: play into the second weekend so every club has competitive goals.
+  const target = "2026-08-17";
+  for (let date = (await bootstrapOf(request)).state.date; date < target; date = (await bootstrapOf(request)).state.date) {
+    const days = Math.min(28, Math.ceil((Date.parse(target) - Date.parse(date)) / 86400000));
+    const response = await retryBusyResponse(() => request.post("/api/advance", { data: { days }, timeout: 300_000 }));
+    expect(response.status()).toBe(200);
+  }
+  const { state } = await bootstrapOf(request);
+  type Line = { appearances: number; minutes: number; goals: number; assists: number; averageRating: number | null };
+  type History = {
+    seasons: {
+      season: number;
+      clubs: { club: { id: number }; competitions: Line[]; total: Line }[];
+      friendlies: Line[];
+      total: Line;
+    }[];
+    career: Line;
+    careerFriendlies: Line | null;
+  };
+  // The world's leading scorers of the season (players.goals counts every match, friendlies included); most of their
+  // goals came on the fast model, whose goals the history used to leave blank.
+  const leaders = (await (await request.get("/api/players?sort=goals&direction=desc&pageSize=10")).json()).players as {
+    id: number;
+    name: string;
+    appearances: number;
+    goals: number;
+    assists: number;
+  }[];
+  let chosen: { player: (typeof leaders)[number]; history: History } | null = null;
+  for (const player of leaders) {
+    const history = (await (await request.get(`/api/players/${player.id}/history`)).json()) as History;
+    const current = history.seasons.find((entry) => entry.season === state.season);
+    expect(current, player.name).toBeTruthy();
+    const friendlies = current!.friendlies.reduce(
+      (sum, line) => ({ appearances: sum.appearances + line.appearances, goals: sum.goals + line.goals, assists: sum.assists + line.assists }),
+      { appearances: 0, goals: 0, assists: 0 },
+    );
+    // This season's competitive lines plus his friendlies are exactly his season counters.
+    expect(current!.total.goals + friendlies.goals, player.name).toBe(player.goals);
+    expect(current!.total.assists + friendlies.assists, player.name).toBe(player.assists);
+    expect(current!.total.appearances + friendlies.appearances, player.name).toBe(player.appearances);
+    for (const entry of history.seasons) {
+      for (const key of ["appearances", "minutes", "goals", "assists"] as const) {
+        expect(entry.clubs.reduce((sum, club) => sum + club.total[key], 0)).toBe(entry.total[key]);
+        for (const club of entry.clubs)
+          expect(club.competitions.reduce((sum, line) => sum + line[key], 0)).toBe(club.total[key]);
+      }
+    }
+    expect(history.career.goals).toBe(history.seasons.reduce((sum, entry) => sum + entry.total.goals, 0));
+    const namesake = (await (await request.get(`/api/players?q=${encodeURIComponent(player.name)}`)).json()).total;
+    if (!chosen && current!.total.goals > 0 && namesake === 1) chosen = { player, history };
+  }
+  expect(chosen).toBeTruthy();
+  const { player, history } = chosen!;
+  expect(history.career.goals).toBeGreaterThan(0);
+  // Every match of the season keeps its rating: the season is fully rated.
+  expect(history.career.averageRating).not.toBeNull();
+
+  await page.goto("/#database");
+  await page.getByLabel("Search players", { exact: true }).fill(player.name);
+  await page.locator(".player-name").filter({ hasText: player.name }).first().click();
+  const dossier = page.getByRole("dialog", { name: "Player dossier" });
+  await dossier.getByRole("tab", { name: "Career", exact: true }).click();
+  await dossier.getByRole("radio", { name: "Season statistics", exact: true }).check();
+  const table = dossier.getByRole("region", { name: "Season statistics" });
+  const seasonRow = table.locator(".season-stats-season").first();
+  await expect(seasonRow.locator("th")).toHaveText(`${state.season}/${String(state.season + 1).slice(-2)}`);
+  const current = history.seasons.find((entry) => entry.season === state.season)!;
+  await expect(seasonRow.locator("td").nth(1)).toHaveText(String(current.total.goals));
+  await expect(seasonRow.locator("td").nth(2)).toHaveText(String(current.total.assists));
+  const career = table.locator("tfoot .season-stats-career");
+  await expect(career.locator("td").nth(1)).toHaveText(String(history.career.goals));
+  await expect(career.locator("td").nth(3)).toContainText(history.career.averageRating!.toFixed(2));
+  await expect(dossier.locator(".career-season-summary")).toContainText(`Goals${history.career.goals}`);
+  await expect(table).not.toContainText("—");
+  await page.screenshot({ path: "test-results/player-history-statistics-desktop.png" });
+  for (const width of [390, 320]) {
+    await page.setViewportSize({ width, height: 844 });
+    await expect(table).toBeVisible();
+    await noOverflow(page);
+  }
+  await page.screenshot({ path: "test-results/player-history-statistics-mobile.png" });
+  await page.setViewportSize({ width: 1440, height: 1000 });
 });

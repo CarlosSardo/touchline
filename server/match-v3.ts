@@ -999,6 +999,8 @@ export function simulateMatchV3(
     result.winnerId = teams[scores[0] > scores[1] ? 0 : 1].id;
   }
   result.duration = elapsed;
+  // Rules 4 count regulation minutes only: a substitute sent on in stoppage time still appeared (and may have scored).
+  if (v4) for (const change of result.substitutions!) result.players[change.onId].minutes ||= 1;
   for (const [index, team] of teams.entries()) {
     const stats = result.stats[team.id];
     stats.possession =

@@ -621,6 +621,13 @@ describe("SQL schema contract (no database)", () => {
     expect(sql).toContain("playing_club_id INTEGER GENERATED ALWAYS AS (COALESCE(squad_club_id, club_id)) STORED");
     expect(sql).toContain("notification_key TEXT\n          GENERATED ALWAYS AS (data::jsonb ->> 'notificationKey') STORED");
     expect(sql).not.toContain("notification_unkeyed_id");
+    // Migration 11: plain body columns copied from the profile (not generated: no re-parse on every profile update).
+    const body = migrations.find((migration) => migration.version === 11)!.statements.join("\n");
+    expect(body).toContain("ADD COLUMN IF NOT EXISTS height SMALLINT NULL");
+    expect(body).toContain("ADD COLUMN IF NOT EXISTS weight SMALLINT NULL");
+    expect(body).toContain("height = round((profile::jsonb #>> '{identity,height}')::double precision)::smallint");
+    expect(body).toContain(`CREATE INDEX IF NOT EXISTS "player_height" ON "${schema}"."players" (height);`);
+    expect(body).not.toContain("GENERATED");
   });
 
   it("creates every index idempotently on schema-qualified tables", () => {

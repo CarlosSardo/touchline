@@ -29,6 +29,7 @@ import {
   needsHeadToHead,
   pairQualifyingRound,
   planBoundaries,
+  planMovement,
   planSplit,
   postseasonDates,
   QUALIFYING_STAGES,
@@ -39,6 +40,7 @@ import {
   resolvePlayoffBySeed,
   splitMatchdays,
   type PlayoffInput,
+  type PlayoffResult,
   type PlayoffState,
   type PyramidClub,
   type PyramidTier,
@@ -2324,6 +2326,48 @@ export async function countryPyramid(store: Store, countryId: number, season?: n
     }
   return { leagues, tiers, clubs };
 }
+
+/**
+ * Promotions and relegations the rollover will apply for `season` (the finished season), from today's tables and
+ * play-offs (open ties resolved by seed, as at the rollover). Cached per world and day: the tables no longer change
+ * once the season is over.
+ */
+export async function plannedLeagueMoves(store: Store, season: number): Promise<ReadonlyMap<number, PlannedMove>> {
+  const state = await store.get<{ value: string }>("SELECT value FROM meta WHERE key = 'state'");
+  const key = `${season}:${state ? (JSON.parse(state.value) as { date: string }).date : ""}`;
+  const cached = plannedMoves.get(store.schemaName);
+  if (cached?.key === key) return cached.moves;
+  const results = new Map<number, Map<string, PlayoffResult>>();
+  for (const competition of await store.all<League>(
+    `SELECT * FROM leagues WHERE kind = 'cup' AND data::jsonb ->> 'key' IS NOT NULL AND ${jsonInteger("data::jsonb ->> 'season'")} = ?`,
+    season,
+  )) {
+    const playoff = JSON.parse(competition.data) as PlayoffData;
+    if (playoff.key === "title" || !playoff.state || competition.country_id === null) continue;
+    const country = results.get(competition.country_id) ?? new Map<string, PlayoffResult>();
+    country.set(playoff.key, playoff.state.result ?? resolvePlayoffBySeed(playoff.state));
+    results.set(competition.country_id, country);
+  }
+  const moves = new Map<number, PlannedMove>();
+  for (const { country_id } of await store.all<{ country_id: number }>(
+    "SELECT DISTINCT country_id FROM leagues WHERE kind = 'league' AND age_group = 'Senior' AND country_id IS NOT NULL ORDER BY country_id",
+  ))
+    for (const move of planMovement({ ...(await countryPyramid(store, country_id, season)), results: results.get(country_id) }))
+      if (move.from !== null && move.to !== null) moves.set(move.clubId, { movement: move.promoted ? "promoted" : "relegated", leagueId: move.to });
+  plannedMoves.delete(store.schemaName);
+  plannedMoves.set(store.schemaName, { key, moves });
+  // Several worlds can share a process: keep the latest few.
+  for (const schema of plannedMoves.keys()) if (plannedMoves.size > 4) plannedMoves.delete(schema);
+  return moves;
+}
+
+/** A club's coming promotion or relegation and its league next season. */
+export interface PlannedMove {
+  movement: "promoted" | "relegated";
+  leagueId: number;
+}
+
+const plannedMoves = new Map<string, { key: string; moves: ReadonlyMap<number, PlannedMove> }>();
 
 interface SeasonPlan {
   season: number;

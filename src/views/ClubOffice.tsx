@@ -76,6 +76,7 @@ import type {
 import type { NewsItem } from "../../shared/types.ts";
 import { TransferPaymentTable } from "./Transfers.tsx";
 import { AffiliatesPanel, EventsPanel } from "./ClubSupport.tsx";
+import { ClubAffairsPanel, WorldFeed } from "../ClubLife.tsx";
 import { EligibilityBadge } from "../EligibilityBadge.tsx";
 
 function BudgetSheet({ close, wages }: { close: () => void; wages: number }) {
@@ -489,6 +490,7 @@ export function Finances() {
                         ? "Not applicable"
                         : money(data.compliance.costHeadroom),
                     ],
+                    ["Room for added annual squad cost", money(data.compliance.ffpHeadroom)],
                     [
                       "Recorded rolling earnings",
                       money(data.compliance.rollingEarnings),
@@ -516,6 +518,17 @@ export function Finances() {
                   </p>
                 ))}
                 <p className="sheet-description">{data.compliance.source}</p>
+                {data.sanctions.length > 0 && (
+                  <>
+                    <h3>Sanctions</h3>
+                    <DetailList
+                      items={data.sanctions.map((sanction) => [
+                        `${dateLabel(sanction.start_date)} / ${sanction.kind === "points" ? `${sanction.points} points` : sanction.kind === "embargo" ? `Embargo${sanction.end_date ? ` until ${dateLabel(sanction.end_date)}` : ""}` : `${sanction.kind === "fine" ? "Fine" : "Settlement"} ${money(sanction.amount)}`}`,
+                        sanction.reason,
+                      ])}
+                    />
+                  </>
+                )}
               </div>
               <div>
                 <h3 className="subsection-title">
@@ -784,6 +797,7 @@ export function Board() {
         ))}
       </div>
       <RegistrationPanel />
+      <ClubAffairsPanel />
       <AffiliatesPanel />
       <EventsPanel />
     </div>
@@ -1311,6 +1325,7 @@ export function Media() {
         <Tabs
           items={[
             { id: "headlines", label: "News feed" },
+            { id: "world", label: "World football" },
             {
               id: "journalists",
               label: "Journalists",
@@ -1322,6 +1337,7 @@ export function Media() {
           value={tab}
           onChange={setTab}
         />
+        {tab === "world" && <WorldFeed />}
         {tab === "press" && (
           <div className="padded">
             <div className="press-question">

@@ -1,6 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { Store } from "./db.ts";
-import { tableName } from "./sql-schema.ts";
 import { generateWorld } from "./world.ts";
 import {
   createCalendar,
@@ -14,8 +13,8 @@ import {
   developPlayers,
   playFixture,
   seasonRollover,
-  worldTransfers,
 } from "./simulation.ts";
+import { worldMarket } from "./world-market.ts";
 import { clubOf, enquire, negotiate, negotiationStep, stateOf } from "./systems.ts";
 import { playerCareer } from "./queries.ts";
 import { MATCH_RULES_VERSION, simulateMatch } from "./match.ts";
@@ -140,7 +139,8 @@ describe("connected simulation", () => {
     expect(clubs).toBeGreaterThan(100);
     // (Transfers and other one-off items post their own rows; the weekly accounts are one statement, not one per club.)
     expect(firstWeek.filter((sql) => sql.includes("INTO financial_periods")).length).toBeLessThan(clubs / 10);
-    expect(firstWeek.filter((sql) => sql.includes("INTO financial_periods") && sql.includes("unnest("))).toHaveLength(1);
+    // The weekly accounts are the one upsert of wages and operating costs (the market books its own sales set-based).
+    expect(firstWeek.filter((sql) => sql.includes("INTO financial_periods") && sql.includes("unnest(") && sql.includes("wages"))).toHaveLength(1);
     expect(firstWeek.filter((sql) => /FROM financial_periods WHERE club_id = \?/.test(sql)).length).toBeLessThan(clubs / 10);
     // Club friendlies go through the set-based batch: per-fixture squad selection is left to the user's club family.
     const userFixtures = (await store.get<{ total: number }>(
@@ -468,9 +468,17 @@ describe("persisted football media", () => {
       ).toBe(true);
       expect((await mediaFeed(store, { q: "%" })).total).toBe(0);
       expect((await mediaFeed(store, { scope: "world" })).total).toBe(0);
+      // Standings store points net of deductions: the roundup must not subtract them again.
+      const own = await clubOf(store, (await stateOf(store)).clubId);
+      await store.run(
+        "UPDATE standings SET played = 4, wins = 3, draws = 1, losses = 0, points = 4, deducted = 6 WHERE club_id = ? AND league_id = ?",
+        own.id,
+        own.league_id,
+      );
       await publishClubRoundup(store);
       const roundups = await mediaFeed(store, { topic: "club" });
       expect(roundups.total).toBe(1);
+      expect(roundups.stories[0].report!.paragraphs.join(" ")).toContain("with 4 points from 4 league matches");
       expect(roundups.stories[0].report!.paragraphs.join(" ")).toContain(
         "0 arrivals and 0 departures",
       );
@@ -499,117 +507,31 @@ describe("daily transfer market", () => {
     }
   }
 
-  it("indexes eligible senior candidates without scanning youth rosters", async () => {
-    const store = await marketWorld();
-    try {
-      const date = (await stateOf(store)).date;
-      const indexes = await store.all<{
-        name: string;
-        is_disabled: boolean;
-        has_filter: boolean;
-        filter_definition: string | null;
-      }>(
-        `SELECT index_class.relname AS name, NOT (info.indisvalid AND info.indisready) AS is_disabled,
-           info.indpred IS NOT NULL AS has_filter, pg_get_expr(info.indpred, info.indrelid) AS filter_definition
-         FROM pg_catalog.pg_index AS info JOIN pg_catalog.pg_class AS index_class ON index_class.oid = info.indexrelid
-         WHERE info.indrelid = to_regclass(?) AND index_class.relname IN ('player_market_candidate','player_market_squad')`,
-        tableName(store.schemaName, "players"),
-      );
-      expect(indexes).toHaveLength(2);
-      expect(indexes.every((index) => !index.is_disabled)).toBe(true);
-      const candidateIndex = indexes.find(
-        (index) => index.name === "player_market_candidate",
-      )!;
-      expect(candidateIndex.has_filter).toBe(true);
-      expect(candidateIndex.filter_definition).toMatch(/age_group.*Senior/i);
-      expect(candidateIndex.filter_definition).toMatch(
-        /parent_club_id.*IS NULL/i,
-      );
-      for (const [name, expectedColumns] of [
-        ["player_market_candidate", ["id", "contract_end", "injury_until"]],
-        [
-          "player_market_squad",
-          ["club_id", "age_group", "position", "role", "wage"],
-        ],
-      ] as const) {
-        const columns = await store.all<{ name: string }>(
-          `SELECT attribute.attname AS name
-           FROM pg_catalog.pg_index AS info
-           JOIN pg_catalog.pg_class AS index_class ON index_class.oid = info.indexrelid
-           CROSS JOIN LATERAL unnest(info.indkey::int2[]) WITH ORDINALITY AS indexed(attnum, ordinal)
-           JOIN pg_catalog.pg_attribute AS attribute ON attribute.attrelid = info.indrelid AND attribute.attnum = indexed.attnum
-           WHERE info.indrelid = to_regclass(?) AND index_class.relname = ? AND indexed.ordinal <= info.indnkeyatts
-           ORDER BY indexed.ordinal`,
-          tableName(store.schemaName, "players"),
-          name,
-        );
-        expect(columns.map((column) => column.name)).toEqual(expectedColumns);
-      }
-      const players = await store.all<Player>(
-        "SELECT id,club_id,parent_club_id,age,age_group,role,contract_end,injury_until FROM players ORDER BY id",
-      );
-      const eligible = players.filter(
-        (player) =>
-          player.club_id !== null &&
-          player.parent_club_id === null &&
-          player.age >= 18 &&
-          player.age <= 31 &&
-          player.age_group === "Senior" &&
-          player.role !== "Retired" &&
-          player.contract_end > date &&
-          (player.injury_until === null || player.injury_until <= date),
-      );
-      expect(eligible.length).toBeGreaterThan(0);
-      const lastId = players.at(-1)!.id;
-      const started = performance.now();
-      for (let repeat = 0; repeat < 3; repeat++) {
-        for (const lowerBound of [
-          1,
-          Math.floor(lastId / 4),
-          Math.floor(lastId / 2),
-          lastId + 1,
-        ]) {
-          const candidate = await store.get<Player>(
-            "SELECT * FROM players WHERE id >= ? AND club_id IS NOT NULL AND parent_club_id IS NULL AND age BETWEEN 18 AND 31 AND age_group = 'Senior' AND role != 'Retired' AND contract_end > ? AND (injury_until IS NULL OR injury_until <= ?) AND NOT EXISTS (SELECT 1 FROM negotiations WHERE negotiations.player_id = players.id AND stage NOT IN ('Completed','Rejected','Withdrawn','Expired','Hijacked')) AND NOT EXISTS (SELECT 1 FROM history WHERE entity_type = 'transfer' AND entity_id = players.id AND date >= ?) ORDER BY id LIMIT 1",
-            lowerBound,
-            date,
-            date,
-            addDays(date, -90),
-          );
-          expect(candidate?.id).toBe(
-            eligible.find((player) => player.id >= lowerBound)?.id,
-          );
-        }
-      }
-      expect(performance.now() - started).toBeLessThan(15000);
-    } finally {
-      await store.close();
-    }
-  });
-
-  it("runs on multiple window days without repeat moves or automatic sales from the managed club", async () => {
+  it("runs once per window day without repeat moves, sales from the managed club or overdrawn buyers", async () => {
     const store = await marketWorld();
     try {
       const originalSquad = await store.all(
         "SELECT id,club_id FROM players WHERE club_id = 1 ORDER BY id",
       );
+      // Spread the squads so clubs have surplus and needs (the helper flattens every senior to the same level).
+      await store.run(
+        "UPDATE players SET ability = 50 + (id * 7919) % 30, value = 200000 + (id * 7919) % 30 * 50000 WHERE age_group = 'Senior'",
+      );
       const days: string[] = [];
       for (let index = 0; index < 7; index++) {
         const date = addDays("2026-07-01", index);
-        await store.setMeta("state", { ...(await stateOf(store)), date });
+        const state = { ...(await stateOf(store)), date };
+        await store.setMeta("state", state);
         const result = await store.transaction(
-          async () =>
-            await worldTransfers(store, seedrandom(`market-day-${index}`)),
+          async () => await worldMarket(store, state, seedrandom(`market-day-${index}`)),
         );
-        if (result.completed) days.push(date);
-        expect(await worldTransfers(store, seedrandom("duplicate"))).toEqual({
-          completed: 0,
-        });
+        if (result.transfers + result.loans + result.free) days.push(date);
+        expect(await worldMarket(store, state, seedrandom("duplicate"))).toMatchObject({ transfers: 0, loans: 0, free: 0 });
       }
       expect(days.length).toBeGreaterThan(1);
       expect(
         await store.all(
-          "SELECT entity_id FROM history WHERE entity_type = 'transfer' GROUP BY entity_id HAVING count(*) > 1",
+          "SELECT entity_id FROM history WHERE entity_type IN ('transfer','loan') GROUP BY entity_id HAVING count(*) > 1",
         ),
       ).toHaveLength(0);
       expect(
@@ -622,13 +544,9 @@ describe("daily transfer market", () => {
           "SELECT id FROM clubs WHERE balance < 0 OR transfer_budget < 0",
         ),
       ).toHaveLength(0);
-      await store.setMeta("state", {
-        ...(await stateOf(store)),
-        date: "2026-10-01",
-      });
-      expect(await worldTransfers(store, seedrandom("closed-window"))).toEqual({
-        completed: 0,
-      });
+      const closed = { ...(await stateOf(store)), date: "2026-10-01" };
+      await store.setMeta("state", closed);
+      expect(await worldMarket(store, closed, seedrandom("closed-window"))).toMatchObject({ transfers: 0, loans: 0 });
     } finally {
       await store.close();
     }
@@ -680,7 +598,7 @@ describe("daily transfer market", () => {
       expect(
         (await store.get<{ stage: string }>("SELECT stage FROM negotiations WHERE id = ?", enquiry.id))!.stage,
       ).toBe("Scheduled");
-      await worldTransfers(store, seedrandom("pre-contract-protected"));
+      await worldMarket(store, await stateOf(store), seedrandom("pre-contract-protected"));
       expect((await store.get<Player>("SELECT * FROM players WHERE id = ?", player.id))!.club_id).toBeNull();
       expect(
         (await store.get<{ stage: string }>("SELECT stage FROM negotiations WHERE id = ?", enquiry.id))!.stage,

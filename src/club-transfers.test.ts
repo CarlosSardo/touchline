@@ -65,8 +65,10 @@ describe("updateFilter / isFiltered", () => {
     expect(isFiltered({ ...DEFAULT_TRANSFER_FILTER, season: 2024 })).toBe(true);
     expect(isFiltered({ ...DEFAULT_TRANSFER_FILTER, type: "free" })).toBe(true);
   });
-  it("offers every move kind with the player-history labels", () => {
-    expect(TYPE_OPTIONS.map((option) => option.kind)).toHaveLength(8);
+  it("offers every move kind with another club, with the player-history labels", () => {
+    expect(TYPE_OPTIONS.map((option) => option.kind)).toEqual([
+      "transfer", "free", "loan", "loanReturn", "loanRecall", "loanPurchase", "registration",
+    ]);
     expect(TYPE_OPTIONS.find((option) => option.kind === "loanPurchase")?.label).toBe("Loan made permanent");
   });
 });

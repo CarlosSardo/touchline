@@ -55,7 +55,7 @@ import {
   ACTIVE_TRANSFER_STAGES,
 } from "../../shared/rules.ts";
 import { plural } from "../format.ts";
-import type { PlayerDetail, TransferDesk } from "../../shared/api.ts";
+import type { PlayerDetail, SquadData, TransferDesk } from "../../shared/api.ts";
 import type {
   BuyBackClause,
   LoanTerms,
@@ -1494,6 +1494,8 @@ export function NegotiationSheet({
     ...details.transferTerms,
   });
   const [bonus, setBonus] = useState(details.signingBonus ?? 0);
+  const [releaseClause, setReleaseClause] = useState(details.contractReleaseClause ?? 0);
+  const [exchangeId, setExchangeId] = useState<number | null>(details.exchange?.playerId ?? null);
   const [pending, setPending] = useState(false);
   const loan = LOAN_TYPES.includes(negotiation.type);
   const preContract = negotiation.type === "Pre-contract agreement";
@@ -1518,6 +1520,14 @@ export function NegotiationSheet({
     ["Permanent transfer", "Future transfer"].includes(negotiation.type) &&
     negotiation.selling_club_id !== null;
   const enquiry = !contractPage && negotiation.stage === "Enquiry";
+  const buying = negotiation.buying_club_id === bootstrap?.club.id;
+  const clauseTalks = permanent && buying && negotiation.stage === "Club talks" && !!negotiation.release_clause;
+  const { data: squad } = useResource<SquadData>(
+    permanent && buying && negotiation.type === "Permanent transfer" && negotiation.stage === "Club talks" ? "squad?ageGroup=Senior" : null,
+  );
+  const exchangeOptions = (squad?.players ?? []).filter(
+    (player) => player.id !== negotiation.player_id && !player.parent_club_id && player.club_id === bootstrap?.club.id && player.age >= 18,
+  );
   const review = contractPage && negotiation.stage === "Contract review";
   const agentFee = Math.round(
     ((loan ? negotiation.offer : negotiation.wage * 52) *
@@ -1576,6 +1586,8 @@ export function NegotiationSheet({
       signingBonus: bonus,
       ...(permanent ? { transferTerms } : {}),
       ...(loan ? { terms: { ...terms, fee } } : {}),
+      ...(permanent && !personalStage && negotiation.type === "Permanent transfer" ? { exchangePlayerId: exchangeId } : {}),
+      ...(personalStage && !loan ? { releaseClause: releaseClause > 0 ? releaseClause : undefined } : {}),
     });
     setPending(false);
     if (
@@ -1586,6 +1598,18 @@ export function NegotiationSheet({
       openContract(negotiation.player_id);
     // A rejection stays open so its reason remains readable after the toast.
     if (!fullPage && result?.stage === "Medical") close();
+  }
+  function payClause() {
+    confirm(
+      "Pay the release clause?",
+      `Paying ${money(negotiation.release_clause ?? 0)} triggers ${negotiation.player_name ?? "the player"}'s release clause: the club cannot refuse, but he still has to agree personal terms.`,
+      async () => {
+        onAction?.();
+        setPending(true);
+        await act({ type: "negotiation", id: negotiation.id, action: "release-clause" });
+        setPending(false);
+      },
+    );
   }
   async function counterOffer() {
     onAction?.();
@@ -1829,6 +1853,33 @@ export function NegotiationSheet({
                   />
                 </Field>
               )}
+              {!contractPage && buying && negotiation.type === "Permanent transfer" && negotiation.stage === "Club talks" && (
+                <Field label="Include a player (part-exchange)">
+                  <select
+                    aria-label="Part-exchange player"
+                    value={exchangeId ?? ""}
+                    onChange={(event) => setExchangeId(event.target.value ? Number(event.target.value) : null)}
+                  >
+                    <option value="">Cash only</option>
+                    {exchangeOptions.map((player) => (
+                      <option key={player.id} value={player.id}>
+                        {player.name} ({player.position}, {player.age}) / value {money(player.value)}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+              )}
+              {contractPage && !loan && (
+                <Field label="Release clause (0 = none or the league default)">
+                  <MoneyInput
+                    aria-label="Release clause"
+                    min={0}
+                    value={releaseClause}
+                    disabled={!personalStage}
+                    onChange={setReleaseClause}
+                  />
+                </Field>
+              )}
               {contractPage && (
                 <Field label="Weekly wage">
                   <MoneyInput
@@ -1953,6 +2004,20 @@ export function NegotiationSheet({
                         <strong>{money(details.counter)}</strong>
                       </span>
                     )}
+                  {details.exchange && (
+                    <span>
+                      {details.exchange.name} credited at{" "}
+                      <strong>{money(details.exchange.valuation)}</strong>
+                    </span>
+                  )}
+                  {clauseTalks && (
+                    <span>
+                      Release clause <strong>{money(negotiation.release_clause!)}</strong>{" "}
+                      <button type="button" className="button secondary" disabled={pending} onClick={payClause}>
+                        Pay release clause
+                      </button>
+                    </span>
+                  )}
                 </>
               )}
               <span>

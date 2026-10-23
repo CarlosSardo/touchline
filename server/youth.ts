@@ -15,7 +15,7 @@ import {
   seniorRetirementChance,
 } from "./people.ts";
 import { retirementNotice } from "./notifications.ts";
-import { baseWage, marketWage, professionalWageFloor, wageScale, wageScales } from "./finance.ts";
+import { baseWage, marketWage, professionalWageFloor, RENEWAL_BUDGET_SHARE, wageScale, wageScales } from "./finance.ts";
 import {
   assessRegistration,
   clubRegistration,
@@ -31,7 +31,6 @@ import {
   type ClubRegistration,
 } from "./registration.ts";
 import { news } from "./systems.ts";
-import { marketMoveInterest, marketWageOffer } from "./recruitment.ts";
 import { ageOn, clamp, daysBetween, transferWindow, winterWindowClose } from "../shared/rules.ts";
 import { MIN_GOALKEEPERS, SQUAD_MINIMUMS } from "../shared/world-rules.ts";
 import { hasOwnLeague, nationByCode } from "../shared/world-catalog/index.ts";
@@ -410,6 +409,44 @@ function foreignYouthShare(club: ClubRow, style: string) {
   return (tier?.clubs.foreignShare ?? 0.2) * 0.35 * (style === "regional" ? 0.3 : style === "global" ? 2 : 1);
 }
 
+/**
+ * An AI club's renewal of an expiring first-team contract. The offer starts from the club's going rate for the player
+ * (`market`: his ability at its pay level) and moves with his standing: a first-choice player gets 5% more, a squad
+ * player 5% less and a fringe player 15% less; a regular (60%+ of last season's league minutes) 5% more and a bit
+ * part (under 20%) 8% less; youngsters 5% more and players past their peak (30, keepers 33) 6% less per year. It
+ * stays within 60-130% of his current wage. The club only commits what its budget can sustain (`room`, weekly): it
+ * cuts the offer by up to a fifth to fit, or lets him go. He refuses more often the deeper the cut, and a starter in
+ * his prime sometimes leaves for a new challenge anyway. Returns the agreed wage, or who ended the talks.
+ */
+export function aiRenewalTerms(input: {
+  wage: number;
+  market: number;
+  floor: number;
+  age: number;
+  position: Position;
+  /** Place in the club's keep order (1 = first choice). */
+  rank: number;
+  minutesShare: number;
+  room: number;
+  /** The player's draw (0-1) against his refusal chance. */
+  random: number;
+}): { wage: number } | { leaves: "club" | "player" } {
+  const role = input.rank <= 11 ? 1.05 : input.rank <= 18 ? 0.95 : 0.85;
+  const form = input.minutesShare >= 0.6 ? 1.05 : input.minutesShare < 0.2 ? 0.92 : 1;
+  const peak = input.position === "GK" ? 33 : 30;
+  const age = input.age <= 23 ? 1.05 : input.age >= peak ? Math.max(0.6, 1 - 0.06 * (input.age - peak + 1)) : 1;
+  const ask = clamp(input.market * role * form * age, input.wage * 0.6, Math.max(input.wage, 50) * 1.3);
+  let wage = Math.max(input.floor, Math.round(ask / 10) * 10);
+  if (wage > input.room) {
+    const fitted = Math.floor(Math.max(0, input.room) / 10) * 10;
+    if (fitted < wage * 0.8 || fitted < input.floor) return { leaves: "club" };
+    wage = fitted;
+  }
+  const ratio = wage / Math.max(1, input.wage);
+  const refusal = clamp(0.06 + Math.max(0, 0.95 - ratio) * 1.6 + (input.rank <= 11 && input.age <= 28 ? 0.06 : 0), 0, 0.75);
+  return input.random < refusal ? { leaves: "player" } : { wage };
+}
+
 function contractYears(age: number, random: Rng) {
   const span = age < 18 ? [2, 3] : age < 24 ? [3, 4] : age < 30 ? [2, 3] : [1, 2];
   return span[0] + Math.floor(random() * (span[1] - span[0] + 1));
@@ -521,6 +558,21 @@ export async function runYouthIntake(
     return held;
   };
   const scales = await wageScales(store);
+  // Payroll each club is already committed to next season (contracts running on) and last season's league minutes.
+  const committed = new Map<number, number>();
+  for (const member of members)
+    if (member.contract_end >= date) {
+      const payer = member.parent_club_id ?? member.club_id!;
+      committed.set(payer, (committed.get(payer) ?? 0) + member.wage);
+    }
+  const minutes = new Map(
+    (
+      await store.all<{ player_id: number; minutes: number }>(
+        "SELECT player_id, sum(minutes) AS minutes FROM player_season_stats WHERE season = ? AND league_id IN (SELECT id FROM leagues WHERE kind = 'league') GROUP BY player_id",
+        season - 1,
+      )
+    ).map((row) => [row.player_id, row.minutes]),
+  );
   const payroll = new Map<number, { professionals: number; allowances: number }>();
   for (const member of members) {
     const payer = member.parent_club_id ?? member.club_id!;
@@ -543,6 +595,13 @@ export async function runYouthIntake(
     const declining = member.age >= (member.position === "GK" ? 33 : 30);
     const renewal = member.contract_status !== "amateur" && member.wage > 0 && !declining;
     member.wage = renewal ? Math.max(market, Math.ceil((member.wage * 0.9) / 10) * 10) : market;
+    member.contract_end = `${season + contractYears(member.age, random)}-06-30`;
+    member.contract_status = "professional";
+    professional.add(member.id);
+    touched(member);
+  };
+  const renewAt = (member: Member, wage: number, random: Rng) => {
+    member.wage = wage;
     member.contract_end = `${season + contractYears(member.age, random)}-06-30`;
     member.contract_status = "professional";
     professional.add(member.id);
@@ -667,12 +726,35 @@ export async function runYouthIntake(
     const fixed = seniors.filter((member) => member.locked || member.club_id !== club.id);
     const own = seniors.filter((member) => !fixed.includes(member));
     const { kept, rest } = selectSquad(own, Math.max(0, squadTarget(club) - fixed.length), 3);
-    for (const member of kept)
-      if (member.contract_end < date || member.contract_status === "amateur") {
-        if (member.contract_status === "amateur") member.role = "Prospect";
+    const order = [...kept].sort((left, right) => keepScore(right) - keepScore(left));
+    let room = club.wage_budget * RENEWAL_BUDGET_SHARE - (committed.get(club.id) ?? 0);
+    let count = fixed.length;
+    // Expiring contracts are renewed best first, each on budget-aware terms (aiRenewalTerms); the rest go free.
+    for (const member of order) {
+      if (member.contract_status === "amateur") {
+        member.role = "Prospect";
         signProfessional(member, club.id, random);
+      } else if (member.contract_end < date) {
+        const terms = aiRenewalTerms({
+          wage: member.wage,
+          market: wageFor(member, club.id),
+          floor: floors.get(club.id) ?? 50,
+          age: member.age,
+          position: member.position,
+          rank: order.indexOf(member) + 1,
+          minutesShare: Math.min(1, (minutes.get(member.id) ?? 0) / 2700),
+          room,
+          random: random(),
+        });
+        if (!("wage" in terms)) {
+          release(member);
+          continue;
+        }
+        renewAt(member, terms.wage, random);
+        room -= terms.wage;
       }
-    let count = fixed.length + kept.length;
+      count++;
+    }
     for (const member of rest) {
       const expiring = member.contract_end < date;
       const graduate = member.contract_status === "amateur";
@@ -1438,59 +1520,4 @@ async function registerFreeAgent(store: Store, state: Pick<GameState, "date" | "
     JSON.stringify({ name: player.name, from: null, to: buyer.id, club: buyer.name, fee: 0, type: "Free transfer" }),
   );
   return true;
-}
-
-/**
- * Fee-free AI signings of club-less adults in a transfer window: free agents and home-based pool players join
- * clubs at their level that are short of seniors or cover in their position, with wage room and a valid
- * registration. Returns the number of signings. Squads are checked in the daily loop (`maintainSquads`).
- */
-export async function signClublessPlayers(
-  store: Store,
-  state: Pick<GameState, "date" | "season" | "clubId">,
-  limit: number,
-  random: Rng,
-): Promise<number> {
-  const maxId = (await store.get<{ id: number }>("SELECT max(id) AS id FROM players"))?.id ?? 0;
-  const candidates = await store.all<Player>(
-    `SELECT * FROM players WHERE club_id IS NULL AND role != 'Retired' AND age_group = 'Senior' AND age BETWEEN 18 AND 33 AND id >= ? AND (injury_until IS NULL OR injury_until <= ?) AND NOT EXISTS (SELECT 1 FROM negotiations WHERE negotiations.player_id = players.id AND stage NOT IN ${TERMINAL_STAGES}) ORDER BY id LIMIT ${Math.max(1, Math.round(limit) * 4)}`,
-    Math.floor(random() * maxId),
-    state.date,
-  );
-  let signed = 0;
-  for (const player of candidates) {
-    if (signed >= limit) break;
-    // Club level ≈ reputation × 0.66 + 22 (the generation anchor): the player fits clubs 6 above to 10 below.
-    const buyers = await store.all<Club>(
-      "SELECT * FROM clubs WHERE type = 'club' AND id != ? AND reputation BETWEEN ? AND ? AND (SELECT count(*) FROM players WHERE players.club_id = clubs.id AND players.squad_club_id IS NULL AND age_group = 'Senior' AND role != 'Retired') < ? ORDER BY (SELECT count(*) FROM players WHERE players.club_id = clubs.id AND players.position = ? AND age_group = 'Senior' AND role != 'Retired'),abs(reputation - ?),id LIMIT 6",
-      state.clubId,
-      (player.ability - 6 - 22) / 0.66,
-      (player.ability + 10 - 22) / 0.66,
-      SQUAD_MINIMUMS.Senior + 1,
-      player.position,
-      (player.ability - 22) / 0.66 + random() * 6,
-    );
-    for (const buyer of buyers) {
-      // Free agents choose too (50/85 directive): no move below 50% interest; the club pays up to 1.5x its going rate.
-      const goingRate = marketWage({ ...player, age_group: "Senior", wage: 0 }, await wageScale(store, buyer.id));
-      const wage = marketWageOffer(
-        0,
-        marketMoveInterest(player, JSON.parse(player.profile) as PlayerProfile, buyer, undefined, state.date),
-        goingRate,
-      );
-      if (wage === null) continue;
-      const payroll = (await store.get<{ total: number }>(
-        "SELECT coalesce(sum(wage),0) AS total FROM players WHERE (club_id = ? AND parent_club_id IS NULL) OR parent_club_id = ?",
-        buyer.id,
-        buyer.id,
-      ))!.total;
-      if (payroll + wage > buyer.wage_budget) continue;
-      if (!(await assessRegistration(store, player, buyer)).allowed) continue;
-      const years = player.age >= 30 ? 1 : 1 + Math.floor(random() * 3);
-      if (!(await registerFreeAgent(store, state, player, buyer, wage, years))) break;
-      signed++;
-      break;
-    }
-  }
-  return signed;
 }

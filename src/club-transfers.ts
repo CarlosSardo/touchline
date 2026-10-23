@@ -32,7 +32,7 @@ export const DIRECTION_OPTIONS: readonly [TransferDirection, string][] = [
   ["out", "Out"],
 ];
 
-/** Kinds in the order a director scans them; squad moves are internal and last. */
+/** Kinds in the order a director scans them; moves inside the club family are listed apart (squadMoves). */
 const TYPE_ORDER: readonly PlayerMoveKind[] = [
   "transfer",
   "free",
@@ -41,7 +41,6 @@ const TYPE_ORDER: readonly PlayerMoveKind[] = [
   "loanRecall",
   "loanPurchase",
   "registration",
-  "squad",
 ];
 
 export const TYPE_OPTIONS = TYPE_ORDER.map((kind) => ({ kind, label: MOVE_KIND_LABELS[kind] }));
@@ -69,7 +68,7 @@ export function updateFilter(
 export const isFiltered = (filter: ClubTransferFilter) =>
   filter.season !== null || filter.direction !== "all" || filter.type !== "";
 
-/** Moves where a fee can apply; the rest (returns, recalls, internal moves) show no fee at all. */
+/** Moves where a fee can apply; the rest (returns, recalls, registrations) show no fee at all. */
 const FEE_KINDS = new Set<PlayerMoveKind>(["transfer", "free", "loan", "loanPurchase"]);
 
 export type TransferFee =

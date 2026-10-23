@@ -20,8 +20,10 @@ import {
 import { compactNumber, dateLabel } from "../shared/rules.ts";
 import type { ClubDetail } from "../shared/api.ts";
 import ClubTransfers from "./ClubTransfers.tsx";
+import ClubOwnership from "./ClubOwnership.tsx";
 import { NationalTeamPanel } from "./NationalTeam.tsx";
 import { SheetOriginContext } from "./sheet-trail.ts";
+import { ClubLifeSection } from "./ClubLife.tsx";
 import { seasonText } from "./format.ts";
 
 export default function ClubSheet() {
@@ -106,6 +108,9 @@ export default function ClubSheet() {
                 ? [{ id: "transfers", label: "Transfers" }]
                 : []),
               { id: "staff", label: "Staff" },
+              ...(data.club.type !== "national"
+                ? [{ id: "ownership", label: "Ownership" }]
+                : []),
               ...(data.club.type !== "national"
                 ? [
                     {
@@ -218,6 +223,12 @@ export default function ClubSheet() {
                       ],
                     ]}
                   />
+                  {data.club.type === "club" && (
+                    <>
+                      <h3 className="subsection-title section-space">Club affairs</h3>
+                      <ClubLifeSection clubId={data.club.id === bootstrap?.state.clubId ? undefined : data.club.id} />
+                    </>
+                  )}
                 </section>
               </div>
             </div>
@@ -225,6 +236,11 @@ export default function ClubSheet() {
           {tab === "selection" && data.club.type === "national" && (
             <div className="profile-body">
               <NationalTeamPanel teamId={data.club.id} />
+            </div>
+          )}
+          {tab === "ownership" && data.club.type !== "national" && (
+            <div className="profile-body">
+              <ClubOwnership key={data.club.id} clubId={data.club.id} />
             </div>
           )}
           {tab === "affiliates" && (

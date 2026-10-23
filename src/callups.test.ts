@@ -2,9 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildDuration,
   callUpBadge,
-  callUpSummary,
   callUpsByTeam,
-  collapseCallUps,
   dateRange,
   debutText,
   developmentStatusText,
@@ -120,65 +118,5 @@ describe("desk helpers", () => {
     expect(callUpBadge({ fromLabel: "Harbour / U17", duration: "match", until: "2026-10-03" }, "2026-10-01")).toBe(
       "From U17 · Next match · 3 Oct",
     );
-  });
-});
-
-describe("collapseCallUps", () => {
-  type Row = { id: string; date: string | null; player: number; callUp?: boolean; callUpReturn?: boolean };
-  const rows: Row[] = [
-    { id: "return", date: "2026-10-10", player: 1, callUpReturn: true },
-    { id: "other", date: "2026-10-05", player: 2, callUp: true },
-    { id: "call", date: "2026-10-03", player: 1, callUp: true },
-    { id: "move", date: "2026-09-01", player: 1 },
-  ];
-
-  it("folds a return into its call-up and keeps input order", () => {
-    const collapsed = collapseCallUps(rows, (row) => row.player);
-    expect(collapsed.map((row) => [row.id, row.returnedOn])).toEqual([
-      ["other", null],
-      ["call", "2026-10-10"],
-      ["move", undefined],
-    ]);
-  });
-
-  it("keeps an orphan return and lets a later move close an open call-up", () => {
-    const collapsed = collapseCallUps<Row>([
-      { id: "orphan", date: "2026-09-01", player: 1, callUpReturn: true },
-      { id: "call", date: "2026-10-03", player: 1, callUp: true },
-      { id: "sold", date: "2026-10-20", player: 1 },
-    ]);
-    expect(collapsed.map((row) => [row.id, row.returnedOn])).toEqual([
-      ["orphan", undefined],
-      ["call", "2026-10-20"],
-      ["sold", undefined],
-    ]);
-  });
-
-  it("leaves rows untouched without call-up flags", () => {
-    const plain = [{ date: "2026-10-01" }, { date: "2026-10-02" }];
-    expect(collapseCallUps(plain)).toEqual(plain);
-  });
-});
-
-describe("callUpSummary", () => {
-  it("reads as one line with the direction", () => {
-    expect(
-      callUpSummary({ toLabel: "Harbour / U19", fromGroup: "U17", toGroup: "U19", start: "2026-10-03", returnedOn: "2026-10-10" }),
-    ).toBe("Called up to U19 · 3–10 Oct");
-    expect(
-      callUpSummary({ toLabel: "Harbour / First team", fromGroup: "Senior", toGroup: "Senior", start: "2026-10-03", returnedOn: null }),
-    ).toBe("Called up to First team · since 3 Oct");
-    expect(
-      callUpSummary({ toLabel: "Harbour B / Reserve team", fromGroup: "Senior", toGroup: "Senior", start: "2026-10-03", returnedOn: null, until: "2026-10-24" }),
-    ).toBe("Sent down to Reserve team · 3–24 Oct (ongoing)");
-    expect(
-      callUpSummary({ toLabel: "Harbour / U19", fromGroup: "Senior", toGroup: "U19", start: "2026-10-03", returnedOn: "2026-10-04" }),
-    ).toBe("Sent down to U19 · 3–4 Oct");
-    expect(
-      callUpSummary({ toLabel: "Harbour B / Reserve team", fromGroup: null, toGroup: null, start: "2026-10-03", returnedOn: "2026-10-04" }),
-    ).toBe("Moved to Reserve team · 3–4 Oct");
-    expect(
-      callUpSummary({ toLabel: "Harbour / First team", fromGroup: null, toGroup: null, start: null, returnedOn: null }),
-    ).toBe("Called up to First team");
   });
 });
