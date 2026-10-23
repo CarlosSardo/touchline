@@ -51,6 +51,8 @@ import type { Player } from "../../shared/types.ts";
 import { EventsPanel } from "./ClubSupport.tsx";
 import { leagueZones } from "../table-zones.ts";
 import { expectationText, ordinal, plural, seasonText } from "../format.ts";
+import { AdministrationNotice } from "../ClubLife.tsx";
+import OwnershipNotice from "../OwnershipNotice.tsx";
 
 function MiniPitch() {
   const { bootstrap } = useGame();
@@ -233,6 +235,8 @@ export default function Office() {
           {data.unread > 0 && <span className="nav-count">{data.unread}</span>}
         </Button>
       </PageHeading>
+      <AdministrationNotice />
+      <OwnershipNotice />
       <EventsPanel compact />
       <div className="stat-strip">
         <Stat

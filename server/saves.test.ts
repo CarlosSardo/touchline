@@ -403,6 +403,9 @@ if (process.env.SQL_SAVE_TESTS === "true") {
       expect(columnsOf("clubs").columns.find((column) => column.name === "balance"))
         .toEqual({ name: "balance", type: "float", nullable: false });
       expect(columnsOf("players").columns.map((column) => column.name)).not.toContain("playing_club_id");
+      // Profile copies (migration 11) stay out of checkpoints and are rebuilt on restore.
+      for (const copy of ["height", "weight"])
+        expect(columnsOf("players").columns.map((column) => column.name)).not.toContain(copy);
       expect(columnsOf("players").columns.at(-1)).toEqual({ name: "squad_club_id", type: "int", nullable: true });
       expect(columnsOf("news").legacyColumns).toEqual(["notification_key", "notification_unkeyed_id"]);
 
@@ -475,6 +478,9 @@ if (process.env.SQL_SAVE_TESTS === "true") {
           "SELECT count(*) AS total FROM players WHERE playing_club_id IS DISTINCT FROM COALESCE(squad_club_id, club_id)",
         ))!.total).toBe(0);
         expect((await store.get<{ total: number }>(
+          "SELECT count(*) AS total FROM players WHERE height IS NULL OR height IS DISTINCT FROM round((profile::jsonb #>> '{identity,height}')::double precision) OR weight IS DISTINCT FROM round((profile::jsonb #>> '{identity,weight}')::double precision)",
+        ))!.total).toBe(0);
+        expect((await store.get<{ total: number }>(
           "SELECT count(*) AS total FROM news WHERE notification_key = 'legacy-key'",
         ))!.total).toBe(1);
         // Identity sequences continue after the imported ids.
@@ -485,6 +491,112 @@ if (process.env.SQL_SAVE_TESTS === "true") {
         const slots = await saves.list();
         expect(slots).toHaveLength(before + 1);
         expect(slots.filter((slot) => slot.imported)).not.toHaveLength(0);
+      } finally {
+        await rm(exported.file, { force: true });
+      }
+    }, 300_000);
+
+    it("imports a checkpoint written before the player records and backfills honours and running injuries once", async () => {
+      const { PLAYER_RECORD_TABLES } = await import("./sql-schema.ts");
+      const state = await store.meta<GameState>("state");
+      const [winner, injured] = await store.all<{ id: number; club_id: number }>(
+        "SELECT id, club_id FROM players WHERE club_id IS NOT NULL AND role <> 'Retired' ORDER BY id LIMIT 2",
+      );
+      const league = (await store.get<{ id: number }>("SELECT id FROM leagues WHERE kind = 'league' ORDER BY id LIMIT 1"))!;
+      await store.run(
+        "INSERT INTO player_season_stats (player_id, season, club_id, league_id, minutes, appearances, goals, assists) VALUES (?, ?, ?, ?, 270, 3, 1, 0)",
+        winner.id, state.season, winner.club_id, league.id,
+      );
+      await store.run(
+        "INSERT INTO history (season, entity_type, entity_id, date, data) VALUES (?, 'champion', ?, ?, ?)",
+        state.season, league.id, state.date, JSON.stringify({ clubId: winner.club_id, name: "Winners", competition: "League" }),
+      );
+      await store.run("UPDATE players SET injury_until = ? WHERE id = ?", "2099-01-01", injured.id);
+      await store.run("DELETE FROM meta WHERE key = 'playerRecords'");
+      const exported = await saves.export();
+      try {
+        const rows = new Map<string, RestoredValue[][]>();
+        const contents = await readCheckpoint(createReadStream(exported.file), {
+          onRow(table, values) {
+            rows.set(table.name, [...(rows.get(table.name) ?? []), values]);
+          },
+        });
+        const legacy = structuredClone(contents.manifest);
+        legacy.tables = legacy.tables.filter((table) => !(PLAYER_RECORD_TABLES as readonly string[]).includes(table.name));
+        const chunks: Buffer[] = [];
+        await writeCheckpoint(
+          new Writable({
+            write(chunk, _encoding, callback) {
+              chunks.push(Buffer.from(chunk));
+              callback();
+            },
+          }),
+          legacy,
+          (item) => rows.get(item.name) ?? [],
+        );
+        await store.run("INSERT INTO player_honours (player_id, season, kind, title) VALUES (?, ?, 'cup', 'Stale')", injured.id, state.season);
+        await saveTestStep("import checkpoint without player records", () => saves.import(Buffer.concat(chunks)));
+        expect(await store.all("SELECT player_id, club_id, league_id, kind, title FROM player_honours")).toEqual([
+          { player_id: winner.id, club_id: winner.club_id, league_id: league.id, kind: "league", title: expect.any(String) },
+        ]);
+        expect(await store.all("SELECT player_id, end_date, data FROM player_injuries")).toEqual([
+          { player_id: injured.id, end_date: "2099-01-01", data: '{"backfilled":true}' },
+        ]);
+        expect((await store.get<{ total: number }>("SELECT count(*) AS total FROM player_milestones"))!.total).toBe(0);
+        expect(await store.meta<{ version: number }>("playerRecords")).toMatchObject({ version: 1, milestonesThrough: state.date });
+      } finally {
+        await rm(exported.file, { force: true });
+      }
+    }, 300_000);
+
+    it("imports a checkpoint written before market sanctions: no sanctions, Spanish release clauses backfilled on the next market day", async () => {
+      const { ensureReleaseClauses } = await import("./world-market.ts");
+      const state = await store.meta<GameState>("state");
+      const club = (await store.get<{ id: number }>("SELECT id FROM clubs WHERE type = 'club' ORDER BY id LIMIT 1"))!;
+      await store.run("INSERT INTO sanctions (club_id, season, kind, start_date, reason) VALUES (?, ?, 'fine', ?, 'Stale')", club.id, state.season, state.date);
+      await store.run(
+        "INSERT INTO countries (code, name, continent, confederation, reputation, language, region) SELECT 'ES', 'Spain', continent, confederation, reputation, 'Spanish', region FROM countries WHERE NOT EXISTS (SELECT 1 FROM countries WHERE code = 'ES') ORDER BY id LIMIT 1",
+      );
+      await store.run("UPDATE clubs SET country_id = (SELECT id FROM countries WHERE code = 'ES') WHERE id = ?", club.id);
+      await store.run("UPDATE players SET profile = (profile::jsonb #- '{contract,releaseClause}')::text");
+      await store.run("DELETE FROM meta WHERE key = 'releaseClauseScan'");
+      const exported = await saves.export();
+      try {
+        const rows = new Map<string, RestoredValue[][]>();
+        const contents = await readCheckpoint(createReadStream(exported.file), {
+          onRow(table, values) {
+            rows.set(table.name, [...(rows.get(table.name) ?? []), values]);
+          },
+        });
+        const legacy = structuredClone(contents.manifest);
+        legacy.tables = legacy.tables.filter((table) => table.name !== "sanctions");
+        const chunks: Buffer[] = [];
+        await writeCheckpoint(
+          new Writable({
+            write(chunk, _encoding, callback) {
+              chunks.push(Buffer.from(chunk));
+              callback();
+            },
+          }),
+          legacy,
+          (item) => rows.get(item.name) ?? [],
+        );
+        await saveTestStep("import checkpoint without sanctions", () => saves.import(Buffer.concat(chunks)));
+        expect((await store.get<{ total: number }>("SELECT count(*) AS total FROM sanctions"))!.total).toBe(0);
+        const spanish = (await store.get<{ total: number }>(
+          "SELECT count(*) AS total FROM players WHERE club_id = ? AND role <> 'Retired' AND parent_club_id IS NULL AND coalesce(profile::jsonb #>> '{contract,status}', 'professional') = 'professional'",
+          club.id,
+        ))!.total;
+        expect(spanish).toBeGreaterThan(0);
+        expect(await ensureReleaseClauses(store, state.date)).toBeGreaterThanOrEqual(spanish);
+        expect(
+          (await store.get<{ total: number }>(
+            "SELECT count(*) AS total FROM players WHERE club_id = ? AND (profile::jsonb #>> '{contract,releaseClause}')::double precision > 0",
+            club.id,
+          ))!.total,
+        ).toBeGreaterThanOrEqual(spanish);
+        // A second scan within four weeks does nothing.
+        expect(await ensureReleaseClauses(store, state.date)).toBe(0);
       } finally {
         await rm(exported.file, { force: true });
       }

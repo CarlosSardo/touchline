@@ -1066,6 +1066,13 @@ export function staffRetirementChance(age: number) {
   return clamp(rule.retireAt + (age - rule.retireFrom) * rule.retirePerYear, 0, 1);
 }
 
+/** The indexed body columns of a player (migration 11): profile.identity height and weight in whole cm and kg. */
+export function bodyColumns(identity: Partial<Pick<PlayerProfile["identity"], "height" | "weight">>) {
+  const whole = (value: unknown) =>
+    typeof value === "number" && Number.isFinite(value) ? Math.round(value) : null;
+  return { height: whole(identity.height), weight: whole(identity.weight) };
+}
+
 export async function insertPlayers(
   store: Store,
   rows: Iterable<PlayerRow>,
@@ -1083,7 +1090,9 @@ export async function insertPlayers(
       batch = [];
     };
     for (const row of rows) {
-      batch.push({ id: ++nextId, ...row });
+      // Callers may still rewrite the profile after building the row (youth intake), so read the final one.
+      const { identity } = JSON.parse(String(row.profile)) as PlayerProfile;
+      batch.push({ id: ++nextId, ...row, ...bodyColumns(identity ?? {}) });
       if (batch.length === 5000) await flush();
     }
     await flush();

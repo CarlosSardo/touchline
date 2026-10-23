@@ -319,7 +319,6 @@ describe.skipIf(!sqlIntegration)("career integration: unregistered signing, club
     const before = {
       budget: user.transfer_budget,
       wages: await weeklyWages(store, user.id),
-      sellerBalance: seller.balance,
     };
     const enquiry = await action({ type: "enquiry", playerId: target.id, dealType: "Permanent transfer" });
     expect(enquiry.id).toBeGreaterThan(0);
@@ -358,7 +357,13 @@ describe.skipIf(!sqlIntegration)("career integration: unregistered signing, club
     );
     expect(fees.reduce((sum, row) => sum + row.amount, 0)).toBeLessThanOrEqual(-signingFee);
     expect((await clubRow(user.id)).transfer_budget).toBeLessThanOrEqual(before.budget - signingFee);
-    expect((await clubRow(seller.id)).balance).toBeGreaterThan(before.sellerBalance);
+    // The seller is paid (its balance also moves with its own market business meanwhile).
+    const proceeds = await store.get<{ total: number }>(
+      "SELECT sum(amount) AS total FROM ledger WHERE club_id = ? AND category = 'Player sales' AND description LIKE ?",
+      seller.id,
+      `${target.name}%`,
+    );
+    expect(proceeds!.total).toBeGreaterThan(0);
     expect(await weeklyWages(store, user.id)).toBeCloseTo(before.wages + deal.wage, 0);
     expect(await store.get("SELECT id FROM history WHERE entity_type = 'transfer' AND entity_id = ?", target.id)).toBeDefined();
     target = signed;
@@ -425,6 +430,15 @@ describe.skipIf(!sqlIntegration)("career integration: unregistered signing, club
     expect(volume.medium).toBeGreaterThan(0);
     expect(volume.high).toBeGreaterThan(volume.medium);
 
+    // Only a Portuguese club can register him, and the busy world market fills most of their wage budgets by late July:
+    // a few clubs a little below his English club keep room for a share of his English wage.
+    await store.run(
+      `UPDATE clubs SET wage_budget = wage_budget + ? WHERE id IN (SELECT clubs.id FROM clubs JOIN countries ON countries.id = clubs.country_id
+         WHERE countries.code = 'PT' AND clubs.type = 'club' AND clubs.reputation BETWEEN ? AND ? ORDER BY clubs.reputation DESC LIMIT 5)`,
+      target.wage,
+      user.reputation - 20,
+      user.reputation - 3,
+    );
     // Wait (at High) until clubs approach him unprompted. The director then puts him on the loan list, and takes the
     // best offer once a second club bids or the first offer is about to lapse.
     const openLoanOffers = () =>
@@ -480,7 +494,8 @@ describe.skipIf(!sqlIntegration)("career integration: unregistered signing, club
     );
     expect(titles).toContain(`Loan offer for ${target.name}`);
     const recallable = offers.filter((offer) => (JSON.parse(offer.data) as NegotiationData).terms.recall);
-    acceptedOffer = recallable[0] ?? offers.find((offer) => offer.type !== "Loan with obligation") ?? offers[0];
+    // He must come back at the end: a recall clause, or else a loan without an option or obligation to buy.
+    acceptedOffer = recallable[0] ?? offers.find((offer) => !["Loan with obligation", "Loan with option"].includes(offer.type)) ?? offers[0];
   });
 
   it("accepts the loan: rivals withdrawn, wages split, registered at the borrower, no duplicate loan", async () => {
@@ -492,10 +507,7 @@ describe.skipIf(!sqlIntegration)("career integration: unregistered signing, club
     summary.rivalOffersWithdrawn = rivals.length;
     await acceptWithdrawingRivals(acceptedOffer, rivals);
     const borrower = await clubRow(acceptedOffer.buying_club_id);
-    const before = {
-      userWages: await weeklyWages(store, user.id),
-      borrowerWages: await weeklyWages(store, borrower.id),
-    };
+    const before = { userWages: await weeklyWages(store, user.id) };
     for (let day = 0; day < 14 && (await negotiationRow(acceptedOffer.id)).stage !== "Completed"; day++) {
       await advanceDay();
       expect(
@@ -524,7 +536,19 @@ describe.skipIf(!sqlIntegration)("career integration: unregistered signing, club
     expect(onLoan).toMatchObject({ club_id: borrower.id, parent_club_id: user.id });
     const share = (onLoan.wage * terms.salarySplit) / 100;
     expect(await weeklyWages(store, user.id)).toBeCloseTo(before.userWages - share, 0);
-    expect(await weeklyWages(store, borrower.id)).toBeCloseTo(before.borrowerWages + share, 0);
+    // The world market keeps running: the borrower's other players may have changed meanwhile, so only his part counts.
+    const others = (await store.get<{ total: number }>(
+      `SELECT (SELECT coalesce(sum(wage), 0) FROM players WHERE club_id = ? AND id <> ?) - coalesce((SELECT sum(players.wage * (1 - (loans.terms::jsonb ->> 'salarySplit')::double precision / 100))
+         FROM loans JOIN players ON players.id = loans.player_id WHERE loans.status = 'active' AND loans.destination_id = ? AND loans.player_id <> ?), 0)
+         + coalesce((SELECT sum(players.wage * (1 - (loans.terms::jsonb ->> 'salarySplit')::double precision / 100))
+         FROM loans JOIN players ON players.id = loans.player_id WHERE loans.status = 'active' AND loans.parent_id = ?), 0) AS total`,
+      borrower.id,
+      target.id,
+      borrower.id,
+      target.id,
+      borrower.id,
+    ))!.total;
+    expect(await weeklyWages(store, borrower.id)).toBeCloseTo(others + share, 0);
     if (deal.offer > 0)
       expect(
         await store.get("SELECT id FROM ledger WHERE club_id = ? AND category = 'Loan income' AND description LIKE ?", user.id, `${target.name}:%`),

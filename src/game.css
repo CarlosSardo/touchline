@@ -1053,6 +1053,11 @@ table {
 .standings-table .points {
   font-weight: 750;
 }
+.standings-table .points-deducted {
+  margin-left: 4px;
+  color: var(--red);
+  font-weight: 600;
+}
 .table-position {
   display: inline-flex;
   align-items: center;

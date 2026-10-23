@@ -1,6 +1,9 @@
 import seedrandom from "seedrandom";
 import { Store } from "./db.ts";
 import { processAffiliateRequests, processAssistant, processStaffCareers } from "./club-support.ts";
+import { clubLifeDaily, clubLifeRollover, relegationClausesAtRollover, worldNewsBatch } from "./club-life.ts";
+import { MANAGER_RULES, managerPreference, sackingChance } from "./club-directors.ts";
+import { ownershipDaily, ownershipRollover } from "./ownership.ts";
 import { processUnexpectedEvents } from "./events.ts";
 import { processCompetitionNotifications } from "./notifications.ts";
 import {
@@ -33,22 +36,22 @@ import {
 import { MATCH_RULES_VERSION } from "./match.ts";
 import { recordAssociationCoefficients } from "./qualification.ts";
 import { pruneSeason, storedAppearanceStats, storedMatchData } from "./retention.ts";
-import { assessRegistration } from "./registration.ts";
+import { ensureMatchStatRepair } from "./stat-repair.ts";
+import {
+  ensurePlayerRecords,
+  recordInjuries,
+  recordPlayerRecords,
+  recordSeasonHonours,
+  shortenInjuries,
+  type NewInjury,
+} from "./player-records.ts";
 import { competitiveRegistrationSql, processRegistrations } from "./eligibility.ts";
 import { generateUserClubOffers } from "./market-offers.ts";
-import {
-  buyerGoingRate,
-  marketMoveInterest,
-  marketWageOffer,
-  MOVE_REFUSAL_THRESHOLD,
-  processMinorApplications,
-} from "./recruitment.ts";
-import {
-  executeMarketTransfer,
-  processTransferBattles,
-  recordShortlistBid,
-  sellerCanRelease,
-} from "./transfer-battles.ts";
+import { processMinorApplications } from "./recruitment.ts";
+import { processTransferBattles } from "./transfer-battles.ts";
+import { weeklyMarket, worldMarket } from "./world-market.ts";
+import { forgetClubPolicies } from "./club-policy.ts";
+import { applySeasonSanctions, reviewSeasonFinances } from "./sanctions.ts";
 import {
   dailyMedia,
   publishClubRoundup,
@@ -57,18 +60,22 @@ import {
   assessFinances,
   closeFinancialYear,
   estimateClubRevenue,
+  leagueGroupSizes,
   leaguePrizeMoney,
   parachutePayment,
+  seasonHomeMatches,
   postWeeklyAccountsBatch,
   type WeeklyAccount,
   recordFinancialItem,
   seasonBudgets,
   MOVEMENT_BUDGET_FACTOR,
   spendRatio,
+  sustainableWageBudget,
   weeklyOperatingCosts,
+  alignPartTimeStaff,
 } from "./finance.ts";
-import { personName } from "./people.ts";
-import { maintainSquads, runYouthIntake, signClublessPlayers, youthBirthCutoff } from "./youth.ts";
+import { bodyColumns, personName } from "./people.ts";
+import { maintainSquads, runYouthIntake, youthBirthCutoff } from "./youth.ts";
 import { AVERAGE_MINUTES_SHARE, developBody, exactAge, weeklyDevelopment } from "./growth.ts";
 import {
   aiLineupCallUps,
@@ -105,7 +112,6 @@ import {
   reviewLoans,
   settingsOf,
   stateOf,
-  weeklyWages,
 } from "./systems.ts";
 import {
   addDays,
@@ -123,7 +129,6 @@ import {
   potentialInfluences,
   round,
   tacticalFit,
-  transferWindow,
   valuation,
 } from "../shared/rules.ts";
 import type {
@@ -492,7 +497,7 @@ async function disciplinaryConsequences(
       if (fixture.league_id)
         seasonStats.push({
           player_id: player.id,
-          season: state.season,
+          season: fixture.season,
           club_id: team.id,
           league_id: fixture.league_id,
           minutes: stats.minutes,
@@ -543,7 +548,23 @@ async function disciplinaryConsequences(
       addDays(fixture.date, injury.days),
       injury.playerId,
     );
+  await recordInjuries(store, (result.injuries ?? []).map((injury) => matchInjury(fixture, snapshot, injury)));
 }
+
+const matchInjury = (
+  fixture: Pick<Fixture, "id" | "date">,
+  snapshot: MatchSnapshot,
+  injury: { playerId: number; days: number },
+): NewInjury => ({
+  playerId: injury.playerId,
+  start: fixture.date,
+  days: injury.days,
+  context: "match",
+  fixtureId: fixture.id,
+  teamId: [snapshot.home, snapshot.away].find((team) =>
+    [...team.lineup, ...(team.bench ?? [])].some((player) => player.id === injury.playerId),
+  )?.id,
+});
 
 async function updateTable(
   store: Store,
@@ -1394,6 +1415,7 @@ async function writeMatchBatch(
   const disciplineTeams: { club_id: number; scope: string; country_id: number; national: number; age_group: string }[] = [];
   const participants: { player: MatchPlayer; stats: Record<string, number>; team: MatchTeam; match: BatchMatch; league: League; scope: string }[] = [];
   const injuries: { id: number; until: string }[] = [];
+  const injuryRecords: NewInjury[] = [];
   const senior: { club_id: number; league_id: number; result: number; margin: number }[] = [];
   for (const match of matches) {
     const { fixture, league, snapshot, result } = match;
@@ -1454,8 +1476,10 @@ async function writeMatchBatch(
       }
     // Friendlies leave tables, discipline, season statistics and injuries alone (as in playFixture).
     if (league)
-      for (const injury of result.injuries ?? [])
+      for (const injury of result.injuries ?? []) {
         injuries.push({ id: injury.playerId, until: addDays(fixture.date, injury.days) });
+        injuryRecords.push(matchInjury(fixture, snapshot, injury));
+      }
     for (const team of [snapshot.home, snapshot.away]) {
       const scope = match.scopes[team.id === fixture.home_id ? 0 : 1];
       const nation = match.nations?.[team.id === fixture.home_id ? 0 : 1] ?? null;
@@ -1597,6 +1621,7 @@ async function writeMatchBatch(
       ...changes.params,
     );
   });
+  await recordInjuries(store, injuryRecords);
   await writeTableConsequences(store, settings, senior);
 }
 
@@ -1635,7 +1660,7 @@ async function writeBatchDiscipline(
   for (const { player, stats, team, match, league, scope } of participants) {
     seasonStats.push({
       player_id: player.id,
-      season: state.season,
+      season: match.fixture.season,
       club_id: team.id,
       league_id: league.id,
       minutes: stats.minutes,
@@ -1787,6 +1812,8 @@ export async function developPlayers(store: Store, random: seedrandom.PRNG) {
       )
     ).map((row) => [`${row.club_id}:${row.age_group}`, row.played]),
   );
+  const trainingInjuries: NewInjury[] = [];
+  const rehabReturns: { id: number; until: string }[] = [];
   let cursor = 0;
   while (true) {
     const batch = await store.all<Player>(
@@ -2081,7 +2108,7 @@ export async function developPlayers(store: Store, random: seedrandom.PRNG) {
         player.injury_until && player.injury_until > state.date
           ? player.injury_until
           : null;
-      if (injury && effectiveFocus === "Injury rehab")
+      if (injury && effectiveFocus === "Injury rehab") {
         injury = addDays(
           injury,
           -Math.min(
@@ -2089,6 +2116,8 @@ export async function developPlayers(store: Store, random: seedrandom.PRNG) {
             Math.max(0, daysBetween(state.date, injury) - 1),
           ),
         );
+        if (injury !== player.injury_until) rehabReturns.push({ id: player.id, until: injury });
+      }
       const injuryChance =
         ((0.004 * Number(settings.injuryFrequency)) / 50) *
         (1 + Math.max(0, intensity - 50) / 50) *
@@ -2101,6 +2130,7 @@ export async function developPlayers(store: Store, random: seedrandom.PRNG) {
             ? 4 + Math.floor(random() * 24)
             : 35 + Math.floor(random() * 120);
         injury = addDays(state.date, duration);
+        trainingInjuries.push({ playerId: player.id, start: state.date, days: duration, context: "training" });
         potential = Math.max(ability, potential - (duration > 60 ? 0.6 : 0.05));
         if (ownClub)
           await news(
@@ -2152,6 +2182,8 @@ export async function developPlayers(store: Store, random: seedrandom.PRNG) {
         injury_until: injury,
         profile: updatedProfile,
         secondary_position: secondaryPosition,
+        // The indexed body columns follow growth (migration 11).
+        ...(updatedProfile ? bodyColumns(profile.identity) : {}),
       });
       if (mentors.has(player.id))
         mentors.set(player.id, {
@@ -2176,10 +2208,14 @@ export async function developPlayers(store: Store, random: seedrandom.PRNG) {
         injury_until: "text",
         profile: "text",
         secondary_position: "text",
+        height: "integer",
+        weight: "integer",
       },
-      "ability = changes.ability, potential = changes.potential, development_bank = changes.development_bank, potential_bank = 0, age = changes.age, value = changes.value, morale = changes.morale, injury_until = changes.injury_until, profile = coalesce(changes.profile,target.profile), secondary_position = coalesce(changes.secondary_position,target.secondary_position), loan_progress = 0",
+      "ability = changes.ability, potential = changes.potential, development_bank = changes.development_bank, potential_bank = 0, age = changes.age, value = changes.value, morale = changes.morale, injury_until = changes.injury_until, profile = coalesce(changes.profile,target.profile), secondary_position = coalesce(changes.secondary_position,target.secondary_position), loan_progress = 0, height = coalesce(changes.height,target.height), weight = coalesce(changes.weight,target.weight)",
     );
   }
+  await recordInjuries(store, trainingInjuries);
+  await shortenInjuries(store, state.date, rehabReturns);
 }
 
 async function weeklyFinances(store: Store) {
@@ -2189,13 +2225,6 @@ async function weeklyFinances(store: Store) {
     (
       await store.all<{ club_id: number; total: number }>(
         "SELECT club_id, sum(wage) AS total FROM players WHERE club_id IS NOT NULL GROUP BY club_id",
-      )
-    ).map((row) => [row.club_id, row.total]),
-  );
-  const staffCosts = new Map(
-    (
-      await store.all<{ club_id: number; total: number }>(
-        "SELECT club_id, sum(wage) AS total FROM staff WHERE club_id IS NOT NULL GROUP BY club_id",
       )
     ).map((row) => [row.club_id, row.total]),
   );
@@ -2236,9 +2265,8 @@ async function weeklyFinances(store: Store) {
   const clubs = await store.all<Club & { wage_reference: number | null }>(
     `SELECT *, ${jsonNumber("data", "$.operatingWageBudget")} AS wage_reference FROM clubs WHERE type != 'national' ORDER BY id`,
   );
-  const leagueSizes = new Map<number, number>();
-  for (const club of clubs)
-    leagueSizes.set(club.league_id ?? -1, (leagueSizes.get(club.league_id ?? -1) ?? 0) + 1);
+  // Grouped divisions share a league id: each club plays the clubs of its own group at home.
+  const groupSizes = await leagueGroupSizes(store);
   const countryCodes = new Map(
     (await store.all<{ id: number; code: string }>("SELECT id, code FROM countries")).map((row) => [row.id, row.code]),
   );
@@ -2251,19 +2279,30 @@ async function weeklyFinances(store: Store) {
     gate: number;
     account: WeeklyAccount;
   }[] = [];
+  // The board plans running costs on the attendance it actually draws: a falling crowd cuts spending, not just income.
+  const expectedRevenue = new Map(
+    clubs.map((club) => {
+      const league = leagues.get(club.league_id ?? -1);
+      return [
+        club.id,
+        estimateClubRevenue({
+          reputation: club.reputation,
+          leagueReputation: league?.reputation ?? club.reputation,
+          tier: league?.tier ?? 1,
+          capacity: club.capacity,
+          fanMood: club.fan_mood,
+          homeMatches: seasonHomeMatches(groupSizes.get(club.id) ?? 1),
+          countryCode: countryCodes.get(league?.country_id ?? club.country_id),
+        }).annualOperatingRevenue,
+      ];
+    }),
+  );
+  const staffCosts = await alignPartTimeStaff(store, expectedRevenue, new Set([state.clubId]));
   for (const club of clubs) {
     const wages = (salaries.get(club.id) ?? 0) + (staffCosts.get(club.id) ?? 0);
     const league = leagues.get(club.league_id ?? -1);
     const countryCode = countryCodes.get(league?.country_id ?? club.country_id);
-    const expected = estimateClubRevenue({
-      reputation: club.reputation,
-      leagueReputation: league?.reputation ?? club.reputation,
-      tier: league?.tier ?? 1,
-      capacity: club.capacity,
-      fanMood: 72,
-      homeMatches: Math.max(0, (leagueSizes.get(club.league_id ?? -1) ?? 1) - 1) + 2,
-      countryCode,
-    }).annualOperatingRevenue;
+    const expected = expectedRevenue.get(club.id)!;
     const operating = weeklyOperatingCosts({
       annualRevenue: expected,
       wageShare: (0.88 * (club.wage_reference ?? club.wage_budget) * 52) / Math.max(1, expected),
@@ -2454,51 +2493,79 @@ async function weeklyStaffAndPolitics(store: Store, random: seedrandom.PRNG) {
     { id: "integer", chemistry: "double precision" },
     "chemistry = changes.chemistry",
   );
-  for (const troubled of await store.all<Club>(
-    "SELECT * FROM clubs WHERE type = 'club' AND manager_trust < 22 AND crisis > 50 ORDER BY id",
-  )) {
-    const country = (await store.get<Country>(
-      "SELECT * FROM countries WHERE id = ?",
-      troubled.country_id,
-    ))!;
-    const nextManager = personName(random, country.code);
+  // A new manager brings his own shape and style: match selection fills the new formation's slots and the market
+  // reads squad needs from it.
+  const sackings = (
+    await store.all<Club & { code: string; tier: number }>(
+      "SELECT clubs.*,countries.code,coalesce(leagues.tier,9) AS tier FROM clubs JOIN countries ON countries.id = clubs.country_id LEFT JOIN leagues ON leagues.id = clubs.league_id WHERE clubs.type = 'club' AND (clubs.crisis > ? OR clubs.manager_trust < ?) ORDER BY clubs.id",
+      MANAGER_RULES.crisisFrom,
+      MANAGER_RULES.trustFrom,
+    )
+  ).filter((troubled) => {
+    // The world's opening entries carry no date.
+    const last = (JSON.parse(troubled.data).managerCareer ?? []).at(-1) as { date?: string } | undefined;
+    return (!last?.date || daysBetween(last.date, state.date) >= MANAGER_RULES.honeymoonDays) &&
+      random() < sackingChance(troubled.crisis, troubled.manager_trust);
+  }).map((troubled) => {
+    const appointed = personName(random, troubled.code);
+    const { formation, style } = managerPreference(random, troubled.code, troubled.tier, state.worldTrend);
+    const change = { season: state.season, date: state.date, departed: troubled.manager, appointed, formation, style };
     const data = JSON.parse(troubled.data);
-    data.managerCareer = [
-      ...(data.managerCareer ?? []),
-      {
+    data.managerCareer = [...(data.managerCareer ?? []), change];
+    return { troubled, change, data: JSON.stringify(data) };
+  });
+  if (sackings.length) {
+    await updateSimulationRows(
+      store,
+      "clubs",
+      sackings.map(({ troubled, change, data }) => ({
+        id: troubled.id,
+        manager: change.appointed,
+        formation: change.formation,
+        style: change.style,
+        data,
+      })),
+      { id: "integer", manager: "text", formation: "text", style: "text", data: "text" },
+      "manager = changes.manager, manager_trust = 65, chemistry = GREATEST(25,target.chemistry - 6), formation = changes.formation, tactical_style = changes.style, data = changes.data",
+    );
+    await store.bulkInsert(
+      "history",
+      sackings.map(({ troubled, change }) => ({
         season: state.season,
+        entity_type: "manager",
+        entity_id: troubled.id,
         date: state.date,
-        departed: troubled.manager,
-        appointed: nextManager,
-      },
-    ];
-    await store.run(
-      "UPDATE clubs SET manager = ?, manager_trust = 65, chemistry = GREATEST(25,chemistry - 6), tactical_style = ?, data = ? WHERE id = ?",
-      nextManager,
-      ["Possession", "High press", "Counter attack", "Direct", "Balanced"][
-        Math.floor(random() * 5)
-      ],
-      JSON.stringify(data),
-      troubled.id,
+        data: JSON.stringify({
+          departed: change.departed,
+          appointed: change.appointed,
+          formation: change.formation,
+          previousFormation: troubled.formation,
+          style: change.style,
+        }),
+      })),
     );
-    await store.run(
-      "INSERT INTO history(season, entity_type, entity_id, date, data) VALUES (?, ?, ?, ?, ?)",
-      state.season,
-      "manager",
-      troubled.id,
-      state.date,
-      JSON.stringify({ departed: troubled.manager, appointed: nextManager }),
+    await worldNewsBatch(
+      store,
+      sackings.map(({ troubled, change }) => ({
+        kind: "manager",
+        date: state.date,
+        clubIds: [troubled.id],
+        title: `${troubled.name} dismiss ${change.departed}`,
+        body: `${change.appointed} takes charge${change.formation === troubled.formation ? ` and keeps the ${change.formation}` : `, switching from ${troubled.formation} to ${change.formation}`} with a ${change.style.toLowerCase()} approach.`,
+        data: { formation: change.formation, previousFormation: troubled.formation, style: change.style },
+      })),
     );
-    if (troubled.id === state.clubId)
-      await news(
-        store,
-        "Board",
-        "The board dismisses the manager",
-        `${troubled.manager} has left. ${nextManager} takes charge with a new tactical approach. Your recruitment plan must adapt.`,
-        "warning",
-        "staff",
-      );
   }
+  const own = sackings.find(({ troubled }) => troubled.id === state.clubId);
+  if (own)
+    await news(
+      store,
+      "Board",
+      "The board dismisses the manager",
+      `${own.change.departed} has left. ${own.change.appointed} takes charge with a new tactical approach: ${own.change.formation}, ${own.change.style.toLowerCase()}. Squad needs follow the new shape; your recruitment plan must adapt.`,
+      "warning",
+      "staff",
+    );
   if (club.crisis > 60) {
     const unsettled = await store.get<Player>(
       "SELECT * FROM players WHERE club_id = ? AND age_group = 'Senior' AND listed = 0 ORDER BY morale ASC,id LIMIT 1",
@@ -2820,119 +2887,6 @@ async function processNegotiations(store: Store, random: seedrandom.PRNG) {
   }
 }
 
-export async function worldTransfers(store: Store, random: seedrandom.PRNG) {
-  const state = await stateOf(store);
-  const activity = { completed: 0 };
-  if (
-    !transferWindow(state.date) ||
-    (
-      await store.get<{ value: string }>(
-        "SELECT value FROM meta WHERE key = 'lastMarketDate'",
-      )
-    )?.value === JSON.stringify(state.date)
-  )
-    return activity;
-  await store.setMeta("lastMarketDate", state.date);
-  const clubCount = (await store.get<{ total: number }>(
-    "SELECT count(*) AS total FROM clubs WHERE type = 'club'",
-  ))!.total;
-  const deadlineWeek =
-    ((state.date.slice(5, 7) === "08" || state.date.slice(5, 7) === "01") &&
-      Number(state.date.slice(8)) >= 25) ||
-    state.date.slice(5) === "09-01";
-  const quota = Math.max(
-    1,
-    Math.round(
-      clamp(clubCount / 250, 1, 30) *
-        (deadlineWeek ? 1.6 : state.date.slice(5, 7) === "01" ? 0.8 : 1),
-    ),
-  );
-  const maxId = (await store.get<{ id: number }>(
-    "SELECT max(id) AS id FROM players",
-  ))!.id;
-  const userFamily = new Set(
-    (await store.all<{ id: number }>("SELECT id FROM clubs WHERE id = ? OR parent_id = ?", state.clubId, state.clubId)).map((club) => club.id),
-  );
-  for (
-    let index = 0;
-    index < quota * 6 && activity.completed < quota;
-    index++
-  ) {
-    const player = await store.get<Player>(
-      "SELECT * FROM players WHERE id >= ? AND club_id IS NOT NULL AND parent_club_id IS NULL AND age BETWEEN 18 AND 31 AND age_group = 'Senior' AND role != 'Retired' AND contract_end > ? AND (injury_until IS NULL OR injury_until <= ?) AND NOT EXISTS (SELECT 1 FROM negotiations WHERE negotiations.player_id = players.id AND stage NOT IN ('Completed','Rejected','Withdrawn','Expired','Hijacked')) AND NOT EXISTS (SELECT 1 FROM history WHERE entity_type = 'transfer' AND entity_id = players.id AND date >= ?) ORDER BY id LIMIT 1",
-      Math.floor(random() * maxId),
-      state.date,
-      state.date,
-      addDays(state.date, -90),
-    );
-    if (!player || userFamily.has(player.club_id!) || player.value <= 0)
-      continue;
-    const fee = Math.round(player.value * (0.95 + random() * 0.15));
-    const minimumWage = Math.round(player.wage * 1.1);
-    // One squad aggregate per club that passes the cheap club filters (covered by player_market_squad).
-    const buyers = await store.all<Club>(
-      `SELECT clubs.* FROM clubs CROSS JOIN LATERAL (
-         SELECT coalesce(sum(players.wage),0) AS wages,
-           count(*) FILTER (WHERE players.age_group = 'Senior' AND players.role != 'Retired') AS seniors,
-           count(*) FILTER (WHERE players.age_group = 'Senior' AND players.position = ?) AS rivals
-         FROM players WHERE players.club_id = clubs.id) AS squad
-       WHERE clubs.type = 'club' AND clubs.id NOT IN (?,?) AND clubs.reputation BETWEEN ? AND ? AND clubs.transfer_budget > ? AND clubs.balance > ?
-         AND clubs.wage_budget > squad.wages + ? AND squad.seniors < 28
-       ORDER BY squad.rivals, abs(clubs.reputation - ?), clubs.id LIMIT 8`,
-      player.position,
-      player.club_id!,
-      state.clubId,
-      Math.max(1, player.ability - 12),
-      player.ability + 14,
-      fee,
-      fee,
-      minimumWage,
-      player.ability + random() * 10,
-    );
-    let buyer: Club | undefined;
-    let newWage = 0;
-    if (buyers.length) {
-      const seller = await store.get<Club>("SELECT * FROM clubs WHERE id = ?", player.club_id);
-      const profile = JSON.parse(player.profile) as PlayerProfile;
-      for (const candidate of buyers) {
-        // The player must want the move: below 50% he refuses; the buyer pays up to 1.5x his expectation to reach 85%.
-        // His expectation is his wage + 10% or the buyer's going rate for his level, whichever is higher.
-        const moveScore = marketMoveInterest(player, profile, candidate, seller, state.date);
-        if (moveScore < MOVE_REFUSAL_THRESHOLD) continue;
-        const wage = marketWageOffer(player.wage, moveScore, await buyerGoingRate(store, player, candidate));
-        if (
-          wage !== null &&
-          (await weeklyWages(store, candidate.id)) + wage <=
-            candidate.wage_budget &&
-          (await assessRegistration(store, player, candidate)).allowed
-        ) {
-          buyer = candidate;
-          newWage = wage;
-          break;
-        }
-      }
-    }
-    if (!buyer) continue;
-    if (!(await sellerCanRelease(store, player, state.date))) continue;
-    // A shortlisted target is not taken at once: the director is alerted and has time to compete.
-    if (player.shortlisted) {
-      await recordShortlistBid(store, player, buyer, fee, newWage);
-      continue;
-    }
-    await executeMarketTransfer(
-      store,
-      player,
-      buyer,
-      fee,
-      newWage,
-      activity.completed < 2 ? `world:${player.id}:${state.date}` : undefined,
-    );
-    activity.completed++;
-  }
-  activity.completed += await signClublessPlayers(store, state, Math.max(1, Math.round(quota / 2)), random);
-  return activity;
-}
-
 /**
  * League merit payments by final position (senior leagues, before promotion and relegation), credited to cash.
  * Returns each club's expected revenue in its final top-flight table (the base of a parachute payment).
@@ -3043,13 +2997,39 @@ async function resetSeasonBudgets(store: Store, userClubId: number) {
     movement: string | null;
     reserved: number;
     owed: number;
+    parent_id: number | null;
+    reputation: number;
+    capacity: number;
+    fan_mood: number;
+    facilities: number;
+    academy: number;
+    tier: number | null;
+    league_reputation: number | null;
+    code: string;
   }>(
-    `SELECT clubs.id,clubs.balance,clubs.wage_budget,${jsonNumber("clubs.data", "$.operatingWageBudget")} AS wage_reference,clubs.data::jsonb ->> 'budgetMovement' AS movement,coalesce(reserved.total,0) AS reserved,coalesce(owed.total,0) AS owed
-     FROM clubs
+    `SELECT clubs.id,clubs.parent_id,clubs.reputation,clubs.capacity,clubs.fan_mood,clubs.facilities,clubs.academy,leagues.tier,leagues.reputation AS league_reputation,
+       countries.code,clubs.balance,clubs.wage_budget,${jsonNumber("clubs.data", "$.operatingWageBudget")} AS wage_reference,clubs.data::jsonb ->> 'budgetMovement' AS movement,coalesce(reserved.total,0) AS reserved,coalesce(owed.total,0) AS owed
+     FROM clubs LEFT JOIN leagues ON leagues.id = clubs.league_id JOIN countries ON countries.id = coalesce(leagues.country_id, clubs.country_id)
      LEFT JOIN (SELECT buying_club_id AS club_id, sum(${jsonNumber("data", "$.reservedBudget")}) AS total FROM negotiations WHERE stage IN ('Scheduled','Medical','Registration') GROUP BY buying_club_id) AS reserved ON reserved.club_id = clubs.id
      LEFT JOIN (SELECT payer_id AS club_id, sum(amount) AS total FROM transfer_payments WHERE paid_date IS NULL GROUP BY payer_id) AS owed ON owed.club_id = clubs.id
      WHERE clubs.type != 'national'`,
   );
+  const groups = await leagueGroupSizes(store);
+  const revenues = new Map(
+    rows.map((row) => [
+      row.id,
+      estimateClubRevenue({
+        reputation: row.reputation,
+        leagueReputation: row.league_reputation ?? row.reputation,
+        tier: row.tier ?? 1,
+        capacity: row.capacity,
+        fanMood: row.fan_mood,
+        homeMatches: seasonHomeMatches(groups.get(row.id) ?? 0),
+        countryCode: row.code,
+      }).annualOperatingRevenue,
+    ]),
+  );
+  const staff = await alignPartTimeStaff(store, revenues, new Set(rows.filter((row) => row.id === userClubId || row.parent_id === userClubId).map((row) => row.id)));
   const updates = rows.map((row) => {
     const movement = row.movement && row.movement in MOVEMENT_BUDGET_FACTOR ? (row.movement as keyof typeof MOVEMENT_BUDGET_FACTOR) : "none";
     const budgets = seasonBudgets({
@@ -3059,14 +3039,26 @@ async function resetSeasonBudgets(store: Store, userClubId: number) {
       wageReference: row.wage_reference ?? row.wage_budget,
       movement,
     });
-    return { id: row.id, transfer_budget: budgets.transferBudget, wage_budget: budgets.wageBudget };
+    const reference = { id: row.id, transfer_budget: budgets.transferBudget, wage_budget: budgets.wageBudget, reference: budgets.wageBudget };
+    if (row.id === userClubId || row.parent_id === userClubId) return reference;
+    const sustainable = sustainableWageBudget({
+      annualRevenue: revenues.get(row.id)!,
+      spendRatio: spendRatio(row.id, row.tier ?? 1),
+      staffWages: staff.get(row.id) ?? 0,
+      facilities: row.facilities,
+      academy: row.academy,
+    });
+    // The board's approved budget (raised in-season on a surplus, world-market.ts boardWageBudget) carries over when
+    // revenue sustains it. The operating plan keeps the uncapped reference: a smaller payroll then shows up as savings.
+    const approved = Math.round(row.wage_budget * MOVEMENT_BUDGET_FACTOR[movement]);
+    return { ...reference, wage_budget: Math.min(Math.max(budgets.wageBudget, approved), sustainable) };
   });
   await updateSimulationRows(
     store,
     "clubs",
     updates,
-    { id: "integer", transfer_budget: "double precision", wage_budget: "double precision" },
-    "transfer_budget = changes.transfer_budget, wage_budget = changes.wage_budget, data = (jsonb_set(target.data::jsonb, '{operatingWageBudget}', to_jsonb(changes.wage_budget)) - 'budgetMovement')::text",
+    { id: "integer", transfer_budget: "double precision", wage_budget: "double precision", reference: "double precision" },
+    "transfer_budget = changes.transfer_budget, wage_budget = changes.wage_budget, data = (jsonb_set(target.data::jsonb, '{operatingWageBudget}', to_jsonb(changes.reference)) - 'budgetMovement')::text",
   );
   const own = rows.find((row) => row.id === userClubId);
   if (own && own.balance < 0)
@@ -3087,6 +3079,8 @@ export async function seasonRollover(store: Store) {
     // Called-up players return before the youth cycle recomputes age groups.
     await endAllCallUps(store);
     await closeFinancialYear(store, oldSeason);
+    // Every club's closed accounts are reviewed before promotion and relegation; sanctions apply in the new tables.
+    const sanctionReview = await reviewSeasonFinances(store, oldSeason);
     const financialReview = await assessFinances(store, state.clubId);
     if ((await settingsOf(store)).ffp && financialReview.status === "review") {
       await news(
@@ -3286,6 +3280,7 @@ export async function seasonRollover(store: Store) {
         country.id,
       );
     }
+    await relegationClausesAtRollover(store, state, oldSeason + 1);
     // Read by the simulation check: boundaries that moved fewer clubs than their spec, per upper league.
     await store.setMeta("movementAudit", { season: oldSeason + 1, shortfalls });
     await payParachutes(store, state.clubId, oldSeason + 1);
@@ -3334,7 +3329,14 @@ export async function seasonRollover(store: Store) {
       "academy",
     );
     await closeGbeSeason(store, oldSeason, state.date);
+    // Before pruning: league titles need the finished season's appearance rows.
+    await recordSeasonHonours(store);
     await pruneSeason(store, oldSeason, state.date);
+    await clubLifeRollover(store, oldSeason + 1);
+    await ownershipRollover(store);
+    await applySeasonSanctions(store, sanctionReview);
+    // The day's club policy snapshot still holds last season's accounts and budgets.
+    forgetClubPolicies(store);
   });
 }
 
@@ -3382,6 +3384,7 @@ async function weeklyUpdate(store: Store) {
   }
   await experience(store, 10);
   await refreshGbeIfDue(store);
+  await weeklyMarket(store, await stateOf(store));
 }
 
 export async function advance(store: Store, days: number) {
@@ -3394,6 +3397,9 @@ export async function advance(store: Store, days: number) {
   await createCalendar(store);
   // Worlds and saves older than the GBE ledger get their pre-game estimate and rebuilt months once.
   await ensureGbeBaseline(store);
+  // Worlds and saves from before stoppage-time substitutes were credited a minute get their lost goals back once.
+  await ensureMatchStatRepair(store);
+  await ensurePlayerRecords(store);
   const started = performance.now();
   const from = (await stateOf(store)).date;
   let played = 0;
@@ -3416,10 +3422,12 @@ export async function advance(store: Store, days: number) {
       await processTransferBattles(store);
       await processTransferPayments(store);
       await processAffiliateRequests(store);
+      await clubLifeDaily(store, state, random);
+      await ownershipDaily(store, state, random);
       await processUnexpectedEvents(store);
       // AI squads keep their minimums (first team 25, B-team and youth 20; two goalkeepers) between windows too; self-throttles to weekly.
       await maintainSquads(store, state);
-      await worldTransfers(store, random);
+      await worldMarket(store, state, random);
       // Clubs approach the director about his players (offer frequency setting; pre-window and emergency loans too).
       await generateUserClubOffers(store, state);
       await finishScouting(store);
@@ -3454,6 +3462,7 @@ export async function advance(store: Store, days: number) {
       await dailyMedia(store);
       await expireLoans(store);
       await progressCompetitions(store, state.date);
+      await recordPlayerRecords(store, state.date);
       await processCompetitionNotifications(store);
       if (daysBetween("2026-07-01", state.date) % 7 === 0) {
         await weeklyUpdate(store);

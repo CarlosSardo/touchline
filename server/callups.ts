@@ -789,7 +789,7 @@ const topProspects = async (store: Store, clubId: number) =>
  * League games left (today's included), last rounds, final round and dead rubber of a target team. Reads: the team's
  * league row, a count of its scheduled league fixtures and, in the last rounds only, the table.
  */
-async function seasonPhase(store: Store, team: CallUpTeam, season: number) {
+export async function seasonPhase(store: Store, team: CallUpTeam, season: number) {
   const none = { endOfSeason: false, finalRound: false, deadRubber: false, remaining: 0 };
   const league = await store.get<{ league_id: number; group_name: string }>(
     "SELECT standings.league_id,standings.group_name FROM standings JOIN leagues ON leagues.id = standings.league_id WHERE standings.club_id = ? AND leagues.age_group = ? AND leagues.kind IN ('league','youth') ORDER BY leagues.tier,leagues.id LIMIT 1",
@@ -807,7 +807,8 @@ async function seasonPhase(store: Store, team: CallUpTeam, season: number) {
   const endOfSeason = remaining > 0 && remaining <= CALL_UP_RULES.endOfSeason.lastRounds;
   if (!endOfSeason) return { ...none, remaining };
   const table = await store.all<{ club_id: number; points: number; played: number }>(
-    "SELECT club_id,points - deducted AS points,played FROM standings WHERE league_id = ? AND group_name = ? ORDER BY points - deducted DESC,(gf - ga) DESC,gf DESC,club_id",
+    // Points are stored net of deductions (points = wins × 3 + draws - deducted).
+    "SELECT club_id,points,played FROM standings WHERE league_id = ? AND group_name = ? ORDER BY points DESC,(gf - ga) DESC,gf DESC,club_id",
     league.league_id,
     league.group_name,
   );

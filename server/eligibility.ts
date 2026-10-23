@@ -17,6 +17,7 @@ import { clubRegistration, countsTowardQuota, foreignQuota, heldNationalities, p
 import { gbeAssessment } from "./gbe.ts";
 import { assessYouthTransfer } from "./recruitment.ts";
 import { transferEmbargo } from "./finance.ts";
+import { activeEmbargo } from "./sanctions.ts";
 import { internationalLoanIssue, news } from "./systems.ts";
 
 export type { PlayerEligibility, RegistrationStatus } from "../shared/eligibility.ts";
@@ -237,6 +238,16 @@ export async function registerSpell(store: Store, playerId: number, trigger: str
   return verdict;
 }
 
+/** Set-based registerSpell cleanup for bulk moves: the moved players' registrations at clubs they no longer play for. */
+export async function endSpells(store: Store, playerIds: readonly number[]) {
+  if (!playerIds.length) return;
+  for (const table of ["player_registrations", "competition_registrations"])
+    await store.run(
+      `DELETE FROM ${table} AS reg USING players WHERE players.id = reg.player_id AND reg.player_id = ANY(?::integer[]) AND players.club_id IS DISTINCT FROM reg.club_id`,
+      [...playerIds],
+    );
+}
+
 /** The association registration a signing by `clubId` would get today (nothing stored; quotas excluded). */
 export async function predictRegistration(store: Store, playerId: number, clubId: number) {
   const player = (await store.get<Player>("SELECT * FROM players WHERE id = ?", playerId))!;
@@ -360,7 +371,14 @@ export async function refreshQuotaLists(store: Store, clubIds?: readonly number[
       }
     }
   }
-  await store.run("DELETE FROM competition_registrations WHERE club_id = ANY(?::integer[]) AND season = ?", ids, state.season);
+  // A player's competition registration belongs to his current club: rows left at a previous club (moves made without
+  // registerSpell, e.g. at the rollover or by the world market, until processRegistrations' cleanup) would collide.
+  await store.run(
+    "DELETE FROM competition_registrations WHERE season = ? AND (club_id = ANY(?::integer[]) OR player_id = ANY(?::integer[]))",
+    state.season,
+    ids,
+    [...new Set(rows.map((row) => row.player_id as number))],
+  );
   if (rows.length) await store.bulkInsert("competition_registrations", rows);
 }
 
@@ -507,6 +525,8 @@ export async function canSign(
   if (player.club_id && !transferWindow(state.date) && !options.emergency)
     blockers.push(["window", `The registration window is closed; the move can complete from ${nextWindowOpening(state.date)}.`]);
   if (transferEmbargo(club.balance, options.fee ?? 0)) blockers.push(["embargo", "Transfer embargo: the club's cash balance is negative."]);
+  else if (club.type === "club" && (await activeEmbargo(store, club.id, state.date)))
+    blockers.push(["embargo", "Registration embargo: the club may not register new signings while the sanction applies."]);
   if (options.fee !== undefined && options.fee > club.transfer_budget) blockers.push(["funds", "The fee exceeds the transfer budget."]);
   if (options.wage !== undefined) {
     const wages = (await store.get<{ total: number }>("SELECT coalesce(sum(wage),0) AS total FROM players WHERE club_id = ?", club.id))!.total;

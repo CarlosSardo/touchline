@@ -1,6 +1,7 @@
 import seedrandom from "seedrandom";
 import { describe, expect, it } from "vitest";
 import {
+  aiRenewalTerms,
   AI_YOUTH_TARGET,
   ageGroupFor,
   competitionGroup,
@@ -157,6 +158,37 @@ describe("squad planning", () => {
       }
     }
     expect(thin).toBeGreaterThan(0);
+  });
+});
+
+describe("AI contract renewals", () => {
+  const base = { wage: 10_000, market: 10_000, floor: 100, age: 26, position: "CM" as Position, rank: 8, minutesShare: 0.7, room: 1e6, random: 0.99 };
+
+  it("prices a renewal on role, form and age around the club's going rate", () => {
+    expect(aiRenewalTerms(base)).toEqual({ wage: 11_030 });
+    expect(aiRenewalTerms({ ...base, rank: 22, minutesShare: 0.1 })).toEqual({ wage: 7_820 });
+    // Past the peak the wage falls 6% a year; a keeper peaks later.
+    expect(aiRenewalTerms({ ...base, age: 32, rank: 15, minutesShare: 0.4 })).toEqual({ wage: 7_790 });
+    expect(aiRenewalTerms({ ...base, age: 32, rank: 15, minutesShare: 0.4, position: "GK" })).toEqual({ wage: 9_500 });
+    // Within 60-130% of the current wage, never below the club's floor.
+    expect(aiRenewalTerms({ ...base, market: 50_000 })).toEqual({ wage: 13_000 });
+    expect(aiRenewalTerms({ ...base, market: 1_000, rank: 20 })).toEqual({ wage: 6_000 });
+    expect(aiRenewalTerms({ ...base, wage: 50, market: 40, floor: 300 })).toEqual({ wage: 300 });
+  });
+
+  it("keeps within the budget: a fifth less at most, otherwise the club lets him go", () => {
+    expect(aiRenewalTerms({ ...base, room: 9_500 })).toEqual({ wage: 9_500 });
+    expect(aiRenewalTerms({ ...base, room: 8_000 })).toEqual({ leaves: "club" });
+    expect(aiRenewalTerms({ ...base, room: -5_000 })).toEqual({ leaves: "club" });
+  });
+
+  it("lets players refuse, more often after a deeper cut and when a starter in his prime", () => {
+    const refusals = (input: Partial<typeof base>) =>
+      Array.from({ length: 100 }, (_, index) => aiRenewalTerms({ ...base, ...input, random: index / 100 })).filter((terms) => "leaves" in terms).length;
+    expect(refusals({ rank: 15 })).toBe(6);
+    expect(refusals({ rank: 5 })).toBe(12);
+    expect(refusals({ rank: 15, age: 33, minutesShare: 0.1 })).toBeGreaterThan(30);
+    expect(aiRenewalTerms({ ...base, random: 0 })).toEqual({ leaves: "player" });
   });
 });
 

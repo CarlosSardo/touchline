@@ -2,17 +2,22 @@ import { z } from "zod";
 import type { Store } from "./db.ts";
 import { GameError, stateOf } from "./systems.ts";
 import {
-  callUpFlags,
+  foldSquadMoves,
   idOrNull,
   numberOrNull,
   parse,
+  registrationEntry,
+  squadEntry,
   textOrNull,
   transferKind,
+  type FamilyClub,
   type HistoryLoanRow,
   type HistoryMoveRow,
+  type SquadEntry,
 } from "./player-history.ts";
 import { ageOn } from "../shared/rules.ts";
 import type {
+  ClubSquadMove,
   ClubTransfer,
   ClubTransferClub,
   ClubTransfers,
@@ -23,6 +28,8 @@ import type {
 import type { TransferTerms } from "../shared/types.ts";
 
 export const CLUB_TRANSFER_ROW_LIMIT = 20_000;
+/** Squad movements listed per request (newest first). */
+export const CLUB_SQUAD_MOVE_LIMIT = 200;
 export const CLUB_TRANSFER_KINDS = [
   "transfer",
   "free",
@@ -31,10 +38,8 @@ export const CLUB_TRANSFER_KINDS = [
   "loanRecall",
   "loanPurchase",
   "registration",
-  "squad",
 ] as const satisfies readonly PlayerMoveKind[];
 const FEE_KINDS = new Set<PlayerMoveKind>(["transfer", "loan", "loanPurchase"]);
-const INTERNAL_KINDS = new Set<PlayerMoveKind>(["registration", "squad"]);
 const LOAN_END_KINDS = new Set<PlayerMoveKind>(["loanReturn", "loanRecall"]);
 
 export const clubTransfersQuerySchema = z.object({
@@ -74,21 +79,24 @@ export interface ClubMoveRecord {
   loanUntil: string | null;
   /** Newest-first sort key: the date, or just after the loan start for an undated end. */
   order: string;
-  callUp?: boolean;
-  callUpReturn?: boolean;
-  until?: string | null;
 }
 
 /** Seasons start on 1 July (the 2026 season runs 2026-07-01 to 2027-06-30). */
 export const seasonOfDate = (date: string) => Number(date.slice(0, 4)) - (date.slice(5, 7) < "07" ? 1 : 0);
 
-/** Pure: every recorded move into or out of `clubId`, newest first. Moves inside the club itself are skipped. */
+/**
+ * Pure: every recorded move with another club into or out of `clubId`, newest first, and apart from them the moves
+ * inside the club's family that involve it (squad moves, call-ups, B-team and age-group registrations).
+ */
 export function clubMoves(
   clubId: number,
   rows: ClubHistoryRow[],
   loans: ClubLoanRow[],
   rowsTruncated: boolean,
-): ClubMoveRecord[] {
+  family: ReadonlySet<number> = new Set([clubId]),
+): { moves: ClubMoveRecord[]; squad: SquadEntry[] } {
+  const squad: SquadEntry[] = [];
+  const touches = (entry: SquadEntry) => entry.fromClubId === clubId || entry.toClubId === clubId;
   const moves: { move: ClubMoveRecord; sequence: number }[] = [];
   const push = (move: Omit<ClubMoveRecord, "direction">) => {
     const direction =
@@ -114,19 +122,18 @@ export function clubMoves(
       order: row.date,
     };
     if (row.entity_type === "squad") {
-      push({
-        ...base,
-        kind: "squad",
-        fromClubId: idOrNull(data.fromClubId),
-        toClubId: idOrNull(data.toClubId),
-        dealType: textOrNull(data.label),
-        ...callUpFlags(data),
-      });
+      const entry = squadEntry(row, Number(row.entity_id));
+      if (touches(entry)) squad.push(entry);
       continue;
     }
     const from = idOrNull(data.from);
     const to = idOrNull(data.to);
     const type = textOrNull(data.type);
+    if (row.entity_type === "transfer" && from !== null && to !== null && family.has(from) && family.has(to)) {
+      const entry = registrationEntry(row, Number(row.entity_id));
+      if (touches(entry)) squad.push(entry);
+      continue;
+    }
     if (row.entity_type === "loan") {
       const loan = loans.find(
         (entry) =>
@@ -195,14 +202,17 @@ export function clubMoves(
         fee: numberOrNull(parse(loan.terms).optionFee),
       });
   }
-  return moves
-    .sort(
-      (left, right) =>
-        right.move.season - left.move.season ||
-        right.move.order.localeCompare(left.move.order) ||
-        right.sequence - left.sequence,
-    )
-    .map((entry) => entry.move);
+  return {
+    moves: moves
+      .sort(
+        (left, right) =>
+          right.move.season - left.move.season ||
+          right.move.order.localeCompare(left.move.order) ||
+          right.sequence - left.sequence,
+      )
+      .map((entry) => entry.move),
+    squad,
+  };
 }
 
 const emptyTotals = (): ClubTransferTotals => ({
@@ -217,17 +227,24 @@ const emptyTotals = (): ClubTransferTotals => ({
 });
 
 /**
- * Pure: per-season totals, newest season first; `currentSeason` is always listed. Call-ups are left out;
- * family moves and loan ends are counted apart from the in/out moves with other clubs.
+ * Pure: per-season totals, newest season first; `currentSeason` is always listed. Loan ends are counted apart from
+ * the in/out moves with other clubs; family moves (`squad`, call-ups and their returns left out) apart from both.
  */
-export function seasonSummaries(moves: ClubMoveRecord[], currentSeason: number): ClubTransferSeasonSummary[] {
+export function seasonSummaries(
+  moves: ClubMoveRecord[],
+  currentSeason: number,
+  squad: readonly SquadEntry[] = [],
+): ClubTransferSeasonSummary[] {
   const seasons = new Map<number, ClubTransferTotals>([[currentSeason, emptyTotals()]]);
+  const totalsOf = (season: number) => {
+    let totals = seasons.get(season);
+    if (!totals) seasons.set(season, (totals = emptyTotals()));
+    return totals;
+  };
+  for (const entry of squad) if (!entry.callUp && !entry.callUpReturn) totalsOf(entry.season).countInternal!++;
   for (const move of moves) {
-    if (move.callUp || move.callUpReturn) continue;
-    let totals = seasons.get(move.season);
-    if (!totals) seasons.set(move.season, (totals = emptyTotals()));
-    if (INTERNAL_KINDS.has(move.kind)) totals.countInternal!++;
-    else if (LOAN_END_KINDS.has(move.kind)) totals.countLoanEnds!++;
+    const totals = totalsOf(move.season);
+    if (LOAN_END_KINDS.has(move.kind)) totals.countLoanEnds!++;
     else if (move.direction === "in") {
       totals.countIn++;
       totals.spent += Math.max(0, move.fee ?? 0);
@@ -361,8 +378,13 @@ export async function clubTransfers(store: Store, clubId: number, rawQuery: unkn
     clubId,
     clubId,
   );
-  const moves = clubMoves(clubId, scan.rows, loans, scan.truncated);
-  const seasons = seasonSummaries(moves, state.season);
+  const familyClubs = await store.all<FamilyClub>(
+    "SELECT id,name,color,parent_id FROM clubs WHERE id = (SELECT coalesce(parent_id,id) FROM clubs WHERE id = ?) OR parent_id = (SELECT coalesce(parent_id,id) FROM clubs WHERE id = ?)",
+    clubId,
+    clubId,
+  );
+  const { moves, squad } = clubMoves(clubId, scan.rows, loans, scan.truncated, new Set(familyClubs.map((club) => Number(club.id))));
+  const seasons = seasonSummaries(moves, state.season, squad);
   const { total, pages, page } = filterClubMoves(moves, query);
 
   const playerIds = page.map((move) => move.playerId);
@@ -427,8 +449,6 @@ export async function clubTransfers(store: Store, clubId: number, rawQuery: unkn
       dealType: move.dealType,
       loanUntil: move.loanUntil,
       terms: termsOf(deal?.terms ?? null),
-      ...(move.callUp ? { callUp: true, until: move.until ?? null } : {}),
-      ...(move.callUpReturn ? { callUpReturn: true } : {}),
     };
   };
   const totals = new Map(seasons.map((entry) => [entry.season, entry.totals]));
@@ -448,5 +468,47 @@ export async function clubTransfers(store: Store, clubId: number, rawQuery: unkn
     pageSize: query.pageSize,
     pages,
     truncated: scan.truncated,
+    squadMoves: await clubSquadMoves(store, squad, familyClubs, query.season),
+  };
+}
+
+/** The family moves of the selected season (or all), call-ups folded, newest first and capped. */
+async function clubSquadMoves(
+  store: Store,
+  entries: readonly SquadEntry[],
+  familyClubs: readonly FamilyClub[],
+  season: number | undefined,
+): Promise<ClubTransfers["squadMoves"]> {
+  const clubs = new Map(familyClubs.map((club) => [Number(club.id), club]));
+  const folded = foldSquadMoves(entries, (id) =>
+    id === null ? null : (clubs.get(id) ?? { id, name: "Unknown club", color: null, parent_id: null }),
+  )
+    .filter((move) => season === undefined || move.season === season)
+    .reverse();
+  const listed = folded.slice(0, CLUB_SQUAD_MOVE_LIMIT);
+  const players = new Map(
+    (listed.length
+      ? await store.all<{ id: number; name: string; position: string; birth_date: string }>(
+          "SELECT id,name,position,birth_date FROM players WHERE id = ANY(?::integer[])",
+          idList(listed.map((move) => move.playerId)),
+        )
+      : []
+    ).map((row) => [Number(row.id), row]),
+  );
+  const names = new Map(entries.filter((entry) => entry.name).map((entry) => [entry.playerId, entry.name]));
+  return {
+    total: folded.length,
+    moves: listed.map(({ playerId, ...move }): ClubSquadMove => {
+      const player = players.get(playerId);
+      return {
+        ...move,
+        player: {
+          id: playerId,
+          name: player?.name ?? names.get(playerId) ?? "Unknown player",
+          position: player?.position ?? null,
+          ageAtMove: player ? ageOn(player.birth_date, move.date) : null,
+        },
+      };
+    }),
   };
 }

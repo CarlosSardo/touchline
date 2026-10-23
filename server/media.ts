@@ -433,7 +433,8 @@ export async function publishClubRoundup(store: Store) {
     gf: number;
     ga: number;
   }>(
-    "SELECT club_id,played,points - deducted AS points,gf,ga FROM standings WHERE league_id = ? AND group_name = (SELECT own.group_name FROM standings AS own WHERE own.league_id = ? AND own.club_id = ?) ORDER BY points - deducted DESC,(gf-ga) DESC,gf DESC,club_id",
+    // Points are stored net of deductions (points = wins × 3 + draws - deducted).
+    "SELECT club_id,played,points,gf,ga FROM standings WHERE league_id = ? AND group_name = (SELECT own.group_name FROM standings AS own WHERE own.league_id = ? AND own.club_id = ?) ORDER BY points DESC,(gf-ga) DESC,gf DESC,club_id",
     club.league_id,
     club.league_id,
     club.id,

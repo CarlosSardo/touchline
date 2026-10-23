@@ -1,0 +1,70 @@
+.world-feed {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.world-feed[aria-busy="true"] {
+  opacity: 0.6;
+  transition: opacity 0.15s;
+}
+.world-item {
+  display: grid;
+  gap: 6px;
+  padding: 16px 26px;
+  border-bottom: 1px solid var(--line);
+}
+.world-item header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.world-item time {
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+.world-item p {
+  margin: 0;
+  font-size: 0.84rem;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+.world-item-subjects {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 18px;
+}
+.world-item-subjects > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.world-filter-club {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+.club-life {
+  display: grid;
+  gap: 16px;
+}
+.club-life-alert {
+  display: flex;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid color-mix(in srgb, var(--red) 45%, var(--line));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--red) 7%, var(--surface));
+}
+.club-life-alert svg {
+  flex: none;
+  color: var(--red);
+  margin-top: 2px;
+}
+.club-life-alert p {
+  margin: 4px 0 0;
+  font-size: 0.84rem;
+  line-height: 1.6;
+}
+.office-alert {
+  margin-bottom: 18px;
+}

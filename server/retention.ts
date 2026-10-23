@@ -54,6 +54,9 @@ const PLAYER_TABLES = [
   "player_season_stats",
   "player_match_appearances",
   "promises",
+  "player_honours",
+  "player_injuries",
+  "player_milestones",
 ];
 const KEPT_APPEARANCES = "pg_temp.touchline_kept_appearances";
 

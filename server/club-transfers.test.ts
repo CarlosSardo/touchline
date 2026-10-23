@@ -30,12 +30,12 @@ const loan = (entry: Partial<ClubLoanRow> & Pick<ClubLoanRow, "id" | "status">):
   data: "{}",
   ...entry,
 });
-const summary = (moves: ReturnType<typeof clubMoves>) =>
+const summary = (moves: ReturnType<typeof clubMoves>["moves"]) =>
   moves.map((move) => [move.key, move.kind, move.direction, move.date, move.season, move.fee]);
 
 describe("club transfer list (no database)", () => {
-  it("classifies every move in and out of the club, newest first, and skips moves inside the club", () => {
-    const moves = clubMoves(
+  it("classifies every move with another club, newest first, and keeps family moves apart", () => {
+    const { moves, squad } = clubMoves(
       CLUB,
       [
         row(1, "2026-07-01", "transfer", { from: null, to: CLUB, fee: 0, type: "Free transfer" }),
@@ -59,6 +59,7 @@ describe("club transfer list (no database)", () => {
         loan({ id: 4, status: "active", start_date: "2030-01-01", player_id: 11, parent_id: 5, destination_id: CLUB }),
       ],
       false,
+      new Set([CLUB, 4]),
     );
     expect(summary(moves)).toEqual([
       ["l4", "loan", "in", "2030-01-01", 2029, null],
@@ -70,9 +71,13 @@ describe("club transfer list (no database)", () => {
       ["h6", "transfer", "out", "2028-07-02", 2028, 4_000_000],
       ["l1e", "loanReturn", "in", "2028-06-30", 2027, null],
       ["h5", "loan", "out", "2027-08-01", 2027, 50_000],
-      ["h3", "squad", "in", "2027-01-15", 2026, null],
-      ["h2", "registration", "out", "2026-09-01", 2026, 0],
       ["h1", "free", "in", "2026-07-01", 2026, 0],
+    ]);
+    // The B-team registration and both squad moves (one inside the club itself) are family moves, not transfers.
+    expect(squad.map((entry) => [entry.key, entry.registration, entry.fromClubId, entry.toClubId])).toEqual([
+      ["h2", true, CLUB, 4],
+      ["h3", false, 4, CLUB],
+      ["h4", false, CLUB, CLUB],
     ]);
     expect(moves.find((move) => move.key === "l1e")?.dateEstimated).toBe(true);
     expect(moves.find((move) => move.key === "h5")?.loanUntil).toBe("2028-06-30");
@@ -80,13 +85,13 @@ describe("club transfer list (no database)", () => {
   });
 
   it("never lists a loan start from the loan row when older history rows were not read", () => {
-    const moves = clubMoves(CLUB, [], [loan({ id: 1, status: "completed", data: JSON.stringify({ endedOn: "2028-05-20" }) })], true);
+    const { moves } = clubMoves(CLUB, [], [loan({ id: 1, status: "completed", data: JSON.stringify({ endedOn: "2028-05-20" }) })], true);
     expect(summary(moves)).toEqual([["l1e", "loanReturn", "in", "2028-05-20", 2027, null]]);
     expect(moves[0].dateEstimated).toBe(false);
   });
 
   it("totals every season (always including the current one), filters and pages", () => {
-    const moves = clubMoves(
+    const { moves } = clubMoves(
       CLUB,
       [
         row(1, "2026-08-01", "transfer", { from: 2, to: CLUB, fee: 3_000_000 }),
@@ -134,8 +139,8 @@ describe("club transfer list (no database)", () => {
     expect(filterClubMoves([], query({})).pages).toBe(1);
   });
 
-  it("marks call-ups and keeps them, family moves and loan ends out of the in/out counts", () => {
-    const moves = clubMoves(
+  it("keeps call-ups and family moves out of the transfer list and its in/out counts", () => {
+    const { moves, squad } = clubMoves(
       CLUB,
       [
         row(1, "2026-08-01", "transfer", { from: 2, to: CLUB, fee: 1_000_000 }),
@@ -143,14 +148,25 @@ describe("club transfer list (no database)", () => {
         row(3, "2026-09-01", "squad", { fromClubId: 4, toClubId: CLUB, label: "First team", callUp: true, until: "2026-09-05" }),
         row(4, "2026-09-06", "squad", { fromClubId: CLUB, toClubId: 4, label: "B team", callUpReturn: true }),
         row(5, "2026-10-01", "squad", { fromClubId: 4, toClubId: CLUB, label: "First team" }),
+        // Moves of other players between two other clubs of the family do not concern this club.
+        row(6, "2026-10-02", "squad", { fromClubId: 4, toClubId: 6, label: "U19" }, 12),
       ],
       [loan({ id: 1, status: "completed", start_date: "2026-08-03", end_date: "2027-01-31", data: JSON.stringify({ endedOn: "2027-01-31" }) })],
       false,
+      new Set([CLUB, 4, 6]),
     );
-    expect(moves.find((move) => move.key === "h3")).toMatchObject({ kind: "squad", direction: "in", callUp: true, until: "2026-09-05" });
-    expect(moves.find((move) => move.key === "h4")).toMatchObject({ direction: "out", callUpReturn: true });
-    expect(moves.find((move) => move.key === "h5")).not.toHaveProperty("callUp");
-    expect(seasonSummaries(moves, 2026)[0].totals).toEqual({
+    expect(summary(moves)).toEqual([
+      ["l1e", "loanReturn", "in", "2027-01-31", 2026, null],
+      ["l1", "loan", "out", "2026-08-03", 2026, null],
+      ["h1", "transfer", "in", "2026-08-01", 2026, 1_000_000],
+    ]);
+    expect(squad.map((entry) => [entry.key, entry.callUp, entry.callUpReturn])).toEqual([
+      ["h2", false, false],
+      ["h3", true, false],
+      ["h4", false, true],
+      ["h5", false, false],
+    ]);
+    expect(seasonSummaries(moves, 2026, squad)[0].totals).toEqual({
       spent: 1_000_000,
       received: 0,
       net: -1_000_000,
@@ -183,6 +199,7 @@ describe("club transfer list (no database)", () => {
       { pageSize: "501" },
       { direction: "both" },
       { type: "gift" },
+      { type: "squad" },
       { season: "abc" },
       { season: "20260" },
     ])

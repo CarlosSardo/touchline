@@ -983,7 +983,14 @@ export function StandingsTable({
                 {entry.gf - entry.ga > 0 ? "+" : ""}
                 {entry.gf - entry.ga}
               </td>
-              <td className="points">{entry.points}</td>
+              <td className="points">
+                {entry.points}
+                {entry.deducted > 0 && (
+                  <small className="points-deducted" title={`${entry.deducted} points deducted`} aria-label={`${entry.deducted} points deducted`}>
+                    −{entry.deducted}
+                  </small>
+                )}
+              </td>
               <td>
                 <FormDots form={entry.form} />
               </td>

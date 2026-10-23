@@ -18,7 +18,13 @@ const searchQueries: Record<string, unknown>[] = [
   { position: "ST", ageMin: 17.5, ageMax: 23.9, minutesMin: 90.5, club: 4, ageGroup: "U19", sort: "height" },
   { contractStatus: "amateur", lifestyle: "Quiet", trait: "Leader", personality: "professionalism", heightMin: 170, heightMax: 190 },
   { listed: "1", availableLoan: "0", freeAgent: "1", injured: "0", shortlisted: "0", sort: "contract", direction: "asc" },
+  {
+    clubCountry: 3, league: 5, tierMin: 1, tierMax: 2, weightMin: 60, weightMax: 80, contractMonthsMin: 6,
+    contractMonthsMax: 18, goalsMax: 5, assistsMin: 1, appearancesMin: 2, formMax: 8, wageMin: 1000, sort: "weight",
+  },
+  { attribute: "finishing", attributeMin: 60, attributeMax: 80, personality: "ambition", personalityMax: 40, clubCountry: 2 },
 ];
+const TODAY = "2026-08-31";
 
 describe("player search SQL (no database)", () => {
   it("serves the default page from one players alias, without no-op range predicates", () => {
@@ -51,6 +57,88 @@ describe("player search SQL (no database)", () => {
     expect(limited.where).toContain("players.value <= ?");
     expect(limited.where).toContain("players.ability >= ?");
     expect(limited.params).toEqual([50, 2_000_000]);
+  });
+
+  it("applies both ends of every numeric range and puts a reversed pair in order", () => {
+    const reversed = search({ ageMin: 25, ageMax: 18, valueMin: 5_000_000, valueMax: 1_000_000 });
+    expect(reversed.where).toBe(
+      "players.role <> 'Retired' AND players.age >= ? AND players.age <= ? AND players.value >= ? AND players.value <= ?",
+    );
+    expect(reversed.params).toEqual([18, 25, 1_000_000, 5_000_000]);
+    for (const [key, column] of [
+      ["ability", "players.ability"],
+      ["potential", "players.potential"],
+      ["wage", "players.wage"],
+      ["form", "players.form"],
+      ["appearances", "players.appearances"],
+      ["goals", "players.goals"],
+      ["assists", "players.assists"],
+      ["minutes", "players.minutes"],
+      // Copied from the profile (migration 11) and indexed, so no profile is parsed.
+      ["height", "players.height"],
+      ["weight", "players.weight"],
+    ] as const) {
+      const result = search({ [`${key}Min`]: 5, [`${key}Max`]: 8 });
+      expect(result.where).toBe(`players.role <> 'Retired' AND ${column} >= ? AND ${column} <= ?`);
+      expect(result.params).toEqual([5, 8]);
+      expect(result.readsProfile).toBe(false);
+      expect(result.columnWhere).toBe(result.where);
+      expect(search({ [`${key}Max`]: 8 }).params).toEqual([8]);
+    }
+  });
+
+  it("rejects bounds outside each range's domain at the filter boundary", () => {
+    for (const query of [{ ageMax: 101 }, { abilityMax: 100 }, { tierMin: 21 }, { contractMonthsMax: 121 }, { heightMin: -1 }, { goalsMin: "x" }])
+      expect(playerFilter.safeParse(query).success).toBe(false);
+    expect(playerFilter.parse({ abilityMin: "0", minutesMax: "900" })).toMatchObject({ abilityMin: 0, minutesMax: 900 });
+  });
+
+  it("scopes the club by country, league and division through one semi-join on clubs", () => {
+    const scoped = search({ clubCountry: 3, league: 9, tierMax: 2 });
+    expect(scoped.readsProfile).toBe(false);
+    expect(scoped.where).toBe(
+      "players.role <> 'Retired' AND players.club_id IN (SELECT clubs.id FROM clubs JOIN leagues ON leagues.id = clubs.league_id WHERE clubs.country_id = ? AND clubs.league_id = ? AND leagues.tier >= ? AND leagues.tier <= ?)",
+    );
+    // An open lower division bound starts at the top flight, so reserve leagues (tier 0) never match.
+    expect(scoped.params).toEqual([3, 9, 1, 2]);
+    const league = search({ league: 9, club: 4 });
+    expect(league.where).toContain("players.club_id = ?");
+    expect(league.where).toContain("players.club_id IN (SELECT clubs.id FROM clubs WHERE clubs.league_id = ?)");
+    expect(league.params).toEqual([4, 9]);
+    expect(search({ tierMin: 2 }).params).toEqual([2, 20]);
+    expect(search({ tierMin: 1, tierMax: 20 }).filtered).toBe(false);
+  });
+
+  it("dates contract ranges in whole months from today", () => {
+    const result = search({ contractMonthsMin: 6, contractMonthsMax: 18.5 }, { today: TODAY });
+    expect(result.where).toBe(
+      "players.role <> 'Retired' AND players.contract_end >= ? AND players.contract_end <= ?",
+    );
+    expect(result.params).toEqual(["2027-02-28", "2028-02-29"]);
+    expect(search({ contractMonthsMax: 6 }, { today: TODAY }).params).toEqual(["2027-02-28"]);
+    expect(() => search({ contractMonthsMax: 6 })).toThrow("today");
+  });
+
+  it("ignores a skill range until its attribute or personality is chosen", () => {
+    expect(search({ attributeMin: 70, personalityMax: 40 }).filtered).toBe(false);
+    const ranged = search({ attribute: "passing", attributeMin: 60, attributeMax: 80 });
+    expect(ranged.params).toEqual([["attributes", "technical", "passing"], 60, ["attributes", "technical", "passing"], 80]);
+    expect(search({ personality: "ambition", personalityMax: 40 }).params).toEqual([["personality", "ambition"], 40]);
+  });
+
+  it("separates column conditions, served by indexes, from profile-JSON conditions checked on bounded candidates", () => {
+    const result = search({ position: "ST", attribute: "passing", attributeMin: 70, trait: "Leader", heightMin: 185 });
+    expect(result.readsProfile).toBe(true);
+    expect(result.columnWhere).toBe("players.role <> 'Retired' AND players.height >= ? AND players.position = ?");
+    expect(result.columnParams).toEqual([185, "ST"]);
+    // Checked over the profile parsed once per candidate (PROFILE_JSON exposes it as profile_json.doc).
+    expect(result.profileWhere).toBe(
+      "(profile_json.doc::jsonb -> 'traits') @> jsonb_build_array(?::text) AND ((profile_json.doc::jsonb #>> ?::text[])::double precision + (players.ability - coalesce((profile_json.doc::jsonb #>> '{baseAbility}')::double precision,players.ability))) >= ?",
+    );
+    expect(result.where).toContain("(players.profile::jsonb -> 'traits') @> jsonb_build_array(?::text)");
+    expect(result.profileParams).toEqual(["Leader", ["attributes", "technical", "passing"], 70]);
+    expect(result.params).toEqual([185, "ST", "Leader", ["attributes", "technical", "passing"], 70]);
+    expect(search({ position: "ST" })).toMatchObject({ profileWhere: null, profileParams: [], columnParams: ["ST"] });
   });
 
   it("reads profile JSON paths through jsonb with key-path parameters", () => {
@@ -112,13 +200,14 @@ describe("player search SQL (no database)", () => {
   it("ranks a known match set by primary key with missing values last", () => {
     const ranked = playerRanking({ sort: "height", direction: "asc" });
     expect(ranked.where).toBe("players.id = ANY(?::int[])");
-    expect(ranked.order).toContain("(players.profile::jsonb #>> '{identity,height}')::double precision ASC NULLS LAST");
+    expect(ranked.order).toBe("players.height ASC NULLS LAST,lower(players.name) ASC,players.id ASC");
+    expect(search({ sort: "weight" }).readsProfile).toBe(false);
     expect(ranked.params).toEqual([]);
   });
 
   it("produces read-only single statements with ? placeholders only", () => {
     for (const query of searchQueries) {
-      const result = search(query, { secondaryNationals: [1, 2] });
+      const result = search(query, { today: TODAY, secondaryNationals: [1, 2] });
       const { count, page } = sqlOf(result);
       for (const [sql, extra] of [[count, []], [page, [30, 0]]] as const) {
         const bound = bindSql(sql, [...result.params, ...extra]);
@@ -163,12 +252,22 @@ describe.skipIf(!sqlIntegration)("player search SQL on PostgreSQL", () => {
 
   it("runs every generated search and ranking statement with correctly typed parameters", async () => {
     for (const query of searchQueries) {
-      const result = search(query, { secondaryNationals: [1, 2] });
+      const result = search(query, { today: TODAY, secondaryNationals: [1, 2] });
       const { count, page } = sqlOf(result);
       expect(await store.get(count, ...result.params)).toEqual({ count: 0 });
       expect(await store.all(page, ...result.params, 30, 0)).toEqual([]);
       const ranked = playerRanking(playerFilter.parse(query));
       expect(await store.all(sqlOf(ranked).page, [3, 1, 2], 30, 0)).toEqual([]);
+      if (result.profileWhere) {
+        expect(await store.all(
+          `SELECT players.id FROM players ${result.joins} WHERE ${result.columnWhere} ORDER BY ${result.order} LIMIT ?`,
+          ...result.columnParams, 10_001,
+        )).toEqual([]);
+        expect(await store.all(
+          `SELECT players.id FROM players CROSS JOIN LATERAL (SELECT players.profile::jsonb AS doc OFFSET 0) AS profile_json WHERE players.id = ANY(?::int[]) AND ${result.profileWhere}`,
+          [1, 2], ...result.profileParams,
+        )).toEqual([]);
+      }
     }
   });
 

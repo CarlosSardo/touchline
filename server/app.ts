@@ -35,11 +35,19 @@ import {
 import { Saves } from "./saves.ts";
 import * as query from "./queries.ts";
 import { playerHistory } from "./player-history.ts";
+import { playerMedical } from "./player-records.ts";
+import { competitionScorers } from "./competition-scorers.ts";
 import { clubTransfers, clubTransfersChanged } from "./club-transfers.ts";
+import { forgetClubPolicies } from "./club-policy.ts";
 import { advance } from "./simulation.ts";
 import { assessPlayerInterest, submitMinorApplication } from "./recruitment.ts";
 import { withRivals } from "./transfer-battles.ts";
 import { mediaFeed } from "./media.ts";
+import { clubLifeView } from "./club-life.ts";
+import { guardForcedSale } from "./administration.ts";
+import { worldNewsFeed } from "./world-news.ts";
+import { clubOwnership, ownershipNotice, ownershipOverview } from "./ownership-views.ts";
+import { forgetOwnership, requestOwnerBacking } from "./ownership.ts";
 import {
   competitionFavorites,
   favoriteCompetition,
@@ -84,6 +92,7 @@ import {
   MAX_LOAN_SELL_ON,
   MIN_LOAN_SALARY_SPLIT,
 } from "./systems.ts";
+import { payReleaseClause } from "./deal-clauses.ts";
 import {
   placeFutureTransferAtAffiliate,
   setOnwardLoanPlan,
@@ -93,6 +102,7 @@ import {
   clamp,
   daysBetween,
   LOAN_TYPES,
+  money,
   PARTNERSHIP_TYPES,
   POSITIONS,
   SETTING_DEFINITIONS,
@@ -525,6 +535,8 @@ export async function dispatchAction(
           terms: loanTerms.optional(),
           signingBonus: positive.max(100_000_000).optional(),
           transferTerms: transferTermsSchema.optional(),
+          releaseClause: z.number().positive().max(5_000_000_000).nullable().optional(),
+          exchangePlayerId: idSchema.nullable().optional(),
         })
         .parse(body);
       if (data.terms) {
@@ -596,6 +608,7 @@ export async function dispatchAction(
             "formalize",
             "sign",
             "revise",
+            "release-clause",
           ]),
         })
         .parse(body);
@@ -620,6 +633,7 @@ export async function dispatchAction(
         await declareInterest(store, data.id);
         return { message: "Your interest is now public." };
       }
+      if (data.action === "release-clause") return payReleaseClause(store, data.id);
       if (
         data.action === "formalize" ||
         data.action === "sign" ||
@@ -667,6 +681,7 @@ export async function dispatchAction(
         .object({ playerId: idSchema, listed: z.boolean(), loan: z.boolean() })
         .parse(body);
       await requireOwnPlayer(store, data.playerId);
+      await guardForcedSale(store, data.playerId, data.listed);
       await store.run(
         "UPDATE players SET listed = ?, available_loan = ? WHERE id = ?",
         data.listed ? 1 : 0,
@@ -873,17 +888,20 @@ export async function dispatchAction(
           throw new GameError(
             "The board will not release more funds with the current confidence and cash position.",
           );
+        // A wealthy, ambitious owner adds new equity once a season on top of the board's allocation.
+        const backing = await requestOwnerBacking(store, club.id);
         const allocation = Math.min(
           10_000_000,
           Math.max(0, club.balance - club.transfer_budget) * 0.2,
-        );
+        ) + backing;
         await store.run(
           "UPDATE clubs SET transfer_budget = transfer_budget + ?, board_pressure = CASE WHEN board_pressure + 7 > 100 THEN 100 ELSE board_pressure + 7 END, expectations = CASE WHEN expectations - 1 < 1 THEN 1 ELSE expectations - 1 END WHERE id = ?",
           allocation,
           club.id,
         );
-        response =
-          "The board has increased your transfer allocation. Expectations and scrutiny have risen too.";
+        response = backing
+          ? `The board has increased your transfer allocation, including ${money(backing)} of new money from the owners. Expectations and scrutiny have risen too.`
+          : "The board has increased your transfer allocation. Expectations and scrutiny have risen too.";
       } else if (approach === "back-manager") {
         await store.run(
           "UPDATE clubs SET manager_trust = CASE WHEN manager_trust + 8 > 99 THEN 99 ELSE manager_trust + 8 END, board_confidence = CASE WHEN board_confidence - 2 < 0 THEN 0 ELSE board_confidence - 2 END, chemistry = CASE WHEN chemistry + 3 > 99 THEN 99 ELSE chemistry + 3 END WHERE id = ?",
@@ -1345,7 +1363,11 @@ function createWorldRouter(
       } finally {
         // Before readers are let back in: cached player-search matches may no longer hold.
         query.playerSearchChanged(store, WORLD_REPLACING.has(operation));
-        if (WORLD_REPLACING.has(operation)) clubTransfersChanged(store);
+        if (WORLD_REPLACING.has(operation)) {
+          clubTransfersChanged(store);
+          forgetClubPolicies(store);
+          forgetOwnership(store);
+        }
         activity = null;
       }
     };
@@ -1482,6 +1504,10 @@ function createWorldRouter(
     read((request) => playerHistory(store, idSchema.parse(request.params.id))),
   );
   app.get(
+    "/api/players/:id/medical",
+    read((request) => playerMedical(store, idSchema.parse(request.params.id))),
+  );
+  app.get(
     "/api/squad",
     read((request) => query.squad(store, request.query)),
   );
@@ -1568,12 +1594,24 @@ function createWorldRouter(
     read((request) => mediaFeed(store, request.query)),
   );
   app.get(
+    "/api/world-news",
+    read((request) => worldNewsFeed(store, request.query)),
+  );
+  app.get(
+    "/api/club-life",
+    read(async () => clubLifeView(store, (await stateOf(store)).clubId)),
+  );
+  app.get(
     "/api/news",
     read((request) => notificationFeed(store, request.query)),
   );
   app.get(
     "/api/competitions/favorites",
     read(() => competitionFavorites(store)),
+  );
+  app.get(
+    "/api/competitions/:id/scorers",
+    read((request) => competitionScorers(store, idSchema.parse(request.params.id), request.query)),
   );
   app.put(
     "/api/competitions/:id/favorite",
@@ -1622,8 +1660,24 @@ function createWorldRouter(
     ),
   );
   app.get(
+    "/api/clubs/:id/life",
+    read((request) => clubLifeView(store, idSchema.parse(request.params.id))),
+  );
+  app.get(
     "/api/clubs/:id/transfers",
     read((request) => clubTransfers(store, idSchema.parse(request.params.id), request.query)),
+  );
+  app.get(
+    "/api/clubs/:id/ownership",
+    read((request) => clubOwnership(store, idSchema.parse(request.params.id))),
+  );
+  app.get(
+    "/api/ownership",
+    read(() => ownershipOverview(store)),
+  );
+  app.get(
+    "/api/ownership/notice",
+    read(() => ownershipNotice(store)),
   );
   app.get(
     "/api/leagues",

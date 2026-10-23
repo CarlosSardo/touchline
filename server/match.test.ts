@@ -290,6 +290,37 @@ describe("version-four match laws", () => {
     expect(simulateMatch({ ...current, rulesVersion: 3 }, "replay")).toEqual(v3);
   });
 
+  it("credits a substitute sent on in stoppage time with a minute, so his appearance and goals are on record", () => {
+    const rules: NonNullable<MatchSnapshot["rules"]> = {
+      decisive: false,
+      extraTime: false,
+      neutral: false,
+      awayGoals: false,
+      substitutions: 5,
+      substitutionWindows: 3,
+      extraSubstitution: true,
+      aggregate: { home: 0, away: 0, homeAwayGoals: 0, awayAwayGoals: 0 },
+      injuryFrequency: 600,
+    };
+    let cameos = 0;
+    for (let index = 0; index < 150 && cameos < 2; index++) {
+      const result = simulateMatch({ ...current, rules }, `cameo-${index}`, false);
+      if (result.abandoned) continue;
+      for (const side of [current.home, current.away]) {
+        const changes = result.substitutions!.filter((sub) => sub.teamId === side.id);
+        for (const sub of changes) expect(result.players[sub.onId].minutes, `${index}`).toBeGreaterThan(0);
+        // Sent on after the 90th minute's play: no regulation minute left, credited one.
+        cameos += changes.filter((sub) => sub.elapsed >= 90 + result.stoppageTime![0]).length;
+        // Match rows and season lines take the players with minutes: they hold every goal of the side.
+        const credited = [...side.lineup, ...(side.bench ?? [])].filter((player) => result.players[player.id].minutes > 0);
+        expect(credited.reduce((sum, player) => sum + result.players[player.id].goals, 0)).toBe(
+          side.id === current.home.id ? result.homeGoals : result.awayGoals,
+        );
+      }
+    }
+    expect(cameos).toBeGreaterThan(0);
+  }, 60000);
+
   it("awards penalties about every fourth match, counts regulation minutes and varies substitutions", () => {
     let penalties = 0;
     let halfTime = 0;

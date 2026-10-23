@@ -467,6 +467,8 @@ export function simulateFastMatch(snapshot: MatchSnapshot, seed: string): MatchR
     const stats = result.players[stint.player.id];
     stats.minutes += Math.max(0, clock(Math.min(stint.off, duration)) - clock(stint.on));
   }
+  // A substitute sent on in stoppage time plays no clock minute; he still appeared (and may have scored): credit one.
+  for (const stint of stints) result.players[stint.player.id].minutes ||= 1;
   for (const [index, team] of teams.entries()) {
     const difference = score[index] - score[1 - index];
     for (const player of [...team.lineup, ...(team.bench ?? [])]) {

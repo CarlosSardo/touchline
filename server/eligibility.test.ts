@@ -378,6 +378,30 @@ describe("signing is separate from registration", () => {
     await store.setMeta("state", { ...(await stateOf(store)), date: "2026-07-20" });
   }, 120_000);
 
+  it("rebuilds a quota list for a player who moved without his old club's rows being cleared", async () => {
+    const [from, to] = await store.all<Club>(
+      `SELECT clubs.* FROM clubs JOIN leagues ON leagues.id = clubs.league_id JOIN countries ON countries.id = clubs.country_id
+       WHERE countries.code = 'PT' AND leagues.tier = 1 AND clubs.type = 'club' ORDER BY clubs.id LIMIT 2`,
+    );
+    for (const club of [from, to])
+      await store.run("UPDATE clubs SET data = ? WHERE id = ?", JSON.stringify({ ...JSON.parse(club.data), hosted: { host: "ES", registration: "host" } }), club.id);
+    const england = (await store.get<{ id: number }>("SELECT id FROM countries WHERE code = 'EN'"))!;
+    const mover = (await store.get<Player>(
+      "SELECT * FROM players WHERE club_id = ? AND age_group = 'Senior' AND role <> 'Retired' AND parent_club_id IS NULL ORDER BY ability DESC, id LIMIT 1",
+      from.id,
+    ))!;
+    const profile = JSON.parse(mover.profile) as PlayerProfile;
+    profile.identity.nationalities = [];
+    await store.run("UPDATE players SET profile = ?, country_id = ? WHERE id = ?", JSON.stringify(profile), england.id, mover.id);
+    await refreshQuotaLists(store, [from.id], true);
+    expect(await store.get("SELECT club_id FROM competition_registrations WHERE player_id = ? AND league_id = ?", mover.id, from.league_id)).toEqual({ club_id: from.id });
+    // A bulk move (rollover release and re-signing, world market) changes the club without registerSpell's cleanup.
+    await store.run("UPDATE players SET club_id = ? WHERE id = ?", to.id, mover.id);
+    await refreshQuotaLists(store, [to.id], true);
+    expect(await store.all("SELECT club_id FROM competition_registrations WHERE player_id = ? AND league_id = ?", mover.id, to.league_id)).toEqual([{ club_id: to.id }]);
+    for (const club of [from, to]) await store.run("UPDATE clubs SET data = ? WHERE id = ?", club.data, club.id);
+  }, 120_000);
+
   it("reviews refused GBE cases when the GBE cache is refreshed", async () => {
     const target = (await store.get<{ player_id: number }>(
       "SELECT player_id FROM player_registrations WHERE club_id = ? AND status = 'refused' AND basis = 'gbe' ORDER BY player_id LIMIT 1",

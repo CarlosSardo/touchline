@@ -2,6 +2,8 @@
 import seedrandom from "seedrandom";
 import type { Store } from "./db.ts";
 import { ensureClubSupport } from "./club-support.ts";
+import { ensureOwnership } from "./ownership.ts";
+import { markClausesStamped, relegationClauseStamper } from "./contract-clauses.ts";
 import { initialClubFinances } from "./finance.ts";
 import { seedAssociationCoefficients } from "./qualification.ts";
 import { youthBirthCutoff } from "./youth.ts";
@@ -1725,16 +1727,20 @@ export async function generateWorld(store: Store, options: WorldOptions = {}): P
       const { staff, relationships } = worldStaff(plan);
       await insertRows(store, "staff", staff);
       await insertRows(store, "relationships", relationships);
+      // Ids are assigned here (as insertPlayers would) so contracts carry their relegation clause terms from the start.
+      let id = (await store.get<{ id: number }>("SELECT coalesce(max(id), 0) AS id FROM players"))!.id;
+      const stamp = relegationClauseStamper(plan.rows.clubs, plan.rows.leagues);
       players = await insertPlayers(
         store,
         (function* counted() {
           for (const row of worldPlayers(plan)) {
             if (row.club_id === null) homeBased++;
-            yield row;
+            yield stamp({ ...row, id: ++id });
           }
         })(),
       );
     }
+    await markClausesStamped(store);
     await store.setMeta("state", state);
     await store.setMeta("settings", DEFAULT_SETTINGS);
     await store.setMeta("schemaVersion", 1);
@@ -1762,5 +1768,7 @@ export async function generateWorld(store: Store, options: WorldOptions = {}): P
   // Club support hires a director assistant per club: people, so structure-only worlds skip it.
   if (!options.structureOnly) await ensureClubSupport(store);
   await seedAssociationCoefficients(store, Number(START_DATE.slice(0, 4)));
+  // Owners, multi-club groups and the owners' first-season funding (structure-only worlds have none).
+  await ensureOwnership(store, { fund: true });
 }
 

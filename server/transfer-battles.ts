@@ -1,6 +1,9 @@
 import seedrandom from "seedrandom";
 import type { Store } from "./db.ts";
-import { acquirePlayerAsset } from "./finance.ts";
+import { clubPolicySnapshot } from "./club-policy.ts";
+import { acquirePlayerAsset, assessFinances, signingHeadroomCost } from "./finance.ts";
+import { activeEmbargo } from "./sanctions.ts";
+import { endSpells } from "./eligibility.ts";
 import { publishTransferRumour, publishTransferStory } from "./media.ts";
 import {
   assessPlayerInterest,
@@ -17,10 +20,12 @@ import {
   contractEndDate,
   ledger,
   news,
+  settingsOf,
   stateOf,
   transferProceeds,
   weeklyWages,
 } from "./systems.ts";
+import { optionalReleaseClause, releaseClauseFor } from "../shared/release-clauses.ts";
 import { addDays, clamp, money, transferWindow } from "../shared/rules.ts";
 import { MIN_GOALKEEPERS, SQUAD_MINIMUMS } from "../shared/world-rules.ts";
 import type {
@@ -451,7 +456,14 @@ async function marketTransferAllowed(store: Store, playerId: number, buyerId: nu
       buyer.id,
     ))!.total >= BUYER_SQUAD_CAP ||
     !(await assessRegistration(store, player, buyer)).allowed ||
-    !(await sellerCanRelease(store, player, state.date))
+    !(await sellerCanRelease(store, player, state.date)) ||
+    (await activeEmbargo(store, buyer.id, state.date))
+  )
+    return null;
+  // Hard FFP gate: the signing may not take the buyer past its limit.
+  if (
+    (await settingsOf(store)).ffp !== false &&
+    (await assessFinances(store, buyer.id, { fee, annualWages: wage * 52, years: marketContractYears(player.age) })).ffpHeadroom < 0
   )
     return null;
   return { player, buyer };
@@ -480,13 +492,25 @@ export async function executeMarketTransfer(
     fee,
     buyer.id,
   );
+  const spanish = (await store.get<{ code: string }>("SELECT code FROM countries WHERE id = ?", buyer.country_id))?.code === "ES";
+  const clause =
+    spanish || optionalReleaseClause(player.id, buyer.id) ? releaseClauseFor({ ...player, value: Math.max(player.value, fee) }, spanish) : null;
   await store.run(
-    "UPDATE players SET club_id = ?, squad_club_id = NULL, wage = ?, contract_end = ?, role = 'Squad player', morale = LEAST(99,morale + 4) WHERE id = ?",
+    `UPDATE players SET club_id = ?, squad_club_id = NULL, wage = ?, contract_end = ?, role = 'Squad player', morale = LEAST(99,morale + 4),
+       listed = 0, available_loan = 0, profile = jsonb_set(profile::jsonb, '{contract}',
+         (CASE WHEN jsonb_typeof(profile::jsonb -> 'contract') = 'object' THEN profile::jsonb -> 'contract' ELSE '{}'::jsonb END - 'releaseClause')
+         || jsonb_build_object('status', 'professional', 'signedDate', ?::text)
+         || CASE WHEN ?::double precision IS NULL THEN '{}'::jsonb ELSE jsonb_build_object('releaseClause', ?::double precision) END)::text
+     WHERE id = ?`,
     buyer.id,
     wage,
     contractEnd,
+    state.date,
+    clause,
+    clause,
     player.id,
   );
+  await endSpells(store, [player.id]);
   await store.run(
     "INSERT INTO history(season, entity_type, entity_id, date, data) VALUES (?, ?, ?, ?, ?)",
     state.season,
@@ -576,12 +600,19 @@ async function findRival(
     player.ability + random() * 10,
   );
   const profile = JSON.parse(player.profile) as PlayerProfile;
+  const policies = await clubPolicySnapshot(store, state.date);
+  const ffp = (await settingsOf(store)).ffp !== false;
   for (const club of candidates) {
     if (rivals.some((rival) => rival.clubId === club.id)) continue;
+    const policy = policies.get(club.id);
+    if (policy?.embargo) continue;
     const moveScore = marketMoveInterest(player, profile, club, seller, state.date);
     if (moveScore < MOVE_REFUSAL_THRESHOLD) continue;
     const wage = marketWageOffer(player.wage, moveScore, await buyerGoingRate(store, player, club));
     if (wage === null) continue;
+    // FFP: a rival only bids what its squad-cost headroom can carry.
+    if (ffp && policy && signingHeadroomCost({ wage, fee: negotiation.asking_price * 0.9, years: marketContractYears(player.age) }, policy.feeCashShare) > policy.ffpHeadroom)
+      continue;
     if ((await weeklyWages(store, club.id)) + wage > club.wage_budget) continue;
     if (!(await assessRegistration(store, player, club)).allowed) continue;
     return {

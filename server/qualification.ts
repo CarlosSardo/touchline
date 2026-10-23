@@ -1,4 +1,5 @@
 import { Store } from "./db.ts";
+import { multiClubExclusions } from "./ownership.ts";
 import type { Club, Country, Standing } from "../shared/types.ts";
 import {
   CONTINENTAL,
@@ -257,6 +258,14 @@ async function accessNation(store: Store, country: Country, season: number): Pro
   };
 }
 
+/** The association's access data without the given clubs: the next eligible club inherits their places. */
+function withoutClubs(nation: AccessNation, clubs: ReadonlySet<number>): AccessNation {
+  const result: AccessNation = { ...nation, table: nation.table.filter((id) => !clubs.has(id)) };
+  for (const key of ["champion", "cupWinner", "leagueCupWinner"] as const)
+    if (result[key] !== undefined && clubs.has(result[key])) delete result[key];
+  return result;
+}
+
 /** Access data per `countryId:season`, shared by the competitions of one calendar build (inputs do not change). */
 export type AccessNationCache = Map<string, AccessNation>;
 
@@ -299,16 +308,16 @@ export async function continentalEntries(
       feederResults[item.id] = [winner, ...order.filter((id) => id !== winner)];
     }
   }
-  const resolved = resolveContinentalAccess(CONTINENTAL, {
+  // Youth League Domestic Champions Path: the ranking published a season later (N-5..N-1, not N-6..N-2).
+  const youthRanking =
+    spec.id === "uefa-youth-league"
+      ? (await associationCoefficients(store, spec.confederation, season + 1)).map((entry) => entry.code)
+      : undefined;
+  const resolve = (entrants: AccessNation[]) => resolveContinentalAccess(CONTINENTAL, {
     confederation: spec.confederation,
     ranking: associations.map((entry) => entry.code),
-    // Youth League Domestic Champions Path: the ranking published a season later (N-5..N-1, not N-6..N-2).
-    ...(spec.id === "uefa-youth-league" && {
-      rankings: {
-        [spec.id]: (await associationCoefficients(store, spec.confederation, season + 1)).map((entry) => entry.code),
-      },
-    }),
-    nations,
+    ...(youthRanking && { rankings: { [spec.id]: youthRanking } }),
+    nations: entrants,
     titleholders,
     feederResults,
     performanceSpots:
@@ -318,7 +327,19 @@ export async function continentalEntries(
             .slice(0, 2)
             .map((entry) => entry.code)
         : [],
-  }).filter((entry) => entry.competition === spec.id && !excluded.has(entry.clubId));
+  });
+  let access = resolve(nations);
+  // UEFA multi-club rule: a club under common control with a better-placed club in the same competition is replaced.
+  if (spec.confederation === "UEFA" && spec.age === "Senior" && spec.kind === "club" && !spec.feeder) {
+    const ruledOut = new Set<number>();
+    for (let pass = 0; pass < 3; pass++) {
+      const found = await multiClubExclusions(store, season, access);
+      if (!found.size) break;
+      for (const id of found) ruledOut.add(id);
+      access = resolve(nations.map((nation) => withoutClubs(nation, ruledOut)));
+    }
+  }
+  const resolved = access.filter((entry) => entry.competition === spec.id && !excluded.has(entry.clubId));
   const clubs = new Map(
     (
       await store.all<Club>(

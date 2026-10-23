@@ -1065,6 +1065,8 @@ describe("director decisions and ownership boundaries", () => {
     );
     await keenToJoin(player.id, 2);
     await store.run("UPDATE clubs SET reputation = 70 WHERE id = 2");
+    // At reputation 70 the elite payroll is far above the Premier League squad-cost ratio; the FFP gate is covered by world-market.test.
+    await store.setMeta("settings", { ...(await store.meta<Record<string, unknown>>("settings")), ffp: false });
     await store.run("UPDATE players SET position = 'GK' WHERE club_id = 2 AND position = 'CM'");
     await store.run("UPDATE players SET age_group = 'U19' WHERE id IN (SELECT id FROM players WHERE club_id = 2 AND age_group = 'Senior' ORDER BY id LIMIT 5)");
     const loanPlayer = await playerOf(store, player.id);

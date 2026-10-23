@@ -165,10 +165,10 @@ function situationImpact(player: Pick<Player, "listed" | "morale" | "contract_en
  * club level and situation as a loan does (LOAN_CAREER_WEIGHT).
  */
 export function marketMoveInterest(
-  player: Player,
-  profile: PlayerProfile,
-  buyer: Club,
-  seller: Club | undefined,
+  player: Pick<Player, "age" | "listed" | "morale" | "contract_end" | "ability" | "country_id" | "position">,
+  profile: { personality: Partial<PlayerProfile["personality"]> },
+  buyer: Pick<Club, "reputation" | "facilities" | "academy" | "country_id" | "formation" | "tactical_style">,
+  seller: Pick<Club, "reputation" | "facilities" | "academy" | "country_id"> | undefined,
   date: string,
   loan = false,
 ) {

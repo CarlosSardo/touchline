@@ -1,4 +1,4 @@
-import { Store } from "./db.ts";
+import { Store, type SqlParameter } from "./db.ts";
 import { addDays, clamp, daysBetween, round } from "../shared/rules.ts";
 import type { Club, GameState, League, Player } from "../shared/types.ts";
 
@@ -101,6 +101,19 @@ export interface FinancialAssessment {
   allowableLoss: number | null;
   lossHeadroom: number | null;
   costHeadroom: number | null;
+  /**
+   * Additional annual squad cost (GBP) before the binding rule is breached: the planning gate for new spending (from
+   * 15 June to the rollover, also within next season's projection; for a club in Europe now or a top-half top-flight
+   * club, under both the UEFA and its domestic rules, since continental places are resolved at the rollover:
+   * preseasonHeadroom).
+   */
+  ffpHeadroom: number;
+  /** Share of a transfer fee that uses headroom besides its amortisation: the cash a domestic solvency gate counts (signingHeadroomCost). */
+  feeCashShare: number;
+  /** Weekly player wage bill after loan wage splits (staff excluded). */
+  weeklyWages: number;
+  /** Projected weekly operating cash result at today's payroll (revenue less wages and running costs; fees are paid from the transfer budget); 0 once the season is closed. */
+  weeklySurplus: number;
   yearsObserved: number;
   projected: boolean;
   status: "compliant" | "monitoring" | "review";
@@ -150,6 +163,35 @@ export interface ClubRevenueEstimate {
   annualOperatingRevenue: number;
 }
 
+/**
+ * Income of lower divisions beyond the gate and the national commercial market: league central distributions and
+ * solidarity payments, sponsorship, hospitality and bar income, as a share of a season of 20 home gates. Nothing in
+ * the top two tiers (their broadcast and commercial deals are the commercial term), 15% in the third, 40% in the
+ * fourth, 60% in the fifth and 120% from the sixth, where semi-professional clubs live on community income (2023-25
+ * EFL basic award and solidarity of about £1.5-2.5M per League One/Two club; National League clubs report
+ * commercial and other income at or above their gate receipts).
+ */
+export const OTHER_INCOME_SHARE = [0, 0, 0.15, 0.4, 0.6, 1.2] as const;
+
+/** Home league matches of a club in a season: one against each other club of its league group, plus two cup or play-off ties. */
+export const seasonHomeMatches = (groupSize: number) => Math.max(0, groupSize - 1) + 2;
+
+/** Size of each club's league table group (grouped divisions share a league id), from the standings. */
+export async function leagueGroupSizes(store: Store, clubIds?: readonly number[]) {
+  return new Map(
+    (
+      await store.all<{ club_id: number; size: number }>(
+        `SELECT club_id, size FROM (
+           SELECT standings.club_id, standings.league_id, count(*) OVER (PARTITION BY standings.league_id, standings.group_name) AS size
+           FROM standings) AS groups
+         JOIN clubs ON clubs.id = groups.club_id AND clubs.league_id = groups.league_id
+         ${clubIds ? "WHERE groups.club_id = ANY(?::integer[])" : ""}`,
+        ...(clubIds ? [[...clubIds]] : []),
+      )
+    ).map((row) => [row.club_id, row.size]),
+  );
+}
+
 export function estimateClubRevenue(
   input: ClubEconomyInput,
 ): ClubRevenueEstimate {
@@ -186,12 +228,13 @@ export function estimateClubRevenue(
   );
   const annualMatchday =
     matchdayPerHomeMatch * Math.floor(clamp(homeMatches, 0, 40));
+  const other = Math.round(matchdayPerHomeMatch * 20 * OTHER_INCOME_SHARE[Math.min(tier, OTHER_INCOME_SHARE.length) - 1]);
   return {
     currency: "GBP",
-    annualCommercial,
+    annualCommercial: annualCommercial + other,
     matchdayPerHomeMatch,
     annualMatchday,
-    annualOperatingRevenue: annualCommercial + annualMatchday,
+    annualOperatingRevenue: annualCommercial + other + annualMatchday,
   };
 }
 
@@ -251,6 +294,59 @@ export function parachutePayment(
   if (countryCode !== "EN" || lastTopFlightRevenue <= 0) return 0;
   const share = [0.35, 0.28, topFlightSeasons >= 2 ? 0.12 : 0][seasonsSinceRelegation - 1] ?? 0;
   return Math.round(lastTopFlightRevenue * share);
+}
+
+/** Most of its expected revenue a club spends on backroom staff: semi-professional clubs employ them part-time (top flights spend well under 1%). */
+export const STAFF_REVENUE_SHARE = 0.15;
+/** Least of its expected revenue a board keeps for player wages, so a semi-professional club keeps a small professional core. */
+export const PLAYER_WAGE_FLOOR_SHARE = 0.45;
+
+/** Share of full-time pay a club's staff draw (1, or less where their wages exceed STAFF_REVENUE_SHARE of revenue). */
+export const partTimeStaffFactor = (staffWages: number, annualRevenue: number) =>
+  staffWages > 0 ? Math.min(1, (STAFF_REVENUE_SHARE * Math.max(0, annualRevenue)) / 52 / staffWages) : 1;
+
+/**
+ * AI clubs whose backroom staff cost more than STAFF_REVENUE_SHARE of their expected revenue put them on part-time
+ * terms (wages scaled pro rata, at least 10 a week). Set-based; returns each club's staff wages after the change.
+ */
+export async function alignPartTimeStaff(store: Store, revenues: Map<number, number>, excluded: ReadonlySet<number>) {
+  const totals = new Map(
+    (await store.all<{ club_id: number; total: number }>("SELECT club_id, sum(wage) AS total FROM staff WHERE club_id IS NOT NULL GROUP BY club_id")).map(
+      (row) => [row.club_id, row.total],
+    ),
+  );
+  const changes = [...totals].flatMap(([clubId, total]) => {
+    const revenue = revenues.get(clubId);
+    if (revenue === undefined || excluded.has(clubId)) return [];
+    const factor = partTimeStaffFactor(total, revenue);
+    return factor < 0.98 ? [{ clubId, factor }] : [];
+  });
+  if (!changes.length) return totals;
+  const updated = await store.all<{ club_id: number; total: number }>(
+    `WITH changed AS (
+       UPDATE staff AS target SET wage = GREATEST(10, round(target.wage * changes.factor))
+       FROM unnest(?::integer[], ?::double precision[]) AS changes(club_id, factor) WHERE target.club_id = changes.club_id
+       RETURNING target.club_id, target.wage)
+     SELECT club_id, sum(wage) AS total FROM changed GROUP BY club_id`,
+    changes.map((change) => change.clubId),
+    changes.map((change) => change.factor),
+  );
+  for (const row of updated) totals.set(row.club_id, row.total);
+  return totals;
+}
+
+/**
+ * The weekly wage budget a board can sustain: a full player payroll (the world market fills the budget) plus staff
+ * wages and facilities/academy upkeep within the club's spend ratio of its expected revenue. AI boards cap next
+ * season's wage budget at it, so a club paying more than it earns shrinks its payroll through sales, releases and
+ * expiring contracts. Staff count at most STAFF_REVENUE_SHARE (part-time terms, alignPartTimeStaff) and the budget never
+ * falls below PLAYER_WAGE_FLOOR_SHARE of revenue.
+ */
+export function sustainableWageBudget(input: { annualRevenue: number; spendRatio: number; staffWages: number; facilities: number; academy: number }) {
+  const weekly = Math.max(0, input.annualRevenue) / 52;
+  const upkeep = weeklyOperatingCosts({ ...input, wageShare: 0, balance: input.annualRevenue });
+  const staff = Math.min(input.staffWages, STAFF_REVENUE_SHARE * weekly);
+  return Math.round(Math.max(PLAYER_WAGE_FLOOR_SHARE * weekly, input.spendRatio * weekly - staff - upkeep.facilities - upkeep.academy));
 }
 
 /** Budget multipliers after a league move (1 when the club stayed up/down). */
@@ -485,10 +581,7 @@ export async function projectedOperatingRevenue(store: Store, club: Club) {
     "SELECT * FROM leagues WHERE id = ?",
     club.league_id,
   );
-  const size = (await store.get<{ total: number }>(
-    "SELECT count(*) AS total FROM standings WHERE league_id = ?",
-    club.league_id,
-  ))!.total;
+  const size = (await leagueGroupSizes(store, [club.id])).get(club.id) ?? 0;
   const country = await store.get<{ code: string }>(
     "SELECT code FROM countries WHERE id = ?",
     league?.country_id ?? club.country_id,
@@ -499,133 +592,123 @@ export async function projectedOperatingRevenue(store: Store, club: Club) {
     tier: league?.tier ?? 1,
     capacity: club.capacity,
     fanMood: club.fan_mood,
-    homeMatches: Math.max(0, size - 1) + 2,
+    homeMatches: seasonHomeMatches(size),
     countryCode: country?.code,
   }).annualOperatingRevenue;
 }
 
-export async function assessFinances(
-  store: Store,
-  clubId: number,
-  proposed: {
-    annualWages?: number;
-    fee?: number;
-    agentFee?: number;
-    years?: number;
-  } = {},
-): Promise<FinancialAssessment> {
-  const state = await store.meta<GameState>("state");
-  const club = (await store.get<Club>(
-    "SELECT * FROM clubs WHERE id = ?",
-    clubId,
-  ))!;
-  const country = (await store.get<{ code: string }>(
-    "SELECT code FROM countries WHERE id = ?",
-    club.country_id,
-  ))!;
-  const league = await store.get<League>(
-    "SELECT * FROM leagues WHERE id = ?",
-    club.league_id,
-  );
-  const continental = !!(await store.get(
-    "SELECT standings.club_id FROM standings JOIN leagues ON leagues.id = standings.league_id WHERE standings.club_id = ? AND leagues.kind = 'continental' AND leagues.confederation = 'UEFA' LIMIT 1",
-    clubId,
-  ));
-  const premier = country.code === "EN" && league?.tier === 1;
-  const periods = await store.all<FinancialPeriod>(
-    "SELECT * FROM financial_periods WHERE club_id = ? AND season BETWEEN ? AND ? ORDER BY season",
-    clubId,
-    state.season - 2,
-    state.season,
-  );
-  const current = periods.find((period) => period.season === state.season);
-  const elapsedWeeks = Math.max(
-    1,
-    daysBetween(`${state.season}-07-01`, state.date) / 7,
-  );
+export interface ProposedSpend {
+  annualWages?: number;
+  fee?: number;
+  agentFee?: number;
+  years?: number;
+}
+
+/** Everything the regulations read about one club, loaded for many clubs at once by assessFinancesBatch. */
+type FinanceClub = Pick<Club, "id" | "reputation" | "capacity" | "fan_mood" | "balance" | "wage_budget" | "facilities" | "academy"> & {
+  operating_wage_budget: number | null;
+};
+
+interface FinanceInputs {
+  club: FinanceClub;
+  clubCode: string;
+  revenueCode: string | undefined;
+  leagueReputation: number | null;
+  tier: number | null;
+  leagueSize: number;
+  continental: boolean;
+  periods: FinancialPeriod[];
+  playerWages: number;
+  loanAdjustment: number;
+  staffWages: number;
+  amortization: number;
+}
+
+/**
+ * Share of its cash a club without a league or UEFA cost rule may commit to added annual squad cost on top of the
+ * season's projected operating result (domestic solvency: a board does not plan to run out of money). A planning gate
+ * on new spending only, never a regulatory breach.
+ */
+export const SOLVENCY_CASH_SHARE = 0.5;
+const EURO_TO_POUND = 0.86;
+
+/** The rules applied to one club's season `season` (state.season, or an earlier closed season at the year-end review). */
+function financialAssessment(
+  input: FinanceInputs,
+  state: Pick<GameState, "season" | "date">,
+  season: number,
+  proposed: ProposedSpend,
+): FinancialAssessment {
+  const { club, periods } = input;
+  const premier = input.clubCode === "EN" && input.tier === 1;
+  const current = periods.find((period) => period.season === season);
+  const elapsedWeeks = Math.max(1, daysBetween(`${state.season}-07-01`, state.date) / 7);
+  const remainingWeeks = Math.max(0, 52 - elapsedWeeks);
   const projected = !current?.closed;
   const recordedRevenue = current?.revenue ?? 0;
+  const operatingRevenue = estimateClubRevenue({
+    reputation: club.reputation,
+    leagueReputation: input.leagueReputation ?? club.reputation,
+    tier: input.tier ?? 1,
+    capacity: club.capacity,
+    fanMood: club.fan_mood,
+    homeMatches: seasonHomeMatches(input.leagueSize),
+    countryCode: input.revenueCode,
+  }).annualOperatingRevenue;
   const revenue = projected
-    ? Math.max(
-        recordedRevenue,
-        recordedRevenue +
-          ((await projectedOperatingRevenue(store, club)) *
-            Math.max(0, 52 - elapsedWeeks)) /
-            52,
-      )
+    ? Math.max(recordedRevenue, recordedRevenue + (operatingRevenue * remainingWeeks) / 52)
     : recordedRevenue;
-  const playerWages = (await store.get<{ total: number }>(
-    "SELECT coalesce(sum(wage),0) AS total FROM players WHERE (club_id = ? AND parent_club_id IS NULL) OR parent_club_id = ?",
-    clubId,
-    clubId,
-  ))!.total;
-  const loanAdjustment = (await store.get<{ total: number }>(
-    `SELECT coalesce(sum(CASE WHEN loans.destination_id = ? THEN 1 ELSE -1 END * players.wage * (
-       jsonb_path_query_first(loans.terms::jsonb, '$.salarySplit ? (@.type() == "number")') #>> '{}')::double precision / 100), 0) AS total
-     FROM loans JOIN players ON players.id = loans.player_id
-     WHERE loans.status = 'active' AND (loans.parent_id = ? OR loans.destination_id = ?)`,
-    clubId,
-    clubId,
-    clubId,
-  ))!.total;
-  const staffWages = (await store.get<{ total: number }>(
-    "SELECT coalesce(sum(wage),0) AS total FROM staff WHERE club_id = ?",
-    clubId,
-  ))!.total;
-  const wages = projected
-    ? (current?.wages ?? 0) +
-      (playerWages + loanAdjustment + staffWages) *
-        Math.max(0, 52 - elapsedWeeks)
-    : current.wages;
-  const amortization = await annualAmortization(store, clubId, state.date);
-  const newAmortization =
-    (proposed.fee ?? 0) / Math.min(5, Math.max(1, proposed.years ?? 4));
+  const weeklyWages = input.playerWages + input.loanAdjustment + input.staffWages;
+  const wages = projected ? (current?.wages ?? 0) + weeklyWages * remainingWeeks : current.wages;
+  const newAmortization = (proposed.fee ?? 0) / Math.min(5, Math.max(1, proposed.years ?? 4));
+  const proposedCost = (proposed.annualWages ?? 0) + newAmortization + (proposed.agentFee ?? 0);
   const squadCost =
     wages +
     (current?.amortization ?? 0) +
-    (projected ? (amortization * Math.max(0, 52 - elapsedWeeks)) / 52 : 0) +
+    (projected ? (input.amortization * remainingWeeks) / 52 : 0) +
     (current?.agent_fees ?? 0) +
-    (proposed.annualWages ?? 0) +
-    newAmortization +
-    (proposed.agentFee ?? 0);
-  const saleProfit =
-    periods.reduce((total, period) => total + period.sale_profit, 0) / 3;
+    proposedCost;
+  const saleProfit = periods.reduce((total, period) => total + period.sale_profit, 0) / 3;
   const footballRevenue = Math.max(1, revenue + saleProfit);
   const ratio = squadCost / footballRevenue;
-  const earnings = periods.reduce(
-    (total, period) =>
-      total +
-      period.revenue +
-      period.sale_profit -
-      period.wages -
-      period.operating -
-      period.amortization -
-      period.agent_fees,
-    0,
-  );
+  const earningsOf = (period: FinancialPeriod) =>
+    period.revenue + period.sale_profit - period.wages - period.operating - period.amortization - period.agent_fees;
+  const earnings = periods.reduce((total, period) => total + earningsOf(period), 0);
   const equity = periods.reduce((total, period) => total + period.equity, 0);
-  const euroToPound = 0.86;
-  const allowableLoss = continental
-    ? (5_000_000 + Math.min(55_000_000, equity / euroToPound)) * euroToPound
-    : null;
-  const squadCostLimit = continental
-    ? 0.7
-    : premier && state.season >= 2026
-      ? 0.85
-      : null;
+  const allowableLoss = input.continental ? (5_000_000 + Math.min(55_000_000, equity / EURO_TO_POUND)) * EURO_TO_POUND : null;
+  const squadCostLimit = input.continental ? 0.7 : premier && state.season >= 2026 ? 0.85 : null;
   const issues: string[] = [];
   if (squadCostLimit !== null && ratio > squadCostLimit)
-    issues.push(
-      `Squad costs are ${round(ratio * 100)}% of football revenue against a ${squadCostLimit * 100}% limit.`,
-    );
+    issues.push(`Squad costs are ${round(ratio * 100)}% of football revenue against a ${squadCostLimit * 100}% limit.`);
   if (allowableLoss !== null && earnings < -allowableLoss)
-    issues.push(
-      "Recorded football earnings exceed the equity-supported acceptable deviation.",
-    );
-  if (club.balance < 0)
-    issues.push("Negative cash balance requires a funding or recovery plan.");
+    issues.push("Recorded football earnings exceed the equity-supported acceptable deviation.");
+  if (club.balance < 0) issues.push("Negative cash balance requires a funding or recovery plan.");
+  const costHeadroom = squadCostLimit === null ? null : footballRevenue * squadCostLimit - squadCost;
+  // The board's planning view: the rest of this season's result projected from the weekly accounts.
+  let remainingResult = 0;
+  let weeklySurplus = 0;
+  if (projected) {
+    const reference = club.operating_wage_budget ?? club.wage_budget;
+    const operating = weeklyOperatingCosts({
+      annualRevenue: operatingRevenue,
+      wageShare: (0.88 * reference * 52) / Math.max(1, operatingRevenue),
+      spendRatio: spendRatio(club.id, input.tier ?? 1),
+      facilities: club.facilities,
+      academy: club.academy,
+      balance: club.balance,
+      staffWages: input.staffWages,
+    });
+    weeklySurplus = operatingRevenue / 52 - weeklyWages - operating.facilities - operating.operations;
+    remainingResult = remainingWeeks * weeklySurplus - (input.amortization * remainingWeeks) / 52;
+  }
+  const lossGate = allowableLoss === null ? null : allowableLoss + earnings + remainingResult - proposedCost;
+  const gates = [
+    costHeadroom,
+    lossGate,
+    squadCostLimit === null ? Math.max(0, club.balance - (proposed.fee ?? 0)) * SOLVENCY_CASH_SHARE + remainingResult - proposedCost : null,
+  ].filter((value): value is number => value !== null);
   return {
-    policy: continental
+    policy: input.continental
       ? "UEFA financial sustainability"
       : premier && state.season >= 2026
         ? "Premier League SCR 2026/27"
@@ -638,24 +721,243 @@ export async function assessFinances(
     rollingEarnings: earnings,
     allowableLoss,
     lossHeadroom: allowableLoss === null ? null : allowableLoss + earnings,
-    costHeadroom:
-      squadCostLimit === null
-        ? null
-        : footballRevenue * squadCostLimit - squadCost,
+    costHeadroom,
+    ffpHeadroom: Math.round(Math.min(...gates)),
+    feeCashShare: squadCostLimit === null ? SOLVENCY_CASH_SHARE : 0,
+    weeklyWages: input.playerWages + input.loanAdjustment,
+    weeklySurplus: Math.round(weeklySurplus),
     yearsObserved: periods.length,
     projected,
     status: issues.length ? (projected ? "monitoring" : "review") : "compliant",
     issues,
     periods,
-    annualAmortization: amortization + newAmortization,
+    annualAmortization: input.amortization + newAmortization,
     levyApplies: premier && state.season >= 2027,
-    source: continental
+    source: input.continental
       ? "UEFA Club Licensing and Financial Sustainability Regulations; fixed game FX EUR 1 = GBP 0.86"
       : premier
         ? "Premier League Handbook 2026/27, Appendix 2, A.1.6, A.1.9 and transitional application"
         : "Local solvency and agreed club budgets; no unverified national FFP threshold",
   };
 }
+
+/**
+ * The financial regulations of many clubs (all non-national clubs by default) with one query per input, for the
+ * daily club policy snapshot and the year-end review. `season` defaults to the current season; an earlier, closed
+ * season is assessed on its recorded accounts.
+ */
+export async function assessFinancesBatch(
+  store: Store,
+  options: {
+    clubIds?: readonly number[];
+    season?: number;
+    proposed?: ProposedSpend;
+    /** Weekly player wages by owning club (coalesce(parent_club_id, club_id)) when the caller has them already. */
+    playerWages?: ReadonlyMap<number, number>;
+  } = {},
+) {
+  const state = await store.meta<GameState>("state");
+  const season = options.season ?? state.season;
+  const ids = options.clubIds ? [...options.clubIds] : null;
+  const filter = (column: string) => (ids ? `AND ${column} = ANY(?::integer[])` : "");
+  const bind = ids ? [ids] : [];
+  const clubs = await store.all<FinanceClub & { club_code: string; revenue_code: string | null; league_reputation: number | null; tier: number | null }>(
+    `SELECT clubs.id, clubs.reputation, clubs.capacity, clubs.fan_mood, clubs.balance, clubs.wage_budget, clubs.facilities, clubs.academy,
+       (clubs.data::jsonb ->> 'operatingWageBudget')::double precision AS operating_wage_budget, own.code AS club_code, home.code AS revenue_code, leagues.reputation AS league_reputation, leagues.tier
+     FROM clubs JOIN countries AS own ON own.id = clubs.country_id
+     LEFT JOIN leagues ON leagues.id = clubs.league_id
+     LEFT JOIN countries AS home ON home.id = coalesce(leagues.country_id, clubs.country_id)
+     WHERE clubs.type != 'national' ${filter("clubs.id")} ORDER BY clubs.id`,
+    ...bind,
+  );
+  const clubIds = clubs.map((club) => club.id);
+  const groupSizes = await leagueGroupSizes(store, ids ?? undefined);
+  const totals = async (sql: string, ...parameters: SqlParameter[]) =>
+    new Map((await store.all<{ club_id: number; total: number }>(sql, ...parameters)).map((row) => [row.club_id, row.total]));
+  const continental = new Set(
+    (
+      await store.all<{ club_id: number }>(
+        `SELECT DISTINCT standings.club_id FROM standings JOIN leagues ON leagues.id = standings.league_id
+         WHERE leagues.kind = 'continental' AND leagues.confederation = 'UEFA' ${filter("standings.club_id")}`,
+        ...bind,
+      )
+    ).map((row) => row.club_id),
+  );
+  const periods = new Map<number, FinancialPeriod[]>();
+  for (const period of await store.all<FinancialPeriod>(
+    `SELECT * FROM financial_periods WHERE season BETWEEN ? AND ? ${filter("club_id")} ORDER BY club_id, season`,
+    season - 2,
+    season,
+    ...bind,
+  ))
+    periods.set(period.club_id, [...(periods.get(period.club_id) ?? []), period]);
+  // A loaned-out player's full wage stays with the parent; the loan split moves the borrower's share (below).
+  const playerWages = options.playerWages ?? await totals(
+    `SELECT coalesce(parent_club_id, club_id) AS club_id, coalesce(sum(wage),0) AS total FROM players
+     WHERE ${ids ? "(club_id = ANY(?::integer[]) AND parent_club_id IS NULL) OR parent_club_id = ANY(?::integer[])" : "club_id IS NOT NULL"}
+     GROUP BY coalesce(parent_club_id, club_id)`,
+    ...(ids ? [ids, ids] : []),
+  );
+  const loanAdjustment = await totals(
+    `SELECT club_id, sum(amount) AS total FROM (
+       SELECT CASE WHEN side.borrower THEN loans.destination_id ELSE loans.parent_id END AS club_id,
+         CASE WHEN side.borrower THEN 1 ELSE -1 END * players.wage *
+           (jsonb_path_query_first(loans.terms::jsonb, '$.salarySplit ? (@.type() == "number")') #>> '{}')::double precision / 100 AS amount
+       FROM loans JOIN players ON players.id = loans.player_id CROSS JOIN (VALUES (true), (false)) AS side(borrower)
+       WHERE loans.status = 'active') AS shares
+     WHERE amount IS NOT NULL ${filter("club_id")} GROUP BY club_id`,
+    ...bind,
+  );
+  const staffWages = await totals(
+    `SELECT club_id, coalesce(sum(wage),0) AS total FROM staff WHERE club_id IS NOT NULL ${filter("club_id")} GROUP BY club_id`,
+    ...bind,
+  );
+  const amortization = await annualAmortizations(store, clubIds, state.date);
+  // From the summer window's opening to the rollover, deals also count against next season (preseasonHeadroom).
+  const preseason = season === state.season && state.date >= `${season + 1}-06-15`;
+  const moves = preseason ? await (await import("./calendar.ts")).plannedLeagueMoves(store, season) : null;
+  const destinations = new Map(
+    moves
+      ? (
+          await store.all<{ id: number; tier: number; reputation: number }>(
+            "SELECT id, tier, reputation FROM leagues WHERE id = ANY(?::integer[])",
+            [...new Set([...moves.values()].map((move) => move.leagueId))],
+          )
+        ).map((league) => [league.id, league])
+      : [],
+  );
+  const ownerPayments = preseason ? await (await import("./ownership.ts")).rolloverOwnerPayments(store, season, clubIds) : null;
+  const relegated = moves ? [...moves].filter(([, move]) => move.movement === "relegated").map(([id]) => id) : [];
+  const clauseSavings = relegated.length ? await (await import("./contract-clauses.ts")).relegationWageSavings(store, relegated) : null;
+  const expiring = preseason
+    ? await totals(
+        `SELECT coalesce(parent_club_id, club_id) AS club_id, sum(wage) AS total FROM players
+         WHERE club_id IS NOT NULL AND role <> 'Retired' AND contract_end < ? ${filter("coalesce(parent_club_id, club_id)")} GROUP BY 1`,
+        `${season + 1}-07-01`,
+        ...bind,
+      )
+    : null;
+  // Top-half top-flight clubs may win a continental place at the rollover (table and cup places).
+  const contenders = preseason
+    ? new Set(
+        (
+          await store.all<{ club_id: number }>(
+            `SELECT club_id FROM (
+               SELECT standings.club_id, rank() OVER (PARTITION BY standings.league_id, standings.group_name
+                 ORDER BY standings.points DESC, standings.gf - standings.ga DESC) AS position,
+                 count(*) OVER (PARTITION BY standings.league_id, standings.group_name) AS size
+               FROM standings JOIN leagues ON leagues.id = standings.league_id
+               WHERE leagues.kind = 'league' AND leagues.age_group = 'Senior' AND leagues.tier = 1) AS tables
+             WHERE 2 * position <= size + 1 ${filter("club_id")}`,
+            ...bind,
+          )
+        ).map((row) => row.club_id),
+      )
+    : null;
+  return new Map(
+    clubs.map((club) => {
+      const input: FinanceInputs = {
+        club,
+        clubCode: club.club_code,
+        revenueCode: club.revenue_code ?? undefined,
+        leagueReputation: club.league_reputation,
+        tier: club.tier,
+        leagueSize: groupSizes.get(club.id) ?? 0,
+        continental: continental.has(club.id),
+        periods: periods.get(club.id) ?? [],
+        playerWages: playerWages.get(club.id) ?? 0,
+        loanAdjustment: loanAdjustment.get(club.id) ?? 0,
+        staffWages: staffWages.get(club.id) ?? 0,
+        amortization: amortization.get(club.id) ?? 0,
+      };
+      const closing = financialAssessment(input, state, season, options.proposed ?? {});
+      if (!moves) return [club.id, closing];
+      const move = moves.get(club.id);
+      const league = move && destinations.get(move.leagueId);
+      const next = nextSeasonInputs(input, season, {
+        move: move && league ? { movement: move.movement, tier: league.tier, reputation: league.reputation } : undefined,
+        ownerPayments: ownerPayments?.get(club.id) ?? 0,
+        expiringWages: expiring?.get(club.id) ?? 0,
+        clauseSavings: clauseSavings?.get(club.id) ?? 0,
+      });
+      // Continental places are resolved at the rollover: a club in Europe now may drop out and a top-half top-flight
+      // club staying up may qualify, so either set of rules may apply to them next season.
+      const uncertain = next.continental || (next.tier === 1 && Boolean(contenders?.has(club.id)));
+      const projection = (uncertain ? [next, { ...next, continental: !next.continental }] : [next])
+        .map((inputs) => financialAssessment(inputs, { season: season + 1, date: `${season + 1}-07-01` }, season + 1, options.proposed ?? {}))
+        .reduce((strictest, candidate) => (candidate.ffpHeadroom < strictest.ffpHeadroom ? candidate : strictest));
+      return [club.id, projection.ffpHeadroom < closing.ffpHeadroom ? { ...closing, ffpHeadroom: projection.ffpHeadroom, feeCashShare: projection.feeCashShare } : closing];
+    }),
+  );
+}
+
+/** Share of next season's wage budget an AI club fills with running contracts and renewals (youth.ts uses the same). */
+export const RENEWAL_BUDGET_SHARE = 0.95;
+
+/**
+ * Between the summer window's opening (15 June) and the rollover a deal runs into next season at once: the closing
+ * season's accounts alone would let a club sign what next season cannot carry, and the rollover would find it over its
+ * limit. The planning gate (assessFinancesBatch) is then the stricter of the closing season and next season from its
+ * first day, as the rollover will set it up: the league the club moves to (tier, reputation and rules; with or without a
+ * continental place, which the rollover resolves), the club's
+ * reputation and fan mood after the move (seasonRollover), the operating plan on next season's budget
+ * (MOVEMENT_BUDGET_FACTOR, as resetSeasonBudgets sets it), the cash after the owners' interest and dividends, the
+ * payroll of the contracts running on (after relegation clauses) plus the expiring ones the club can renew within that
+ * budget (as the rollover's renewals do, youth.ts aiRenewalTerms), amortisation for the full year and the rolling periods without the oldest.
+ */
+function nextSeasonInputs(
+  input: FinanceInputs,
+  season: number,
+  next: {
+    move?: { movement: "promoted" | "relegated"; tier: number; reputation: number };
+    ownerPayments: number;
+    expiringWages: number;
+    /** Weekly wages relegation clauses cut (contract-clauses.ts). */
+    clauseSavings: number;
+  },
+): FinanceInputs {
+  const { move } = next;
+  const step = move ? (move.movement === "promoted" ? 1 : -1) : 0;
+  const factor = MOVEMENT_BUDGET_FACTOR[move?.movement ?? "none"];
+  const running = input.playerWages - next.expiringWages - next.clauseSavings;
+  const renewed = Math.min(next.expiringWages, Math.max(0, input.club.wage_budget * factor * RENEWAL_BUDGET_SHARE - running));
+  return {
+    ...input,
+    playerWages: running + renewed,
+    club: {
+      ...input.club,
+      reputation: clamp(input.club.reputation + 4 * step, 1, 99),
+      fan_mood: clamp(input.club.fan_mood + 15 * step, 1, 99),
+      balance: input.club.balance - next.ownerPayments,
+      operating_wage_budget: (input.club.operating_wage_budget ?? input.club.wage_budget) * factor,
+    },
+    ...(move ? { tier: move.tier, leagueReputation: move.reputation } : {}),
+    periods: input.periods.filter((period) => period.season > season - 2),
+  };
+}
+
+export async function assessFinances(store: Store, clubId: number, proposed: ProposedSpend = {}): Promise<FinancialAssessment> {
+  const assessment = (await assessFinancesBatch(store, { clubIds: [clubId], proposed })).get(clubId);
+  if (!assessment) throw new Error(`Club ${clubId} has no financial assessment.`);
+  return assessment;
+}
+
+/**
+ * The fee a regulator recognises for a deal between related parties (clubs of the same owner group): the agreed fee
+ * when it is within 15% of the player's market value, otherwise the market value. The difference is excluded from
+ * football earnings.
+ */
+export function fairValueForFfp(fee: number, value: number) {
+  return Math.abs(fee - value) <= value * 0.15 ? fee : Math.round(value);
+}
+
+/** Annual squad cost a signing adds under the rules: wages, amortisation of the fee over the contract (max 5 years), agent fee. */
+export const annualSigningCost = (input: { wage: number; fee: number; years: number; agentFee?: number }) =>
+  input.wage * 52 + input.fee / Math.min(5, Math.max(1, input.years)) + (input.agentFee ?? 0);
+
+/** FFP headroom a signing uses: its annual squad cost plus the fee's cash where a solvency gate binds (FinancialAssessment.feeCashShare). */
+export const signingHeadroomCost = (input: { wage: number; fee: number; years: number; agentFee?: number }, feeCashShare: number) =>
+  annualSigningCost(input) + feeCashShare * input.fee;
 
 export async function postWeeklyAccounts(
   store: Store,

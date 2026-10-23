@@ -9,7 +9,6 @@ import {
   ChevronLeft,
   ChevronRight,
   GraduationCap,
-  HeartHandshake,
   ScanLine,
   Undo2,
   UserX,
@@ -30,7 +29,8 @@ import {
 } from "recharts";
 import { useCurrency, useGame, useResource } from "./game-context.tsx";
 import InterestSummary from "./InterestSummary.tsx";
-import PlayerHistory from "./PlayerHistory.tsx";
+import PlayerCareer from "./PlayerHistory.tsx";
+import PlayerMedical from "./PlayerMedical.tsx";
 import { PlayerCapsBlock } from "./NationalTeam.tsx";
 import { clearOrigin, peekOrigin } from "./sheet-trail.ts";
 import {
@@ -46,6 +46,9 @@ import {
 } from "./callups.ts";
 import { CALL_UP_RULES, type CallUpDesk } from "../shared/features/callups.ts";
 import { seasonText } from "./format.ts";
+import { milestoneText } from "./player-history.ts";
+import { relegationClauseText } from "../shared/contract-clauses.ts";
+import { playerCapsPath } from "./internationals.ts";
 import { EligibilityBadge } from "./EligibilityBadge.tsx";
 import GbeBreakdown from "./GbeBreakdown.tsx";
 import {
@@ -72,7 +75,13 @@ import {
   label,
   transferWindow,
 } from "../shared/rules.ts";
-import type { PlayerCareer, PlayerDetail, StaffDesk } from "../shared/api.ts";
+import type { PlayerCaps } from "../shared/features/youth-internationals.ts";
+import type {
+  PlayerCareer as PlayerCareerData,
+  PlayerDetail,
+  PlayerHistory,
+  StaffDesk,
+} from "../shared/api.ts";
 import { blocking, type RegistrationStatus } from "../shared/eligibility.ts";
 import {
   bodyLabel,
@@ -111,7 +120,7 @@ function CareerMatches({ playerId }: { playerId: number }) {
   const params = new URLSearchParams({ page: String(page) });
   if (season) params.set("season", season);
   if (competition) params.set("competition", competition);
-  const { data, error, loading } = useResource<PlayerCareer>(
+  const { data, error, loading } = useResource<PlayerCareerData>(
     `players/${playerId}/career?${params}`,
   );
   if (error) return <ErrorState message={error} />;
@@ -120,8 +129,8 @@ function CareerMatches({ playerId }: { playerId: number }) {
     return (
       <Empty
         icon={CalendarDays}
-        title="No detailed matches recorded"
-        detail="Only matches played with the full match engine are listed here. Fast-simulated matches count towards the season totals in the History tab."
+        title="No matches recorded"
+        detail="Every match of the current season and your club's matches of earlier seasons are listed here. Season statistics count every competitive match of every season."
       />
     );
   const summary = data.seasons.find(
@@ -192,8 +201,8 @@ function CareerMatches({ playerId }: { playerId: number }) {
         </span>
       </div>
       <p className="muted career-coverage-note">
-        Full-engine matches only. Fast-simulated matches are not listed; their appearances and minutes appear in the
-        History tab.
+        Every match of the current season and your club's matches of earlier seasons; full match detail for your
+        club's matches. Season statistics count every competitive match of every season.
       </p>
       <div className="career-team-links">
         {data.teams.map((team) => (
@@ -435,12 +444,11 @@ export default function PlayerSheet() {
   }
   const tabs = [
     { id: "overview", label: "Overview" },
-    { id: "career", label: "Career & matches" },
-    { id: "history", label: "History" },
-    { id: "attributes", label: "Attributes" },
-    { id: "development", label: "Development" },
-    { id: "scout", label: "Scout report" },
-    { id: "contract", label: "Contract & value" },
+    { id: "career", label: "Career" },
+    { id: "development", label: "Attributes & development" },
+    { id: "scout", label: "Scouting" },
+    { id: "contract", label: "Contract & registration" },
+    { id: "medical", label: "Medical" },
   ];
   return (
     <Modal title="Player dossier" onClose={() => setPlayer(null)} wide>
@@ -530,8 +538,6 @@ export default function PlayerSheet() {
           </div>
           <Tabs items={tabs} value={tab} onChange={setTab} />
           <div className="profile-body">
-            {tab === "career" && <CareerMatches playerId={playerId} />}
-            {tab === "history" && <PlayerHistory playerId={playerId} />}
             {tab === "overview" && (
               <div className="profile-columns">
                 <div>
@@ -587,6 +593,14 @@ export default function PlayerSheet() {
                       ]}
                     />
                   </section>
+                  {!!data.profile.identity.biography?.length && (
+                    <section className="profile-section">
+                      <h3>Personal history</h3>
+                      {data.profile.identity.biography.map((entry) => (
+                        <p key={entry}>{entry}</p>
+                      ))}
+                    </section>
+                  )}
                   <section className="profile-section">
                     <h3>Career vision</h3>
                     <ul className="bullet-list">
@@ -595,10 +609,15 @@ export default function PlayerSheet() {
                       ))}
                     </ul>
                   </section>
-                  <section className="profile-section">
-                    <h3>International career</h3>
-                    <PlayerCapsBlock playerId={playerId} />
-                  </section>
+                </div>
+                <div>
+                  <CurrentStatus
+                    data={data}
+                    activeCallUp={activeCallUp}
+                    today={today}
+                    onOpen={setTab}
+                  />
+                  <KeyNumbers playerId={playerId} />
                   {own && (
                     <section className="profile-section">
                       <h3>Squad assignment</h3>
@@ -755,24 +774,19 @@ export default function PlayerSheet() {
                       )}
                     </section>
                   )}
-                  {!!data.profile.identity.biography?.length && (
-                    <section className="profile-section">
-                      <h3>Personal history</h3>
-                      {data.profile.identity.biography.map((entry) => (
-                        <p key={entry}>{entry}</p>
-                      ))}
-                    </section>
-                  )}
-                  <section className="profile-section">
-                    <h3>Player traits</h3>
-                    <div className="trait-list">
-                      {data.profile.traits.map((trait) => (
-                        <span key={trait}>{trait}</span>
-                      ))}
-                    </div>
-                  </section>
                 </div>
-                <div>
+              </div>
+            )}
+            {tab === "career" && (
+              <PlayerCareer
+                playerId={playerId}
+                matches={<CareerMatches playerId={playerId} />}
+                international={<PlayerCapsBlock playerId={playerId} />}
+              />
+            )}
+            {tab === "development" && (
+              <>
+                <div className="profile-columns">
                   <section className="profile-section">
                     <h3>Player profile</h3>
                     <div className="chart-box">
@@ -818,55 +832,14 @@ export default function PlayerSheet() {
                     </div>
                   </section>
                   <section className="profile-section">
-                    <h3>Wellbeing</h3>
-                    {Object.entries(data.profile.mentalHealth).map(
-                      ([key, value]) => (
-                        <div className="attribute-row" key={key}>
-                          <span className="attribute-label">{label(key)}</span>
-                          <Meter
-                            value={value}
-                            tone={
-                              ["anxiety", "burnout"].includes(key)
-                                ? value > 60
-                                  ? "red"
-                                  : "amber"
-                                : "green"
-                            }
-                          />
-                          <strong>{Math.round(value)}</strong>
-                        </div>
-                      ),
-                    )}
-                    <div className="attribute-row">
-                      <span className="attribute-label">Fitness</span>
-                      <Meter value={data.player.fitness} />
-                      <strong>{Math.round(data.player.fitness)}</strong>
+                    <h3>Player traits</h3>
+                    <div className="trait-list">
+                      {data.profile.traits.map((trait) => (
+                        <span key={trait}>{trait}</span>
+                      ))}
                     </div>
-                    <div className="attribute-row">
-                      <span className="attribute-label">Morale</span>
-                      <Meter value={data.player.morale} />
-                      <strong>{Math.round(data.player.morale)}</strong>
-                    </div>
-                    {own && (
-                      <Button
-                        variant="secondary"
-                        icon={HeartHandshake}
-                        onClick={() =>
-                          void act({
-                            type: "wellbeing",
-                            playerId: data.player.id,
-                          })
-                        }
-                      >
-                        Arrange wellbeing support
-                      </Button>
-                    )}
                   </section>
                 </div>
-              </div>
-            )}
-            {tab === "attributes" && (
-              <>
                 <div className="attribute-grid">
                   {Object.entries(
                     currentAttributes(data.profile, data.player.ability),
@@ -911,10 +884,7 @@ export default function PlayerSheet() {
                     )}
                   </section>
                 </div>
-              </>
-            )}
-            {tab === "development" && (
-              <div className="profile-columns">
+                <div className="profile-columns">
                 <div>
                   <section className="profile-section">
                     <h3>Dynamic potential</h3>
@@ -1036,6 +1006,7 @@ export default function PlayerSheet() {
                     </ResponsiveContainer>
                   </div>
                 </div>
+                  <div>
                 <section className="profile-section">
                   <h3>Development influences</h3>
                   {Object.entries(data.development.factors).map(
@@ -1056,7 +1027,18 @@ export default function PlayerSheet() {
                     ),
                   )}
                 </section>
-              </div>
+                    {data.report && (
+                      <section className="profile-section">
+                        <h3>Scout's projection</h3>
+                        <p className="dossier-copy">{(JSON.parse(data.report.data) as ReportDetails).projection}</p>
+                        <small className="muted">
+                          {data.report.scout_name}, {dateLabel(data.report.date)}
+                        </small>
+                      </section>
+                    )}
+                  </div>
+                </div>
+              </>
             )}
             {tab === "scout" &&
               (data.report ? (
@@ -1120,10 +1102,6 @@ export default function PlayerSheet() {
                         </div>
                         <div>
                           <section className="profile-section">
-                            <h3>Development projection</h3>
-                            <p className="dossier-copy">{report.projection}</p>
-                          </section>
-                          <section className="profile-section">
                             <h3>Personality notes</h3>
                             <p className="dossier-copy">
                               {report.personalityNotes}
@@ -1178,6 +1156,7 @@ export default function PlayerSheet() {
                         ["Weekly wage", money(data.player.wage)],
                         ["Annual salary", money(data.player.wage * 52)],
                         ["Expires", dateLabel(data.player.contract_end)],
+                        ...contractClauses(data, money),
                         ["Role", data.player.role],
                         ["Agent", data.profile.agent.name],
                         ["Agent approach", data.profile.agent.personality],
@@ -1340,6 +1319,7 @@ export default function PlayerSheet() {
                 </section>
               </div>
             )}
+            {tab === "medical" && <PlayerMedical data={data} own={own} />}
           </div>
           <footer className="sheet-footer">
             <div className="footer-left">
@@ -1397,6 +1377,123 @@ export default function PlayerSheet() {
         </>
       )}
     </Modal>
+  );
+}
+
+/** Release clause and relegation wage cut of the player's contract, when it has them. */
+function contractClauses(data: PlayerDetail, money: (value: number) => string): [string, ReactNode][] {
+  const contract = data.profile.contract;
+  const relegation = relegationClauseText(contract);
+  return [
+    ...(contract?.releaseClause ? ([["Release clause", money(contract.releaseClause)]] as [string, ReactNode][]) : []),
+    ...(relegation ? ([["Relegation clause", relegation]] as [string, ReactNode][]) : []),
+  ];
+}
+
+/** Where he plays now, whether he can play, and his contract, at a glance; details live in their tabs. */
+function CurrentStatus({
+  data,
+  activeCallUp,
+  today,
+  onOpen,
+}: {
+  data: PlayerDetail;
+  activeCallUp: CallUpDesk["active"][number] | null;
+  today: string;
+  onOpen: (tab: string) => void;
+}) {
+  const squad = data.squadDestinations.find((entry) => entry.current);
+  const injured = !!data.player.injury_until && data.player.injury_until > today;
+  return (
+    <section className="profile-section">
+      <h3>Current status</h3>
+      <DetailList
+        items={[
+          [
+            "Club",
+            <ClubLink
+              key="club"
+              id={data.player.club_id}
+              name={clubLabel(data.player, data.profile)}
+              color={data.player.club_color}
+            />,
+          ],
+          ["Playing squad", squad?.label ?? data.player.age_group],
+          ...(activeCallUp
+            ? ([["Call-up", `From ${shortTeamLabel(activeCallUp.fromLabel)} · ${untilText(activeCallUp, today)}`]] as [
+                string,
+                ReactNode,
+              ][])
+            : []),
+          ...(data.loan
+            ? ([["Loan", `${data.loan.type} until ${dateLabel(data.loan.end_date)}`]] as [string, ReactNode][])
+            : []),
+          [
+            "Fitness",
+            <button key="fitness" type="button" className="text-link" onClick={() => onOpen("medical")}>
+              {injured ? (
+                <Badge tone="red">Injured until {dateLabel(data.player.injury_until!)}</Badge>
+              ) : (
+                <Badge tone="green">Available · fitness {Math.round(data.player.fitness)}</Badge>
+              )}
+            </button>,
+          ],
+          [
+            "Registration",
+            <button key="registration" type="button" className="text-link" onClick={() => onOpen("contract")}>
+              <EligibilityBadge eligibility={data.eligibility} />
+            </button>,
+          ],
+          ["Contract", `Until ${dateLabel(data.player.contract_end)} · ${data.player.role}`],
+          ...(data.player.listed || data.player.available_loan
+            ? ([
+                [
+                  "Market",
+                  [data.player.listed ? "Transfer listed" : null, data.player.available_loan ? "Available on loan" : null]
+                    .filter(Boolean)
+                    .join(" · "),
+                ],
+              ] as [string, ReactNode][])
+            : []),
+        ]}
+      />
+    </section>
+  );
+}
+
+/** Career numbers from the Career tab's records (competitive club and senior national-team matches). */
+function KeyNumbers({ playerId }: { playerId: number }) {
+  const { data: history } = useResource<PlayerHistory>(`players/${playerId}/history`);
+  const { data: caps } = useResource<PlayerCaps>(playerCapsPath(playerId));
+  const latest = history?.milestones.at(-1);
+  const seniorCaps = caps?.teams.filter((team) => team.ageGroup === "Senior").reduce((sum, team) => sum + team.appearances, 0);
+  return (
+    <section className="profile-section">
+      <h3>Key numbers</h3>
+      <div className="compact-stats key-numbers">
+        <div>
+          <small>Appearances</small>
+          <strong>{history ? history.career.appearances : "…"}</strong>
+        </div>
+        <div>
+          <small>Senior caps</small>
+          <strong>{seniorCaps ?? "…"}</strong>
+        </div>
+        <div>
+          <small>Trophies</small>
+          <strong>{history ? history.honours.length : "…"}</strong>
+        </div>
+        <div>
+          <small>Transfers & loans</small>
+          <strong>{history ? history.transfers.filter((move) => move.kind !== "loanReturn" && move.kind !== "loanRecall").length : "…"}</strong>
+        </div>
+      </div>
+      {latest && (
+        <p className="muted key-numbers-note">
+          Latest milestone: {milestoneText(latest)} ({latest.dateEstimated ? seasonText(latest.season) : dateLabel(latest.date)})
+        </p>
+      )}
+    </section>
   );
 }
 

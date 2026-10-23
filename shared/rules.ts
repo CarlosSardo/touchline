@@ -1341,7 +1341,7 @@ export function loanScore(factors: Record<string, number>) {
 }
 
 export function tacticalFit(
-  player: Player,
+  player: Pick<Player, "position" | "morale">,
   club: { formation: string; tactical_style: string },
 ) {
   const preferred: Record<string, string[]> = {

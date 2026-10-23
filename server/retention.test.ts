@@ -129,6 +129,18 @@ describe("season retention (SQL)", () => {
       ids.pruned,
     );
     await store.run(
+      "INSERT INTO player_honours (player_id, season, club_id, league_id, kind, title) VALUES (?, 2024, ?, NULL, 'cup', 'Probe Cup')",
+      ids.pruned, clubs[0],
+    );
+    await store.run(
+      "INSERT INTO player_injuries (player_id, club_id, start_date, end_date, kind, severity) VALUES (?, ?, '2024-09-01', '2024-09-20', 'Calf strain', 'moderate')",
+      ids.pruned, clubs[0],
+    );
+    await store.run(
+      "INSERT INTO player_milestones (player_id, date, kind, club_id) VALUES (?, '2023-08-12', 'seniorDebut', ?)",
+      ids.pruned, clubs[0],
+    );
+    await store.run(
       `INSERT INTO player_registrations (player_id, club_id, association_id, status, evaluated_on)
        SELECT ?, id, country_id, 'refused', '2025-07-01' FROM clubs WHERE id = ?`,
       ids.pruned, clubs[0],
@@ -198,7 +210,7 @@ describe("season retention (SQL)", () => {
     for (const table of ["reports", "assignments", "discipline", "player_assets", "registration_records", "player_registrations",
       "competition_registrations", "minor_applications",
       "player_season_stats", "player_match_appearances", "promises", "negotiations", "loans", "sell_on_clauses",
-      "transfer_payments", "buy_back_clauses"]) {
+      "transfer_payments", "buy_back_clauses", "player_honours", "player_injuries", "player_milestones"]) {
       const row = await store.get<{ total: number }>(
         `SELECT COUNT(*) AS total FROM ${table} WHERE player_id = ANY(?::int[])`,
         pruned,

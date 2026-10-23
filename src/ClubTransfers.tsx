@@ -3,8 +3,8 @@ import { ArrowLeftRight, ChevronLeft, ChevronRight, FileText } from "lucide-reac
 import { useCurrency, useResource } from "./game-context.tsx";
 import { Badge, ClubLink, Empty, ErrorState, IconButton, Loading, PlayerLink, SortHeader } from "./ui.tsx";
 import { dateLabel } from "../shared/rules.ts";
-import type { ClubTransfer, ClubTransfers as ClubTransfersData, ClubTransferTotals, PlayerMoveKind } from "../shared/api.ts";
-import { callUpSummary, collapseCallUps, type CallUpFlags, type Collapsed } from "./callups.ts";
+import type { ClubTransfers as ClubTransfersData, ClubTransferTotals, PlayerMoveKind } from "../shared/api.ts";
+import SquadMoveTable from "./SquadMoves.tsx";
 import { ageValue, dateValue, positionRank, type SortColumn } from "./sort.ts";
 import { useSortableRows } from "./useSortableRows.ts";
 import { MOVE_KIND_LABELS, seasonLabel } from "./player-history.ts";
@@ -60,7 +60,7 @@ function TotalsStrip({ totals, label }: { totals: ClubTransferTotals; label: str
       </div>
       <div>
         <dt>In / Out</dt>
-        <dd title="All recorded moves, including loan returns and moves between the club's own teams">
+        <dd title="Signings, sales, free transfers, loans and loan purchases with other clubs; moves between the club's own teams are listed apart">
           {totals.countIn} / {totals.countOut}
         </dd>
       </div>
@@ -110,17 +110,7 @@ function TransferTable({ section, showTitle }: { section: TransferSection; showT
             <tbody>
               {sorting.rows.map((row) => {
                 const fee = transferFee(row);
-                const callUp = row as TransferRow & Collapsed<CallUpFlags>;
-                const detail = callUp.callUp
-                  ? callUpSummary({
-                      toLabel: row.dealType,
-                      fromGroup: null,
-                      toGroup: null,
-                      start: row.date,
-                      returnedOn: callUp.returnedOn,
-                      until: callUp.until,
-                    })
-                  : transferDetail(row, dateLabel);
+                const detail = transferDetail(row, dateLabel);
                 const clauses = transferClauses(row.terms, money);
                 const badges = clauseBadges(row.terms);
                 return (
@@ -156,7 +146,7 @@ function TransferTable({ section, showTitle }: { section: TransferSection; showT
                       )}
                     </td>
                     <td>
-                      {callUp.callUp ? "Call-up" : MOVE_KIND_LABELS[row.kind]}
+                      {MOVE_KIND_LABELS[row.kind]}
                       {detail && <small className="appearance-status">{detail}</small>}
                     </td>
                     <td className="club-transfer-number">
@@ -202,7 +192,7 @@ export default function ClubTransfers({ clubId }: { clubId: number }) {
   if (!data) return <Loading label="Opening transfer history" />;
   const seasons = data.seasons;
   const everything = sumTotals(seasons);
-  if (!isFiltered(filter) && !data.total && !everything.countIn && !everything.countOut)
+  if (!isFiltered(filter) && !data.total && !everything.countIn && !everything.countOut && !data.squadMoves.total)
     return (
       <Empty
         icon={ArrowLeftRight}
@@ -291,10 +281,7 @@ export default function ClubTransfers({ clubId }: { clubId: number }) {
                 )}
               </span>
             </header>
-            {transferSections(
-              collapseCallUps(group.transfers as readonly (ClubTransfer & CallUpFlags)[], (row) => row.player.id),
-              direction,
-            ).map((section) => (
+            {transferSections(group.transfers, direction).map((section) => (
               <TransferTable key={section.id} section={section} showTitle={direction === "all"} />
             ))}
           </section>
@@ -319,6 +306,20 @@ export default function ClubTransfers({ clubId }: { clubId: number }) {
             />
           </span>
         </div>
+      )}
+      {data.squadMoves.total > 0 && (
+        <details className="club-squad-moves">
+          <summary>
+            Squad movements <span className="muted">{data.squadMoves.total}</span>
+            <small className="muted"> · first team, B-team and youth squads, call-ups included; not transfers</small>
+          </summary>
+          <SquadMoveTable moves={data.squadMoves.moves} label="Club squad movements" showPlayer />
+          {data.squadMoves.total > data.squadMoves.moves.length && (
+            <p className="muted club-transfer-note">
+              The latest {data.squadMoves.moves.length} of {data.squadMoves.total} squad movements are listed.
+            </p>
+          )}
+        </details>
       )}
       {data.truncated && (
         <p className="muted club-transfer-note">

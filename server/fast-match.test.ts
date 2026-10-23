@@ -149,6 +149,27 @@ describe("fast match model", () => {
     }
   });
 
+  it("credits every player who took the field with a minute, a substitute sent on in stoppage time too", () => {
+    let cameos = 0;
+    for (let index = 0; index < 3000 && cameos < 3; index++) {
+      const match = snapshot(66, 64, index);
+      match.rules!.injuryFrequency = 100;
+      const result = simulateFastMatch(match, `cameo:${index}`);
+      for (const [side, team] of [match.home, match.away].entries()) {
+        const entered = result.substitutions!.filter((change) => change.teamId === team.id);
+        for (const player of team.lineup) expect(result.players[player.id].minutes).toBeGreaterThan(0);
+        for (const player of team.bench ?? [])
+          expect(result.players[player.id].minutes > 0, `${index}`).toBe(entered.some((change) => change.onId === player.id));
+        // Sent on once the regulation clock had stopped (stoppage time of the second half).
+        cameos += entered.filter((change) => change.elapsed! - 1 >= 90 + result.stoppageTime![0]).length;
+        // Match rows and season lines take the players with minutes: they hold every goal of the side.
+        const credited = [...team.lineup, ...(team.bench ?? [])].filter((player) => result.players[player.id].minutes > 0);
+        expect(credited.reduce((sum, player) => sum + result.players[player.id].goals, 0)).toBe(side ? result.awayGoals : result.homeGoals);
+      }
+    }
+    expect(cameos).toBeGreaterThan(0);
+  });
+
   it("varies substitutions: some at half-time, not always all five, never more than the limit", () => {
     let halfTime = 0;
     let allFive = 0;
