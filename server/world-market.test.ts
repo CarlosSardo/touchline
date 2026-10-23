@@ -692,4 +692,48 @@ describe("FFP planning gate before the rollover", () => {
     await store.run("DELETE FROM history WHERE id = ?", won!.id);
     await store.setMeta("state", state);
   }, 300_000);
+
+  it("projects next season without the wage shares of loans that end by the rollover", async () => {
+    const state = await stateOf(store);
+    await store.setMeta("state", { ...state, date: `${state.season + 1}-06-20` });
+    const moves = await plannedLeagueMoves(store, state.season);
+    const [, , parent, borrower] = (
+      await store.all<{ id: number }>(
+        "SELECT clubs.id FROM clubs JOIN leagues ON leagues.id = clubs.league_id WHERE leagues.tier = 2 AND clubs.type = 'club' AND clubs.id <> ? AND clubs.parent_id IS NULL ORDER BY clubs.id",
+        state.clubId,
+      )
+    ).filter((candidate) => !moves.has(candidate.id));
+    const player = (await store.get<{ id: number }>(
+      "SELECT id FROM players WHERE club_id = ? AND parent_club_id IS NULL AND age_group = 'Senior' AND contract_end > ? ORDER BY id LIMIT 1",
+      parent.id,
+      `${state.season + 2}-07-01`,
+    ))!;
+    // A well-paid player out on loan until 30 June, the borrower paying all of his wage.
+    const assess = async () => (await assessFinancesBatch(store, { clubIds: [parent.id] })).get(parent.id)!;
+    await store.run("UPDATE clubs SET balance = 0 WHERE id = ?", parent.id);
+    const weekly = Math.round((await assess()).weeklyWages);
+    await store.run("UPDATE players SET wage = ?, club_id = ?, parent_club_id = ? WHERE id = ?", weekly, borrower.id, parent.id, player.id);
+    const loan = (await store.get<{ id: number }>(
+      `INSERT INTO loans (player_id, parent_id, destination_id, type, start_date, end_date, score, fit, relationship, terms, data)
+       VALUES (?, ?, ?, 'Standard loan', ?, ?, 50, 60, 50, ?, ?) RETURNING id`,
+      player.id,
+      parent.id,
+      borrower.id,
+      `${state.season}-08-01`,
+      `${state.season + 1}-06-30`,
+      JSON.stringify({ salarySplit: 100, playingTime: 70 }),
+      JSON.stringify({ world: true, parentRole: "Squad player", parentTraining: "Balanced", startingMinutes: 0 }),
+    ))!;
+    const during = await assess();
+    // The loan ends: he is back on the parent's payroll for next season.
+    await store.run("UPDATE loans SET status = 'completed' WHERE id = ?", loan.id);
+    await store.run("UPDATE players SET club_id = ?, parent_club_id = NULL WHERE id = ?", parent.id, player.id);
+    const after = await assess();
+    expect(after.ffpHeadroom).toBeLessThan(0);
+    // June's gate already plans for his return, so it is no more generous than the day after the loan ends
+    // (up to the closing season's last week and a half of his wages).
+    expect(during.ffpHeadroom).toBeLessThanOrEqual(after.ffpHeadroom + 2 * weekly);
+    await store.run("DELETE FROM loans WHERE id = ?", loan.id);
+    await store.setMeta("state", state);
+  }, 300_000);
 });

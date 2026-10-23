@@ -798,16 +798,20 @@ export async function assessFinancesBatch(
      GROUP BY coalesce(parent_club_id, club_id)`,
     ...(ids ? [ids, ids] : []),
   );
-  const loanAdjustment = await totals(
-    `SELECT club_id, sum(amount) AS total FROM (
-       SELECT CASE WHEN side.borrower THEN loans.destination_id ELSE loans.parent_id END AS club_id,
-         CASE WHEN side.borrower THEN 1 ELSE -1 END * players.wage *
-           (jsonb_path_query_first(loans.terms::jsonb, '$.salarySplit ? (@.type() == "number")') #>> '{}')::double precision / 100 AS amount
-       FROM loans JOIN players ON players.id = loans.player_id CROSS JOIN (VALUES (true), (false)) AS side(borrower)
-       WHERE loans.status = 'active') AS shares
-     WHERE amount IS NOT NULL ${filter("club_id")} GROUP BY club_id`,
-    ...bind,
-  );
+  // `runningAfter`: only loans still running after that date (next season's split; world loans expire on their end date).
+  const loanShares = (runningAfter?: string) =>
+    totals(
+      `SELECT club_id, sum(amount) AS total FROM (
+         SELECT CASE WHEN side.borrower THEN loans.destination_id ELSE loans.parent_id END AS club_id,
+           CASE WHEN side.borrower THEN 1 ELSE -1 END * players.wage *
+             (jsonb_path_query_first(loans.terms::jsonb, '$.salarySplit ? (@.type() == "number")') #>> '{}')::double precision / 100 AS amount
+         FROM loans JOIN players ON players.id = loans.player_id CROSS JOIN (VALUES (true), (false)) AS side(borrower)
+         WHERE loans.status = 'active' ${runningAfter ? "AND loans.end_date > ?" : ""}) AS shares
+       WHERE amount IS NOT NULL ${filter("club_id")} GROUP BY club_id`,
+      ...(runningAfter ? [runningAfter] : []),
+      ...bind,
+    );
+  const loanAdjustment = await loanShares();
   const staffWages = await totals(
     `SELECT club_id, coalesce(sum(wage),0) AS total FROM staff WHERE club_id IS NOT NULL ${filter("club_id")} GROUP BY club_id`,
     ...bind,
@@ -837,6 +841,8 @@ export async function assessFinancesBatch(
         ...bind,
       )
     : null;
+  // Loans ending by the rollover hand their wages back to the parent next season.
+  const nextLoanAdjustment = preseason ? await loanShares(`${season + 1}-07-01`) : null;
   // A continental place is won at the rollover from the top half of a top-flight table or a domestic cup (any tier).
   const contenders = preseason
     ? new Set(
@@ -887,6 +893,7 @@ export async function assessFinancesBatch(
         ownerPayments: ownerPayments?.get(club.id) ?? 0,
         expiringWages: expiring?.get(club.id) ?? 0,
         clauseSavings: clauseSavings?.get(club.id) ?? 0,
+        loanAdjustment: nextLoanAdjustment?.get(club.id) ?? 0,
       });
       // Continental places are resolved at the rollover: a club in Europe now may drop out and a contender may
       // qualify, so either set of rules may apply to them next season.
@@ -906,12 +913,13 @@ export const RENEWAL_BUDGET_SHARE = 0.95;
  * Between the summer window's opening (15 June) and the rollover a deal runs into next season at once: the closing
  * season's accounts alone would let a club sign what next season cannot carry, and the rollover would find it over its
  * limit. The planning gate (assessFinancesBatch) is then the stricter of the closing season and next season from its
- * first day, as the rollover will set it up: the league the club moves to (tier, reputation and rules; with or without a
- * continental place, which the rollover resolves), the club's
- * reputation and fan mood after the move (seasonRollover), the operating plan on next season's budget
- * (MOVEMENT_BUDGET_FACTOR, as resetSeasonBudgets sets it), the cash after the owners' interest and dividends, the
- * payroll of the contracts running on (after relegation clauses) plus the expiring ones the club can renew within that
- * budget (as the rollover's renewals do, youth.ts aiRenewalTerms), amortisation for the full year and the rolling periods without the oldest.
+ * first day, as the rollover will set it up: the league the club moves to (tier, reputation and rules; with or without
+ * a continental place, which the rollover resolves), the club's reputation and fan mood after the move
+ * (seasonRollover), the operating plan on next season's budget (MOVEMENT_BUDGET_FACTOR, as resetSeasonBudgets sets it),
+ * the cash after the owners' interest and dividends, the payroll of the contracts running on (after relegation clauses,
+ * with the wage splits of the loans still running) plus the expiring ones the club can renew within that budget (as the
+ * rollover's renewals do, youth.ts aiRenewalTerms), amortisation for the full year and the rolling periods without the
+ * oldest.
  */
 function nextSeasonInputs(
   input: FinanceInputs,
@@ -922,6 +930,8 @@ function nextSeasonInputs(
     expiringWages: number;
     /** Weekly wages relegation clauses cut (contract-clauses.ts). */
     clauseSavings: number;
+    /** Weekly loan wage splits of the loans still running next season. */
+    loanAdjustment: number;
   },
 ): FinanceInputs {
   const { move } = next;
@@ -932,6 +942,7 @@ function nextSeasonInputs(
   return {
     ...input,
     playerWages: running + renewed,
+    loanAdjustment: next.loanAdjustment,
     club: {
       ...input.club,
       reputation: clamp(input.club.reputation + 4 * step, 1, 99),
