@@ -443,6 +443,15 @@ describe("world market (EN + ES world)", () => {
       date,
     );
     await store.run("UPDATE clubs SET transfer_budget = 500000000, balance = 500000000 WHERE id = ?", borrower.id);
+    // A top club may be in Europe next season, so June options are also judged on UEFA rules: player sales keep it
+    // inside them as well as the cash keeps it solvent.
+    for (const season of [current.season - 1, current.season])
+      await store.run(
+        `INSERT INTO financial_periods (club_id, season, sale_profit) VALUES (?, ?, 3000000000)
+         ON CONFLICT (club_id, season) DO UPDATE SET sale_profit = excluded.sale_profit`,
+        borrower.id,
+        season,
+      );
     // Cash for the fee, but a wage bill next season's revenue cannot carry: the option would breach its FFP limit.
     await store.run("UPDATE clubs SET transfer_budget = 50000000, balance = 50000000 WHERE id = ?", capped.id);
     await store.run("UPDATE players SET wage = wage * 40 WHERE club_id = ?", capped.id);
@@ -648,6 +657,39 @@ describe("FFP planning gate before the rollover", () => {
     expect(preseason.feeCashShare).toBeGreaterThan(0);
     await store.run("DELETE FROM standings WHERE league_id = ?", cup.id);
     await store.run("DELETE FROM leagues WHERE id = ?", cup.id);
+    await store.setMeta("state", state);
+  }, 300_000);
+
+  it("plans a domestic cup winner's June deals under UEFA rules too, whatever its division", async () => {
+    const state = await stateOf(store);
+    await store.setMeta("state", { ...state, date: `${state.season + 1}-06-30` });
+    const moves = await plannedLeagueMoves(store, state.season);
+    const [, club] = (
+      await store.all<{ id: number }>(
+        "SELECT clubs.id FROM clubs JOIN leagues ON leagues.id = clubs.league_id WHERE leagues.tier = 2 AND clubs.type = 'club' AND clubs.id <> ? AND clubs.parent_id IS NULL ORDER BY clubs.id",
+        state.clubId,
+      )
+    ).filter((candidate) => !moves.has(candidate.id));
+    const cup = (await store.get<{ id: number }>(
+      "SELECT id FROM leagues WHERE kind = 'cup' AND age_group = 'Senior' AND country_id IS NOT NULL ORDER BY id LIMIT 1",
+    ))!;
+    // Rich enough for the domestic solvency gate, but a payroll far beyond what UEFA's squad-cost rule allows.
+    await store.run("UPDATE clubs SET balance = 1000000000 WHERE id = ?", club.id);
+    await store.run("UPDATE players SET wage = wage * 5 WHERE coalesce(parent_club_id, club_id) = ?", club.id);
+    const assess = async () => (await assessFinancesBatch(store, { clubIds: [club.id] })).get(club.id)!;
+    const without = await assess();
+    expect(without.policy).toBe("Domestic club solvency");
+    expect(without.ffpHeadroom).toBeGreaterThan(0);
+    const won = await store.get<{ id: number }>(
+      "INSERT INTO history(season, entity_type, entity_id, date, data) VALUES (?, 'champion', ?, ?, ?) RETURNING id",
+      state.season,
+      cup.id,
+      `${state.season + 1}-05-20`,
+      JSON.stringify({ clubId: club.id, name: "Cup winner", competition: "Cup" }),
+    );
+    // The cup may bring a continental place at the rollover: UEFA's limit binds before it.
+    expect((await assess()).ffpHeadroom).toBeLessThan(0);
+    await store.run("DELETE FROM history WHERE id = ?", won!.id);
     await store.setMeta("state", state);
   }, 300_000);
 });

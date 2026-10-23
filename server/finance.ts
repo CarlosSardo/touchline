@@ -103,9 +103,9 @@ export interface FinancialAssessment {
   costHeadroom: number | null;
   /**
    * Additional annual squad cost (GBP) before the binding rule is breached: the planning gate for new spending (from
-   * 15 June to the rollover, also within next season's projection; for a club in Europe now or a top-half top-flight
-   * club, under both the UEFA and its domestic rules, since continental places are resolved at the rollover:
-   * preseasonHeadroom).
+   * 15 June to the rollover, also within next season's projection; for a club in Europe now, a top-half top-flight club
+   * or a domestic cup winner, under both the UEFA and its domestic rules, since continental places are resolved at the
+   * rollover: preseasonHeadroom).
    */
   ffpHeadroom: number;
   /** Share of a transfer fee that uses headroom besides its amortisation: the cash a domestic solvency gate counts (signingHeadroomCost). */
@@ -837,7 +837,7 @@ export async function assessFinancesBatch(
         ...bind,
       )
     : null;
-  // Top-half top-flight clubs may win a continental place at the rollover (table and cup places).
+  // A continental place is won at the rollover from the top half of a top-flight table or a domestic cup (any tier).
   const contenders = preseason
     ? new Set(
         (
@@ -848,7 +848,15 @@ export async function assessFinancesBatch(
                  count(*) OVER (PARTITION BY standings.league_id, standings.group_name) AS size
                FROM standings JOIN leagues ON leagues.id = standings.league_id
                WHERE leagues.kind = 'league' AND leagues.age_group = 'Senior' AND leagues.tier = 1) AS tables
-             WHERE 2 * position <= size + 1 ${filter("club_id")}`,
+             WHERE 2 * position <= size + 1 ${filter("club_id")}
+             UNION
+             SELECT club_id FROM (
+               SELECT (history.data::jsonb ->> 'clubId')::integer AS club_id FROM history JOIN leagues ON leagues.id = history.entity_id
+               WHERE history.entity_type = 'champion' AND history.season = ? AND leagues.kind = 'cup' AND leagues.age_group = 'Senior'
+                 AND leagues.country_id IS NOT NULL) AS cups
+             WHERE true ${filter("club_id")}`,
+            ...bind,
+            season,
             ...bind,
           )
         ).map((row) => row.club_id),
@@ -880,9 +888,9 @@ export async function assessFinancesBatch(
         expiringWages: expiring?.get(club.id) ?? 0,
         clauseSavings: clauseSavings?.get(club.id) ?? 0,
       });
-      // Continental places are resolved at the rollover: a club in Europe now may drop out and a top-half top-flight
-      // club staying up may qualify, so either set of rules may apply to them next season.
-      const uncertain = next.continental || (next.tier === 1 && Boolean(contenders?.has(club.id)));
+      // Continental places are resolved at the rollover: a club in Europe now may drop out and a contender may
+      // qualify, so either set of rules may apply to them next season.
+      const uncertain = next.continental || Boolean(contenders?.has(club.id));
       const projection = (uncertain ? [next, { ...next, continental: !next.continental }] : [next])
         .map((inputs) => financialAssessment(inputs, { season: season + 1, date: `${season + 1}-07-01` }, season + 1, options.proposed ?? {}))
         .reduce((strictest, candidate) => (candidate.ffpHeadroom < strictest.ffpHeadroom ? candidate : strictest));
