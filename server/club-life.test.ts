@@ -192,7 +192,19 @@ describe("club life in a generated world", () => {
       generated.map((row) => row.id),
     );
     await store.run("DELETE FROM meta WHERE key = 'clauseSweep'");
-    expect(await sweepRelegationClauses(store, state.date)).toBe(generated.length);
+    // An older world is termed a range of player ids per day (bounded statements), resuming where it stopped.
+    const lastId = (await store.get<{ id: number }>("SELECT max(id) AS id FROM players"))!.id;
+    const idsPerDay = Math.ceil((lastId + 1) / 3);
+    let termed = 0;
+    let day = 0;
+    const sweepState = async () =>
+      JSON.parse((await store.get<{ value: string }>("SELECT value FROM meta WHERE key = 'clauseSweep'"))?.value ?? "{}") as { backfilled?: boolean };
+    for (; day < 10 && !(await sweepState()).backfilled; day++) {
+      termed += await sweepRelegationClauses(store, addDays(state.date, day - 2), idsPerDay);
+      if (day < 2) expect(await store.meta("clauseSweep")).toEqual({ cursor: (day + 1) * idsPerDay, date: addDays(state.date, day - 2) });
+    }
+    expect(day).toBe(3);
+    expect(termed).toBe(generated.length);
     expect(await store.meta("clauseSweep")).toEqual({ backfilled: true, date: state.date });
     const backfilled = await store.all<{ id: number; profile: string }>("SELECT id,profile FROM players WHERE id = ANY(?::integer[]) ORDER BY id", generated.map((row) => row.id));
     expect(backfilled.map((row) => JSON.parse(row.profile).contract)).toEqual(generated.map((row) => JSON.parse(row.profile).contract));
