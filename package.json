@@ -30,6 +30,7 @@
     "test:local": "tsx scripts/test-local.ts",
     "test:e2e": "playwright test",
     "verify": "bash scripts/verify.sh",
+    "ci": "bash scripts/ci.sh",
     "image:build": "bash scripts/build.sh",
     "pi:backup": "bash scripts/pi-backup.sh",
     "pi:restore": "bash scripts/pi-restore.sh",

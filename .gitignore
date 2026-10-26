@@ -58,3 +58,6 @@ reports/
 .squad/.cache/
 # Squad: SubSquad activation file (local to this machine)
 .squad-workstream
+
+# scripts/ci.sh (Dagger) logs and reports
+ci-logs/
