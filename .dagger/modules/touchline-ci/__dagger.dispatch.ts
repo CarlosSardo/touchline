@@ -64,7 +64,8 @@ async function invoke(
 
         case "backendReport": {
           const __parent = rebuildTouchlineCi(parentJson)
-          const __result = await __parent.backendReport()
+          const __arg_shard = args["shard"]
+          const __result = await __parent.backendReport(__arg_shard)
           return await (__result).id()
         }
 
@@ -74,9 +75,16 @@ async function invoke(
           return __result
         }
 
+        case "browserImage": {
+          const __parent = rebuildTouchlineCi(parentJson)
+          const __result = await __parent.browserImage()
+          return await (__result).id()
+        }
+
         case "browserReport": {
           const __parent = rebuildTouchlineCi(parentJson)
-          const __result = await __parent.browserReport()
+          const __arg_shard = args["shard"]
+          const __result = await __parent.browserReport(__arg_shard)
           return await (__result).id()
         }
 
@@ -130,7 +138,8 @@ async function invoke(
           const __arg_suite = args["suite"] === undefined || args["suite"] === null ? args["suite"] : args["suite"]
           const __arg_seasons = args["seasons"]
           const __arg_fullWorld = args["fullWorld"]
-          const __result = await __parent.report(__arg_suite, __arg_seasons, __arg_fullWorld)
+          const __arg_shard = args["shard"]
+          const __result = await __parent.report(__arg_suite, __arg_seasons, __arg_fullWorld, __arg_shard)
           return await (__result).id()
         }
 
@@ -143,6 +152,19 @@ async function invoke(
         case "staticReport": {
           const __parent = rebuildTouchlineCi(parentJson)
           const __result = await __parent.staticReport()
+          return await (__result).id()
+        }
+
+        case "testPlan": {
+          const __parent = rebuildTouchlineCi(parentJson)
+          const __result = await __parent.testPlan()
+          return __result
+        }
+
+        case "updatedTimings": {
+          const __parent = rebuildTouchlineCi(parentJson)
+          const __arg_reports = args["reports"] === undefined || args["reports"] === null ? args["reports"] : __loadCoreObject(args["reports"], "Directory")
+          const __result = await __parent.updatedTimings(__arg_reports)
           return await (__result).id()
         }
 
