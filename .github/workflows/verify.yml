@@ -1,9 +1,14 @@
 name: Verify
 
-# Full verification against throwaway PostgreSQL 18 containers. No push trigger and no secrets.
-# Each job runs scripts/ci.sh, the same Dagger pipeline (.dagger/modules/touchline-ci) developers run locally
-# with `npm run ci`, on a local Dagger engine in the runner's Docker. No Dagger Cloud.
+# CI: full verification against throwaway PostgreSQL 18 containers, without secrets, on every pull request
+# and every push to main. Each job runs scripts/ci.sh, the same Dagger pipeline (.dagger/modules/touchline-ci)
+# developers run locally with `npm run ci`, on a local Dagger engine in the runner's Docker. No Dagger Cloud.
+# A push whose exact git tree is the one every job tested and passed on its pull request (the PR's test merge,
+# whose tree that run's Plan job records in its log) reuses that result instead of running again.
+# A successful push run starts CD (cd.yml): image + deploy.
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       suites:
@@ -45,6 +50,10 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
     outputs:
       static: ${{ steps.plan.outputs.static }}
       backend: ${{ steps.plan.outputs.backend }}
@@ -53,13 +62,45 @@ jobs:
       seasons: ${{ steps.plan.outputs.seasons }}
       full_world: ${{ steps.plan.outputs.full_world }}
     steps:
+      - name: Check out source
+        if: github.event_name != 'workflow_dispatch'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Record the tree under test
+        if: github.event_name == 'pull_request'
+        # Every job of this run checks out GITHUB_SHA, the PR's test merge commit (not the PR head). This log line
+        # records the tree they all test; a later push of exactly that tree reuses the run (scripts/ci/verified.sh).
+        run: |
+          head=$(git rev-parse HEAD)
+          if [[ "$head" != "$GITHUB_SHA" ]]; then echo "::error::Checked out ${head}, expected ${GITHUB_SHA}."; exit 1; fi
+          marker="touchline-tested-tree=$(git rev-parse 'HEAD^{tree}') commit=${GITHUB_SHA}"
+          printf '%s\n' "$marker"
+          echo "Tested tree: <code>${marker}</code>" >> "$GITHUB_STEP_SUMMARY"
+      - name: Reuse the pull request's verification of this exact tree
+        id: reuse
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # Any API failure means "not verified": the suites then run in full.
+        run: |
+          verified=$(scripts/ci/verified.sh "$GITHUB_SHA") || true
+          if [[ "$verified" != true ]]; then verified=false; fi
+          echo "verified=${verified}" >> "$GITHUB_OUTPUT"
       - name: Validate inputs
         id: plan
         env:
+          REUSED: ${{ steps.reuse.outputs.verified == 'true' }}
           SUITES: ${{ inputs.suites }}
           SEASONS: ${{ inputs.seasons }}
           FULL_WORLD: ${{ inputs.full_world == true }}
         run: |
+          if [[ "$REUSED" == true ]]; then
+            for suite in static backend world e2e; do echo "${suite}=false"; done >> "$GITHUB_OUTPUT"
+            { echo "seasons=3"; echo "full_world=false"; } >> "$GITHUB_OUTPUT"
+            echo "Verified: this exact tree already passed every job on its pull request (see the Plan log)." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           suites="${SUITES:-all}"
           suites="${suites//[[:space:]]/}"
           SEASONS="${SEASONS:-3}"

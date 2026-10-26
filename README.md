@@ -5,7 +5,7 @@
 **A football sporting-director simulation, self-hosted on a Raspberry Pi**
 
 [![Verify](https://github.com/CarlosSardo/touchline/actions/workflows/verify.yml/badge.svg)](https://github.com/CarlosSardo/touchline/actions/workflows/verify.yml)
-[![Image](https://github.com/CarlosSardo/touchline/actions/workflows/image.yml/badge.svg)](https://github.com/CarlosSardo/touchline/actions/workflows/image.yml)
+[![CD](https://github.com/CarlosSardo/touchline/actions/workflows/cd.yml/badge.svg)](https://github.com/CarlosSardo/touchline/actions/workflows/cd.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-22c55e.svg)](LICENSE)
 
 [![Node.js 24](https://img.shields.io/badge/Node.js-24-5FA04E?logo=nodedotjs&logoColor=white)](.nvmrc)
@@ -114,7 +114,7 @@ npm run test:local -- --no-docker -- npx vitest run server/draw.test.ts
 
 ### CI (Dagger)
 
-CI is a [Dagger](https://docs.dagger.io) pipeline, the TypeScript module [.dagger/modules/touchline-ci](.dagger/modules/touchline-ci/src/index.ts), and [scripts/ci.sh](scripts/ci.sh) is its only entrypoint: the GitHub Actions workflows [verify.yml](.github/workflows/verify.yml) (pull requests to `main`, manual dispatch) and [image.yml](.github/workflows/image.yml) (pushes to `main`) run exactly the commands below. It needs only Docker: the script installs the pinned, checksum-verified Dagger CLI (into `~/.cache/touchline/dagger`) and runs a local Dagger engine container. Dagger Cloud is not used (no token, no cloud engine, telemetry off).
+CI is a [Dagger](https://docs.dagger.io) pipeline, the TypeScript module [.dagger/modules/touchline-ci](.dagger/modules/touchline-ci/src/index.ts), and [scripts/ci.sh](scripts/ci.sh) is its only entrypoint: the GitHub Actions workflows [verify.yml](.github/workflows/verify.yml) (CI: pull requests, pushes to `main`, manual dispatch) and [cd.yml](.github/workflows/cd.yml) (CD, see [Continuous deployment](#continuous-deployment)) run exactly the commands below. It needs only Docker: the script installs the pinned, checksum-verified Dagger CLI (into `~/.cache/touchline/dagger`) and runs a local Dagger engine container. Dagger Cloud is not used (no token, no cloud engine, telemetry off).
 
 ```sh
 npm run ci                                   # all suites: static, then backend, world and e2e in parallel
@@ -128,12 +128,32 @@ npm run ci -- dagger check -l                # the pinned Dagger CLI; `dagger ch
 
 Each suite runs in containers against its own throwaway PostgreSQL 18 service: `static` (lint, build and the SQL-free unit tests, in parallel), `backend` (the SQL integration and save tests in 3 shards, each with its own PostgreSQL; together with `static` exactly the files `npm test` runs), `world` (catalog test, `world:check`, a 3-season `simulation:check`, `db:footprint` and the backup / world reset smoke) and `e2e` (Playwright on the official Playwright image, in 2 spec-file shards with their own database and servers). Shards are balanced by the per-file durations in `scripts/ci/test-timings.json`; locally all shards run at once, in GitHub Actions each is a matrix job. Every step runs even when an earlier one fails; logs, reports and per-step exit codes are exported to `ci-logs/<suite>/` (uploaded as workflow artifacts), and the script exits non-zero if any step failed. Tests see the same loopback `SQL_*` environment as `npm run test:local`. The Dagger version is pinned in `scripts/ci.sh`; after changing the module run `npm run ci -- dagger generate -y` and commit the generated files.
 
+### Continuous deployment
+
+Every merge to `main` goes to the Raspberry Pi on its own, with no stored secret and no inbound access to the Pi:
+
+1. **CI** ([verify.yml](.github/workflows/verify.yml)) runs on the push. If the exact git tree already passed every job on its pull request (a squash merge of an up-to-date PR), it reuses that result ([scripts/ci/verified.sh](scripts/ci/verified.sh)); otherwise every suite runs.
+2. **CD** ([cd.yml](.github/workflows/cd.yml), runs titled *Release: \<commit\>*) starts when CI succeeds for that push, and every 6 hours to reconcile (for example after the Pi was offline), and runs one release at a time. It releases the newest commit on `main` whose push passed CI, recomputed at each step: a newer commit that fails CI doesn't hold back the last good one, and a dropped or late CD run can't roll anything back. Don't use `[skip ci]` on `main`: such a commit is never verified, so it only ships with the next verified commit.
+3. **Publish**, on GitHub's runners: `scripts/ci.sh publish` builds, pushes and verifies `ghcr.io/carlossardo/touchline:sha-<commit>` and `:latest` for linux/amd64 and linux/arm64.
+4. **Deploy**, on the Pi itself (GitHub environment `production`, for the deployment history): its self-hosted runner picks up the job and runs [scripts/ci/cd.sh](scripts/ci/cd.sh) `deploy`, which never moves the Pi to an older commit, runs [scripts/deploy.sh](scripts/deploy.sh) `local` (the Pi pulls with the job's short-lived `GITHUB_TOKEN` through a temporary Docker config, then migrates and restarts), and checks that the app container runs the released commit and that `/api/health` answers.
+
+The release checks retry transient GitHub API errors; the deploy itself runs once (one deploy at a time on the host). A failed pull or revision check leaves the running app untouched; a failed migration or start may leave the database migrated, so recover from a database backup ([Backups](#backups-and-restore)), not an older image. Re-running CD repeats the deploy. `scripts/ci/cd.sh candidate` and `scripts/ci/cd.sh deploy <sha>` run the same steps by hand.
+
+**The runner** is GitHub's Actions runner in `~/actions-runner` on the Pi, registered to this repository with the label `touchline-deploy` (only CD's deploy job uses it). It only makes outbound HTTPS connections to GitHub, updates itself, and runs as the deploy user in the systemd user service `actions-runner.service`, with lingering on so it starts at boot without a login (no sudo). Install it, or register it again after rebuilding the host, from a checkout with `gh` logged in as a repository admin:
+
+```sh
+scripts/ci/install-runner.sh carlos@raspberrypi   # idempotent; checksum-verified download
+ssh carlos@raspberrypi systemctl --user status actions-runner      # journalctl --user -u actions-runner for logs
+```
+
+The runner runs jobs as the deploy user, who is in the `docker` group, so it is guarded: a job-started hook installed with the runner ([scripts/ci/runner-job-guard.sh](scripts/ci/runner-job-guard.sh)) refuses every job except the `deploy` job of `cd.yml` on `main`, before any step runs. A workflow on another branch or in a pull request can't use the Pi even if it asks for `touchline-deploy`. On GitHub Free, private repositories have no branch protection and don't enforce environment branch rules, so the guard is the boundary: anyone who can push to `main` can change what CD runs. Give push access only to people you trust with the Pi.
+
 ## Hosting on a Raspberry Pi
 
 The production stack in [compose.yaml](compose.yaml) runs on a Raspberry Pi 4 Model B (8 GB) with an SSD and 64-bit Raspberry Pi OS, or on any arm64/amd64 Linux host with Docker:
 
 - `postgres`: the official `postgres:18` image, data in the `postgres-data` volume, published only on `127.0.0.1:5432`, tuned for 8 GB RAM and an SSD (`shared_buffers=1GB`, `effective_cache_size=4GB`, `random_page_cost=1.1`, `jit=off`, compressed WAL, 15-minute checkpoints). On first start [deploy/postgres/initdb](deploy/postgres/initdb/10-touchline-role.sh) creates `SQL_USER` as a non-superuser owner of `SQL_DATABASE`; the `postgres` superuser is only for administration and backups.
-- `app`: the multi-arch image `ghcr.io/carlossardo/touchline` built by [image.yml](.github/workflows/image.yml) on every push to `main` (or built locally from the [Dockerfile](Dockerfile)), React UI and Express API on `127.0.0.1:3001`, 2 GB memory limit.
+- `app`: the multi-arch image `ghcr.io/carlossardo/touchline` built by [cd.yml](.github/workflows/cd.yml) for every verified commit on `main` (or built locally from the [Dockerfile](Dockerfile)), React UI and Express API on `127.0.0.1:3001`, 2 GB memory limit.
 - `caddy` (Compose profile `https`): automatic Let's Encrypt HTTPS for `TOUCHLINE_DOMAIN` with [deploy/Caddyfile](deploy/Caddyfile).
 
 ### First install
@@ -161,13 +181,19 @@ Sign-in works the same as above ([Sign-in and access](#sign-in-and-access)): poi
 
 #### Deploying from a checkout
 
-[scripts/deploy.sh](scripts/deploy.sh) deploys this setup without a registry: it streams a commit as a tarball over SSH, and the host builds the image from it (~4 minutes on a Pi 4) and runs it with this compose file:
+[scripts/deploy.sh](scripts/deploy.sh) deploys a commit to this setup: it streams the commit as a tarball over SSH, and the host pulls the image CI built for that commit, `ghcr.io/carlossardo/touchline:sha-<commit>`, and runs it with this compose file. Commits on `main` deploy automatically through this script ([Continuous deployment](#continuous-deployment)).
+
+To deploy by hand, run the script from a checkout. With `--build` the host builds the image from the tarball instead (~4 minutes on a Pi 4), for example for a commit that is not on `main`:
 
 ```sh
 scripts/deploy.sh carlos@raspberrypi          # HEAD; or: scripts/deploy.sh <ssh-host> <git-ref>
+scripts/deploy.sh --build carlos@raspberrypi  # build on the host instead of pulling
+scripts/deploy.sh local                       # on the host itself, without SSH (used by the CD runner)
 ```
 
-On the host, in `~/touchline` (`TOUCHLINE_DIR` to change it), [deploy/host-deploy.sh](deploy/host-deploy.sh) from the deployed commit unpacks the source to `src/`, builds `local/touchline:<commit>` and `:latest` with `docker buildx`, installs [deploy/compose.external-postgres.yaml](deploy/compose.external-postgres.yaml) as `compose.yaml`, creates or checks the account registry, migrates the registered worlds, starts the app and checks `/api/health`. It keeps the three newest images. The host needs Docker with buildx, `curl`, and a `.env` in that directory before the first deploy, with the database settings, the sign-in settings and `TOUCHLINE_PORT`. The script adds `TOUCHLINE_IMAGE=local/touchline:latest` and `TOUCHLINE_PULL_POLICY=never`, so `docker compose pull` (for example a weekly image update) skips the app. A failed build leaves the running container untouched; roll back with a database backup, not an older image.
+The package is private. For manual pulls, log the host in to GHCR once, as the user that runs the deploys, with a classic personal access token that has only `read:packages` ([create one](https://github.com/settings/tokens/new?scopes=read:packages&description=touchline-pull)): `docker login ghcr.io -u <github-user>` and paste the token. For a one-off without a stored login, set `GHCR_TOKEN` (a token with `read:packages`) and `GHCR_USER` (its GitHub user): the script hands it to the host over SSH standard input, never on a command line, and the host deletes it before pulling and drops the temporary login right after. The `sha-<commit>` image exists only for commits on `main`; until CD has published it, or for any other commit, the pull fails with a hint and changes nothing, so wait or use `--build`.
+
+On the host, in `~/touchline` (`TOUCHLINE_DIR` to change it), the commit is unpacked into a fresh staging directory and [deploy/host-deploy.sh](deploy/host-deploy.sh) from it runs one deploy at a time: it holds `.deploy.lock` (`flock`, from util-linux) for the whole run, so a manual deploy and a CD deploy never overlap; a second one waits up to 15 minutes, then gives up without changing anything. It pulls the image, refuses it unless its `org.opencontainers.image.revision` label is the deployed commit, prints its digest and tags it `local/touchline:<commit>` and `:latest` (with `--build` it builds those tags with `docker buildx`, labelled with the full commit). It then moves the source to `src/`, installs [deploy/compose.external-postgres.yaml](deploy/compose.external-postgres.yaml) as `compose.yaml`, creates or checks the account registry, migrates the registered worlds, starts the app and checks `/api/health`. It keeps the three newest images. The running container keeps the image's revision label, so `docker inspect touchline` shows the deployed commit. The host needs Docker (with buildx for `--build`), `curl`, `flock`, and a `.env` in that directory before the first deploy, with the database settings, the sign-in settings and `TOUCHLINE_PORT`. The script adds `TOUCHLINE_IMAGE=local/touchline:latest` and `TOUCHLINE_PULL_POLICY=never`, so `docker compose pull` (for example a weekly image update) skips the app and only a deploy changes it. A failed pull, check or build leaves the running container untouched. Nothing is retried, and a failed migration or start can leave the database already migrated: roll back with a database backup, not an older image.
 
 ### HTTPS and reverse proxy
 

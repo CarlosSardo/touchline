@@ -1,0 +1,121 @@
+name: CD
+run-name: "Release: ${{ github.event.workflow_run.display_title || (github.event_name == 'schedule' && 'reconcile with the newest verified commit') || 'newest verified commit on main (manual)' }}"
+
+# Continuous deployment. After CI (verify.yml) succeeds for a push to main, publish that commit's multi-arch
+# image (linux/amd64 + linux/arm64) to GHCR on GitHub's runners, then deploy it on the Raspberry Pi itself
+# through its self-hosted runner (label touchline-deploy; outbound HTTPS only, set up with
+# scripts/ci/install-runner.sh). Each run releases the newest commit on main that passed CI, recomputed at
+# every step, so a dropped or stale run can't lose a release, and the Pi never moves to an older commit. The jobs run the same scripts as a developer would: scripts/ci.sh publish and
+# scripts/ci/cd.sh (around scripts/deploy.sh). No stored secrets: the Pi pulls with the job's short-lived
+# GITHUB_TOKEN.
+on:
+  workflow_run:
+    workflows: [Verify]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+  # Reconcile: converges the Pi on the newest verified commit after a runner outage or a failed deploy.
+  schedule:
+    - cron: "23 */6 * * *"
+
+permissions:
+  contents: read
+
+# One release at a time. Only runs that release share the queue: GitHub keeps one pending run per group, so a
+# run that can't release (a failed or manual CI run) gets its own group and can never evict a real release.
+concurrency:
+  group: >-
+    cd-${{ (github.event_name != 'workflow_run' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')) && 'release' || github.run_id }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  release:
+    name: Release candidate
+    # Only full CI runs of pushes to main (manual CI runs may skip suites); manual CD runs release main.
+    if: >-
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
+      || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      sha: ${{ steps.candidate.outputs.sha }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Newest verified commit on main (scripts/ci/cd.sh candidate)
+        id: candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sha=$(scripts/ci/cd.sh candidate)
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Release candidate: \`${sha:-none}\`" >> "$GITHUB_STEP_SUMMARY"
+
+  image:
+    name: Publish image
+    needs: release
+    if: needs.release.outputs.sha != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.release.outputs.sha }}
+          persist-credentials: false
+      - name: Already published?
+        id: published
+        env:
+          SHA: ${{ needs.release.outputs.sha }}
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ github.token }}
+        run: echo "published=$(scripts/ci/cd.sh published "$SHA")" >> "$GITHUB_OUTPUT"
+      - name: Build, push and verify the multi-arch image (scripts/ci.sh publish)
+        if: steps.published.outputs.published != 'true'
+        env:
+          IMAGE_REPOSITORY: ghcr.io/carlossardo/touchline
+          IMAGE_TAGS: sha-${{ needs.release.outputs.sha }},latest
+          SOURCE_REVISION: ${{ needs.release.outputs.sha }}
+          REGISTRY_USER: ${{ github.repository_owner }}
+          # GITHUB_TOKEN needs this repo as Write under the package's "Manage Actions access"; GHCR_PUSH_TOKEN is the fallback.
+          REGISTRY_TOKEN: ${{ secrets.GHCR_PUSH_TOKEN || secrets.GITHUB_TOKEN }}
+        run: scripts/ci.sh publish
+
+  deploy:
+    name: Deploy on the Raspberry Pi
+    needs: [release, image]
+    runs-on: [self-hosted, touchline-deploy]
+    timeout-minutes: 30
+    environment:
+      name: production
+      url: https://touchline.sardohome.duckdns.org
+    permissions:
+      actions: read
+      contents: read
+      packages: read
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.release.outputs.sha }}
+          persist-credentials: false
+      - name: Deploy and verify (scripts/ci/cd.sh deploy)
+        env:
+          SHA: ${{ needs.release.outputs.sha }}
+          DEPLOY_HOST: local
+          GH_TOKEN: ${{ github.token }}
+          GHCR_TOKEN: ${{ github.token }}
+          GHCR_USER: ${{ github.actor }}
+        run: scripts/ci/cd.sh deploy "$SHA"
