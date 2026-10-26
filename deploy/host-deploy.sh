@@ -1,35 +1,53 @@
 #!/usr/bin/env bash
-# Runs on the host, started by scripts/deploy.sh in the deploy directory (for example ~/touchline) with
-# the new source unpacked in ./src.new. Gets local/touchline:<rev> + :latest, installs
-# deploy/compose.external-postgres.yaml as ./compose.yaml, creates or checks the account registry,
-# migrates registered worlds, starts the app and checks /api/health.
-#   host-deploy.sh <rev>                    builds the image from ./src.new (docker buildx)
+# Runs on the host, started by scripts/deploy.sh in the deploy directory (for example ~/touchline) from
+# the new source unpacked in a staging directory (./src.new.XXXXXX). Gets local/touchline:<rev> + :latest,
+# installs deploy/compose.external-postgres.yaml as ./compose.yaml, creates or checks the account
+# registry, migrates registered worlds, starts the app and checks /api/health.
+#   host-deploy.sh <rev> --build <commit>   builds the image from the source (docker buildx)
 #   host-deploy.sh <rev> --pull <commit> [--token-file <file>]
 #     pulls ghcr.io/carlossardo/touchline:sha-<commit> and refuses it unless its
 #     org.opencontainers.image.revision is <commit>. It uses the host's `docker login ghcr.io`, or with
 #     --token-file a user and token (two lines, written by deploy.sh) that are deleted on reading and
 #     used only for this pull, from a temporary Docker config.
-# A failed build or pull leaves the running container untouched. Roll back by restoring a database
-# backup, not by running an older image against migrated data.
+# One deploy at a time: it holds ./.deploy.lock (flock) for the whole run and waits up to 15 minutes.
+# A failed build or pull leaves the running container untouched. A failed migration or start can leave
+# the database migrated: roll back by restoring a database backup, not by running an older image.
 set -euo pipefail
-rev=${1:?Usage: deploy/host-deploy.sh <revision> [--pull <commit> [--token-file <file>]] (started by scripts/deploy.sh)}
-sha=
+usage='Usage: deploy/host-deploy.sh <revision> (--build|--pull) <commit> [--token-file <file>] (started by scripts/deploy.sh)'
+rev=${1:?$usage}
+mode=${2:-}
+sha=${3:-}
+staging=
 token_file=
 docker_config=
-cleanup() { [ -z "$token_file" ] || rm -f "$token_file"; [ -z "$docker_config" ] || rm -rf "$docker_config"; }
+cleanup() {
+  [ -z "$token_file" ] || rm -f "$token_file"
+  [ -z "$docker_config" ] || rm -rf "$docker_config"
+  [ -z "$staging" ] || rm -rf "$staging"
+}
 trap cleanup EXIT
-if [ "${2:-}" = --pull ]; then
-  sha=${3:-}
-  if [ "${4:-}" = --token-file ]; then
-    token_file=${5:-}
-    [[ $token_file =~ ^[A-Za-z0-9._-]+$ ]] || { echo "--token-file needs a file name in $PWD" >&2; token_file=; exit 2; }
-    { IFS= read -r ghcr_user && IFS= read -r ghcr_token; } < "$token_file" || { echo "Cannot read user and token from $token_file" >&2; exit 2; }
-    rm -f "$token_file"
-  fi
-  [[ $sha =~ ^[0-9a-f]{40}$ && ${sha:0:12} == "$rev" ]] || { echo "--pull needs the full commit of $rev" >&2; exit 2; }
+if [ "${4:-}" = --token-file ]; then
+  token_file=${5:-}
+  [[ $token_file =~ ^[A-Za-z0-9._-]+$ ]] || { echo "--token-file needs a file name in $PWD" >&2; token_file=; exit 2; }
+  { IFS= read -r ghcr_user && IFS= read -r ghcr_token; } < "$token_file" || { echo "Cannot read user and token from $token_file" >&2; exit 2; }
+  rm -f "$token_file"
 fi
-[ -d src.new ] || { echo "Run from the deploy directory with the source in ./src.new" >&2; exit 2; }
-[ -n "$sha" ] || docker buildx version >/dev/null 2>&1 \
+[[ $mode == --build || $mode == --pull ]] || { echo "$usage" >&2; exit 2; }
+[[ $sha =~ ^[0-9a-f]{40}$ && ${sha:0:12} == "$rev" ]] || { echo "$mode needs the full commit of $rev" >&2; exit 2; }
+staging=${0%/deploy/host-deploy.sh}
+[[ $staging =~ ^src\.new(\.[A-Za-z0-9]+)?$ && -d $staging ]] \
+  || { staging=; echo "Run from the deploy directory as src.new*/deploy/host-deploy.sh (see scripts/deploy.sh)" >&2; exit 2; }
+
+command -v flock >/dev/null || { echo "flock is missing (util-linux)" >&2; exit 1; }
+exec 9>>.deploy.lock
+if ! flock -n 9; then
+  echo ">> waiting for another deploy to finish ($PWD/.deploy.lock, up to 15 minutes)"
+  flock -w 900 9 || { echo "Another deploy still holds $PWD/.deploy.lock after 15 minutes; nothing was changed." >&2; exit 1; }
+fi
+# Sources staged by deploys that never started (for example a dropped connection).
+find . -maxdepth 1 -name 'src.new*' ! -name "$staging" -mmin +1440 -exec rm -rf {} +
+
+[ "$mode" = --pull ] || docker buildx version >/dev/null 2>&1 \
   || { echo "docker buildx is missing (Ubuntu: sudo apt-get install docker-buildx)" >&2; exit 1; }
 [ -f .env ] || { echo "No .env in $PWD: create it first, see .env.example and README (Deploying from a checkout)" >&2; exit 1; }
 # Without it compose falls back to port 3001 and the reverse proxy in front loses the app (502).
@@ -39,7 +57,7 @@ grep -Eq '^TOUCHLINE_PORT=[0-9]+$' .env || {
 }
 
 # Pull and check the CI image before changing anything here.
-if [ -n "$sha" ]; then
+if [ "$mode" = --pull ]; then
   remote=ghcr.io/carlossardo/touchline:sha-$sha
   echo ">> pull $remote"
   config=()
@@ -91,10 +109,10 @@ case "$image" in
 esac
 grep -q '^TOUCHLINE_PULL_POLICY=never$' .env || echo 'TOUCHLINE_PULL_POLICY=never' >> .env
 
-rm -rf src && mv src.new src
-if [ -z "$sha" ]; then
+rm -rf src && mv "$staging" src && staging=
+if [ "$mode" = --build ]; then
   echo ">> build local/touchline:$rev (a few minutes on a Raspberry Pi)"
-  docker buildx build --load --build-arg SOURCE_REVISION="$rev" -t "local/touchline:$rev" -t local/touchline:latest src
+  docker buildx build --load --build-arg SOURCE_REVISION="$sha" -t "local/touchline:$rev" -t local/touchline:latest src
 else
   docker tag "$remote" "local/touchline:$rev"
   docker tag "$remote" local/touchline:latest
@@ -112,7 +130,7 @@ run npm run --silent db:migrate -- --registered --apply --yes
 echo ">> start"
 docker compose up -d --wait
 curl -fsS "http://$(docker compose port app 3001)/api/health" && echo
-[ -z "$sha" ] || echo ">> deployed $rev from $digests"
+[ "$mode" = --build ] || echo ">> deployed $rev from $digests"
 # Keep the three newest builds.
 docker image ls local/touchline --format '{{.Tag}}' | grep -vx latest | tail -n +4 \
   | xargs -r -I{} docker image rm "local/touchline:{}" >/dev/null

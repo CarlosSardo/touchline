@@ -9,13 +9,14 @@
 #   TOUCHLINE_DIR: deploy directory on the host, relative to the SSH user's home (default: touchline)
 #   GHCR_TOKEN + GHCR_USER: pull with this token instead of the host's login (GitHub Actions: GITHUB_TOKEN
 #     and github.actor). It goes to the host on stdin, is used for this one pull and deleted there.
+#   The source is unpacked into a fresh ~/<dir>/src.new.XXXXXX first, then host-deploy.sh runs from it in
+#   a second session (one deploy at a time: it waits for ~/<dir>/.deploy.lock).
 #   DEPLOY_SSH_OPTS: extra ssh options, split on spaces (e.g. -o StrictHostKeyChecking=yes)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 usage='Usage: scripts/deploy.sh [--build] <ssh-host|local> [git-ref]'
 build=
-cleanup=
 [ "${1:-}" != --build ] || { build=1; shift; }
 host=${1:?$usage}
 ref=${2:-HEAD}
@@ -34,20 +35,26 @@ rev=${sha:0:12}
 if [ -n "$build" ]; then
   echo ">> deploy $rev to $host:~/$dir (build on the host)"
   [ -z "${GHCR_TOKEN:-}" ] || echo "Note: GHCR_TOKEN is not used with --build." >&2
-  remote="exec bash src.new/deploy/host-deploy.sh $rev"
+  args="$rev --build $sha"
 elif [ -z "${GHCR_TOKEN:-}" ]; then
   echo ">> deploy $rev to $host:~/$dir (pull ghcr.io/carlossardo/touchline:sha-$sha)"
-  remote="exec bash src.new/deploy/host-deploy.sh $rev --pull $sha"
+  args="$rev --pull $sha"
 else
   [[ ${GHCR_USER:-} =~ ^[A-Za-z0-9_.-]+$ ]] || { echo "Set GHCR_USER to the GitHub user GHCR_TOKEN belongs to" >&2; exit 2; }
   echo ">> deploy $rev to $host:~/$dir (pull ghcr.io/carlossardo/touchline:sha-$sha with GHCR_TOKEN)"
-  # Never in argv or a remote environment: user and token go on stdin into a mode-600 file, which
-  # host-deploy.sh deletes on reading; the trap removes it if host-deploy.sh never gets to it.
-  token=.ghcr-pull-token
-  printf '%s\n%s\n' "$GHCR_USER" "$GHCR_TOKEN" | on_host \
-    "set -e; mkdir -p ~/$dir; cd ~/$dir; umask 077; rm -f $token; cat > $token"
-  cleanup="trap 'rm -f $token' EXIT; "
-  remote="bash src.new/deploy/host-deploy.sh $rev --pull $sha --token-file $token"
+  args="$rev --pull $sha"
 fi
-git archive --format=tar "$rev" | on_host \
-  "set -e; mkdir -p ~/$dir; cd ~/$dir; ${cleanup}rm -rf src.new; mkdir src.new; tar -x -C src.new; $remote"
+src=$(git archive --format=tar "$rev" | on_host \
+  "set -e; mkdir -p ~/$dir; cd ~/$dir; s=\$(mktemp -d src.new.XXXXXX); trap 'rm -rf \$s' EXIT; chmod 755 \$s; tar -x -C \$s; trap - EXIT; echo \$s")
+src=${src##*$'\n'}
+[[ $src =~ ^src\.new\.[A-Za-z0-9]{6}$ ]] || { echo "Unexpected staging directory from the host: $src" >&2; exit 1; }
+# The trap removes the staging directory (and token file) even if host-deploy.sh cannot start.
+run="set -e; cd ~/$dir; t=; trap 'rm -rf $src; rm -f \$t' EXIT"
+if [ -z "${GHCR_TOKEN:-}" ] || [ -n "$build" ]; then
+  on_host "$run; bash $src/deploy/host-deploy.sh $args" </dev/null
+else
+  # Never in argv or a remote environment: user and token go on stdin into a fresh mode-600 file,
+  # which host-deploy.sh deletes on reading.
+  printf '%s\n%s\n' "$GHCR_USER" "$GHCR_TOKEN" | on_host \
+    "$run; t=\$(mktemp .ghcr-pull-token.XXXXXX); cat > \$t; bash $src/deploy/host-deploy.sh $args --token-file \$t"
+fi
