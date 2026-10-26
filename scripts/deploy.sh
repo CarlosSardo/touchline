@@ -5,6 +5,7 @@
 # the host pulls the image CI published for it, ghcr.io/carlossardo/touchline:sha-<commit> (cd.yml,
 # commits on main), with its own `docker login ghcr.io`; with --build the host builds it from the source.
 # Usage: scripts/deploy.sh [--build] <ssh-host> [git-ref]    e.g. scripts/deploy.sh carlos@raspberrypi
+#   The host `local` runs the same steps on this machine without SSH (the CD runner on the host itself).
 #   TOUCHLINE_DIR: deploy directory on the host, relative to the SSH user's home (default: touchline)
 #   GHCR_TOKEN + GHCR_USER: pull with this token instead of the host's login (GitHub Actions: GITHUB_TOKEN
 #     and github.actor). It goes to the host on stdin, is used for this one pull and deleted there.
@@ -12,7 +13,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-usage='Usage: scripts/deploy.sh [--build] <ssh-host> [git-ref]'
+usage='Usage: scripts/deploy.sh [--build] <ssh-host|local> [git-ref]'
 build=
 cleanup=
 [ "${1:-}" != --build ] || { build=1; shift; }
@@ -22,6 +23,8 @@ dir=${TOUCHLINE_DIR:-touchline}
 [[ $dir =~ ^[A-Za-z0-9._/-]+$ ]] || { echo "TOUCHLINE_DIR may only contain letters, digits and ._/-" >&2; exit 2; }
 ssh_opts=()
 [ -z "${DEPLOY_SSH_OPTS:-}" ] || read -r -a ssh_opts <<<"$DEPLOY_SSH_OPTS"
+# shellcheck disable=SC2029 # the command expands here on purpose ($dir is validated above)
+on_host() { if [ "$host" = local ]; then bash -c "$1"; else ssh "${ssh_opts[@]}" "$host" "$1"; fi; }
 
 sha=$(git rev-parse --verify "$ref^{commit}")
 rev=${sha:0:12}
@@ -41,12 +44,10 @@ else
   # Never in argv or a remote environment: user and token go on stdin into a mode-600 file, which
   # host-deploy.sh deletes on reading; the trap removes it if host-deploy.sh never gets to it.
   token=.ghcr-pull-token
-  # shellcheck disable=SC2029 # $dir expands here on purpose (validated above)
-  printf '%s\n%s\n' "$GHCR_USER" "$GHCR_TOKEN" | ssh "${ssh_opts[@]}" "$host" \
+  printf '%s\n%s\n' "$GHCR_USER" "$GHCR_TOKEN" | on_host \
     "set -e; mkdir -p ~/$dir; cd ~/$dir; umask 077; rm -f $token; cat > $token"
   cleanup="trap 'rm -f $token' EXIT; "
   remote="bash src.new/deploy/host-deploy.sh $rev --pull $sha --token-file $token"
 fi
-# shellcheck disable=SC2029 # $dir and $remote expand here on purpose (validated above)
-git archive --format=tar "$rev" | ssh "${ssh_opts[@]}" "$host" \
+git archive --format=tar "$rev" | on_host \
   "set -e; mkdir -p ~/$dir; cd ~/$dir; ${cleanup}rm -rf src.new; mkdir src.new; tar -x -C src.new; $remote"

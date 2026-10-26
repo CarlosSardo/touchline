@@ -188,6 +188,7 @@ To deploy by hand, run the script from a checkout. With `--build` the host build
 ```sh
 scripts/deploy.sh carlos@raspberrypi          # HEAD; or: scripts/deploy.sh <ssh-host> <git-ref>
 scripts/deploy.sh --build carlos@raspberrypi  # build on the host instead of pulling
+scripts/deploy.sh local                       # on the host itself, without SSH (used by the CD runner)
 ```
 
 The package is private. For manual pulls, log the host in to GHCR once, as the user that runs the deploys, with a classic personal access token that has only `read:packages` ([create one](https://github.com/settings/tokens/new?scopes=read:packages&description=touchline-pull)): `docker login ghcr.io -u <github-user>` and paste the token. For a one-off without a stored login, set `GHCR_TOKEN` (a token with `read:packages`) and `GHCR_USER` (its GitHub user): the script hands it to the host over SSH standard input, never on a command line, and the host deletes it before pulling and drops the temporary login right after. The `sha-<commit>` image exists only for commits on `main`; until CD has published it, or for any other commit, the pull fails with a hint and changes nothing, so wait or use `--build`.
