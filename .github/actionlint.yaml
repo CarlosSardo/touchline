@@ -1,0 +1,4 @@
+self-hosted-runner:
+  # The Raspberry Pi runner that runs CD's deploy job (scripts/ci/install-runner.sh).
+  labels:
+    - touchline-deploy

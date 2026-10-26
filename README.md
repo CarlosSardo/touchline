@@ -130,16 +130,23 @@ Each suite runs in containers against its own throwaway PostgreSQL 18 service: `
 
 ### Continuous deployment
 
-Every merge to `main` goes to the Raspberry Pi on its own, with no stored secret:
+Every merge to `main` goes to the Raspberry Pi on its own, with no stored secret and no inbound access to the Pi:
 
 1. **CI** ([verify.yml](.github/workflows/verify.yml)) runs on the push. If the exact git tree already passed every job on its pull request (a squash merge of an up-to-date PR), it reuses that result ([scripts/ci/verified.sh](scripts/ci/verified.sh)); otherwise every suite runs.
 2. **CD** ([cd.yml](.github/workflows/cd.yml)) starts when CI succeeds for that push. It releases only the newest commit on `main` (a commit superseded meanwhile is left to its successor's own run) and runs one release at a time.
-3. **Publish:** `scripts/ci.sh publish` builds, pushes and verifies `ghcr.io/carlossardo/touchline:sha-<commit>` and `:latest` for linux/amd64 and linux/arm64.
-4. **Deploy** (GitHub environment `production`): the job joins the tailnet as an ephemeral `tag:ci` node, trusted through GitHub's OIDC token ([workload identity federation](https://tailscale.com/kb/1581/workload-identity-federation)), and runs [scripts/ci/cd.sh](scripts/ci/cd.sh) `deploy`. That runs [scripts/deploy.sh](scripts/deploy.sh) over Tailscale SSH with the Pi's host keys pinned in [deploy/known_hosts](deploy/known_hosts); the Pi pulls with the job's short-lived `GITHUB_TOKEN` (nothing stored), migrates and restarts. It never moves the Pi to an older commit, then checks that the Pi runs the released commit and that `/api/health` answers.
+3. **Publish**, on GitHub's runners: `scripts/ci.sh publish` builds, pushes and verifies `ghcr.io/carlossardo/touchline:sha-<commit>` and `:latest` for linux/amd64 and linux/arm64.
+4. **Deploy**, on the Pi itself (GitHub environment `production`): its self-hosted runner picks up the job and runs [scripts/ci/cd.sh](scripts/ci/cd.sh) `deploy`, which never moves the Pi to an older commit, runs [scripts/deploy.sh](scripts/deploy.sh) `local` (the Pi pulls with the job's short-lived `GITHUB_TOKEN` through a temporary Docker config, then migrates and restarts), and checks that the Pi runs the released commit and that `/api/health` answers.
 
-Every step retries transient GitHub, Tailscale and SSH errors, and a failed pull or check leaves the running app untouched. `scripts/ci/cd.sh candidate|deploy <sha>` runs the same steps by hand.
+Every step retries transient GitHub errors, and a failed pull or check leaves the running app untouched. `scripts/ci/cd.sh candidate|deploy <sha>` runs the same steps by hand.
 
-One-time setup, kept in [raspberry-pi-4b-bootstrap](https://github.com/CarlosSardo/raspberry-pi-4b-bootstrap) (Touchline section): the tailnet policy lets `tag:ci` reach the Pi on port 22 and log in over Tailscale SSH as the deploy user; a Tailscale federated identity trusts the issuer `https://token.actions.githubusercontent.com` with the subject `repo:CarlosSardo/touchline:environment:production` (scope Auth Keys: write, tag `tag:ci`); and its client ID and audience are the Actions variables `TS_OAUTH_CLIENT_ID` and `TS_AUDIENCE` (an OAuth client with the secret `TS_OAUTH_SECRET` works too). Until then CD still publishes the image and the deploy job ends with a notice. To redeploy `main`, run the CD workflow by hand.
+**The runner** is GitHub's Actions runner in `~/actions-runner` on the Pi, registered to this repository with the label `touchline-deploy` (only CD's deploy job uses it). It only makes outbound HTTPS connections to GitHub, updates itself, and runs as the deploy user in the systemd user service `actions-runner.service`, with lingering on so it starts at boot without a login (no sudo). Install it, or register it again after rebuilding the host, from a checkout with `gh` logged in as a repository admin:
+
+```sh
+scripts/ci/install-runner.sh carlos@raspberrypi   # idempotent; checksum-verified download
+ssh carlos@raspberrypi systemctl --user status actions-runner      # journalctl --user -u actions-runner for logs
+```
+
+Workflows of this repository can run code on the Pi as that user (who is in the `docker` group), so keep the repository private and only target `touchline-deploy` from CD.
 
 ## Hosting on a Raspberry Pi
 
