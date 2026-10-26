@@ -44,11 +44,12 @@ const POSTGRES_FLAGS = [
 ].flatMap((flag) => ["-c", flag])
 
 // The SQL guards only accept a loopback SQL_HOST, so each test container forwards 127.0.0.1:54329 to the
-// PostgreSQL service instead of pointing tests at a remote host name.
+// PostgreSQL service instead of pointing tests at a remote host name. Nagle's algorithm is off on both sides:
+// with it, a large statement split across writes waits for PostgreSQL's delayed ACK on every query.
 const SQL_FORWARDER = `import net from "node:net";
 const [host, port] = process.env.SQL_FORWARD_TARGET.split(":");
-net.createServer((client) => {
-  const upstream = net.connect(Number(port), host);
+net.createServer({ noDelay: true }, (client) => {
+  const upstream = net.connect({ port: Number(port), host, noDelay: true });
   const close = () => { client.destroy(); upstream.destroy(); };
   for (const socket of [client, upstream]) { socket.on("error", close); socket.on("close", close); }
   client.pipe(upstream).pipe(client);
