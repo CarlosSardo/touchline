@@ -1,5 +1,5 @@
 name: CD
-run-name: "Release: ${{ github.event.workflow_run.display_title || 'newest verified commit on main (manual)' }}"
+run-name: "Release: ${{ github.event.workflow_run.display_title || (github.event_name == 'schedule' && 'reconcile with the newest verified commit') || 'newest verified commit on main (manual)' }}"
 
 # Continuous deployment. After CI (verify.yml) succeeds for a push to main, publish that commit's multi-arch
 # image (linux/amd64 + linux/arm64) to GHCR on GitHub's runners, then deploy it on the Raspberry Pi itself
@@ -14,13 +14,18 @@ on:
     types: [completed]
     branches: [main]
   workflow_dispatch:
+  # Reconcile: converges the Pi on the newest verified commit after a runner outage or a failed deploy.
+  schedule:
+    - cron: "23 */6 * * *"
 
 permissions:
   contents: read
 
-# One release at a time; a newer one waits and replaces any older one still waiting.
+# One release at a time. Only runs that release share the queue: GitHub keeps one pending run per group, so a
+# run that can't release (a failed or manual CI run) gets its own group and can never evict a real release.
 concurrency:
-  group: cd
+  group: >-
+    cd-${{ (github.event_name != 'workflow_run' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')) && 'release' || github.run_id }}
   cancel-in-progress: false
 
 defaults:
@@ -33,7 +38,7 @@ jobs:
     # Only full CI runs of pushes to main (manual CI runs may skip suites); manual CD runs release main.
     if: >-
       (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
-      || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+      || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -70,7 +75,15 @@ jobs:
         with:
           ref: ${{ needs.release.outputs.sha }}
           persist-credentials: false
+      - name: Already published?
+        id: published
+        env:
+          SHA: ${{ needs.release.outputs.sha }}
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ github.token }}
+        run: echo "published=$(scripts/ci/cd.sh published "$SHA")" >> "$GITHUB_OUTPUT"
       - name: Build, push and verify the multi-arch image (scripts/ci.sh publish)
+        if: steps.published.outputs.published != 'true'
         env:
           IMAGE_REPOSITORY: ghcr.io/carlossardo/touchline
           IMAGE_TAGS: sha-${{ needs.release.outputs.sha }},latest
@@ -89,6 +102,7 @@ jobs:
       name: production
       url: https://touchline.sardohome.duckdns.org
     permissions:
+      actions: read
       contents: read
       packages: read
     steps:
