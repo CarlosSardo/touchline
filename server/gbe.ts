@@ -1087,6 +1087,8 @@ async function ledgerFor(store: Store, ids: readonly number[], windows: Windows)
   const { ref, half, lastFrom, lastTo, intl, intlYouth, esc, currentFrom, asOfMonth } = windows;
   const aggregates = new Map<string, LedgerAggregate>();
   const later = (left: string | null, right: string) => (left === null || right > left ? right : left);
+  // The twelve months of each season's row (July to June), built once per season instead of once per row.
+  const seasonMonths = new Map<number, string[]>();
   for (const row of await store.all<{ player_id: number; season: number; club_id: number; league_id: number; kind: LedgerKind; estimated: boolean; data: string }>(
     "SELECT player_id, season, club_id, league_id, kind, estimated, data FROM player_minutes_monthly WHERE player_id = ANY(?::integer[])",
     ids,
@@ -1103,10 +1105,19 @@ async function ledgerFor(store: Store, ids: readonly number[], windows: Windows)
       aggregates.set(key, entry);
     }
     const values = row.data.split(",").map(Number);
+    let months = seasonMonths.get(row.season);
+    if (!months) {
+      months = Array.from({ length: 12 }, (_, index) => addMonths(`${row.season}-07`, index));
+      seasonMonths.set(row.season, months);
+    }
     for (let index = 0; index < 12; index++) {
-      const [available, minutes, appearances, listed, unavailable] = [0, 12, 24, 36, 48].map((offset) => values[offset + index]);
+      const available = values[index];
+      const minutes = values[12 + index];
+      const appearances = values[24 + index];
+      const listed = values[36 + index];
+      const unavailable = values[48 + index];
       if (available + minutes + appearances + listed + unavailable === 0) continue;
-      const month = addMonths(`${row.season}-07`, index);
+      const month = months[index];
       if (month > asOfMonth) continue;
       if (month >= ref) {
         entry.ref_available! += available;
