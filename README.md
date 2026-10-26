@@ -4,7 +4,7 @@
 
 **A football sporting-director simulation, self-hosted on a Raspberry Pi**
 
-[![CI](https://github.com/CarlosSardo/touchline/actions/workflows/verify.yml/badge.svg)](https://github.com/CarlosSardo/touchline/actions/workflows/verify.yml)
+[![CI](https://github.com/CarlosSardo/touchline/actions/workflows/ci.yml/badge.svg)](https://github.com/CarlosSardo/touchline/actions/workflows/ci.yml)
 [![CD](https://github.com/CarlosSardo/touchline/actions/workflows/cd.yml/badge.svg)](https://github.com/CarlosSardo/touchline/actions/workflows/cd.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-22c55e.svg)](LICENSE)
 
@@ -114,7 +114,7 @@ npm run test:local -- --no-docker -- npx vitest run server/draw.test.ts
 
 ### CI (Dagger)
 
-CI is a [Dagger](https://docs.dagger.io) pipeline, the TypeScript module [.dagger/modules/touchline-ci](.dagger/modules/touchline-ci/src/index.ts), and [scripts/ci.sh](scripts/ci.sh) is its only entrypoint: the GitHub Actions workflows [verify.yml](.github/workflows/verify.yml) (CI: pull requests, pushes to `main`, manual dispatch) and [cd.yml](.github/workflows/cd.yml) (CD, see [Continuous deployment](#continuous-deployment)) run exactly the commands below. It needs only Docker: the script installs the pinned, checksum-verified Dagger CLI (into `~/.cache/touchline/dagger`) and runs a local Dagger engine container. Dagger Cloud is not used (no token, no cloud engine, telemetry off).
+CI is a [Dagger](https://docs.dagger.io) pipeline, the TypeScript module [.dagger/modules/touchline-ci](.dagger/modules/touchline-ci/src/index.ts), and [scripts/ci.sh](scripts/ci.sh) is its only entrypoint: the GitHub Actions workflows [ci.yml](.github/workflows/ci.yml) (CI: pull requests, pushes to `main`, manual dispatch) and [cd.yml](.github/workflows/cd.yml) (CD, see [Continuous deployment](#continuous-deployment)) run exactly the commands below. It needs only Docker: the script installs the pinned, checksum-verified Dagger CLI (into `~/.cache/touchline/dagger`) and runs a local Dagger engine container. Dagger Cloud is not used (no token, no cloud engine, telemetry off).
 
 ```sh
 npm run ci                                   # all suites: static, then backend, world and e2e in parallel
@@ -132,8 +132,8 @@ Each suite runs in containers against its own throwaway PostgreSQL 18 service: `
 
 Every merge to `main` goes to the Raspberry Pi on its own, with no stored secret and no inbound access to the Pi:
 
-1. **CI** ([verify.yml](.github/workflows/verify.yml)) runs on the push. If the exact git tree already passed every job on its pull request (a squash merge of an up-to-date PR), it reuses that result ([scripts/ci/verified.sh](scripts/ci/verified.sh)); otherwise every suite runs.
-2. **CD** ([cd.yml](.github/workflows/cd.yml), runs titled *Release: \<commit\>*) starts when CI succeeds for that push, and every 6 hours to reconcile (for example after the Pi was offline), and runs one release at a time. It releases the newest commit on `main` whose push passed CI, recomputed at each step: a newer commit that fails CI doesn't hold back the last good one, and a dropped or late CD run can't roll anything back. Don't use `[skip ci]` on `main`: such a commit is never verified, so it only ships with the next verified commit.
+1. **CI** ([ci.yml](.github/workflows/ci.yml)) runs on the push. If the exact git tree already passed every job on its pull request (a squash merge of an up-to-date PR), it reuses that result ([scripts/ci/verified.sh](scripts/ci/verified.sh)); otherwise every suite runs. A push or pull request that changes only docs (`*.md`), Squad (`.squad/`, `.github/agents/`, `.github/skills/`, the Squad workflows) or editor and tool files (`.vscode/`, `.copilot/`, `.mcp.json`, `.env.example`, `LICENSE`) skips CI (the `paths-ignore` lists in ci.yml), so it runs no CD either: nothing it changes is tested or shipped.
+2. **CD** ([cd.yml](.github/workflows/cd.yml), runs titled *Release: \<commit\>*) starts when CI succeeds for that push, and every 6 hours to reconcile (for example after the Pi was offline; when GitHub's newest `production` deployment already succeeded for the release, that check ends after one short job), and runs one release at a time. It releases the newest commit on `main` whose push passed CI, recomputed at each step: a newer commit that fails CI doesn't hold back the last good one, and a dropped or late CD run can't roll anything back. Don't use `[skip ci]` on `main`: such a commit is never verified, so it only ships with the next verified commit. After a deploy outside CD (`scripts/deploy.sh` by hand), run CD manually (*Run workflow*) to put the release back: the scheduled check trusts GitHub's deployment record.
 3. **Publish**, on GitHub's runners: `scripts/ci.sh publish` builds, pushes and verifies `ghcr.io/carlossardo/touchline:sha-<commit>` and `:latest` for linux/amd64 and linux/arm64.
 4. **Deploy**, on the Pi itself (GitHub environment `production`, for the deployment history): its self-hosted runner picks up the job and runs [scripts/ci/cd.sh](scripts/ci/cd.sh) `deploy`, which never moves the Pi to an older commit, runs [scripts/deploy.sh](scripts/deploy.sh) `local` (the Pi pulls with the job's short-lived `GITHUB_TOKEN` through a temporary Docker config, then migrates and restarts), and checks that the app container runs the released commit and that `/api/health` answers.
 

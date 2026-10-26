@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # CD steps of .github/workflows/cd.yml, runnable anywhere with GitHub API access (gh, or curl + jq with GH_TOKEN):
 #   scripts/ci/cd.sh candidate         prints the commit to release: the newest commit on main (closest to its
-#                                      head) whose push passed CI (verify.yml), or nothing when there is none.
+#                                      head) whose push passed CI (ci.yml), or nothing when there is none.
 #   scripts/ci/cd.sh published <sha>   prints true when GHCR already has the sha-<sha> image (GHCR_USER/GHCR_TOKEN).
+#   scripts/ci/cd.sh deployed <sha>    prints true when GitHub's newest production deployment is <sha> and it
+#                                      succeeded (the scheduled reconcile then skips image and deploy); any doubt
+#                                      prints false, so the full, idempotent release path runs.
 #   scripts/ci/cd.sh deploy <sha>      deploys <sha>'s CI image with scripts/deploy.sh, unless a newer verified
 #                                      commit has become the release or the host already runs <sha> or a newer
 #                                      commit (never downgrades); then checks that the host's app container runs
@@ -16,7 +19,7 @@
 set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.."
 
-usage='Usage: scripts/ci/cd.sh candidate | published <sha> | deploy <sha>'
+usage='Usage: scripts/ci/cd.sh candidate | published <sha> | deployed <sha> | deploy <sha>'
 command=${1:?$usage}
 repo=${GITHUB_REPOSITORY:-$(git remote get-url origin | sed -E 's#^(https://github.com/|git@github.com:)##; s#\.git$##')}
 host=${DEPLOY_HOST:-carlos@raspberrypi}
@@ -64,7 +67,7 @@ relation() {
 desired() {
   local main shas sha rel distance best="" best_distance=""
   main=$(api "repos/$repo/git/ref/heads/main" .object.sha) || return 1
-  shas=$(api "repos/$repo/actions/workflows/verify.yml/runs?branch=main&event=push&status=success&per_page=50" \
+  shas=$(api "repos/$repo/actions/workflows/ci.yml/runs?branch=main&event=push&status=success&per_page=50" \
     '[.workflow_runs[].head_sha] | unique | .[]') || return 1
   for sha in $shas; do
     rel=$(relation "$sha" "$main") || return 1
@@ -100,6 +103,18 @@ published() {
     -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json' \
     "https://ghcr.io/v2/carlossardo/touchline/manifests/sha-$sha") || code=000
   if [[ "$code" == 200 ]]; then echo true; else echo false; fi
+}
+
+# deployed <sha>: true when the newest production deployment (CD's deploy job creates one per run) is <sha>
+# and succeeded. A runner outage or failed deploy leaves a newer deployment that did not succeed, so it is false.
+deployed() {
+  local sha=${1:?$usage} id state
+  [[ $sha =~ ^[0-9a-f]{40}$ ]] || { echo "cd: <sha> must be a full commit sha" >&2; exit 2; }
+  id=$(api "repos/$repo/deployments?environment=production&per_page=1" ".[0] | select(.sha == \"$sha\") | .id") \
+    || { echo false; return; }
+  [[ -n "$id" ]] || { echo false; return; }
+  state=$(api "repos/$repo/deployments/$id/statuses?per_page=1" '.[0].state // ""') || { echo false; return; }
+  if [[ "$state" == success ]]; then echo true; else echo false; fi
 }
 
 deploy() {
@@ -144,6 +159,7 @@ deploy() {
 case "$command" in
   candidate) candidate ;;
   published) published "${2:-}" ;;
+  deployed) deployed "${2:-}" ;;
   relation) relation "${2:?$usage}" "${3:?$usage}" ;;
   deploy) deploy "${2:-}" ;;
   *) echo "$usage" >&2; exit 2 ;;

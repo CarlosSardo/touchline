@@ -7,8 +7,22 @@ name: CI
 # whose tree that run's Plan job records in its log) reuses that result instead of running again.
 # A successful push run starts CD (cd.yml): image + deploy.
 on:
+  # Changes only to docs, Squad and editor files skip CI on both triggers (no test or image reads them), so a
+  # docs-only merge to main runs neither CI nor CD. Keep the two lists equal.
   push:
     branches: [main]
+    paths-ignore:
+      - "**/*.md"
+      - "LICENSE"
+      - ".env.example"
+      - ".squad/**"
+      - ".copilot/**"
+      - ".vscode/**"
+      - ".mcp.json"
+      - ".github/agents/**"
+      - ".github/skills/**"
+      - ".github/workflows/squad-*.yml"
+      - ".github/workflows/sync-squad-labels.yml"
   workflow_dispatch:
     inputs:
       suites:
@@ -28,16 +42,22 @@ on:
     types: [opened, synchronize, reopened, ready_for_review]
     paths-ignore:
       - "**/*.md"
+      - "LICENSE"
+      - ".env.example"
       - ".squad/**"
+      - ".copilot/**"
+      - ".vscode/**"
+      - ".mcp.json"
       - ".github/agents/**"
       - ".github/skills/**"
-      - "LICENSE"
+      - ".github/workflows/squad-*.yml"
+      - ".github/workflows/sync-squad-labels.yml"
 
 permissions:
   contents: read
 
 concurrency:
-  group: verify-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name }}-${{ inputs.suites }}-${{ inputs.seasons }}-${{ inputs.full_world }}
+  group: ci-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name }}-${{ inputs.suites }}-${{ inputs.seasons }}-${{ inputs.full_world }}
   cancel-in-progress: true
 
 defaults:

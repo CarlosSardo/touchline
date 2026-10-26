@@ -12,7 +12,7 @@
 #                                                          SOURCE_REVISION, REGISTRY_USER and REGISTRY_TOKEN
 #   scripts/ci.sh dagger ARGS...                           run the pinned Dagger CLI with the same settings
 #
-# `all` runs static first and, if it passes, backend, world and e2e in parallel, like .github/workflows/verify.yml.
+# `all` runs static first and, if it passes, backend, world and e2e in parallel, like .github/workflows/ci.yml.
 set -euo pipefail
 
 DAGGER_VERSION=1.0.0-beta.21

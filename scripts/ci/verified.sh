@@ -38,7 +38,7 @@ if gh api --help 2>/dev/null | grep -q -- --allow-escape-sequences; then raw=(--
 tree=$(api "repos/$repo/commits/$sha" --jq .commit.tree.sha)
 heads=$(api "repos/$repo/commits/$sha/pulls" --jq '.[] | select(.merged_at != null and .base.ref == "main") | .head.sha')
 for head in $heads; do
-  runs=$(api "repos/$repo/actions/workflows/verify.yml/runs?head_sha=$head&event=pull_request&status=success" \
+  runs=$(api "repos/$repo/actions/workflows/ci.yml/runs?head_sha=$head&event=pull_request&status=success" \
     --jq '.workflow_runs[].id')
   for run in $runs; do
     jobs=$(api "repos/$repo/actions/runs/$run/jobs?per_page=100")
