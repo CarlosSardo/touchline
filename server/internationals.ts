@@ -90,7 +90,8 @@ export async function ensureNationalTeams(store: Store) {
        jsonb_set(base.data::jsonb,'{worldKey}',to_jsonb('N:' || countries.code || ':U21'))::text
      FROM clubs AS base JOIN countries ON countries.id = base.country_id
      WHERE base.type = 'national' AND base.age_group = 'U20'
-       AND NOT EXISTS (SELECT 1 FROM clubs AS other WHERE other.type = 'national' AND other.age_group = 'U21' AND other.country_id = base.country_id)`,
+       AND NOT EXISTS (SELECT 1 FROM clubs AS other WHERE other.type = 'national' AND other.age_group = 'U21' AND other.country_id = base.country_id)
+     ORDER BY base.id`,
   );
 }
 
@@ -184,12 +185,12 @@ export async function processInternationalDuty(store: Store) {
   }
   const leagues = await store.all<LeagueRow>(
     `SELECT id,name,age_group,doc ->> 'phase' AS phase,${jsonInt("doc", "season")} AS season,${jsonInt("doc", "forSeason")} AS for_season
-     FROM leagues CROSS JOIN LATERAL (SELECT leagues.data::jsonb AS doc OFFSET 0) AS parsed WHERE kind = 'international'`,
+     FROM leagues CROSS JOIN LATERAL (SELECT leagues.data::jsonb AS doc OFFSET 0) AS parsed WHERE kind = 'international' ORDER BY id`,
   );
   const leagueById = new Map(leagues.map((league) => [league.id, league]));
   const upcoming = leagues.length
     ? await store.all<{ league_id: number; date: string; home_id: number; away_id: number }>(
-        "SELECT league_id,date,home_id,away_id FROM fixtures WHERE season = ? AND status = 'scheduled' AND date >= ? AND league_id = ANY(?::int[]) ORDER BY date",
+        "SELECT league_id,date,home_id,away_id FROM fixtures WHERE season = ? AND status = 'scheduled' AND date >= ? AND league_id = ANY(?::int[]) ORDER BY date, id",
         state.season,
         date,
         leagues.map((league) => league.id),

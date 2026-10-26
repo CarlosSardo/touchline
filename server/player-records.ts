@@ -78,8 +78,8 @@ export async function recordInjuries(store: Store, injuries: readonly NewInjury[
       `INSERT INTO player_injuries (player_id, club_id, start_date, end_date, kind, severity, data)
        SELECT injury.player_id, players.club_id, injury.start_date, injury.end_date, injury.kind, injury.severity, injury.data
        FROM unnest(?::integer[], ?::text[], ?::text[], ?::text[], ?::text[], ?::text[])
-         AS injury(player_id, start_date, end_date, kind, severity, data)
-       JOIN players ON players.id = injury.player_id`,
+         WITH ORDINALITY AS injury(player_id, start_date, end_date, kind, severity, data, n)
+       JOIN players ON players.id = injury.player_id ORDER BY injury.n`,
       batch.map((injury) => injury.playerId),
       batch.map((injury) => injury.start),
       batch.map((injury) => addDays(injury.start, injury.days)),
@@ -169,6 +169,7 @@ async function recordHonours(store: Store, from: number, to: number, source: "ap
      FROM won JOIN squad ON squad.season = won.season AND squad.league_id = won.league_id AND squad.club_id = won.club_id
      JOIN clubs ON clubs.id = won.club_id
      LEFT JOIN matches ON matches.season = won.season AND matches.league_id = won.league_id AND matches.club_id = won.club_id
+     ORDER BY won.season, won.league_id, won.club_id, squad.player_id
      ON CONFLICT (player_id, season, kind, COALESCE(league_id, 0), COALESCE(club_id, 0)) DO NOTHING`,
     from,
     to,
@@ -490,7 +491,8 @@ async function backfill(store: Store, state: GameState): Promise<RecordsMeta> {
      SELECT id, club_id, ?, injury_until, 'Injury', CASE WHEN injury_until <= ? THEN 'minor' WHEN injury_until <= ? THEN 'moderate'
        WHEN injury_until <= ? THEN 'serious' ELSE 'long-term' END, '{"backfilled":true}'
      FROM players WHERE injury_until > ? AND role <> 'Retired'
-       AND NOT EXISTS (SELECT 1 FROM player_injuries WHERE player_injuries.player_id = players.id AND player_injuries.end_date > ?)`,
+       AND NOT EXISTS (SELECT 1 FROM player_injuries WHERE player_injuries.player_id = players.id AND player_injuries.end_date > ?)
+     ORDER BY id`,
     state.date,
     addDays(state.date, 7),
     addDays(state.date, 28),

@@ -1248,7 +1248,7 @@ export async function enquire(
   const profile = JSON.parse(player.profile) as PlayerProfile;
   const partnership = sellingClub
     ? await store.get<{ strength: number }>(
-        "SELECT strength FROM partnerships WHERE (club_id = ? AND partner_id = ?) OR (club_id = ? AND partner_id = ?)",
+        "SELECT strength FROM partnerships WHERE (club_id = ? AND partner_id = ?) OR (club_id = ? AND partner_id = ?) ORDER BY id",
         buyingClub.id,
         sellingClub.id,
         sellingClub.id,
@@ -2345,7 +2345,7 @@ export async function negotiate(
   const actualRelationship = negotiation.selling_club_id
     ? ((
         await store.get<{ strength: number }>(
-          "SELECT strength FROM partnerships WHERE (club_id = ? AND partner_id = ?) OR (club_id = ? AND partner_id = ?)",
+          "SELECT strength FROM partnerships WHERE (club_id = ? AND partner_id = ?) OR (club_id = ? AND partner_id = ?) ORDER BY id",
           buyer.id,
           negotiation.selling_club_id,
           negotiation.selling_club_id,
@@ -3219,7 +3219,7 @@ export async function createPartnership(
     throw new GameError("Invalid partnership type.");
   if (
     await store.get(
-      "SELECT id FROM partnerships WHERE (club_id = ? AND partner_id = ?) OR (club_id = ? AND partner_id = ?)",
+      "SELECT id FROM partnerships WHERE (club_id = ? AND partner_id = ?) OR (club_id = ? AND partner_id = ?) ORDER BY id",
       own.id,
       partnerId,
       partnerId,

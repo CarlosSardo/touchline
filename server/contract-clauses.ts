@@ -151,7 +151,7 @@ export interface RelegationCut {
  * `season` is the season the reduced wage starts in.
  */
 export async function applyRelegationClauses(store: Store, season: number): Promise<RelegationCut[]> {
-  return await store.all<RelegationCut>(
+  const cuts = await store.all<RelegationCut>(
     `WITH terms AS (${relegationTerms("club.data::jsonb ->> 'budgetMovement' = 'relegated'", "GREATEST(1, coalesce(leagues.tier, 9) - 1)")})
      UPDATE players AS target SET wage = round((terms.wage * (1 - terms.cut))::numeric)::double precision,
        morale = GREATEST(1, target.morale - ?),
@@ -165,6 +165,8 @@ export async function applyRelegationClauses(store: Store, season: number): Prom
     RELEGATION_CLAUSE.morale,
     season,
   );
+  // RETURNING follows the physical row order: sorted so the clubs' news is posted in the same order every run.
+  return cuts.sort((left, right) => left.clubId - right.clubId || left.playerId - right.playerId);
 }
 
 /** Weekly wages each of `clubIds` saves from its relegation clauses if relegated now (pre-season FFP planning). */

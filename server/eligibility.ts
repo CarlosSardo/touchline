@@ -293,7 +293,7 @@ export async function refreshQuotaLists(store: Store, clubIds?: readonly number[
   const clubs = await store.all<Club & { tier: number | null; code: string }>(
     `SELECT clubs.*, leagues.tier, countries.code FROM clubs LEFT JOIN leagues ON leagues.id = clubs.league_id
      JOIN countries ON countries.id = clubs.country_id
-     WHERE clubs.type = 'club' AND clubs.parent_id IS NULL ${clubIds ? "AND clubs.id = ANY(?::integer[])" : ""}`,
+     WHERE clubs.type = 'club' AND clubs.parent_id IS NULL ${clubIds ? "AND clubs.id = ANY(?::integer[])" : ""} ORDER BY clubs.id`,
     ...(clubIds ? [[...clubIds]] : []),
   );
   const quotaClubs = clubs

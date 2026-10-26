@@ -542,7 +542,7 @@ export async function processUnexpectedEvents(store: Store) {
     addDays(state.date, 3),
   );
   const hasPlayers = !!(await store.get(
-    "SELECT id FROM players WHERE club_id = ? AND role != 'Retired' AND age_group = 'Senior' LIMIT 1",
+    "SELECT id FROM players WHERE club_id = ? AND role != 'Retired' AND age_group = 'Senior' ORDER BY id LIMIT 1",
     state.clubId,
   ));
   const kind = pickEventKind(

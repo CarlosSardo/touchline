@@ -156,7 +156,7 @@ export async function reviewSeasonFinances(store: Store, season: number): Promis
   if ((await settingsOf(store)).ffp === false) return [];
   const state = await stateOf(store);
   const first = new Set(
-    (await store.all<{ id: number }>("SELECT id FROM clubs WHERE type = 'club'")).map((club) => club.id),
+    (await store.all<{ id: number }>("SELECT id FROM clubs WHERE type = 'club' ORDER BY id")).map((club) => club.id),
   );
   const assessments = await assessFinancesBatch(store, { clubIds: [...first], season });
   const previous = new Map<number, Sanction[]>();

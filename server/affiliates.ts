@@ -178,7 +178,7 @@ async function affiliateCandidates(
   squadCounts?: Map<number, number>,
 ): Promise<AffiliateCandidate[]> {
   const rows = await store.all<Club & { strength: number }>(
-    "SELECT clubs.*, partnerships.strength FROM partnerships JOIN clubs ON clubs.id = CASE WHEN partnerships.club_id = ? THEN partnerships.partner_id ELSE partnerships.club_id END WHERE partnerships.club_id = ? OR partnerships.partner_id = ? ORDER BY partnerships.strength DESC, clubs.name",
+    "SELECT clubs.*, partnerships.strength FROM partnerships JOIN clubs ON clubs.id = CASE WHEN partnerships.club_id = ? THEN partnerships.partner_id ELSE partnerships.club_id END WHERE partnerships.club_id = ? OR partnerships.partner_id = ? ORDER BY partnerships.strength DESC, clubs.name, clubs.id",
     clubId,
     clubId,
     clubId,
