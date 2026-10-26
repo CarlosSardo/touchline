@@ -94,6 +94,7 @@ Open [http://127.0.0.1:5173](http://127.0.0.1:5173); the API runs on `127.0.0.1:
 | `npm run world:check`               | Generate the world in a test schema and check its invariants; prints one JSON line, exits 1 on a violation (`-- --nations=EN,ES`) |
 | `npm run simulation:check`          | Compare a 600-match sample with real aggregates (`-- --seasons=3` soak; the soak fails if the world outgrows its storage budget) |
 | `npm run image:build`               | Build the Docker image for this machine's architecture (`touchline:local`) |
+| `npm run ci`                        | Run the CI pipeline exactly as GitHub Actions does (Dagger; needs only Docker), see [CI](#ci-dagger) |
 | `npm run pi:backup` / `npm run pi:restore` | Back up / restore the compose stack's PostgreSQL database (see [Backups](#backups-and-restore)) |
 
 If ports are taken: `API_PORT=3011 UI_PORT=5181 npm run dev`. `npm run preview` serves only the static build, not the game engine.
@@ -109,7 +110,21 @@ npm run test:local -- npm run verify -- --parallel
 npm run test:local -- --no-docker -- npx vitest run server/draw.test.ts
 ```
 
-`npm run verify` runs lint, the production build, SQL-backed unit/integration/save tests and the Playwright suite; `--parallel` runs them as concurrent jobs in per-job databases and writes logs to `reports/`. Tests use the real schema in isolated `touchline_test_` / `touchline_e2e_` schemas and must never target a player's world. Remote-database rules and guards are in [CONTRIBUTING.md](CONTRIBUTING.md). The manual/PR GitHub Actions workflow [verify.yml](.github/workflows/verify.yml) runs the same suites against a throwaway PostgreSQL 18 container.
+`npm run verify` runs lint, the production build, SQL-backed unit/integration/save tests and the Playwright suite; `--parallel` runs them as concurrent jobs in per-job databases and writes logs to `reports/`. Tests use the real schema in isolated `touchline_test_` / `touchline_e2e_` schemas and must never target a player's world. Remote-database rules and guards are in [CONTRIBUTING.md](CONTRIBUTING.md).
+
+### CI (Dagger)
+
+CI is a [Dagger](https://docs.dagger.io) pipeline, the TypeScript module [.dagger/modules/touchline-ci](.dagger/modules/touchline-ci/src/index.ts), and [scripts/ci.sh](scripts/ci.sh) is its only entrypoint: the GitHub Actions workflows [verify.yml](.github/workflows/verify.yml) (pull requests to `main`, manual dispatch) and [image.yml](.github/workflows/image.yml) (pushes to `main`) run exactly the commands below. It needs only Docker: the script installs the pinned, checksum-verified Dagger CLI (into `~/.cache/touchline/dagger`) and runs a local Dagger engine container. Dagger Cloud is not used (no token, no cloud engine, telemetry off).
+
+```sh
+npm run ci                                   # all suites: static, then backend, world and e2e in parallel
+npm run ci -- backend,e2e                    # selected suites: static, backend, world, e2e
+npm run ci -- world --seasons=5 --full-world # longer season soak, also on the full world
+npm run ci -- image                          # build the linux/amd64 + linux/arm64 release image, no push
+npm run ci -- dagger check -l                # the pinned Dagger CLI; `dagger check` runs the suites as checks
+```
+
+Each suite runs in containers against its own throwaway PostgreSQL 18 service: `static` (lint, build, SQL-free unit tests), `backend` (`npm test` with SQL integration and save tests), `world` (catalog test, `world:check`, a 3-season `simulation:check`, `db:footprint` and the backup / world reset smoke) and `e2e` (Playwright). Every step runs even when an earlier one fails; logs, reports and per-step exit codes are exported to `ci-logs/<suite>/` (uploaded as workflow artifacts), and the script exits non-zero if any step failed. Tests see the same loopback `SQL_*` environment as `npm run test:local`. The Dagger version is pinned in `scripts/ci.sh`; after changing the module run `npm run ci -- dagger generate -y` and commit the generated files.
 
 ## Hosting on a Raspberry Pi
 

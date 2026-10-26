@@ -5,14 +5,16 @@ description: >-
   pipelines that run locally and in any CI system. Use when someone asks to
   "write CI pipeline in TypeScript", "portable CI/CD", "run GitHub Actions
   locally", "Dagger pipeline", "CI as code", "containerized build pipeline",
-  or "test my CI locally before pushing". Covers Dagger SDK (TypeScript/Python),
-  pipeline composition, caching, secrets, and multi-stage builds.
+  "change Touchline CI", or "test my CI locally before pushing". Covers the
+  Dagger 1.0 workspace model, the TypeScript SDK, checks, services, secrets,
+  caching and multi-platform image builds.
 license: Apache-2.0
-compatibility: "A container runtime (Docker) and the Dagger CLI. Modules in TypeScript, Python, Go and other SDKs."
+compatibility: "Docker and the Dagger CLI v1.0.0-beta.21 (pinned in scripts/ci.sh). Modules in TypeScript."
 metadata:
-  author: terminal-skills
-  version: "1.1.0"
+  author: terminal-skills (adapted for Touchline and Dagger 1.0)
+  version: "2.0.0"
   repository: https://github.com/dagger/dagger
+  upstream: https://github.com/TerminalSkills/skills/blob/main/skills/dagger/SKILL.md
   category: devops
   tags: "ci-cd, containers, pipelines, dagger, docker"
 ---
@@ -21,209 +23,156 @@ metadata:
 
 ## Overview
 
-Dagger lets you write CI/CD pipelines in TypeScript, Python, or Go instead of YAML. Pipelines run in containers, are fully cacheable, and work identically on your laptop and in GitHub Actions/GitLab CI/Jenkins. No more "works in CI but not locally" — test your entire pipeline before pushing.
+Dagger runs CI/CD pipelines written in TypeScript, Python or Go in containers on a Dagger engine. Every step is cached and runs the same way on a laptop and in GitHub Actions, so CI can be tested before pushing.
 
-## When to Use
+This skill targets **Dagger 1.0** (`v1.0.0-beta.21`). 1.0 renamed most 0.x commands; never emit the 0.x forms in the right-hand column of the table below.
 
-- Tired of debugging YAML-based CI configs by pushing commits
-- Need to run the exact same pipeline locally and in CI
-- Complex build pipelines that benefit from TypeScript/Python logic (conditionals, loops)
-- Want container-level caching for build steps
-- Multi-language monorepo where different projects need different pipelines
+| Dagger 1.0 | 0.x (do not use) |
+|---|---|
+| `dagger init` (creates `dagger.toml`, the workspace) | `dagger init --sdk=...` |
+| `dagger module install dagger.io/sdk/typescript` then `dagger module init typescript --name=X` | `dagger init --sdk=typescript` |
+| `dagger api call FUNCTION ...`, `dagger api functions` | `dagger call`, `dagger functions` |
+| `dagger generate -y` (regenerate SDK code; commit it) | `dagger develop` |
+| `dagger check`, `dagger check -l` | — |
+| `dagger -c 'script'` | `dagger` / `dagger shell` as a shell |
+| `dagger lock update` | `dagger update` |
+| Secrets as `env:NAME`, `file:PATH`, `cmd:"..."` | `env://NAME` |
+
+Files: `dagger.toml` (workspace config), `dagger.lock` (pinned images and git refs), and per module `dagger-module.toml`, `src/`, generated `clients/`, `__dagger.dispatch.ts`, `entrypoint/`. Commit all of them; 1.0 modules do not generate code at runtime.
+
+## Touchline conventions (read first when changing CI here)
+
+- The CI module is `.dagger/modules/touchline-ci/src/index.ts` (the workspace main). `scripts/ci.sh` is the **only** entrypoint: GitHub Actions (`.github/workflows/verify.yml`, `image.yml`) and developers (`npm run ci`) run the same commands. Put CI logic in the module or `scripts/ci.sh`, never in workflow YAML.
+- **No Dagger Cloud**: no `DAGGER_CLOUD_TOKEN`, no `--engine=cloud`, no `dagger cloud checks on`; `scripts/ci.sh` sets `DO_NOT_TRACK=1` and runs a local engine in Docker with an empty `DOCKER_CONFIG`.
+- Run the pinned CLI through the script: `npm run ci -- dagger <args>` (for example `npm run ci -- dagger generate -y` after changing the module, `npm run ci -- dagger check -l`).
+- Suites `static`, `backend`, `world`, `e2e` are `report(suite)` functions that never fail on a failed step: each step runs through `ci-step NAME CMD...`, which tees `/ci-logs/NAME.log` and writes the exit code to `/ci-logs/status/NAME`. `scripts/ci.sh` exports them to `ci-logs/<suite>/` and fails if any status is non-zero. The `*-checks` / `*-tests` functions are the same suites as `@check()`s for `dagger check`.
+- SQL guards in `server/sql-config.ts` and the tests only accept a loopback `SQL_HOST`. Do not loosen them for CI: each test container runs a TCP forwarder from `127.0.0.1:54329` to the `postgres` service and gets the same `SQL_*` environment as `scripts/test-local.ts`.
+- To change the Dagger version, update `DAGGER_VERSION` in `scripts/ci.sh` and this skill, run `npm run ci -- dagger lock update` and `dagger generate -y`, and commit.
 
 ## Instructions
 
 ### Setup
 
 ```bash
-# macOS / Linux with Homebrew
-brew install dagger/tap/dagger
-
-# Linux without Homebrew: download the release and verify its checksum first
-VER=0.21.10
+# Pinned and checksum-verified; scripts/ci.sh does this automatically
+VER=1.0.0-beta.21
 curl -fsSLO https://dl.dagger.io/dagger/releases/$VER/dagger_v${VER}_linux_amd64.tar.gz
-curl -fsSL https://dl.dagger.io/dagger/releases/$VER/checksums.txt | grep linux_amd64 | sha256sum -c -
+curl -fsSL https://dl.dagger.io/dagger/releases/$VER/checksums.txt | grep " dagger_v${VER}_linux_amd64.tar.gz$" | sha256sum -c -
 tar -xzf dagger_v${VER}_linux_amd64.tar.gz dagger && mv dagger ~/.local/bin/
-
 dagger version
 
-# Create a module in your project (code goes to .dagger/)
-dagger init --sdk=typescript --name=ci
-dagger functions        # list what the module exposes
+# New workspace and TypeScript module (code goes to .dagger/modules/<name>)
+dagger init
+dagger module install dagger.io/sdk/typescript
+dagger module init typescript --name=ci --main -y
+dagger api functions
 ```
 
-The CLI starts a Dagger Engine container on first use, so Docker (or another supported container runtime) must be running. Latest release checked: v0.21.10 (2026-09-30). Docs also describe a 1.0 beta line; the code below targets the 0.21 TypeScript SDK.
+The CLI starts the engine container (`registry.dagger.io/engine:v<version>`) on first use, so Docker must be running.
 
-### Basic Pipeline
+### Module (TypeScript SDK)
 
 ```typescript
-// .dagger/src/index.ts - CI pipeline for a Node.js project
-import { dag, Container, Directory, Secret, argument, check, object, func } from "@dagger.io/dagger";
+import { check, Container, dag, Directory, func, object, ReturnType, Secret, Workspace } from "@dagger.io/dagger"
 
 @object()
 export class Ci {
-  /** Base container with dependencies installed; the npm cache persists between runs. */
   @func()
-  base(
-    @argument({ defaultPath: "/", ignore: ["node_modules", ".git", "dist"] })
-    source: Directory,
-  ): Container {
+  source: Directory
+
+  // The Workspace is filled in by Dagger; read the project lazily and keep the cache key tight.
+  constructor(ws: Workspace) {
+    this.source = ws.directory("/", { gitignore: true, exclude: ["**/.git", "**/node_modules", ".dagger"] })
+  }
+
+  /** Dependencies keyed only by the manifests, then the source on top. */
+  @func()
+  base(): Container {
     return dag
       .container()
-      .from("node:22-slim")
-      .withDirectory("/app", source)
+      .from("node:24-trixie-slim")
+      .withMountedCache("/root/.npm", dag.cacheVolume("npm"))
       .withWorkdir("/app")
-      .withMountedCache("/root/.npm", dag.cacheVolume("npm-cache"))
-      .withExec(["npm", "ci"]);
+      .withFile("/app/package.json", this.source.file("package.json"))
+      .withFile("/app/package-lock.json", this.source.file("package-lock.json"))
+      .withExec(["npm", "ci"])
+      .withDirectory("/app", this.source)
   }
 
-  /** Lint, test and build; `dagger check` runs every @check function. */
+  /** `dagger check` runs every @check() function that has no required arguments. */
   @func()
   @check()
-  async lint(
-    @argument({ defaultPath: "/", ignore: ["node_modules", ".git", "dist"] })
-    source: Directory,
-  ): Promise<void> {
-    await this.base(source).withExec(["npm", "run", "lint"]).sync();
+  async lint(): Promise<void> {
+    await this.base().withExec(["npm", "run", "lint"]).sync()
   }
 
+  /** Keep going after a failure and inspect the exit code instead of throwing. */
   @func()
-  @check()
-  async test(
-    @argument({ defaultPath: "/", ignore: ["node_modules", ".git", "dist"] })
-    source: Directory,
-  ): Promise<void> {
-    await this.base(source).withExec(["npm", "test"]).sync();
-  }
-
-  @func()
-  build(
-    @argument({ defaultPath: "/", ignore: ["node_modules", ".git", "dist"] })
-    source: Directory,
-  ): Directory {
-    return this.base(source).withExec(["npm", "run", "build"]).directory("/app/dist");
-  }
-
-  /** Build and push a runtime image; returns the pushed reference. */
-  @func()
-  async publish(
-    @argument({ defaultPath: "/", ignore: ["node_modules", ".git", "dist"] })
-    source: Directory,
-    address: string,
-  ): Promise<string> {
-    return dag
-      .container()
-      .from("node:22-slim")
-      .withDirectory("/app", this.build(source))
-      .withWorkdir("/app")
-      .withEntrypoint(["node", "index.js"])
-      .publish(address);
+  async testExitCode(): Promise<number> {
+    return this.base().withExec(["npm", "test"], { expect: ReturnType.Any }).exitCode()
   }
 }
 ```
 
-`defaultPath: "/"` makes the project root the default, so `--source` can be omitted. Functions with no required arguments marked `@check()` are what `dagger check` runs (check support is in the 0.21 SDK; see the quickstart if your engine is older).
-
-### Run Locally
+### Run
 
 ```bash
-dagger check                # run every @check function (lint + test)
-dagger check -l             # list the checks
-dagger call test            # run one function
-dagger call build export --path=./dist
-dagger call publish --address=ghcr.io/acme-labs/storefront:1.4.2
+dagger check                 # every check, in parallel
+dagger check -l              # list checks
+dagger api call lint         # one function
+dagger api call base directory --path=/app/dist export --path=./dist
 ```
 
-Registry credentials for `publish` come from `container.withRegistryAuth(address, username, secret)`; pass the token as a `Secret` argument, not a string.
-
-### Pipeline with Services (Database)
+### Services (databases)
 
 ```typescript
-@func()
-async integrationTest(
-  @argument({ defaultPath: "/", ignore: ["node_modules", ".git"] })
-  source: Directory,
-): Promise<string> {
-  const db = dag
-    .container()
-    .from("postgres:16")
-    .withEnvVariable("POSTGRES_PASSWORD", "ci-only-password")
-    .withEnvVariable("POSTGRES_DB", "storefront_test")
-    .withExposedPort(5432)
-    .asService({ useEntrypoint: true });   // run the image's own entrypoint
+const db = dag
+  .container()
+  .from("postgres:18")
+  .withSecretVariable("POSTGRES_PASSWORD", password)
+  .withMountedTemp("/dev/shm", { size: 1024 ** 3 })
+  .withExposedPort(5432)
+  .asService({ useEntrypoint: true, args: ["postgres", "-c", "fsync=off"] })
 
-  return this.base(source)
-    .withServiceBinding("db", db)          // reachable as host "db"
-    .withEnvVariable("DATABASE_URL", "postgresql://postgres:ci-only-password@db:5432/storefront_test")
-    .withExec(["npm", "run", "db:migrate"])
-    .withExec(["npm", "run", "test:integration"])
-    .stdout();
-}
+container.withServiceBinding("postgres", db) // reachable as host "postgres" once the port is open
 ```
 
 ### Secrets
 
+Pass secrets as `Secret` arguments (`--token=env:TOKEN`) or create them with `dag.setSecret(uniqueName, value)`; use `withSecretVariable`, never `withEnvVariable`. Dagger redacts secret values from its own output, but not from files a command writes, so redact log files before exporting them.
+
+### Multi-platform images
+
 ```typescript
-// The Secret type keeps values out of image layers, logs and the cache.
-@func()
-async deploy(source: Directory, deployToken: Secret): Promise<string> {
-  return this.base(source)
-    .withSecretVariable("DEPLOY_TOKEN", deployToken)
-    .withExec(["npm", "run", "deploy"])
-    .stdout();
-}
+const variants = ["linux/amd64", "linux/arm64"].map((platform) =>
+  this.source.dockerBuild({ platform: platform as Platform, buildArgs: [{ name: "SOURCE_REVISION", value: rev }] }),
+)
+await dag.container().withRegistryAuth("ghcr.io", user, token).publish("ghcr.io/owner/app:tag", { platformVariants: variants })
 ```
 
-```bash
-export DEPLOY_TOKEN=...                       # set in your shell or CI secret store
-dagger call deploy --source=. --deploy-token=env://DEPLOY_TOKEN
-```
+The engine emulates foreign platforms itself; no QEMU or buildx setup is needed on the host.
 
-Other providers: `file://`, `cmd://`, `op://` (1Password), `vault://`, `aws+sm://`. Argument names are kebab-cased on the CLI.
+### GitHub Actions
 
-### GitHub Actions Integration
+Keep workflows thin: check out, then run the same script developers run. Docker is preinstalled on `ubuntu-latest`.
 
 ```yaml
-# .github/workflows/ci.yml
-name: CI
-on: [push, pull_request]
-
-jobs:
-  ci:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dagger/dagger-for-github@v8.4.0
-        with:
-          call: test
-          version: "0.21.10"
-          cloud-token: ${{ secrets.DAGGER_CLOUD_TOKEN }}   # optional
+steps:
+  - uses: actions/checkout@<sha> # v7
+    with: { persist-credentials: false }
+  - run: scripts/ci.sh backend
+  - if: failure()
+    uses: actions/upload-artifact@<sha> # v7
+    with: { name: backend-logs, path: ci-logs/ }
 ```
 
-Pin `version` to the engine you developed against; the action installs that CLI.
-
-## Examples
-
-### Example 1: Monorepo CI pipeline
-
-**User prompt:** "I have a monorepo with a Next.js frontend and a Python backend. Set up a CI pipeline that tests both."
-
-The agent will create a Dagger pipeline with separate functions for frontend (Node.js container, npm test) and backend (Python container, pytest), both running from the same module; `dagger check` runs them in parallel and a second run reuses cached layers.
-
-### Example 2: Replace GitHub Actions with Dagger
-
-**User prompt:** "My GitHub Actions workflow is 200 lines of YAML and I can't test it locally. Convert it to Dagger."
-
-The agent runs `dagger init --sdk=typescript --name=ci`, translates each YAML step into a function (`lint`, `test`, `build`), mounts a cache volume for the package manager, and verifies with `dagger check`; each step prints in the TUI with a pass or fail mark, and a second run is served from cache.
+Use `--progress=logs` in non-interactive runs: it streams command output, while `plain` prints a span's output only when it finishes.
 
 ## Guidelines
 
-- **Run locally first** — `dagger check` / `dagger call` on your laptop before pushing to CI
-- **Cache the package-manager cache, not node_modules** — `withMountedCache("/root/.npm", ...)`; a mounted node_modules hides what `npm ci` installed
-- **Secrets via `Secret` type** — pass with `env://NAME`; never as plain string arguments or `withEnvVariable`
-- **Narrow the source** — `defaultPath` plus `ignore` keeps `.git` and `node_modules` out of the upload and the cache key
-- **Services for databases** — `asService()` + `withServiceBinding()` for Postgres/Redis in tests
-- **Each `@func()` is independently callable** — design for composability
-- **Container layers are cached** — order operations so rarely-changing steps come first
-- **Dagger Cloud for team caching** — share build cache across CI runners
-- **Use `withExec` for each command** — separate steps for better cache granularity
+- **Run locally first**: `npm run ci` (or `npm run ci -- <suite>`) before pushing.
+- **Cache the package-manager cache, not node_modules**: `withMountedCache("/root/.npm", ...)`.
+- **Narrow the source**: `gitignore: true` plus `exclude` keeps `.git`, `node_modules` and secrets (`.env*`) out of the engine and the cache key.
+- **Order layers**: copy manifests and install before copying the whole source.
+- **Commit generated code**: run `dagger generate -y` after every module change.
+- **Pin versions**: the CLI and engine version in one place; the `dagger.lock` for images and git refs.

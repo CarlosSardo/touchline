@@ -1,0 +1,13 @@
+[modules.typescript-sdk]
+source = "dagger.io/sdk/typescript"
+
+[sdks.typescript]
+module = "typescript-sdk"
+
+[modules.touchline-ci]
+main = true
+source = ".dagger/modules/touchline-ci"
+
+[sdks.typescript.scopes.".dagger/modules/touchline-ci"]
+is-module = true
+name = "touchline-ci"

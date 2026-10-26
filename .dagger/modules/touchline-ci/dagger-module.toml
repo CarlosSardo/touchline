@@ -1,0 +1,5 @@
+name = "touchline-ci"
+
+[entrypoint]
+  kind = "dang"
+  source = "./entrypoint"
