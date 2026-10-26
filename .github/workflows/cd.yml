@@ -10,7 +10,7 @@ run-name: "Release: ${{ github.event.workflow_run.display_title || (github.event
 # GITHUB_TOKEN.
 on:
   workflow_run:
-    workflows: [Verify]
+    workflows: [CI]
     types: [completed]
     branches: [main]
   workflow_dispatch:

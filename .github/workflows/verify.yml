@@ -1,4 +1,4 @@
-name: Verify
+name: CI
 
 # CI: full verification against throwaway PostgreSQL 18 containers, without secrets, on every pull request
 # and every push to main. Each job runs scripts/ci.sh, the same Dagger pipeline (.dagger/modules/touchline-ci)

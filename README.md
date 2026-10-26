@@ -4,7 +4,7 @@
 
 **A football sporting-director simulation, self-hosted on a Raspberry Pi**
 
-[![Verify](https://github.com/CarlosSardo/touchline/actions/workflows/verify.yml/badge.svg)](https://github.com/CarlosSardo/touchline/actions/workflows/verify.yml)
+[![CI](https://github.com/CarlosSardo/touchline/actions/workflows/verify.yml/badge.svg)](https://github.com/CarlosSardo/touchline/actions/workflows/verify.yml)
 [![CD](https://github.com/CarlosSardo/touchline/actions/workflows/cd.yml/badge.svg)](https://github.com/CarlosSardo/touchline/actions/workflows/cd.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-22c55e.svg)](LICENSE)
 

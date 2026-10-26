@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # CD steps of .github/workflows/cd.yml, runnable anywhere with GitHub API access (gh, or curl + jq with GH_TOKEN):
 #   scripts/ci/cd.sh candidate         prints the commit to release: the newest commit on main (closest to its
-#                                      head) whose push passed CI (Verify), or nothing when there is none.
+#                                      head) whose push passed CI (verify.yml), or nothing when there is none.
 #   scripts/ci/cd.sh published <sha>   prints true when GHCR already has the sha-<sha> image (GHCR_USER/GHCR_TOKEN).
 #   scripts/ci/cd.sh deploy <sha>      deploys <sha>'s CI image with scripts/deploy.sh, unless a newer verified
 #                                      commit has become the release or the host already runs <sha> or a newer
