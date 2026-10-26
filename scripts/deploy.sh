@@ -2,7 +2,7 @@
 # Deploy a commit to a Docker host that already runs PostgreSQL and a reverse proxy, see
 # deploy/host-deploy.sh and README ("Deploying from a checkout"). Only committed code is deployed.
 # The commit goes over SSH as a tarball (host-deploy.sh and the compose file come from it). By default
-# the host pulls the image CI published for it, ghcr.io/carlossardo/touchline:sha-<commit> (image.yml,
+# the host pulls the image CI published for it, ghcr.io/carlossardo/touchline:sha-<commit> (cd.yml,
 # commits on main), with its own `docker login ghcr.io`; with --build the host builds it from the source.
 # Usage: scripts/deploy.sh [--build] <ssh-host> [git-ref]    e.g. scripts/deploy.sh carlos@raspberrypi
 #   TOUCHLINE_DIR: deploy directory on the host, relative to the SSH user's home (default: touchline)

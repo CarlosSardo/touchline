@@ -60,7 +60,7 @@ if [ -n "$sha" ]; then
   if [ "$status" != 0 ]; then
     echo "$out" >&2
     echo "Could not pull $remote; nothing was changed. Either:" >&2
-    echo "- the image does not exist yet: CI publishes it for commits on main (.github/workflows/image.yml)," >&2
+    echo "- the image does not exist yet: CD publishes it for verified commits on main (.github/workflows/cd.yml)," >&2
     echo "  so wait for the image workflow, or build on the host with scripts/deploy.sh --build <host> <ref>; or" >&2
     if [ -n "$token_file" ]; then
       echo "- GHCR refused the token from deploy.sh (GHCR_USER/GHCR_TOKEN): it needs read access to the package" >&2
