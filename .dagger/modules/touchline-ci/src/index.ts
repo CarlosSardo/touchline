@@ -9,6 +9,7 @@ import {
   Container,
   dag,
   Directory,
+  File,
   func,
   object,
   Platform,
@@ -27,6 +28,55 @@ const STATUS = `${LOGS}/status`
 const TOOLS = "/opt/touchline-ci"
 const SQL_PORT = "54329"
 const SQL_DATABASE = "touchline_checks"
+
+// Database-isolated shards. living-world.test.ts alone takes about a third of the backend suite, so a fourth
+// backend shard would not finish sooner; game.spec.ts runs its tests in order, so e2e shards by spec file.
+const BACKEND_SHARDS = 3
+const E2E_SHARDS = 2
+const TIMINGS = "scripts/ci/test-timings.json"
+const UNIT_TEST_GLOBS = ["server", "shared", "src"].flatMap((dir) =>
+  ["test.ts", "test.tsx", "spec.ts", "spec.tsx"].map((suffix) => `${dir}/**/*.${suffix}`),
+)
+const BROWSER_TEST_GLOBS = ["e2e/**/*.spec.ts", "e2e/**/*.test.ts"]
+// A test file that may open a SQL store (the same rule the pure-test selection has always used).
+const SQL_TEST = /\bStore\b|createApp\(/
+
+interface Timings {
+  backend: Record<string, number>
+  e2e: Record<string, number>
+}
+
+interface TestPlan {
+  pure: string[]
+  sql: string[]
+  backend: string[][]
+  e2e: string[][]
+}
+
+interface PlaywrightSuite {
+  file?: string
+  suites?: PlaywrightSuite[]
+  specs?: { tests?: { results?: { duration?: number }[] }[] }[]
+}
+
+/**
+ * Longest-processing-time-first bin packing: files sorted by their last measured duration (unknown files get
+ * the median) go to the shard with the least work so far. Deterministic for the same files and timings.
+ */
+function binPack(files: string[], seconds: Record<string, number>, count: number): string[][] {
+  const known = files.map((file) => seconds[file]).filter((value): value is number => value !== undefined).sort((a, b) => a - b)
+  const fallback = known.length > 0 ? known[Math.floor(known.length / 2)] : 1
+  const weight = (file: string) => seconds[file] ?? fallback
+  const shards = Array.from({ length: count }, () => ({ load: 0, files: [] as string[] }))
+  for (const file of [...files].sort((a, b) => weight(b) - weight(a) || a.localeCompare(b))) {
+    const lightest = shards.reduce((best, shard) => (shard.load < best.load ? shard : best))
+    lightest.load += weight(file)
+    lightest.files.push(file)
+  }
+  return shards.map((shard) => shard.files.sort())
+}
+
+const round = (value: number) => Math.round(value * 10) / 10
 
 // Same flags as deploy/compose.test.yaml (shared_buffers raised to 1GB): test data only,
 // durability is traded for speed.
@@ -74,15 +124,6 @@ echo "[ci] \${name}: $([[ \${code} == 0 ]] && echo PASS || echo "FAIL (exit \${c
 exit 0
 `
 
-const PURE_TESTS = `set -euo pipefail
-# Files that never open a SQL store; the backend suite runs the complete suite, these included.
-mapfile -t files < <(find server shared src -type f \\( -name '*.test.ts' -o -name '*.test.tsx' -o -name '*.spec.ts' -o -name '*.spec.tsx' \\) | sort |
-  xargs --no-run-if-empty grep -L -E '\\bStore\\b|createApp\\(' || true)
-if (( \${#files[@]} == 0 )); then echo "No SQL-free test files found."; exit 0; fi
-printf 'Pure test files:\\n'; printf '  %s\\n' "\${files[@]}"
-npx vitest run "\${files[@]}"
-`
-
 @object()
 export class TouchlineCi {
   /** The checked-out project: tracked and untracked files, minus .gitignore'd files and CI/agent metadata. */
@@ -119,9 +160,29 @@ export class TouchlineCi {
   /** Node.js with `npm ci` done; only package.json and package-lock.json key this layer. */
   @func()
   async deps(): Promise<Container> {
+    return this.installed(dag.container().from(await this.nodeImage()))
+  }
+
+  /**
+   * The Playwright image matching the lockfile's @playwright/test (browsers and their system libraries
+   * preinstalled) with Node.js from .nvmrc, so the browser suite needs no `playwright install --with-deps`.
+   */
+  @func()
+  async browserImage(): Promise<Container> {
+    const lock = JSON.parse(await this.source.file("package-lock.json").contents()) as {
+      packages: Record<string, { version?: string }>
+    }
+    const version = lock.packages["node_modules/@playwright/test"]?.version
+    if (!version) throw new Error("package-lock.json has no node_modules/@playwright/test")
+    const node = dag.container().from(await this.nodeImage())
     return dag
       .container()
-      .from(await this.nodeImage())
+      .from(`mcr.microsoft.com/playwright:v${version}-noble`)
+      .withDirectory("/usr/local", node.directory("/usr/local"))
+  }
+
+  private installed(base: Container): Container {
+    return base
       .withEnvVariable("CI", "true")
       // Matches the dev workstation's default V8 heap limit; an 8 GB runner would default to about 2 GiB.
       .withEnvVariable("NODE_OPTIONS", "--max-old-space-size=4096")
@@ -137,8 +198,7 @@ export class TouchlineCi {
   /** The project on top of its installed dependencies, with the CI step runner. */
   @func()
   async workspace(withBrowsers = false): Promise<Container> {
-    let container = await this.deps()
-    if (withBrowsers) container = container.withExec(["npx", "playwright", "install", "--with-deps", "chromium"])
+    const container = withBrowsers ? this.installed(await this.browserImage()) : await this.deps()
     return container
       .withDirectory(APP, this.source)
       .withNewFile(`${TOOLS}/sql-forwarder.mjs`, SQL_FORWARDER)
@@ -200,22 +260,74 @@ export class TouchlineCi {
       .directory(LOGS)
   }
 
-  /** Lint, production build and the SQL-free unit tests. */
+  /**
+   * Every unit/integration test file, split into SQL-free files (the static suite runs them, in parallel) and
+   * SQL files (the backend suite runs them in database-isolated shards). Together they are exactly the files
+   * `npm test` runs.
+   */
+  @func()
+  async testPlan(): Promise<string> {
+    const plan = await this.plan()
+    return JSON.stringify(plan, null, 2)
+  }
+
+  private async plan(): Promise<TestPlan> {
+    const [unit, browser, timings] = await Promise.all([
+      this.globAll(UNIT_TEST_GLOBS),
+      this.globAll(BROWSER_TEST_GLOBS),
+      this.timings(),
+    ])
+    const contents = await Promise.all(unit.map((file) => this.source.file(file).contents()))
+    const pure = unit.filter((_, index) => !SQL_TEST.test(contents[index]))
+    const sql = unit.filter((_, index) => SQL_TEST.test(contents[index]))
+    const backend = binPack(sql, timings.backend, BACKEND_SHARDS)
+    const e2e = binPack(browser, timings.e2e, E2E_SHARDS)
+    // The shards must cover every SQL and browser test file exactly once.
+    for (const [name, files, shards] of [["backend", sql, backend], ["e2e", browser, e2e]] as const) {
+      const covered = shards.flat().sort()
+      if (covered.length !== files.length || covered.some((file, index) => file !== [...files].sort()[index]))
+        throw new Error(`${name} shards do not cover every test file exactly once`)
+    }
+    if (pure.length + sql.length !== unit.length) throw new Error("test files are not split exactly into pure and SQL")
+    return { pure, sql, backend, e2e }
+  }
+
+  private async globAll(patterns: string[]): Promise<string[]> {
+    const found = await Promise.all(patterns.map((pattern) => this.source.glob(pattern)))
+    return [...new Set(found.flat())].sort()
+  }
+
+  private async timings(): Promise<Timings> {
+    const parsed = JSON.parse(await this.source.file(TIMINGS).contents()) as Partial<Timings>
+    return { backend: parsed.backend ?? {}, e2e: parsed.e2e ?? {} }
+  }
+
+  /** Lint, production build and the SQL-free unit tests (file-parallel: they open no database). */
   @func()
   async staticReport(): Promise<Directory> {
-    let container = await this.workspace()
+    const plan = await this.plan()
+    let container = (await this.workspace()).withNewFile(`${LOGS}/test-plan.json`, JSON.stringify(plan, null, 2))
     container = this.step(container, "lint", ["npm", "run", "lint"])
     container = this.step(container, "build", ["npm", "run", "build"])
-    container = this.step(container, "pure-tests", ["bash", "-c", PURE_TESTS])
+    container = this.step(container, "pure-tests", ["npx", "vitest", "run", "--fileParallelism", ...plan.pure])
     return this.redacted(container)
   }
 
-  /** The complete Vitest suite (npm test) with SQL integration and save tests. */
+  /**
+   * The SQL integration and save test files, each shard in its own container against its own PostgreSQL.
+   * @param shard One shard as N/M (as GitHub Actions runs them); empty runs every shard concurrently
+   */
   @func()
-  async backendReport(): Promise<Directory> {
-    let container = this.withSql(await this.workspace(), "touchline_test_ci_dagger")
-    container = this.step(container, "backend-tests", ["npm", "test"])
-    return this.redacted(container)
+  async backendReport(shard = ""): Promise<Directory> {
+    const plan = await this.plan()
+    return this.sharded(plan.backend, shard, async (files, index, count) => {
+      const name = `backend-${index}of${count}`
+      let container = this.withSql(await this.workspace(), `touchline_test_ci_${index}`)
+      container = this.step(container, name, [
+        "npx", "vitest", "run", ...files,
+      ])
+      return this.redacted(container)
+    })
   }
 
   /**
@@ -242,16 +354,60 @@ export class TouchlineCi {
     return this.redacted(container)
   }
 
-  /** The Playwright browser suite against a fresh E2E schema; the HTML report and traces are kept. */
+  /**
+   * The Playwright browser suite, sharded by spec file; each shard has its own PostgreSQL, servers and fresh
+   * E2E schema. The HTML report and traces are kept under e2e-<shard>/.
+   * @param shard One shard as N/M (as GitHub Actions runs them); empty runs every shard concurrently
+   */
   @func()
-  async browserReport(): Promise<Directory> {
-    const schema = `touchline_e2e_${randomBytes(16).toString("hex")}`
-    let container = this.withSql(await this.workspace(true), schema).withEnvVariable("TOUCHLINE_E2E_SCHEMA", schema)
-    container = this.step(container, "e2e", ["npm", "run", "test:e2e", "--", "--reporter=list,html"])
-    container = container.withExec([
-      "bash", "-c", `for d in playwright-report test-results; do if [[ -d $d ]]; then cp -r $d ${LOGS}/; fi; done`,
-    ])
-    return this.redacted(container)
+  async browserReport(shard = ""): Promise<Directory> {
+    const plan = await this.plan()
+    return this.sharded(plan.e2e, shard, async (files, index, count) => {
+      const name = `e2e-${index}of${count}`
+      const schema = `touchline_e2e_${randomBytes(16).toString("hex")}`
+      let container = this.withSql(await this.workspace(true), schema)
+        .withEnvVariable("TOUCHLINE_E2E_SCHEMA", schema)
+        .withEnvVariable("PLAYWRIGHT_JSON_OUTPUT_NAME", `${LOGS}/timings/${name}.json`)
+      container = this.step(container, name, ["npm", "run", "test:e2e", "--", "--reporter=list,html,json", ...files])
+      container = container.withExec([
+        "bash", "-c", `mkdir -p ${LOGS}/${name}; for d in playwright-report test-results; do if [[ -d $d ]]; then cp -r $d ${LOGS}/${name}/; fi; done`,
+      ])
+      return this.redacted(container)
+    })
+  }
+
+  /** Runs one shard (N/M) or, when shard is empty, every shard concurrently and merges their reports. */
+  private async sharded(
+    shards: string[][],
+    shard: string,
+    run: (files: string[], index: number, count: number) => Promise<Directory>,
+  ): Promise<Directory> {
+    const count = shards.length
+    if (shard) {
+      const match = /^(\d+)\/(\d+)$/.exec(shard)
+      if (!match || Number(match[2]) !== count || Number(match[1]) < 1 || Number(match[1]) > count)
+        throw new Error(`shard must be N/${count} with N from 1 to ${count}, not "${shard}"`)
+      const index = Number(match[1])
+      return this.shardOrEmpty(shards[index - 1], index, count, run)
+    }
+    const reports = await Promise.all(shards.map((files, position) => this.shardOrEmpty(files, position + 1, count, run)))
+    // Evaluate every shard before merging, so they run concurrently rather than one after another.
+    await Promise.all(reports.map((report) => report.sync()))
+    return reports.reduce((merged, report) => merged.withDirectory("/", report), dag.directory())
+  }
+
+  // Vitest and Playwright run every test when given no files, so an empty shard runs nothing instead.
+  private async shardOrEmpty(
+    files: string[],
+    index: number,
+    count: number,
+    run: (files: string[], index: number, count: number) => Promise<Directory>,
+  ): Promise<Directory> {
+    if (files.length > 0) return run(files, index, count)
+    return dag
+      .directory()
+      .withNewFile(`shard-${index}of${count}-empty.log`, "No test files in this shard.\n")
+      .withNewFile(`status/shard-${index}of${count}-empty`, "0\n")
   }
 
   /**
@@ -259,21 +415,56 @@ export class TouchlineCi {
    * @param suite static, backend, world or e2e
    * @param seasons Seasons for the world suite's simulation check (1-20)
    * @param fullWorld Also run the world suite's season soak on the full world
+   * @param shard backend or e2e only: one shard as N/M; empty runs every shard concurrently
    */
   @func()
-  async report(suite: string, seasons = 3, fullWorld = false): Promise<Directory> {
+  async report(suite: string, seasons = 3, fullWorld = false, shard = ""): Promise<Directory> {
+    if (shard && suite !== "backend" && suite !== "e2e") throw new Error(`the ${suite} suite has no shards`)
     switch (suite as Suite) {
       case "static":
         return this.staticReport()
       case "backend":
-        return this.backendReport()
+        return this.backendReport(shard)
       case "world":
         return this.worldReport(seasons, fullWorld)
       case "e2e":
-        return this.browserReport()
+        return this.browserReport(shard)
       default:
         throw new Error(`Unknown suite "${suite}". Use one of: ${SUITES.join(", ")}.`)
     }
+  }
+
+  /**
+   * Per-file test durations (seconds) from the timing reports of earlier runs (ci-logs/), merged into the
+   * current scripts/ci/test-timings.json. scripts/ci.sh timings writes the result back.
+   * @param reports A directory holding backend-NofM.log (Vitest output) and timings/e2e-*.json (Playwright) reports
+   */
+  @func()
+  async updatedTimings(reports: Directory): Promise<File> {
+    const timings = await this.timings()
+    // Vitest's per-file summary line ("✓ server/x.test.ts (12 tests) 9466ms") includes beforeAll/afterAll hooks,
+    // unlike its JSON report, and those hooks are most of the heaviest files' time.
+    for (const file of await reports.glob("**/backend-*of*.log")) {
+      const log = (await reports.file(file).contents()).replace(/\x1b\[[0-9;]*m/g, "")
+      for (const match of log.matchAll(/^\s*[✓❯×↓] ((?:server|shared|src)\/\S+) \(\d+ tests?[^)]*\) (\d+)ms$/gm))
+        timings.backend[match[1]] = round(Number(match[2]) / 1000)
+    }
+    for (const file of await reports.glob("**/timings/e2e-*.json")) {
+      const report = JSON.parse(await reports.file(file).contents()) as { suites: PlaywrightSuite[] }
+      const seconds: Record<string, number> = {}
+      const visit = (suite: PlaywrightSuite, path: string) => {
+        for (const spec of suite.specs ?? [])
+          for (const test of spec.tests ?? [])
+            for (const result of test.results ?? []) seconds[path] = (seconds[path] ?? 0) + (result.duration ?? 0) / 1000
+        for (const child of suite.suites ?? []) visit(child, path)
+      }
+      for (const suite of report.suites ?? []) visit(suite, `e2e/${suite.file}`)
+      for (const [path, value] of Object.entries(seconds)) timings.e2e[path] = round(value)
+    }
+    const sorted = (record: Record<string, number>) =>
+      Object.fromEntries(Object.entries(record).sort(([a], [b]) => a.localeCompare(b)))
+    const json = `${JSON.stringify({ backend: sorted(timings.backend), e2e: sorted(timings.e2e) }, null, 2)}\n`
+    return dag.directory().withNewFile("test-timings.json", json).file("test-timings.json")
   }
 
   private async assertPassed(suite: Suite, report: Directory): Promise<void> {
@@ -294,7 +485,7 @@ export class TouchlineCi {
     await this.assertPassed("static", await this.staticReport())
   }
 
-  /** SQL-backed backend tests (npm test). */
+  /** SQL-backed backend tests, every shard. */
   @func()
   @check()
   async backendTests(): Promise<void> {
@@ -308,7 +499,7 @@ export class TouchlineCi {
     await this.assertPassed("world", await this.worldReport())
   }
 
-  /** Playwright e2e against a throwaway database. */
+  /** Playwright e2e, every shard, against throwaway databases. */
   @func()
   @check()
   async browserTests(): Promise<void> {

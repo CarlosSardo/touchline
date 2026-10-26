@@ -119,12 +119,14 @@ CI is a [Dagger](https://docs.dagger.io) pipeline, the TypeScript module [.dagge
 ```sh
 npm run ci                                   # all suites: static, then backend, world and e2e in parallel
 npm run ci -- backend,e2e                    # selected suites: static, backend, world, e2e
+npm run ci -- backend --shard=2/3            # one shard, exactly as a GitHub Actions matrix job runs it
 npm run ci -- world --seasons=5 --full-world # longer season soak, also on the full world
 npm run ci -- image                          # build the linux/amd64 + linux/arm64 release image, no push
+npm run ci -- timings                        # rebalance shards from the last run's timings (scripts/ci/test-timings.json)
 npm run ci -- dagger check -l                # the pinned Dagger CLI; `dagger check` runs the suites as checks
 ```
 
-Each suite runs in containers against its own throwaway PostgreSQL 18 service: `static` (lint, build, SQL-free unit tests), `backend` (`npm test` with SQL integration and save tests), `world` (catalog test, `world:check`, a 3-season `simulation:check`, `db:footprint` and the backup / world reset smoke) and `e2e` (Playwright). Every step runs even when an earlier one fails; logs, reports and per-step exit codes are exported to `ci-logs/<suite>/` (uploaded as workflow artifacts), and the script exits non-zero if any step failed. Tests see the same loopback `SQL_*` environment as `npm run test:local`. The Dagger version is pinned in `scripts/ci.sh`; after changing the module run `npm run ci -- dagger generate -y` and commit the generated files.
+Each suite runs in containers against its own throwaway PostgreSQL 18 service: `static` (lint, build and the SQL-free unit tests, in parallel), `backend` (the SQL integration and save tests in 3 shards, each with its own PostgreSQL; together with `static` exactly the files `npm test` runs), `world` (catalog test, `world:check`, a 3-season `simulation:check`, `db:footprint` and the backup / world reset smoke) and `e2e` (Playwright on the official Playwright image, in 2 spec-file shards with their own database and servers). Shards are balanced by the per-file durations in `scripts/ci/test-timings.json`; locally all shards run at once, in GitHub Actions each is a matrix job. Every step runs even when an earlier one fails; logs, reports and per-step exit codes are exported to `ci-logs/<suite>/` (uploaded as workflow artifacts), and the script exits non-zero if any step failed. Tests see the same loopback `SQL_*` environment as `npm run test:local`. The Dagger version is pinned in `scripts/ci.sh`; after changing the module run `npm run ci -- dagger generate -y` and commit the generated files.
 
 ## Hosting on a Raspberry Pi
 

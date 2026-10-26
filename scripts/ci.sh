@@ -4,6 +4,9 @@
 # exports logs and reports to ci-logs/. No Dagger Cloud: no token, no cloud engine, no telemetry.
 #
 #   scripts/ci.sh [SUITES] [--seasons=N] [--full-world]   SUITES: all (default) or a comma list of static,backend,world,e2e
+#   scripts/ci.sh backend|e2e --shard=N/M                 one database-isolated shard (as GitHub Actions runs them);
+#                                                          without --shard every shard runs concurrently
+#   scripts/ci.sh timings                                  refresh scripts/ci/test-timings.json (shard balance) from ci-logs/
 #   scripts/ci.sh image [PLATFORMS]                        build the release image (default linux/amd64,linux/arm64), no push
 #   scripts/ci.sh publish                                  build and push; needs IMAGE_REPOSITORY, IMAGE_TAGS (comma list),
 #                                                          SOURCE_REVISION, REGISTRY_USER and REGISTRY_TOKEN
@@ -67,7 +70,7 @@ summary() { if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then printf '%s\n' "$@" >> "
 # --- Suites --------------------------------------------------------------------------------------------------
 run_suite() { # SUITE [dagger output file]
   local suite=$1 out=${2:-} args
-  args=(api call report --suite="$suite" --seasons="$seasons" --full-world="$full_world" export --path="$logs/$suite")
+  args=(api call report --suite="$suite" --seasons="$seasons" --full-world="$full_world" --shard="$shard" export --path="$logs/$suite")
   rm -rf -- "${logs:?}/$suite"
   mkdir -p "$logs"
   if [[ -n "$out" ]]; then dagger "${progress[@]:---progress=logs}" "${args[@]}" > "$out" 2>&1
@@ -101,18 +104,26 @@ check_suite() { # SUITE -> 0 when every step passed
 
 # The committed Dagger SDK code must match the module source (`npm run ci -- dagger generate -y` fixes it).
 # Recorded as the static suite's generated-code step.
+# Runs beside the static suite, whose export replaces ci-logs/static, so its result is written afterwards.
 generated_check() {
-  local dir="$logs/static" code=0
+  local out="$logs/generated-code.tmp" code=0
+  mkdir -p "$logs"
+  dagger --progress=logs check --typescript-sdk > "$out.log" 2>&1 || code=$?
+  printf '%s\n' "$code" > "$out.status"
+}
+record_generated_check() {
+  local dir="$logs/static"
   mkdir -p "$dir/status"
-  dagger --progress=logs check --typescript-sdk > "$dir/generated-code.log" 2>&1 || code=$?
-  printf '%s\n' "$code" > "$dir/status/generated-code"
+  mv "$logs/generated-code.tmp.log" "$dir/generated-code.log"
+  mv "$logs/generated-code.tmp.status" "$dir/status/generated-code"
 }
 
 suites_cmd() {
   local selection=all
-  seasons=3 full_world=false
+  seasons=3 full_world=false shard=""
   for argument in "$@"; do
     case "$argument" in
+      --shard=*) shard=${argument#--shard=} ;;
       --seasons=*) seasons=${argument#--seasons=} ;;
       --full-world) full_world=true ;;
       --full-world=*) full_world=${argument#--full-world=} ;;
@@ -128,13 +139,19 @@ suites_cmd() {
   IFS=, read -ra selected <<< "$selection"
   (( ${#selected[@]} > 0 )) || die "no suites selected"
   for suite in "${selected[@]}"; do [[ " ${SUITES[*]} " == *" $suite "* ]] || die "unknown suite '$suite' (use all or a comma list of ${SUITES[*]})"; done
+  if [[ -n "$shard" ]]; then
+    [[ "$shard" =~ ^[0-9]+/[0-9]+$ ]] || die "--shard must be N/M"
+    [[ "${#selected[@]}" == 1 && ( "${selected[0]}" == backend || "${selected[0]}" == e2e ) ]] || die "--shard needs exactly one of backend or e2e"
+  fi
 
-  summary "### Touchline CI (Dagger v${DAGGER_VERSION})" "" "Suites: ${selection} | simulation seasons: ${seasons} | full world: ${full_world}" "" "| Suite | Step | Result |" "|---|---|---|"
+  summary "### Touchline CI (Dagger v${DAGGER_VERSION})" "" "Suites: ${selection}${shard:+ (shard ${shard})} | simulation seasons: ${seasons} | full world: ${full_world}" "" "| Suite | Step | Result |" "|---|---|---|"
   local status=0 rest=()
   for suite in "${selected[@]}"; do [[ "$suite" == static ]] || rest+=("$suite"); done
   if [[ " ${selected[*]} " == *" static "* ]]; then
+    generated_check & local generated=$!
     run_suite static || true
-    generated_check
+    wait "$generated" || true
+    record_generated_check
     if ! check_suite static; then
       status=1
       if (( ${#rest[@]} > 0 )); then printf 'ci: static failed; skipping %s\n' "${rest[*]}"; fi
@@ -183,10 +200,17 @@ publish_cmd() {
     "Pin it on the Pi with \`TOUCHLINE_IMAGE=${image}\` in \`.env\`, then \`docker compose pull app && docker compose up -d\`."
 }
 
+timings_cmd() {
+  [[ -d "$logs" ]] || die "no ci-logs/: run the backend and e2e suites first"
+  dagger "${progress[@]}" api call updated-timings --reports="$logs" export --path="$root/scripts/ci/test-timings.json"
+  printf '\nci: updated scripts/ci/test-timings.json\n'
+}
+
 case "${1:-all}" in
   image) shift; image_cmd "$@" ;;
+  timings) timings_cmd ;;
   publish) shift; publish_cmd ;;
   dagger) shift; dagger "$@" ;;
-  -h|--help|help) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//' ;;
+  -h|--help|help) sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//' ;;
   *) suites_cmd "$@" ;;
 esac

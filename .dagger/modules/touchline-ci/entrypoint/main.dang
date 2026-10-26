@@ -31,105 +31,124 @@ type Entrypoint implements ModuleEntrypoint {
   pub types: [TypeDef!]! {
     [
       typeDef
-        .withObject("TouchlineCi", sourceMap: sourceMap("src/index.ts", 87, 14))
+        .withObject("TouchlineCi", sourceMap: sourceMap("src/index.ts", 128, 14))
         .withFunction(
           function("backendReport", typeDef.withObject("Directory"))
-            .withDescription("The complete Vitest suite (npm test) with SQL integration and save tests.")
-            .withSourceMap(sourceMap("src/index.ts", 215, 9)),
+            .withDescription("The SQL integration and save test files, each shard in its own container against its own PostgreSQL.")
+            .withSourceMap(sourceMap("src/index.ts", 321, 9))
+            .withArg("shard", typeDef.withKind(TypeDefKind.STRING_KIND), defaultValue: ("\"\"" :: Dagger.JSON), description: "One shard as N/M (as GitHub Actions runs them); empty runs every shard concurrently", sourceMap: sourceMap("src/index.ts", 321, 23)),
         )
         .withFunction(
           function("backendTests", typeDef.withKind(TypeDefKind.VOID_KIND).withOptional(true))
-            .withDescription("SQL-backed backend tests (npm test).")
-            .withSourceMap(sourceMap("src/index.ts", 300, 9))
+            .withDescription("SQL-backed backend tests, every shard.")
+            .withSourceMap(sourceMap("src/index.ts", 491, 9))
             .withCheck,
         )
         .withFunction(
+          function("browserImage", typeDef.withObject("Container"))
+            .withDescription("The Playwright image matching the lockfile's")
+            .withSourceMap(sourceMap("src/index.ts", 171, 9)),
+        )
+        .withFunction(
           function("browserReport", typeDef.withObject("Directory"))
-            .withDescription("The Playwright browser suite against a fresh E2E schema; the HTML report and traces are kept.")
-            .withSourceMap(sourceMap("src/index.ts", 247, 9)),
+            .withDescription("The Playwright browser suite, sharded by spec file; each shard has its own PostgreSQL, servers and fresh\nE2E schema. The HTML report and traces are kept under e2e-<shard>/.")
+            .withSourceMap(sourceMap("src/index.ts", 363, 9))
+            .withArg("shard", typeDef.withKind(TypeDefKind.STRING_KIND), defaultValue: ("\"\"" :: Dagger.JSON), description: "One shard as N/M (as GitHub Actions runs them); empty runs every shard concurrently", sourceMap: sourceMap("src/index.ts", 363, 23)),
         )
         .withFunction(
           function("browserTests", typeDef.withKind(TypeDefKind.VOID_KIND).withOptional(true))
-            .withDescription("Playwright e2e against a throwaway database.")
-            .withSourceMap(sourceMap("src/index.ts", 314, 9))
+            .withDescription("Playwright e2e, every shard, against throwaway databases.")
+            .withSourceMap(sourceMap("src/index.ts", 505, 9))
             .withCheck,
         )
         .withFunction(
           function("deps", typeDef.withObject("Container"))
             .withDescription("Node.js with `npm ci` done; only package.json and package-lock.json key this layer.")
-            .withSourceMap(sourceMap("src/index.ts", 121, 9)),
+            .withSourceMap(sourceMap("src/index.ts", 162, 9)),
         )
         .withFunction(
           function("image", typeDef.withObject("Container"))
             .withDescription("The release image for one platform, built from the Dockerfile.")
-            .withSourceMap(sourceMap("src/index.ts", 324, 3))
-            .withArg("platform", typeDef.withKind(TypeDefKind.STRING_KIND), defaultValue: ("\"linux/amd64\"" :: Dagger.JSON), description: "Target platform, e.g. linux/amd64 or linux/arm64", sourceMap: sourceMap("src/index.ts", 324, 9))
-            .withArg("revision", typeDef.withKind(TypeDefKind.STRING_KIND), defaultValue: ("\"unknown\"" :: Dagger.JSON), description: "Commit recorded as org.opencontainers.image.revision", sourceMap: sourceMap("src/index.ts", 324, 35)),
+            .withSourceMap(sourceMap("src/index.ts", 515, 3))
+            .withArg("platform", typeDef.withKind(TypeDefKind.STRING_KIND), defaultValue: ("\"linux/amd64\"" :: Dagger.JSON), description: "Target platform, e.g. linux/amd64 or linux/arm64", sourceMap: sourceMap("src/index.ts", 515, 9))
+            .withArg("revision", typeDef.withKind(TypeDefKind.STRING_KIND), defaultValue: ("\"unknown\"" :: Dagger.JSON), description: "Commit recorded as org.opencontainers.image.revision", sourceMap: sourceMap("src/index.ts", 515, 35)),
         )
         .withFunction(
           function("nodeImage", typeDef.withKind(TypeDefKind.STRING_KIND))
             .withDescription("Node.js image pinned by .nvmrc, the Debian release of the Dockerfile's runtime image.")
-            .withSourceMap(sourceMap("src/index.ts", 113, 9)),
+            .withSourceMap(sourceMap("src/index.ts", 154, 9)),
         )
         .withFunction(
           function("postgres", typeDef.withObject("Service"))
             .withDescription("A throwaway PostgreSQL 18 with the test database touchline_checks.")
-            .withSourceMap(sourceMap("src/index.ts", 151, 3))
-            .withArg("password", typeDef.withObject("Secret"), sourceMap: sourceMap("src/index.ts", 151, 12)),
+            .withSourceMap(sourceMap("src/index.ts", 211, 3))
+            .withArg("password", typeDef.withObject("Secret"), sourceMap: sourceMap("src/index.ts", 211, 12)),
         )
         .withFunction(
           function("publish", typeDef.withListOf(typeDef.withKind(TypeDefKind.STRING_KIND)))
             .withDescription("Builds the multi-arch release image and pushes it under each tag; returns the pushed references with digest.")
-            .withSourceMap(sourceMap("src/index.ts", 341, 9))
-            .withArg("repository", typeDef.withKind(TypeDefKind.STRING_KIND), description: "Image repository, e.g. ghcr.io/carlossardo/touchline", sourceMap: sourceMap("src/index.ts", 342, 5))
-            .withArg("tags", typeDef.withListOf(typeDef.withKind(TypeDefKind.STRING_KIND)), description: "Tags to push, e.g. sha-<commit> and latest", sourceMap: sourceMap("src/index.ts", 343, 5))
-            .withArg("revision", typeDef.withKind(TypeDefKind.STRING_KIND), description: "Commit recorded in the image", sourceMap: sourceMap("src/index.ts", 344, 5))
-            .withArg("username", typeDef.withKind(TypeDefKind.STRING_KIND), description: "Registry user", sourceMap: sourceMap("src/index.ts", 345, 5))
-            .withArg("password", typeDef.withObject("Secret"), description: "Registry token (pass as env:NAME)", sourceMap: sourceMap("src/index.ts", 346, 5))
-            .withArg("platforms", typeDef.withListOf(typeDef.withKind(TypeDefKind.STRING_KIND)).withOptional(true), description: "Platforms of the multi-arch image", sourceMap: sourceMap("src/index.ts", 347, 5)),
+            .withSourceMap(sourceMap("src/index.ts", 532, 9))
+            .withArg("repository", typeDef.withKind(TypeDefKind.STRING_KIND), description: "Image repository, e.g. ghcr.io/carlossardo/touchline", sourceMap: sourceMap("src/index.ts", 533, 5))
+            .withArg("tags", typeDef.withListOf(typeDef.withKind(TypeDefKind.STRING_KIND)), description: "Tags to push, e.g. sha-<commit> and latest", sourceMap: sourceMap("src/index.ts", 534, 5))
+            .withArg("revision", typeDef.withKind(TypeDefKind.STRING_KIND), description: "Commit recorded in the image", sourceMap: sourceMap("src/index.ts", 535, 5))
+            .withArg("username", typeDef.withKind(TypeDefKind.STRING_KIND), description: "Registry user", sourceMap: sourceMap("src/index.ts", 536, 5))
+            .withArg("password", typeDef.withObject("Secret"), description: "Registry token (pass as env:NAME)", sourceMap: sourceMap("src/index.ts", 537, 5))
+            .withArg("platforms", typeDef.withListOf(typeDef.withKind(TypeDefKind.STRING_KIND)).withOptional(true), description: "Platforms of the multi-arch image", sourceMap: sourceMap("src/index.ts", 538, 5)),
         )
         .withFunction(
           function("report", typeDef.withObject("Directory"))
             .withDescription("Logs, reports and per-step exit codes (status/<step>) of one suite. Never fails because a step failed.")
-            .withSourceMap(sourceMap("src/index.ts", 264, 9))
-            .withArg("suite", typeDef.withKind(TypeDefKind.STRING_KIND), description: "static, backend, world or e2e", sourceMap: sourceMap("src/index.ts", 264, 16))
-            .withArg("seasons", typeDef.withKind(TypeDefKind.INTEGER_KIND), defaultValue: ("3" :: Dagger.JSON), description: "Seasons for the world suite's simulation check (1-20)", sourceMap: sourceMap("src/index.ts", 264, 31))
-            .withArg("fullWorld", typeDef.withKind(TypeDefKind.BOOLEAN_KIND), defaultValue: ("false" :: Dagger.JSON), description: "Also run the world suite's season soak on the full world", sourceMap: sourceMap("src/index.ts", 264, 44)),
+            .withSourceMap(sourceMap("src/index.ts", 421, 9))
+            .withArg("suite", typeDef.withKind(TypeDefKind.STRING_KIND), description: "static, backend, world or e2e", sourceMap: sourceMap("src/index.ts", 421, 16))
+            .withArg("seasons", typeDef.withKind(TypeDefKind.INTEGER_KIND), defaultValue: ("3" :: Dagger.JSON), description: "Seasons for the world suite's simulation check (1-20)", sourceMap: sourceMap("src/index.ts", 421, 31))
+            .withArg("fullWorld", typeDef.withKind(TypeDefKind.BOOLEAN_KIND), defaultValue: ("false" :: Dagger.JSON), description: "Also run the world suite's season soak on the full world", sourceMap: sourceMap("src/index.ts", 421, 44))
+            .withArg("shard", typeDef.withKind(TypeDefKind.STRING_KIND), defaultValue: ("\"\"" :: Dagger.JSON), description: "backend or e2e only: one shard as N/M; empty runs every shard concurrently", sourceMap: sourceMap("src/index.ts", 421, 63)),
         )
         .withFunction(
           function("staticChecks", typeDef.withKind(TypeDefKind.VOID_KIND).withOptional(true))
             .withDescription("Lint, build and SQL-free unit tests.")
-            .withSourceMap(sourceMap("src/index.ts", 293, 9))
+            .withSourceMap(sourceMap("src/index.ts", 484, 9))
             .withCheck,
         )
         .withFunction(
           function("staticReport", typeDef.withObject("Directory"))
-            .withDescription("Lint, production build and the SQL-free unit tests.")
-            .withSourceMap(sourceMap("src/index.ts", 205, 9)),
+            .withDescription("Lint, production build and the SQL-free unit tests (file-parallel: they open no database).")
+            .withSourceMap(sourceMap("src/index.ts", 307, 9)),
+        )
+        .withFunction(
+          function("testPlan", typeDef.withKind(TypeDefKind.STRING_KIND))
+            .withDescription("Every unit/integration test file, split into SQL-free files (the static suite runs them, in parallel) and\nSQL files (the backend suite runs them in database-isolated shards). Together they are exactly the files\n`npm test` runs.")
+            .withSourceMap(sourceMap("src/index.ts", 269, 9)),
+        )
+        .withFunction(
+          function("updatedTimings", typeDef.withObject("File"))
+            .withDescription("Per-file test durations (seconds) from the timing reports of earlier runs (ci-logs/), merged into the\ncurrent scripts/ci/test-timings.json. scripts/ci.sh timings writes the result back.")
+            .withSourceMap(sourceMap("src/index.ts", 443, 9))
+            .withArg("reports", typeDef.withObject("Directory"), description: "A directory holding backend-NofM.log (Vitest output) and timings/e2e-*.json (Playwright) reports", sourceMap: sourceMap("src/index.ts", 443, 24)),
         )
         .withFunction(
           function("workspace", typeDef.withObject("Container"))
             .withDescription("The project on top of its installed dependencies, with the CI step runner.")
-            .withSourceMap(sourceMap("src/index.ts", 139, 9))
-            .withArg("withBrowsers", typeDef.withKind(TypeDefKind.BOOLEAN_KIND), defaultValue: ("false" :: Dagger.JSON), sourceMap: sourceMap("src/index.ts", 139, 19)),
+            .withSourceMap(sourceMap("src/index.ts", 200, 9))
+            .withArg("withBrowsers", typeDef.withKind(TypeDefKind.BOOLEAN_KIND), defaultValue: ("false" :: Dagger.JSON), sourceMap: sourceMap("src/index.ts", 200, 19)),
         )
         .withFunction(
           function("worldChecks", typeDef.withKind(TypeDefKind.VOID_KIND).withOptional(true))
             .withDescription("World and 3-season simulation checks, footprint and backup / reset smoke.")
-            .withSourceMap(sourceMap("src/index.ts", 307, 9))
+            .withSourceMap(sourceMap("src/index.ts", 498, 9))
             .withCheck,
         )
         .withFunction(
           function("worldReport", typeDef.withObject("Directory"))
             .withDescription("World catalog, world check, multi-season simulation, database footprint and the backup / world reset smoke.")
-            .withSourceMap(sourceMap("src/index.ts", 227, 9))
-            .withArg("seasons", typeDef.withKind(TypeDefKind.INTEGER_KIND), defaultValue: ("3" :: Dagger.JSON), description: "Seasons for npm run simulation:check (1-20)", sourceMap: sourceMap("src/index.ts", 227, 21))
-            .withArg("fullWorld", typeDef.withKind(TypeDefKind.BOOLEAN_KIND), defaultValue: ("false" :: Dagger.JSON), description: "Also run the season soak on the full world after the default subset (much slower)", sourceMap: sourceMap("src/index.ts", 227, 34)),
+            .withSourceMap(sourceMap("src/index.ts", 339, 9))
+            .withArg("seasons", typeDef.withKind(TypeDefKind.INTEGER_KIND), defaultValue: ("3" :: Dagger.JSON), description: "Seasons for npm run simulation:check (1-20)", sourceMap: sourceMap("src/index.ts", 339, 21))
+            .withArg("fullWorld", typeDef.withKind(TypeDefKind.BOOLEAN_KIND), defaultValue: ("false" :: Dagger.JSON), description: "Also run the season soak on the full world after the default subset (much slower)", sourceMap: sourceMap("src/index.ts", 339, 34)),
         )
-        .withField("source", typeDef.withObject("Directory"), description: "The checked-out project: tracked and untracked files, minus .gitignore'd files and CI/agent metadata.", sourceMap: sourceMap("src/index.ts", 90, 3))
+        .withField("source", typeDef.withObject("Directory"), description: "The checked-out project: tracked and untracked files, minus .gitignore'd files and CI/agent metadata.", sourceMap: sourceMap("src/index.ts", 131, 3))
         .withConstructor(
           function("", typeDef.withObject("TouchlineCi"))
-            .withArg("ws", typeDef.withObject("Workspace"), sourceMap: sourceMap("src/index.ts", 92, 15)),
+            .withArg("ws", typeDef.withObject("Workspace"), sourceMap: sourceMap("src/index.ts", 133, 15)),
         ),
     ]
   }
