@@ -47,6 +47,7 @@ Files: `dagger.toml` (workspace config), `dagger.lock` (pinned images and git re
 - Run the pinned CLI through the script: `npm run ci -- dagger <args>` (for example `npm run ci -- dagger generate -y` after changing the module, `npm run ci -- dagger check -l`).
 - Suites `static`, `backend`, `world`, `e2e` are `report(suite)` functions that never fail on a failed step: each step runs through `ci-step NAME CMD...`, which tees `/ci-logs/NAME.log` and writes the exit code to `/ci-logs/status/NAME`. `scripts/ci.sh` exports them to `ci-logs/<suite>/` and fails if any status is non-zero. The `*-checks` / `*-tests` functions are the same suites as `@check()`s for `dagger check`.
 - SQL guards in `server/sql-config.ts` and the tests only accept a loopback `SQL_HOST`. Do not loosen them for CI: each test container runs a TCP forwarder from `127.0.0.1:54329` to the `postgres` service and gets the same `SQL_*` environment as `scripts/test-local.ts`.
+- The forwarder must keep `noDelay` on both sockets: with Nagle's algorithm, large statements stall on PostgreSQL's delayed ACK and SQL-heavy suites run 2–3× slower.
 - To change the Dagger version, update `DAGGER_VERSION` in `scripts/ci.sh` and this skill, run `npm run ci -- dagger lock update` and `dagger generate -y`, and commit.
 
 ## Instructions
