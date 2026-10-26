@@ -12,7 +12,7 @@
 #                                                          SOURCE_REVISION, REGISTRY_USER and REGISTRY_TOKEN
 #   scripts/ci.sh dagger ARGS...                           run the pinned Dagger CLI with the same settings
 #
-# `all` runs static first and, if it passes, backend, world and e2e in parallel, like .github/workflows/ci.yml.
+# `all` runs static, backend, world and e2e in parallel, like .github/workflows/ci.yml.
 set -euo pipefail
 
 DAGGER_VERSION=1.0.0-beta.21
@@ -79,7 +79,8 @@ run_suite() { # SUITE [dagger output file]
 
 check_suite() { # SUITE -> 0 when every step passed
   local suite=$1 dir="$logs/$1" failed=0 step code
-  if [[ ! -d "$dir/status" ]] || [[ -z "$(ls -A "$dir/status")" ]]; then
+  # generated-code is recorded beside the static suite's own steps, so it alone doesn't mean the suite ran.
+  if [[ ! -d "$dir/status" ]] || [[ -z "$(find "$dir/status" -mindepth 1 -maxdepth 1 ! -name generated-code -print -quit)" ]]; then
     printf 'ci: %s: no step results (the Dagger run failed before the steps; see its output)\n' "$suite"
     [[ -n "${GITHUB_ACTIONS:-}" ]] && echo "::error::${suite}: Dagger run failed before any step ran"
     summary "| ${suite} | (run failed) | ❌ |"
@@ -145,32 +146,21 @@ suites_cmd() {
   fi
 
   summary "### Touchline CI (Dagger v${DAGGER_VERSION})" "" "Suites: ${selection}${shard:+ (shard ${shard})} | simulation seasons: ${seasons} | full world: ${full_world}" "" "| Suite | Step | Result |" "|---|---|---|"
-  local status=0 rest=()
-  for suite in "${selected[@]}"; do [[ "$suite" == static ]] || rest+=("$suite"); done
-  if [[ " ${selected[*]} " == *" static "* ]]; then
-    generated_check & local generated=$!
-    run_suite static || true
-    wait "$generated" || true
-    record_generated_check
-    if ! check_suite static; then
-      status=1
-      if (( ${#rest[@]} > 0 )); then printf 'ci: static failed; skipping %s\n' "${rest[*]}"; fi
-      return "$status"
-    fi
-  fi
-  if (( ${#rest[@]} == 1 )); then
-    run_suite "${rest[0]}" || true
-    check_suite "${rest[0]}" || status=1
-  elif (( ${#rest[@]} > 1 )); then
-    local pids=()
+  local status=0 pids=() static=false
+  [[ " ${selected[*]} " == *" static "* ]] && static=true
+  if [[ "$static" == true ]]; then generated_check & pids+=($!); fi
+  if (( ${#selected[@]} == 1 )); then
+    run_suite "${selected[0]}" || true
+  else
     mkdir -p "$logs"
-    for suite in "${rest[@]}"; do
+    for suite in "${selected[@]}"; do
       printf 'ci: running %s (Dagger output: ci-logs/%s.dagger.log)\n' "$suite" "$suite"
       run_suite "$suite" "$logs/$suite.dagger.log" & pids+=($!)
     done
-    for pid in "${pids[@]}"; do wait "$pid" || true; done
-    for suite in "${rest[@]}"; do check_suite "$suite" || status=1; done
   fi
+  for pid in "${pids[@]}"; do wait "$pid" || true; done
+  if [[ "$static" == true ]]; then record_generated_check; fi
+  for suite in "${selected[@]}"; do check_suite "$suite" || status=1; done
   return "$status"
 }
 
