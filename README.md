@@ -161,13 +161,16 @@ Sign-in works the same as above ([Sign-in and access](#sign-in-and-access)): poi
 
 #### Deploying from a checkout
 
-[scripts/deploy.sh](scripts/deploy.sh) deploys this setup without a registry: it streams a commit as a tarball over SSH, and the host builds the image from it (~4 minutes on a Pi 4) and runs it with this compose file:
+[scripts/deploy.sh](scripts/deploy.sh) deploys a commit to this setup: it streams the commit as a tarball over SSH, and the host pulls the image CI built for that commit, `ghcr.io/carlossardo/touchline:sha-<commit>`, and runs it with this compose file. With `--build` the host builds the image from the tarball instead (~4 minutes on a Pi 4), for example for a commit that is not on `main`:
 
 ```sh
 scripts/deploy.sh carlos@raspberrypi          # HEAD; or: scripts/deploy.sh <ssh-host> <git-ref>
+scripts/deploy.sh --build carlos@raspberrypi  # build on the host instead of pulling
 ```
 
-On the host, in `~/touchline` (`TOUCHLINE_DIR` to change it), [deploy/host-deploy.sh](deploy/host-deploy.sh) from the deployed commit unpacks the source to `src/`, builds `local/touchline:<commit>` and `:latest` with `docker buildx`, installs [deploy/compose.external-postgres.yaml](deploy/compose.external-postgres.yaml) as `compose.yaml`, creates or checks the account registry, migrates the registered worlds, starts the app and checks `/api/health`. It keeps the three newest images. The host needs Docker with buildx, `curl`, and a `.env` in that directory before the first deploy, with the database settings, the sign-in settings and `TOUCHLINE_PORT`. The script adds `TOUCHLINE_IMAGE=local/touchline:latest` and `TOUCHLINE_PULL_POLICY=never`, so `docker compose pull` (for example a weekly image update) skips the app. A failed build leaves the running container untouched; roll back with a database backup, not an older image.
+The package is private, so log the host in to GHCR once, as the user that runs the deploys, with a classic personal access token that has only `read:packages` ([create one](https://github.com/settings/tokens/new?scopes=read:packages&description=touchline-pull)): `docker login ghcr.io -u <github-user>` and paste the token. [image.yml](.github/workflows/image.yml) publishes the `sha-<commit>` image only for commits on `main`; until it has finished, or for any other commit, the pull fails with a hint and changes nothing, so wait or use `--build`.
+
+On the host, in `~/touchline` (`TOUCHLINE_DIR` to change it), [deploy/host-deploy.sh](deploy/host-deploy.sh) from the deployed commit pulls the image, refuses it unless its `org.opencontainers.image.revision` label is the deployed commit, prints its digest and tags it `local/touchline:<commit>` and `:latest` (with `--build` it builds those tags with `docker buildx`). It then unpacks the source to `src/`, installs [deploy/compose.external-postgres.yaml](deploy/compose.external-postgres.yaml) as `compose.yaml`, creates or checks the account registry, migrates the registered worlds, starts the app and checks `/api/health`. It keeps the three newest images. The host needs Docker (with buildx for `--build`), `curl`, and a `.env` in that directory before the first deploy, with the database settings, the sign-in settings and `TOUCHLINE_PORT`. The script adds `TOUCHLINE_IMAGE=local/touchline:latest` and `TOUCHLINE_PULL_POLICY=never`, so `docker compose pull` (for example a weekly image update) skips the app and only a deploy changes it. A failed pull, check or build leaves the running container untouched; roll back with a database backup, not an older image.
 
 ### HTTPS and reverse proxy
 
