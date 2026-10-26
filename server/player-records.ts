@@ -146,9 +146,11 @@ async function recordHonours(store: Store, from: number, to: number, source: "ap
          FROM won JOIN player_season_stats AS stats
            ON stats.season = won.season AND stats.club_id = won.club_id AND stats.league_id = won.league_id
          WHERE stats.appearances > 0`;
+  // `won` is estimated at one row (its history ids are newer than the statistics), so an inlined `matches` would be
+  // recomputed for every squad row in a nested loop: a rollover of a full world took minutes. Computed once instead.
   await store.run(
     `WITH ${WON},
-     matches AS (
+     matches AS MATERIALIZED (
        SELECT won.season, won.league_id, won.club_id, count(fixtures.id) AS matches
        FROM won JOIN fixtures ON fixtures.league_id = won.league_id AND fixtures.season = won.season
          AND fixtures.status = 'played' AND won.club_id IN (fixtures.home_id, fixtures.away_id)

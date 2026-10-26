@@ -150,7 +150,8 @@ interface Context {
   phase: MarketPhase;
   policies: Map<number, ClubPolicy>;
   ownership: ReadonlyMap<number, OwnershipInfo>;
-  byPosition: Map<string, Candidate[]>;
+  /** Per position, sorted by ability: the players a club may buy or sign free (`buy`) and those it may borrow (`loan`). */
+  byPosition: Map<string, { buy: Candidate[]; loan: Candidate[] }>;
   supplyById: Map<number, Candidate>;
   /** The snapshot's own supply (kept in the per-world cache). */
   supply: Map<number, SupplyPlayer>;
@@ -311,9 +312,15 @@ function wantedPositions(policy: ClubPolicy, random: () => number) {
   return weakest ? [{ position: weakest[0], need: 0.5 }] : [];
 }
 
+/**
+ * The best SHORTLIST players for the buyer at a position. Every check is a pure function of buyer and candidate, so the
+ * cheap arithmetic ones run first and the map lookups only for the few left; the random draw is made for each
+ * candidate that passes them all, in list order, exactly as before.
+ */
 function shortlist(context: Context, buyer: ClubPolicy, position: string, need: number, loan: boolean) {
-  const scored: { candidate: Candidate; mode: Mode; score: number }[] = [];
-  const list = context.byPosition.get(position) ?? [];
+  const best: { candidate: Candidate; mode: Mode; score: number }[] = [];
+  const lists = context.byPosition.get(position);
+  const list = (loan ? lists?.loan : lists?.buy) ?? [];
   // fitScore's widest band is level - 8 (free agents as cover) to level + 10.
   let low = 0;
   for (let high = list.length; low < high; ) {
@@ -321,30 +328,41 @@ function shortlist(context: Context, buyer: ClubPolicy, position: string, need: 
     if (list[middle].ability < buyer.level - 8) low = middle + 1;
     else high = middle;
   }
+  const floor = sellerSquadFloor(context.state.date);
+  const budget = buyer.transferBudget * 1.5;
+  const room = Math.max(0, roomOf(context, buyer)) * 1.5;
+  const headroom = Math.max(0, buyer.ffpHeadroom) * 1.5;
   for (let index = low; index < list.length && list[index].ability <= buyer.level + 10; index++) {
     const candidate = list[index];
-    if (context.taken.has(candidate.id) || candidate.clubId === buyer.clubId) continue;
-    const seller = candidate.clubId === null ? null : (context.policies.get(candidate.clubId) ?? null);
-    if (candidate.clubId !== null && (!seller || seller.managed)) continue;
-    if (context.phase === "closed" && seller) continue;
-    const sister = seller ? sisterPreference(context.ownership, buyer.clubId, seller.clubId) : 1;
-    if (!sister) continue;
-    const mode = modeFor(buyer, candidate, seller, loan);
-    if (!mode) continue;
-    // Cheap pre-checks of priceDeal: a club at its squad floor keeps its players; adult loans stay domestic.
-    if (seller && candidate.rank < 99 && seller.seniors <= sellerSquadFloor(context.state.date)) continue;
-    if (mode === "loan" && candidate.age > 21 && seller!.association !== buyer.association) continue;
+    if (candidate.clubId === buyer.clubId || context.taken.has(candidate.id)) continue;
+    if (context.phase === "closed" && candidate.clubId !== null) continue;
+    // The mode modeFor gives whenever it allows the move (the lists hold only players it may allow).
+    const mode: Mode = loan ? "loan" : candidate.clubId === null ? "free" : "transfer";
     const fit = fitScore(buyer, candidate, mode, need);
     if (!fit) continue;
     // Rough price, wage and FFP cost (priceDeal decides): sell-to-buy can cover a modest shortfall.
     const fee = mode === "transfer" ? candidate.value * 0.9 : 0;
     const wage = mode === "loan" ? candidate.wage * 0.5 : Math.max(candidate.wage * 1.1, goingRate(buyer, candidate));
-    if (fee > buyer.transferBudget * 1.5 || wage > Math.max(0, roomOf(context, buyer)) * 1.5) continue;
-    if (context.ffp && wage * 52 + fee / 4 > Math.max(0, buyer.ffpHeadroom) * 1.5) continue;
+    if (fee > budget || wage > room) continue;
+    if (context.ffp && wage * 52 + fee / 4 > headroom) continue;
+    const seller = candidate.clubId === null ? null : (context.policies.get(candidate.clubId) ?? null);
+    if (candidate.clubId !== null && (!seller || seller.managed)) continue;
+    const sister = seller ? sisterPreference(context.ownership, buyer.clubId, seller.clubId) : 1;
+    if (!sister) continue;
+    if (modeFor(buyer, candidate, seller, loan) !== mode) continue;
+    // Cheap pre-checks of priceDeal: a club at its squad floor keeps its players; adult loans stay domestic.
+    if (seller && candidate.rank < 99 && seller.seniors <= floor) continue;
+    if (mode === "loan" && candidate.age > 21 && seller!.association !== buyer.association) continue;
     const reason = candidate.reason === "listed" ? 1.3 : candidate.reason === "free-agent" ? 0.9 : 1;
-    scored.push({ candidate, mode, score: fit * reason * sister * (0.7 + context.random() * 0.6) });
+    const score = fit * reason * sister * (0.7 + context.random() * 0.6);
+    // Top SHORTLIST by score; an equal score ranks after the earlier candidate (as a stable sort would).
+    if (best.length === SHORTLIST && score <= best[SHORTLIST - 1].score) continue;
+    let at = best.length;
+    while (at > 0 && best[at - 1].score < score) at--;
+    best.splice(at, 0, { candidate, mode, score });
+    if (best.length > SHORTLIST) best.pop();
   }
-  return scored.sort((left, right) => right.score - left.score).slice(0, SHORTLIST);
+  return best;
 }
 
 async function loadDetails(store: Store, ids: readonly number[]) {
@@ -816,8 +834,16 @@ export async function worldMarket(store: Store, state: GameState, random: seedra
     add(candidate.position, candidate);
     if (candidate.secondary && candidate.secondary !== candidate.position) add(candidate.secondary, { ...candidate, position: candidate.secondary as Position });
   }
-  // Sorted by ability: a club only looks at the players within its level band.
-  for (const list of byPosition.values()) list.sort((left, right) => left.ability - right.ability || left.id - right.id);
+  // Sorted by ability: a club only looks at the players within its level band. Split by what modeFor allows (loans
+  // need a lending club and a player not for sale only), so a search skips the players it could never take.
+  const lists = new Map<string, { buy: Candidate[]; loan: Candidate[] }>();
+  for (const [position, list] of byPosition) {
+    list.sort((left, right) => left.ability - right.ability || left.id - right.id);
+    lists.set(position, {
+      buy: list.filter((candidate) => candidate.mode !== "loan"),
+      loan: list.filter((candidate) => candidate.clubId !== null && candidate.mode !== "transfer"),
+    });
+  }
   const context: Context = {
     store,
     state,
@@ -825,7 +851,7 @@ export async function worldMarket(store: Store, state: GameState, random: seedra
     phase,
     policies: snapshot.policies,
     ownership: snapshot.ownership,
-    byPosition,
+    byPosition: lists,
     supplyById: new Map(supply.map((candidate) => [candidate.id, candidate])),
     supply: snapshot.supply,
     details: new Map(),
