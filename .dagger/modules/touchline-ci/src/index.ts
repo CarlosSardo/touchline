@@ -357,6 +357,17 @@ export class TouchlineCi {
           .publish(`${repository}:${tag}`, { platformVariants: variants }),
       )
     }
+    // Pull every platform back by digest: the pushed index must hold each platform with this revision.
+    const digest = published[0].slice(published[0].indexOf("@"))
+    for (const platform of platforms) {
+      const pulled = dag
+        .container({ platform: platform as Platform })
+        .withRegistryAuth(registry, username, password)
+        .from(`${repository}${digest}`)
+      const [actual, label] = await Promise.all([pulled.platform(), pulled.label("org.opencontainers.image.revision")])
+      if (actual !== platform || label !== revision)
+        throw new Error(`pushed image ${repository}${digest} for ${platform} is ${actual} at revision ${label}, expected ${revision}`)
+    }
     return published
   }
 }
