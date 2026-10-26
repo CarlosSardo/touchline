@@ -511,7 +511,7 @@ export async function runYouthIntake(
          doc #>> '{contract,status}' AS contract_status,doc #> '{identity,nationalities}' AS citizenships,
          ${jsonInteger("doc #>> '{identity,birthCountryId}'")} AS birth_country_id,doc -> 'familyMove' AS family_move
        FROM players CROSS JOIN LATERAL (SELECT players.profile::jsonb AS doc OFFSET 0) AS parsed
-       WHERE club_id IS NOT NULL AND role != 'Retired'`,
+       WHERE club_id IS NOT NULL AND role != 'Retired' ORDER BY id`,
     )
   ).map((member) => ({
     ...member,
@@ -656,7 +656,7 @@ export async function runYouthIntake(
 
   // 2. Club-less players: retire, rejoin a home pool, or leave football after an unsigned window.
   const clubless = await store.all<Omit<Member, "age" | "locked" | "contract_status"> & { profile: string; code: string }>(
-    "SELECT players.id,players.club_id,players.squad_club_id,players.parent_club_id,players.country_id,players.age_group,players.position,players.ability,players.potential,players.birth_date,players.contract_end,players.wage,players.role,players.profile,countries.code FROM players JOIN countries ON countries.id = players.country_id WHERE players.club_id IS NULL AND players.role != 'Retired'",
+    "SELECT players.id,players.club_id,players.squad_club_id,players.parent_club_id,players.country_id,players.age_group,players.position,players.ability,players.potential,players.birth_date,players.contract_end,players.wage,players.role,players.profile,countries.code FROM players JOIN countries ON countries.id = players.country_id WHERE players.club_id IS NULL AND players.role != 'Retired' ORDER BY players.id",
   );
   const poolSize = new Map<number, number>();
   const winterClosed = `${season}-01-01`;
@@ -1145,8 +1145,8 @@ export async function runYouthIntake(
     await store.run(
       `INSERT INTO history(season,entity_type,entity_id,date,data)
        SELECT ?::integer,'transfer',moves.id,?::text,json_strip_nulls(json_build_object('name',players.name,'from',moves.from_id,'to',moves.to_id,'club',clubs.name,'fee',0,'type','Squad registration'))::text
-       FROM unnest(?::int[], ?::int[], ?::int[]) AS moves(id, from_id, to_id)
-       JOIN players ON players.id = moves.id JOIN clubs ON clubs.id = moves.to_id`,
+       FROM unnest(?::int[], ?::int[], ?::int[]) WITH ORDINALITY AS moves(id, from_id, to_id, n)
+       JOIN players ON players.id = moves.id JOIN clubs ON clubs.id = moves.to_id ORDER BY moves.n`,
       season,
       date,
       batch.map((move) => move.id),
@@ -1349,12 +1349,12 @@ export async function maintainSquads(store: Store, state: Pick<GameState, "date"
     if (!list) {
       list = group === "Senior"
         ? await store.all<Promotable>(
-            "SELECT id,position,ability,potential,age,role FROM players WHERE playing_club_id = ? AND age_group = 'Senior' AND parent_club_id IS NULL AND role != 'Retired' AND contract_end >= ?",
+            "SELECT id,position,ability,potential,age,role FROM players WHERE playing_club_id = ? AND age_group = 'Senior' AND parent_club_id IS NULL AND role != 'Retired' AND contract_end >= ? ORDER BY id",
             sourceId,
             state.date,
           )
         : await store.all<Promotable>(
-            "SELECT id,position,ability,potential,age,role FROM players WHERE club_id = ? AND squad_club_id IS NULL AND parent_club_id IS NULL AND age_group = ? AND role != 'Retired' AND contract_end >= ? AND birth_date >= ? AND age >= ?",
+            "SELECT id,position,ability,potential,age,role FROM players WHERE club_id = ? AND squad_club_id IS NULL AND parent_club_id IS NULL AND age_group = ? AND role != 'Retired' AND contract_end >= ? AND birth_date >= ? AND age >= ? ORDER BY id",
             sourceId,
             group,
             state.date,

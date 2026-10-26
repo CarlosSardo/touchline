@@ -242,7 +242,7 @@ function pickWeighted<T>(items: T[], weight: (item: T) => number, random: () => 
 /** The director's players clubs could approach today, with how strongly each is "on the market" for a transfer or loan. */
 async function offerSupply(store: Store, state: GameState, frequency: FrequencyProfile) {
   const players = await store.all<Player>(
-    "SELECT * FROM players WHERE club_id = ? AND parent_club_id IS NULL AND role != 'Retired' AND age >= 16 AND contract_end > ?",
+    "SELECT * FROM players WHERE club_id = ? AND parent_club_id IS NULL AND role != 'Retired' AND age >= 16 AND contract_end > ? ORDER BY id",
     state.clubId,
     state.date,
   );
@@ -349,7 +349,7 @@ async function demandSnapshot(store: Store, state: GameState) {
     await store.all<{ id: number }>("SELECT id FROM clubs WHERE id = ? OR parent_id = ?", state.clubId, state.clubId)
   ).map((club) => club.id);
   const clubs = await store.all<Club>(
-    "SELECT * FROM clubs WHERE type = 'club' AND id <> ALL(?::integer[])",
+    "SELECT * FROM clubs WHERE type = 'club' AND id <> ALL(?::integer[]) ORDER BY id",
     family,
   );
   const levels = new Map(
@@ -377,14 +377,14 @@ async function demandSnapshot(store: Store, state: GameState) {
   );
   const loanShares = new Map<number, number>();
   for (const loan of await store.all<{ parent_id: number; destination_id: number; share: number }>(
-    "SELECT loans.parent_id,loans.destination_id,players.wage * (1 - (loans.terms::jsonb ->> 'salarySplit')::double precision / 100.0) AS share FROM loans JOIN players ON players.id = loans.player_id WHERE loans.status = 'active'",
+    "SELECT loans.parent_id,loans.destination_id,players.wage * (1 - (loans.terms::jsonb ->> 'salarySplit')::double precision / 100.0) AS share FROM loans JOIN players ON players.id = loans.player_id WHERE loans.status = 'active' ORDER BY loans.id",
   )) {
     loanShares.set(loan.parent_id, (loanShares.get(loan.parent_id) ?? 0) + loan.share);
     loanShares.set(loan.destination_id, (loanShares.get(loan.destination_id) ?? 0) - loan.share);
   }
   const committed = new Map<number, { fees: number; wages: number; approaches: number }>();
   for (const deal of await store.all<Negotiation & { player_wage: number }>(
-    "SELECT negotiations.*,players.wage AS player_wage FROM negotiations JOIN players ON players.id = negotiations.player_id WHERE negotiations.stage = ANY(?::text[]) AND negotiations.buying_club_id <> ?",
+    "SELECT negotiations.*,players.wage AS player_wage FROM negotiations JOIN players ON players.id = negotiations.player_id WHERE negotiations.stage = ANY(?::text[]) AND negotiations.buying_club_id <> ? ORDER BY negotiations.id",
     OPEN_STAGES,
     state.clubId,
   )) {
@@ -626,7 +626,7 @@ async function buildOffer(
     terms.relationship =
       (
         await store.get<{ strength: number }>(
-          "SELECT strength FROM partnerships WHERE (club_id = ? AND partner_id = ?) OR (club_id = ? AND partner_id = ?)",
+          "SELECT strength FROM partnerships WHERE (club_id = ? AND partner_id = ?) OR (club_id = ? AND partner_id = ?) ORDER BY id",
           user.id,
           buyer.id,
           buyer.id,
@@ -766,7 +766,7 @@ export async function generateUserClubOffers(store: Store, state: GameState) {
   const phase = marketPhase(state.date);
   const random = seedrandom(`${state.seed}:offers:${state.date}`);
   const history = await store.all<{ player_id: number; buying_club_id: number; stage: string; created: string; origin: string | null }>(
-    "SELECT player_id,buying_club_id,stage,created,data::jsonb ->> 'origin' AS origin FROM negotiations WHERE selling_club_id = ? AND buying_club_id <> ? AND (stage = 'Offer received' OR created >= ?)",
+    "SELECT player_id,buying_club_id,stage,created,data::jsonb ->> 'origin' AS origin FROM negotiations WHERE selling_club_id = ? AND buying_club_id <> ? AND (stage = 'Offer received' OR created >= ?) ORDER BY id",
     state.clubId,
     state.clubId,
     addDays(state.date, -PAIR_COOLDOWN_DAYS),

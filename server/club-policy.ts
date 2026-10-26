@@ -98,6 +98,8 @@ export interface SupplyPlayer {
   countryId: number;
   /** Rank by ability in his position in the club's first-team squad (99 outside it). */
   rank: number;
+  /** The club's B-team he plays for (registered at the first team), when he is not in its first-team squad. */
+  squadClubId?: number;
   reason: "listed" | "loan-listed" | "surplus" | "weak" | "expiring" | "development" | "outgrown" | "over-budget";
   mode: "transfer" | "loan" | "both";
 }
@@ -126,6 +128,15 @@ export const windowClose = (date: string) =>
  * agreed. In the short winter window, with matches every week, the minimum itself (a club signs before it sells).
  */
 export const sellerSquadFloor = (date: string) => SQUAD_MINIMUMS.Senior - (date.slice(5) >= "06-15" ? 2 : 0);
+
+/** The same floor for a B-team's senior squad (SQUAD_MINIMUMS.BTeam, which maintainSquads keeps between windows). */
+export const reserveSquadFloor = (date: string) => SQUAD_MINIMUMS.BTeam - (date.slice(5) >= "06-15" ? 2 : 0);
+
+/** Senior players and goalkeepers of a B-team squad, as the market counts them against its floor. */
+export interface ReserveSquad {
+  seniors: number;
+  keepers: number;
+}
 
 /** Most of the wage budget planned sales may cover before the players are gone. */
 const SALE_CREDIT_SHARE = 0.15;
@@ -165,6 +176,8 @@ interface Snapshot {
   date: string;
   policies: Map<number, ClubPolicy>;
   supply: Map<number, SupplyPlayer>;
+  /** B-team senior squads by club id (players the market moves on from them count down). */
+  reserves: Map<number, ReserveSquad>;
   /** Owners and multi-club groups (server/ownership.ts) for sister-club pathways and related-party pricing. */
   ownership: ReadonlyMap<number, OwnershipInfo>;
 }
@@ -214,7 +227,7 @@ async function commitments(store: Store) {
     `SELECT negotiations.buying_club_id, negotiations.type, negotiations.offer, negotiations.wage, players.wage AS player_wage,
        (negotiations.data::jsonb #>> '{terms,salarySplit}')::double precision AS split,
        (negotiations.data::jsonb ->> 'reservedBudget')::double precision AS reserved
-     FROM negotiations JOIN players ON players.id = negotiations.player_id WHERE negotiations.stage = ANY(?::text[])`,
+     FROM negotiations JOIN players ON players.id = negotiations.player_id WHERE negotiations.stage = ANY(?::text[]) ORDER BY negotiations.id`,
     OPEN_STAGES,
   )) {
     const entry = committed.get(deal.buying_club_id) ?? { fees: 0, wages: 0 };
@@ -256,7 +269,7 @@ async function squads(store: Store, date: string) {
     `SELECT playing_club_id AS club_id, position, count(*) AS depth, count(*) FILTER (WHERE injury_until IS NULL OR injury_until <= ?) AS available,
        count(*) FILTER (WHERE age >= 31) AS old, sum(wage) AS wages, sum(${BASE_WAGE_SQL}) AS base, array_agg(ability) AS abilities
      FROM players WHERE playing_club_id IS NOT NULL AND age_group = 'Senior' AND role <> 'Retired' AND (contract_end >= ? OR parent_club_id IS NOT NULL)
-     GROUP BY playing_club_id, position`,
+     GROUP BY playing_club_id, position ORDER BY playing_club_id, position`,
     addDays(date, 14),
     date,
   )) {
@@ -410,7 +423,15 @@ async function build(store: Store, date: string): Promise<Snapshot> {
     policy.surplus.push(player.id);
     if (window && signsAhead(policy)) policy.saleCredit = Math.min(policy.saleCredit + saleCreditOf(player), Math.max(0, policy.wageBudget) * SALE_CREDIT_SHARE);
   }
-  return { schema: store.schemaName, built: date, date, policies, supply, ownership };
+  // Every other club with seniors playing is a B-team (first teams have policies).
+  const reserves = new Map<number, ReserveSquad>();
+  for (const [clubId, positions] of squad.positions)
+    if (!policies.has(clubId))
+      reserves.set(clubId, {
+        seniors: Object.values(positions).reduce((sum, stats) => sum + stats.depth, 0),
+        keepers: positions.GK?.depth ?? 0,
+      });
+  return { schema: store.schemaName, built: date, date, policies, supply, reserves, ownership };
 }
 
 /** Next day with a full build still fresh: budgets, embargoes, open deals and season moves are re-read (no player scan). */
@@ -479,7 +500,8 @@ async function marketSupply(
          OR players.playing_club_id <> players.club_id OR players.ability < clubs.reputation * 0.66 + 16
          OR (players.contract_end <= ? AND (players.age >= 30 OR players.ability < clubs.reputation * 0.66 + 22))
          OR (players.age <= 21 AND players.potential - players.ability >= 5 AND players.ability < clubs.reputation * 0.66 + 22)
-         OR (players.age <= 29 AND players.ability >= clubs.reputation * 0.66 + 26))`,
+         OR (players.age <= 29 AND players.ability >= clubs.reputation * 0.66 + 26))
+     ORDER BY players.id`,
     date,
     addDays(date, 14),
     managed,
@@ -554,6 +576,7 @@ async function marketSupply(
       morale: row.morale,
       countryId: row.country_id,
       rank,
+      ...(row.playing_club_id !== row.club_id ? { squadClubId: row.playing_club_id } : {}),
       reason,
       mode,
     });

@@ -861,7 +861,7 @@ export async function processCallUps(store: Store) {
     const senior = target.level !== "U19";
     const floor = senior ? minSeniorAge(await codeOf(target.club.country_id)) : 0;
     const squad = await store.all<{ id: number; position: Position; ability: number; fitness: number; injury_until: string | null; banned: number }>(
-      "SELECT id,position,ability,fitness,injury_until,CASE WHEN EXISTS(SELECT 1 FROM discipline WHERE discipline.player_id = players.id AND discipline.scope = ? AND discipline.suspension > 0) THEN 1 ELSE 0 END AS banned FROM players WHERE playing_club_id = ? AND age_group = ? AND role != 'Retired'",
+      "SELECT id,position,ability,fitness,injury_until,CASE WHEN EXISTS(SELECT 1 FROM discipline WHERE discipline.player_id = players.id AND discipline.scope = ? AND discipline.suspension > 0) THEN 1 ELSE 0 END AS banned FROM players WHERE playing_club_id = ? AND age_group = ? AND role != 'Retired' ORDER BY id",
       scope,
       target.clubId,
       target.ageGroup,

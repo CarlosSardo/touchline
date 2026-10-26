@@ -285,7 +285,7 @@ async function forceSales(store: Store, clubId: number) {
 /** Season rollover: deductions deferred because the club's league season was over apply to the new season. */
 export async function applyPendingDeductions(store: Store, season: number) {
   const pending = await store.all<{ id: number; name: string; data: string }>(
-    "SELECT id,name,data FROM clubs WHERE type = 'club' AND (data::jsonb #>> '{administration,pendingPoints}')::integer > 0",
+    "SELECT id,name,data FROM clubs WHERE type = 'club' AND (data::jsonb #>> '{administration,pendingPoints}')::integer > 0 ORDER BY id",
   );
   const patches = new Map<number, Record<string, unknown>>();
   for (const club of pending) {

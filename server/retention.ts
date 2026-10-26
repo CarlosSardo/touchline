@@ -152,6 +152,7 @@ const pruneBatch = `
       ) AS spell
     ) AS spells
     WHERE player.id ${DOOMED}
+    ORDER BY player.id
     RETURNING 1
   ),
   deleted_payments AS (

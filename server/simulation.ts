@@ -2234,7 +2234,7 @@ async function weeklyFinances(store: Store) {
     wage: number;
     salary_split: number;
   }>(
-    `SELECT loans.parent_id, loans.destination_id, players.wage, coalesce(${jsonNumber("loans.terms", "$.salarySplit")},0) AS salary_split FROM loans JOIN players ON players.id = loans.player_id WHERE loans.status = 'active'`,
+    `SELECT loans.parent_id, loans.destination_id, players.wage, coalesce(${jsonNumber("loans.terms", "$.salarySplit")},0) AS salary_split FROM loans JOIN players ON players.id = loans.player_id WHERE loans.status = 'active' ORDER BY loans.id`,
   )) {
     const parentShare = loan.wage * (1 - loan.salary_split / 100);
     salaries.set(
@@ -3140,7 +3140,7 @@ export async function seasonRollover(store: Store) {
     const leagueResults = new Map<number, LeagueResult[]>();
     if (headToHead.length)
       for (const row of await store.all<LeagueResult & { league_id: number }>(
-        "SELECT league_id,home_id,away_id,home_goals,away_goals FROM fixtures WHERE season = ? AND status = 'played' AND league_id = ANY(?::integer[])",
+        "SELECT league_id,home_id,away_id,home_goals,away_goals FROM fixtures WHERE season = ? AND status = 'played' AND league_id = ANY(?::integer[]) ORDER BY id",
         oldSeason,
         headToHead,
       ))

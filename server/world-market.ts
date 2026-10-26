@@ -1,7 +1,18 @@
 import seedrandom from "seedrandom";
 import type { Store } from "./db.ts";
 import { assessFinancesBatch, assetAmortization, baseWage, fairValueForFfp, signingHeadroomCost } from "./finance.ts";
-import { marketSnapshot, saleCreditOf, sellerSquadFloor, SNAPSHOT_MAX_AGE, squadNeeds, windowClose, type ClubPolicy, type SupplyPlayer } from "./club-policy.ts";
+import {
+  marketSnapshot,
+  reserveSquadFloor,
+  saleCreditOf,
+  sellerSquadFloor,
+  SNAPSHOT_MAX_AGE,
+  squadNeeds,
+  windowClose,
+  type ClubPolicy,
+  type ReserveSquad,
+  type SupplyPlayer,
+} from "./club-policy.ts";
 import { endSpells, refreshQuotaLists } from "./eligibility.ts";
 import { gbeAssessments } from "./gbe.ts";
 import type { GbeAssessment } from "../shared/gbe/types.ts";
@@ -155,6 +166,8 @@ interface Context {
   supplyById: Map<number, Candidate>;
   /** The snapshot's own supply (kept in the per-world cache). */
   supply: Map<number, SupplyPlayer>;
+  /** The snapshot's B-team senior squads (kept in the per-world cache, counted down as players leave them). */
+  reserves: Map<number, ReserveSquad>;
   details: Map<number, Details>;
   gbe: Map<number, GbeAssessment>;
   taken: Set<number>;
@@ -168,6 +181,15 @@ interface Context {
   /** Sell-to-buy attempts allowed today (each may cost a query): one per two acting clubs, at least DAILY_SALES. */
   salesCap: number;
   clauseSearches: number;
+}
+
+/** A B-team at its squad floor (or down to its last goalkeepers) keeps its players, as a first team at its floor does. */
+function reserveAtFloor(context: Pick<Context, "reserves" | "state" | "supplyById">, candidate: Pick<Candidate, "id" | "squadClubId" | "position">) {
+  const reserve = candidate.squadClubId === undefined ? undefined : context.reserves.get(candidate.squadClubId);
+  if (!reserve) return false;
+  // His own position (a candidate listed under his secondary position carries that one).
+  const position = context.supplyById.get(candidate.id)?.position ?? candidate.position;
+  return reserve.seniors <= reserveSquadFloor(context.state.date) || (position === "GK" && reserve.keepers <= MIN_GOALKEEPERS);
 }
 
 /** Clubs of one multi-club group: related parties whose deals FFP counts at fair value. */
@@ -352,6 +374,7 @@ function shortlist(context: Context, buyer: ClubPolicy, position: string, need: 
     if (modeFor(buyer, candidate, seller, loan) !== mode) continue;
     // Cheap pre-checks of priceDeal: a club at its squad floor keeps its players; adult loans stay domestic.
     if (seller && candidate.rank < 99 && seller.seniors <= floor) continue;
+    if (reserveAtFloor(context, candidate)) continue;
     if (mode === "loan" && candidate.age > 21 && seller!.association !== buyer.association) continue;
     const reason = candidate.reason === "listed" ? 1.3 : candidate.reason === "free-agent" ? 0.9 : 1;
     const score = fit * reason * sister * (0.7 + context.random() * 0.6);
@@ -419,6 +442,7 @@ async function priceDeal(context: Context, buyer: ClubPolicy, candidate: Candida
     if (seller.seniors <= sellerSquadFloor(state.date)) return null;
     if (candidate.position === "GK" && (seller.positions.GK?.depth ?? 0) <= MIN_GOALKEEPERS) return null;
   }
+  if (seller && candidate.reason !== "release-clause" && reserveAtFloor(context, candidate)) return null;
   const personality = { personality: details.personality ?? {} };
   const player = {
     age: candidate.age,
@@ -577,6 +601,15 @@ function commit(context: Context, deal: Deal) {
     }
     seller.surplus = seller.surplus.filter((id) => id !== candidate.id);
   }
+  leaveReserve(context, candidate);
+}
+
+/** A B-team player who moves on leaves his B-team's count (the snapshot serves the next days too). */
+function leaveReserve(context: Pick<Context, "reserves" | "supplyById">, candidate: Pick<Candidate, "id" | "squadClubId" | "position">) {
+  const reserve = candidate.squadClubId === undefined ? undefined : context.reserves.get(candidate.squadClubId);
+  if (!reserve) return;
+  reserve.seniors--;
+  if ((context.supplyById.get(candidate.id)?.position ?? candidate.position) === "GK") reserve.keepers--;
 }
 
 /**
@@ -854,6 +887,7 @@ export async function worldMarket(store: Store, state: GameState, random: seedra
     byPosition: lists,
     supplyById: new Map(supply.map((candidate) => [candidate.id, candidate])),
     supply: snapshot.supply,
+    reserves: snapshot.reserves,
     details: new Map(),
     gbe: new Map(),
     taken: new Set(),
@@ -1069,7 +1103,7 @@ async function applyDeals(store: Store, state: GameState, deals: readonly Deal[]
     : [];
   const assets = soldIds.length
     ? await store.all<{ id: number; player_id: number; club_id: number; cost: number; acquired: string; expires: string }>(
-        "SELECT id, player_id, club_id, cost, acquired, expires FROM player_assets WHERE status = 'active' AND player_id = ANY(?::integer[])",
+        "SELECT id, player_id, club_id, cost, acquired, expires FROM player_assets WHERE status = 'active' AND player_id = ANY(?::integer[]) ORDER BY id",
         soldIds,
       )
     : [];
@@ -1265,6 +1299,7 @@ async function releaseSurplus(context: Context) {
     for (const candidate of own) {
       if (club.wageRoom >= 0 || count >= DEADLINE_RELEASES + (overdrawn ? 1 : 0)) break;
       if (club.seniors <= sellerSquadFloor(state.date) + 1) break;
+      if (reserveAtFloor(context, candidate)) continue;
       const weeks = Math.min(26, Math.max(0, daysBetween(state.date, candidate.contractEnd) / 7));
       released.push({ candidate, club, severance: Math.round((candidate.wage * weeks * SEVERANCE_SHARE) / 100) * 100 });
       count++;
@@ -1273,6 +1308,7 @@ async function releaseSurplus(context: Context) {
       club.wageRoom += candidate.wage;
       club.weeklyWages -= candidate.wage;
       club.seniors--;
+      leaveReserve(context, candidate);
       club.surplus = club.surplus.filter((id) => id !== candidate.id);
     }
   }
@@ -1291,7 +1327,7 @@ async function releaseSurplus(context: Context) {
     released.map((entry) => context.countries.get(entry.club.association) ?? entry.club.countryId),
   );
   const assets = await store.all<{ id: number; player_id: number; cost: number; acquired: string; expires: string }>(
-    "SELECT id, player_id, cost, acquired, expires FROM player_assets WHERE status = 'active' AND player_id = ANY(?::integer[])",
+    "SELECT id, player_id, cost, acquired, expires FROM player_assets WHERE status = 'active' AND player_id = ANY(?::integer[]) ORDER BY id",
     ids,
   );
   const writeOff = new Map<number, number>();
@@ -1344,7 +1380,7 @@ export async function expireWorldLoans(store: Store, state: GameState) {
        (loans.terms::jsonb ->> 'optionFee')::double precision AS option_fee, players.ability, players.wage, players.age,
        clubs.transfer_budget, clubs.balance, clubs.reputation
      FROM loans JOIN players ON players.id = loans.player_id JOIN clubs ON clubs.id = loans.destination_id
-     WHERE ${WORLD_LOANS} AND loans.end_date <= ?`,
+     WHERE ${WORLD_LOANS} AND loans.end_date <= ? ORDER BY loans.id`,
     state.clubId,
     state.clubId,
     state.clubId,

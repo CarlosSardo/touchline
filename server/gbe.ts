@@ -295,7 +295,7 @@ async function continentalRuns(store: Store, season: number, leagues: Map<number
     `SELECT side.club_id, fixtures.league_id, array_agg(DISTINCT fixtures.stage) AS stages
      FROM fixtures CROSS JOIN LATERAL (VALUES (fixtures.home_id), (fixtures.away_id)) AS side(club_id)
      WHERE fixtures.season = ? AND fixtures.league_id = ANY(?::integer[]) AND fixtures.status IN ('played', 'scheduled')
-     GROUP BY side.club_id, fixtures.league_id`,
+     GROUP BY side.club_id, fixtures.league_id ORDER BY side.club_id, fixtures.league_id`,
     season,
     ids,
   );
@@ -974,7 +974,7 @@ async function context(store: Store, asOf: string, countryIds?: readonly number[
   const byTeam = new Map(teams.map((team) => [team.id, team.country_id]));
   for (const row of await store.all<{ country_id: number; month: string; rank: number | null; competitive: number; friendlies: number; estimated: boolean }>(
     `SELECT country_id, month, rank, competitive, friendlies, estimated FROM national_team_months
-     WHERE month >= ? AND month <= ?${countryIds ? " AND country_id = ANY(?::integer[])" : ""}`,
+     WHERE month >= ? AND month <= ?${countryIds ? " AND country_id = ANY(?::integer[])" : ""} ORDER BY country_id, month`,
     from,
     monthOf(asOf),
     ...(countryIds ? [countryIds] : []),
@@ -994,7 +994,7 @@ async function context(store: Store, asOf: string, countryIds?: readonly number[
        FROM fixtures JOIN leagues ON leagues.id = fixtures.league_id AND leagues.kind = 'international' AND leagues.age_group = 'Senior'
        CROSS JOIN LATERAL (VALUES (fixtures.home_id), (fixtures.away_id)) AS side(club_id)
        WHERE fixtures.status = 'played' AND fixtures.date >= ? AND fixtures.date <= ? AND side.club_id = ANY(?::integer[])
-       GROUP BY side.club_id, left(fixtures.date, 7)`,
+       GROUP BY side.club_id, left(fixtures.date, 7) ORDER BY side.club_id, month`,
       `${from}-01`,
       asOf,
       teams.map((team) => team.id),
@@ -1035,7 +1035,7 @@ async function qualifiedPlaces(store: Store, season: number) {
        CASE WHEN data::jsonb ->> 'season' ~ '^[0-9]+$' THEN (data::jsonb ->> 'season')::integer END AS season,
        data::jsonb -> 'qualification' AS qualification
      FROM leagues WHERE kind = 'continental' AND age_group = 'Senior' AND data::jsonb ->> 'catalogQualifying' IS NULL
-       AND jsonb_typeof(data::jsonb -> 'qualification') = 'array'`,
+       AND jsonb_typeof(data::jsonb -> 'qualification') = 'array' ORDER BY id`,
   );
   if (!rows.some((row) => row.season === season)) return null;
   const places = new Map<number, { catalogId: string | null; competition: string; phase: "group" | "qualifiers" }[]>();
@@ -1090,7 +1090,7 @@ async function ledgerFor(store: Store, ids: readonly number[], windows: Windows)
   // The twelve months of each season's row (July to June), built once per season instead of once per row.
   const seasonMonths = new Map<number, string[]>();
   for (const row of await store.all<{ player_id: number; season: number; club_id: number; league_id: number; kind: LedgerKind; estimated: boolean; data: string }>(
-    "SELECT player_id, season, club_id, league_id, kind, estimated, data FROM player_minutes_monthly WHERE player_id = ANY(?::integer[])",
+    "SELECT player_id, season, club_id, league_id, kind, estimated, data FROM player_minutes_monthly WHERE player_id = ANY(?::integer[]) ORDER BY player_id, season, club_id, league_id, kind",
     ids,
   )) {
     const key = `${row.player_id}:${row.club_id}:${row.league_id}:${row.kind}`;
