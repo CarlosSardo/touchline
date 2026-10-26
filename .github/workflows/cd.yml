@@ -1,10 +1,11 @@
 name: CD
+run-name: "Release: ${{ github.event.workflow_run.display_title || 'newest verified commit on main (manual)' }}"
 
 # Continuous deployment. After CI (verify.yml) succeeds for a push to main, publish that commit's multi-arch
 # image (linux/amd64 + linux/arm64) to GHCR on GitHub's runners, then deploy it on the Raspberry Pi itself
 # through its self-hosted runner (label touchline-deploy; outbound HTTPS only, set up with
-# scripts/ci/install-runner.sh). Only the newest commit on main is released, and the Pi never moves to an
-# older commit. The jobs run the same scripts as a developer would: scripts/ci.sh publish and
+# scripts/ci/install-runner.sh). Each run releases the newest commit on main that passed CI, recomputed at
+# every step, so a dropped or stale run can't lose a release, and the Pi never moves to an older commit. The jobs run the same scripts as a developer would: scripts/ci.sh publish and
 # scripts/ci/cd.sh (around scripts/deploy.sh). No stored secrets: the Pi pulls with the job's short-lived
 # GITHUB_TOKEN.
 on:
@@ -34,32 +35,30 @@ jobs:
       (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
       || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     permissions:
       contents: read
       actions: read
     outputs:
       sha: ${{ steps.candidate.outputs.sha }}
-      release: ${{ steps.candidate.outputs.release }}
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Newest verified commit on main?
+      - name: Newest verified commit on main (scripts/ci/cd.sh candidate)
         id: candidate
         env:
           GH_TOKEN: ${{ github.token }}
-          SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
         run: |
-          release=$(scripts/ci/cd.sh candidate "$SHA")
-          { echo "sha=$SHA"; echo "release=$release"; } >> "$GITHUB_OUTPUT"
-          echo "Release candidate \`${SHA:0:12}\`: ${release}" >> "$GITHUB_STEP_SUMMARY"
+          sha=$(scripts/ci/cd.sh candidate)
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Release candidate: \`${sha:-none}\`" >> "$GITHUB_STEP_SUMMARY"
 
   image:
     name: Publish image
     needs: release
-    if: needs.release.outputs.release == 'true'
+    if: needs.release.outputs.sha != ''
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -97,8 +96,6 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.release.outputs.sha }}
-          # Full history: cd.sh compares the running commit with this one (never downgrade).
-          fetch-depth: 0
           persist-credentials: false
       - name: Deploy and verify (scripts/ci/cd.sh deploy)
         env:

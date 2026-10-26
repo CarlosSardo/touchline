@@ -12,7 +12,7 @@ say() { printf '%s\n' "$*" >&2; }
 api() { local attempt; for attempt in 1 2 3; do gh api "$@" && return; sleep $((attempt * 3)); done; return 1; }
 
 tree=$(api "repos/$repo/commits/$sha" --jq .commit.tree.sha)
-for head in $(api "repos/$repo/commits/$sha/pulls" --jq '.[] | select(.merged_at != null) | .head.sha'); do
+for head in $(api "repos/$repo/commits/$sha/pulls" --jq '.[] | select(.merged_at != null and .base.ref == "main") | .head.sha'); do
   head_tree=$(api "repos/$repo/commits/$head" --jq .commit.tree.sha)
   if [[ "$head_tree" != "$tree" ]]; then
     say "PR head $head has a different tree than $sha (main moved before the merge)."
