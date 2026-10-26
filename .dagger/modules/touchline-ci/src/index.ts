@@ -28,7 +28,7 @@ const TOOLS = "/opt/touchline-ci"
 const SQL_PORT = "54329"
 const SQL_DATABASE = "touchline_checks"
 
-// Same flags as .github/actions/disposable-postgres had and deploy/compose.test.yaml uses: test data only,
+// Same flags as deploy/compose.test.yaml (shared_buffers raised to 1GB): test data only,
 // durability is traded for speed.
 const POSTGRES_FLAGS = [
   "max_connections=100",
