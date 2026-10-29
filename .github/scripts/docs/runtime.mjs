@@ -35,6 +35,7 @@ import {
   verdictIdentity,
   VERDICT_FILE,
 } from "./review-cost.mjs";
+import { finalCheckerResponse } from "./cli-output.mjs";
 
 const CLI_VERSION = "1.0.105";
 const MAX_REPORT_BYTES = 8 * 1024 * 1024;
@@ -150,7 +151,7 @@ export function copilotArguments(agent, prompt, { readOnly = false, root } = {})
     "--no-auto-update",
     "--disable-client-telemetry",
     "--secret-env-vars=COPILOT_GITHUB_TOKEN",
-    "--silent",
+    ...(readOnly ? ["--output-format=json"] : ["--silent"]),
     "--stream=off",
   ];
 }
@@ -267,7 +268,7 @@ function runCopilot(root, agent, prompt, { readOnly = false } = {}) {
     cwd: root,
     env,
     encoding: "utf8",
-    maxBuffer: MAX_REPORT_BYTES + 1,
+    maxBuffer: (readOnly ? 16 : 8) * 1024 * 1024 + 1,
     timeout: 20 * 60 * 1000,
   });
   if (result.error) throw result.error;
@@ -278,6 +279,14 @@ function runCopilot(root, agent, prompt, { readOnly = false } = {}) {
     throw new Error(`Copilot ${agent} failed (${result.status}): ${responseDiagnostic(result.stderr || result.stdout)}`);
   }
   const output = result.stdout.trim();
+  if (readOnly) {
+    const response = finalCheckerResponse(output);
+    console.log(`Checker transport: ${JSON.stringify({
+      records: response.records, assistantMessages: response.assistantMessages,
+      toolResults: response.toolResults, finalBytes: Buffer.byteLength(response.content),
+    })}`);
+    return response.content;
+  }
   console.log(`Copilot ${agent} stdout diagnostic: ${responseDiagnostic(output)}`);
   if (!output) throw new Error(`Copilot ${agent} returned an empty response`);
   if (Buffer.byteLength(output) > MAX_REPORT_BYTES) {

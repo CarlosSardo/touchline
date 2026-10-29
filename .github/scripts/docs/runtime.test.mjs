@@ -49,6 +49,7 @@ test("writer invocation has no shell, URL, MCP, or all-tools capability", () => 
   assert.ok(args.includes("--no-ask-user"));
   assert.ok(!args.includes("--trust-folder"));
   assert.ok(args.includes("--deny-tool=shell"));
+  assert.ok(args.includes("--silent"));
   assert.ok(!args.some((arg) => /allow-tool=shell|allow-url|mcp-server=|allow-all/.test(arg)));
   assert.ok(!args.some((arg) => arg.startsWith("--agent")));
   assert.ok(!args.includes("--allow-all"));
@@ -61,6 +62,8 @@ test("checker invocation is read-only and uses an independent agent profile", ()
   });
   assert.ok(args.includes("--available-tools=view,rg,glob"));
   assert.ok(args.includes("--deny-tool=write"));
+  assert.ok(args.includes("--output-format=json"));
+  assert.ok(!args.includes("--silent"));
   assert.ok(args.includes("--deny-tool=shell"));
   assert.ok(!args.includes("--allow-tool=write"));
   assert.ok(!args.includes("--available-tools=view,rg,glob,apply_patch"));
@@ -173,14 +176,15 @@ for (const invalidReport of [false, true]) {
         appendFileSync(process.env.TEST_TRACE, JSON.stringify({ tool: "copilot", args }) + "\\n");
         const prompt = args[args.indexOf("-p") + 1];
         if (prompt.includes("You maintain Touchline's user-facing documentation.")) { console.log("No changes needed"); process.exit(0); }
-        if (process.env.TEST_INVALID_REPORT === "true") { console.log("{}"); process.exit(0); }
-        console.log(JSON.stringify({
+        const content = process.env.TEST_INVALID_REPORT === "true" ? "{}" : JSON.stringify({
           schemaVersion: 1,
           headSha: execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
           baseSha: prompt.match(/Diff BASE \\(not a cached verification\\): ([0-9a-f]{40})/)[1],
           claims: [{ status: "supported" }], omissions: [],
           coverage: { reviewedFiles: ["README.md"], unreviewedFiles: [] }
-        }));
+        });
+        console.log(JSON.stringify({type:"assistant.message",data:{content,toolRequests:[]}}));
+        console.log(JSON.stringify({type:"result",exitCode:0}));
       `,
       npm: `
         const assert = require("node:assert/strict");
