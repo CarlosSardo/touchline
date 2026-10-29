@@ -2,7 +2,7 @@
 export const REPO_URL = "https://github.com/CarlosSardo/touchline";
 export const REPO_BRANCH = "main";
 
-// Repository-root Markdown rendered by the site straight from its canonical file (no copies under website/).
+// Repository-root Markdown rendered by the site straight from its canonical file (no copies under docs/).
 // Keys are repository-relative paths; links to them (relative or GitHub blob URLs) become site routes.
 export const ROOT_DOCS = {
   "DEVELOPMENT.md": {

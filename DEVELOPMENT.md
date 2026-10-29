@@ -1,6 +1,6 @@
 # Touchline engineering guide
 
-This is the operational source of truth for building, testing and running Touchline. For the solution design, runtime boundaries and implementation map, see the [technical documentation](website/src/content/docs/technical/index.md). For contribution policy and review expectations, see [CONTRIBUTING.md](CONTRIBUTING.md); for gameplay scope and known gaps, see [REQUIREMENTS.md](REQUIREMENTS.md).
+This is the operational source of truth for building, testing and running Touchline. For the solution design, runtime boundaries and implementation map, see the [technical documentation](docs/src/content/docs/technical/index.md). For contribution policy and review expectations, see [CONTRIBUTING.md](CONTRIBUTING.md); for gameplay scope and known gaps, see [REQUIREMENTS.md](REQUIREMENTS.md).
 
 ## Contents
 

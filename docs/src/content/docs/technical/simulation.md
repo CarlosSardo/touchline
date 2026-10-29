@@ -36,7 +36,7 @@ flowchart TD
   Next -->|no| Response["Return progress"]
 ```
 
-See the saved [diagram source](https://github.com/CarlosSardo/touchline/blob/main/website/src/content/docs/technical/diagrams/advance.mmd).
+See the saved [diagram source](https://github.com/CarlosSardo/touchline/blob/main/docs/src/content/docs/technical/diagrams/advance.mmd).
 
 The exact implementation in `server/simulation.ts` is more detailed than the diagram:
 

@@ -44,7 +44,7 @@ flowchart LR
   App --> IdP["OIDC provider"]
 ```
 
-The [diagram source](https://github.com/CarlosSardo/touchline/blob/main/website/src/content/docs/technical/diagrams/delivery.mmd) is saved alongside the pages.
+The [diagram source](https://github.com/CarlosSardo/touchline/blob/main/docs/src/content/docs/technical/diagrams/delivery.mmd) is saved alongside the pages.
 
 CD follows successful push CI and a six-hour reconciliation schedule. `scripts/ci/cd.sh` selects the newest verified ancestor of main, not simply whichever old workflow happens to finish last. It recomputes the desired release and refuses downgrades.
 

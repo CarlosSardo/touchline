@@ -5,7 +5,7 @@ import { requiresApplicationCi } from "./plan-suites.mjs";
 test("documentation and editor-only changes intentionally skip application suites", () => {
   assert.equal(requiresApplicationCi([
     "README.md",
-    "website/src/content/docs/guide.md",
+    "docs/src/content/docs/guide.md",
     "LICENSE",
     ".env.example",
     ".copilot/instructions.md",
@@ -13,8 +13,8 @@ test("documentation and editor-only changes intentionally skip application suite
     ".mcp.json",
     ".github/agents/docs-writer.agent.md",
     ".github/skills/docs/SKILL.md",
-    "website/src/pages/index.astro",
-    "website/src/content/docs/guide.mdx",
+    "docs/src/pages/index.astro",
+    "docs/src/content/docs/guide.mdx",
     ".github/workflows/docs.yml",
   ]), false);
   assert.equal(requiresApplicationCi([]), false);

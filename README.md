@@ -9,7 +9,7 @@
 
 [![CI](https://github.com/CarlosSardo/touchline/actions/workflows/ci.yml/badge.svg)](https://github.com/CarlosSardo/touchline/actions/workflows/ci.yml)
 [![CD](https://github.com/CarlosSardo/touchline/actions/workflows/cd.yml/badge.svg)](https://github.com/CarlosSardo/touchline/actions/workflows/cd.yml)
-[![Docs: Astro + Pagefind](https://img.shields.io/badge/docs-Astro%20%2B%20Pagefind-BC52EE?logo=astro&logoColor=white)](website/)
+[![Docs: Astro + Pagefind](https://img.shields.io/badge/docs-Astro%20%2B%20Pagefind-BC52EE?logo=astro&logoColor=white)](https://carlossardo.github.io/touchline/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-22c55e.svg)](LICENSE)
 
 [![Node.js 24](https://img.shields.io/badge/Node.js-24-5FA04E?logo=nodedotjs&logoColor=white)](.nvmrc)
@@ -27,13 +27,13 @@
 
 <br>
 
-<img src="website/public/images/game/director-overview.png" alt="Touchline sporting director overview with transfer and wage budgets, board confidence, squad harmony, recruitment priorities and upcoming fixtures." width="100%">
+<img src="docs/public/images/game/director-overview.png" alt="Touchline sporting director overview with transfer and wage budgets, board confidence, squad harmony, recruitment priorities and upcoming fixtures." width="100%">
 
 <sub>Your club. Your project. Every decision starts at the director's desk.</sub>
 
-**[Player handbook](website/src/content/docs/play/index.md)** · **[Screenshots](#a-look-inside)** · **[Engineering docs](website/src/content/docs/technical/index.md)** · **[Run it yourself](DEVELOPMENT.md)**
+**[Player handbook](https://carlossardo.github.io/touchline/docs/play/)** · **[Screenshots](#a-look-inside)** · **[Engineering docs](https://carlossardo.github.io/touchline/docs/technical/)** · **[Run it yourself](https://carlossardo.github.io/touchline/docs/technical/development/)**
 
-📚 **Explore the [Touchline docs site](#documentation)**: a searchable player handbook and engineering guide.
+📚 **Explore the [Touchline docs site](https://carlossardo.github.io/touchline/)**: a searchable player handbook and engineering guide.
 
 </div>
 
@@ -62,20 +62,20 @@ Every screenshot is captured in the browser from a real, locally generated caree
 
 <table>
 <tr>
-<td width="50%" valign="top"><img src="website/public/images/game/match-analysis.png" alt="Touchline match centre after a simulated 3-0 Birmingham Wanderers win, displaying the pitch shot map, expected goals, possession, passing and shooting statistics." width="100%"><br><sub>See what the scoreline misses with shot maps and expected-goal analysis.</sub></td>
-<td width="50%" valign="top"><img src="website/public/images/game/scouting-dossier.png" alt="Dan Johnson's player dossier showing a real scout report with ability and potential estimates, strengths, weaknesses, personality notes, tactical fit and projected resale value." width="100%"><br><sub>Look beyond the rating: scout potential, personality, tactical fit and risk.</sub></td>
+<td width="50%" valign="top"><img src="docs/public/images/game/match-analysis.png" alt="Touchline match centre after a simulated 3-0 Birmingham Wanderers win, displaying the pitch shot map, expected goals, possession, passing and shooting statistics." width="100%"><br><sub>See what the scoreline misses with shot maps and expected-goal analysis.</sub></td>
+<td width="50%" valign="top"><img src="docs/public/images/game/scouting-dossier.png" alt="Dan Johnson's player dossier showing a real scout report with ability and potential estimates, strengths, weaknesses, personality notes, tactical fit and projected resale value." width="100%"><br><sub>Look beyond the rating: scout potential, personality, tactical fit and risk.</sub></td>
 </tr>
 <tr>
-<td width="50%" valign="top"><img src="website/public/images/game/first-team-squad.png" alt="Birmingham Wanderers' first-team squad showing positional groups, player ability, potential, eligibility, squad roles, fitness, morale, wages and availability." width="100%"><br><sub>Build a balanced squad, not just a collection of stars.</sub></td>
-<td width="50%" valign="top"><img src="website/public/images/game/academy-pathways.png" alt="Touchline U19 academy view with prospect ability and potential, physical development, burnout, age-out reviews and mentoring actions." width="100%"><br><sub>Turn academy potential into a first-team pathway.</sub></td>
+<td width="50%" valign="top"><img src="docs/public/images/game/first-team-squad.png" alt="Birmingham Wanderers' first-team squad showing positional groups, player ability, potential, eligibility, squad roles, fitness, morale, wages and availability." width="100%"><br><sub>Build a balanced squad, not just a collection of stars.</sub></td>
+<td width="50%" valign="top"><img src="docs/public/images/game/academy-pathways.png" alt="Touchline U19 academy view with prospect ability and potential, physical development, burnout, age-out reviews and mentoring actions." width="100%"><br><sub>Turn academy potential into a first-team pathway.</sub></td>
 </tr>
 <tr>
-<td width="50%" valign="top"><img src="website/public/images/game/club-finances.png" alt="Touchline club finances with transfer and wage budgets, cash balance history, season income and expenditure, enterprise estimate and weekly financial charts." width="100%"><br><sub>Keep ambition sustainable with a clear view of your club's finances.</sub></td>
+<td width="50%" valign="top"><img src="docs/public/images/game/club-finances.png" alt="Touchline club finances with transfer and wage budgets, cash balance history, season income and expenditure, enterprise estimate and weekly financial charts." width="100%"><br><sub>Keep ambition sustainable with a clear view of your club's finances.</sub></td>
 <td width="50%" valign="middle" align="center">
 
 ### Ready to take the chair?
 
-Start with the **[player handbook](website/src/content/docs/play/index.md)** and your **[first career](website/src/content/docs/play/getting-started.md)**.
+Start with the **[player handbook](https://carlossardo.github.io/touchline/docs/play/)** and your **[first career](https://carlossardo.github.io/touchline/docs/play/getting-started/)**.
 
 </td>
 </tr>
@@ -83,16 +83,18 @@ Start with the **[player handbook](website/src/content/docs/play/index.md)** and
 
 ## Documentation
 
-Everything about playing and running Touchline lives in the **Touchline docs site** ([website/](website/)): a searchable static site with a marketing home page, the full player handbook, the engineering section and the operations runbook. It is built with Astro, Tailwind CSS and Pagefind from the same Markdown files linked below, so you can read every page here on GitHub too.
+Everything about playing and running Touchline lives in the **[Touchline docs site](https://carlossardo.github.io/touchline/)**: a searchable static site with a marketing home page, the full player handbook, the engineering section and the operations runbook. It is built with Astro, Tailwind CSS and Pagefind from the same Markdown files linked below, so you can read every page here on GitHub too.
 
-> **Hosted docs:** the site is set up to publish to GitHub Pages at `https://carlossardo.github.io/touchline/`. That address is not live yet; until Pages is enabled, use the links below or [preview the site locally](website/README.md).
+> **Hosted docs:** visit [carlossardo.github.io/touchline](https://carlossardo.github.io/touchline/). Browse the Markdown sources below or [preview the site locally](docs/README.md).
 
 | Read this | If you want to |
 | --- | --- |
-| 📘 [Player handbook](website/src/content/docs/play/index.md) | Learn the game, from your first transfer window to long-term squad strategy. |
-| 🏗️ [Engineering docs](website/src/content/docs/technical/index.md) | Understand the architecture, simulation, persistence, identity and delivery. |
-| 🛠️ [Engineering guide (DEVELOPMENT.md)](DEVELOPMENT.md) | Run, test, self-host, back up and upgrade Touchline. |
+| 📘 [Player handbook](https://carlossardo.github.io/touchline/docs/play/) | Learn the game, from your first transfer window to long-term squad strategy. |
+| 🏗️ [Engineering docs](https://carlossardo.github.io/touchline/docs/technical/) | Understand the architecture, simulation, persistence, identity and delivery. |
+| 🛠️ [Engineering guide](https://carlossardo.github.io/touchline/docs/technical/development/) ([DEVELOPMENT.md source](DEVELOPMENT.md)) | Run, test, self-host, back up and upgrade Touchline. |
 | 🗺️ [REQUIREMENTS.md](REQUIREMENTS.md) | See the current product scope and known gaps. |
+
+Read the [Markdown sources](docs/src/content/docs/) or the [site build guide](docs/README.md) on GitHub.
 
 Touchline is self-hosted for a small private group: one Docker Compose stack runs on a Raspberry Pi 4 or any 64-bit Linux host, and players sign in through your own OpenID Connect provider. [DEVELOPMENT.md](DEVELOPMENT.md) explains how.
 
