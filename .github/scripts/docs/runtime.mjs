@@ -220,6 +220,24 @@ function assertNoWorkspaceHooks(root) {
   }
 }
 
+export function responseDiagnostic(output) {
+  const text = String(output ?? "").trim();
+  const sample = `${text.slice(0, 4096)}\n${text.slice(-4096)}`;
+  const signals = [
+    ["authentication", /\b(?:authentication|authenticate|unauthorized|forbidden|401|403)\b|(?:invalid|expired|missing)\s+(?:access\s+)?token/i],
+    ["quota-or-model", /\b(?:quota|credits|rate.limit|model.unavailable|unsupported.model)\b/i],
+    ["folder-trust", /\b(?:untrusted|trust.{0,30}(?:folder|directory|workspace))\b/i],
+    ["tool-or-file-denial", /(?:cannot|can't|unable|don't.have|do.not.have|unavailable|missing|no.available|permission.denied).{0,80}(?:tool|file|read|source)|(?:tool|file|read|source).{0,80}(?:unavailable|not.available|denied|not.permitted)/i],
+    ["cli-error", /(?:^|\n)\s*(?:error|fatal):/i],
+    ["event-envelope", /"type"\s*:\s*"(?:assistant|result|tool|session|workflow)[."]/],
+  ].filter(([, pattern]) => pattern.test(sample)).map(([name]) => name);
+  const format = !text ? "empty" : text.startsWith("```") ? "fenced" :
+    text.startsWith("{") ? "object-prefixed" : "non-JSON";
+  return JSON.stringify({
+    format, bytes: Buffer.byteLength(text), lines: text ? text.split("\n").length : 0, signals,
+  });
+}
+
 function runCopilot(root, agent, prompt, { readOnly = false } = {}) {
   if (!process.env.COPILOT_GITHUB_TOKEN) {
     throw new Error("COPILOT_GITHUB_TOKEN is required for unattended Copilot CLI");
@@ -243,10 +261,14 @@ function runCopilot(root, agent, prompt, { readOnly = false } = {}) {
     timeout: 20 * 60 * 1000,
   });
   if (result.error) throw result.error;
+  if (result.stderr?.trim()) {
+    console.warn(`Copilot ${agent} stderr diagnostic: ${responseDiagnostic(result.stderr)}`);
+  }
   if (result.status !== 0) {
-    throw new Error(`Copilot ${agent} failed (${result.status}): ${result.stderr.slice(-4000)}`);
+    throw new Error(`Copilot ${agent} failed (${result.status}): ${responseDiagnostic(result.stderr || result.stdout)}`);
   }
   const output = result.stdout.trim();
+  console.log(`Copilot ${agent} stdout diagnostic: ${responseDiagnostic(output)}`);
   if (!output) throw new Error(`Copilot ${agent} returned an empty response`);
   if (Buffer.byteLength(output) > MAX_REPORT_BYTES) {
     throw new Error(`Copilot ${agent} response exceeds ${MAX_REPORT_BYTES} bytes`);
@@ -314,9 +336,7 @@ export function captureReport(output, reportPath) {
     const fenced = /^```(?:json)?\s*\n([\s\S]*)\n```\s*$/.exec(output);
     report = JSON.parse(fenced ? fenced[1] : output);
   } catch {
-    const format = output.startsWith("```") ? "fenced text" :
-      output.startsWith("{") ? "incomplete or multiple JSON objects" : "non-JSON text";
-    throw new Error(`Fact-checker response was not a single valid JSON object (${format}, ${Buffer.byteLength(output)} bytes)`);
+    throw new Error(`Fact-checker response was not a single valid JSON object (${responseDiagnostic(output)})`);
   }
   reportHasPassShape(report, report?.headSha, report?.baseSha);
   writeFileSync(reportPath, `${JSON.stringify(report)}\n`, { flag: "wx", mode: 0o600 });

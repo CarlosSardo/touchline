@@ -10,6 +10,7 @@ import {
   copilotArguments,
   main,
   reportHasPassShape,
+  responseDiagnostic,
   validateMainProtection,
   validateMainRules,
   writerPrompt,
@@ -64,6 +65,24 @@ test("checker invocation is read-only and uses an independent agent profile", ()
   assert.ok(!args.includes("--allow-tool=write"));
   assert.ok(!args.includes("--available-tools=view,rg,glob,apply_patch"));
   assert.ok(!args.includes("--trust-folder"));
+});
+
+test("response diagnostics distinguish denial/error channels without exposing model text or credentials", () => {
+  for (const [response, signal] of [
+    ["Error: Authentication failed: github_pat_PRIVATE_FIXTURE_TOKEN", "authentication"],
+    ["Error: quota exhausted for this model", "quota-or-model"],
+    ["Workspace is untrusted; trust this folder", "folder-trust"],
+    ["I cannot read source files because no tools are available. PRIVATE_SOURCE_FIXTURE", "tool-or-file-denial"],
+    ['{"type":"assistant.message","data":{"content":"PRIVATE_MODEL_FIXTURE"}}', "event-envelope"],
+  ]) {
+    const diagnostic = responseDiagnostic(response);
+    assert.ok(JSON.parse(diagnostic).signals.includes(signal), diagnostic);
+    assert.doesNotMatch(diagnostic, /PRIVATE|github_pat_|Authentication failed|no tools are available/);
+    assert.ok(diagnostic.length < 400);
+  }
+  assert.deepEqual(JSON.parse(responseDiagnostic("")), { format: "empty", bytes: 0, lines: 0, signals: [] });
+  assert.equal(JSON.parse(responseDiagnostic("```json\n{}\n```")).format, "fenced");
+  assert.equal(JSON.parse(responseDiagnostic("{}\nStats: 1 turn")).format, "object-prefixed");
 });
 
 test("main merge protection requires stable checks, up-to-date branches, and no human approvals", () => {

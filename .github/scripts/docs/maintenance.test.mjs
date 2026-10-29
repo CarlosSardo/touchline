@@ -198,6 +198,9 @@ test("source changes trigger maintenance but docs automation and docs-only chang
   assert.equal(isRelevantSourceChange(["server/feature.ts", "README.md"]), true);
   assert.equal(isRelevantSourceChange(["website/public/images/game/screenshot.webp"]), true);
   assert.equal(isRelevantSourceChange(["README.md", "website/src/content/docs/guide.md"]), false);
+  const generatedDocs = ["README.md", "DEVELOPMENT.md", "docs/src/content/docs/play/index.md"];
+  assert.equal(isRelevantSourceChange(generatedDocs), false);
+  assert.equal(shouldRunMaintenance(generatedDocs), false);
   assert.equal(isRelevantSourceChange([".github/scripts/docs/runtime.mjs"]), false);
   assert.equal(isAutomationOwnedPath(".github/agents/docs-writer.agent.md"), true);
   assert.equal(isAutomationOwnedPath(".github/agents/docs-fact-checker.agent.md"), true);

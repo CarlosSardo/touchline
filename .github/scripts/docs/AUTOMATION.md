@@ -137,6 +137,11 @@ the CLI's concrete tool names, not profile aliases, for the actual tool filter.
 Checker responses must be one complete JSON object (an enclosing JSON Markdown
 fence is accepted only when it wraps the whole response); prefixes, suffixes,
 multiple objects, stale reports, and unsupported facts still fail closed.
+Diagnostics identify only the response format, byte/line counts, and fixed
+authentication/quota/trust/tool/error-envelope signal labels, separately for
+stdout and stderr. They never echo model/source text, raw CLI errors, or secrets.
+These heuristic labels help triage failures; they neither establish the root
+cause nor turn a failed response into a passing report.
 
 Always reviewing the complete baseline costs more than incremental cached
 verification, but avoids trusting forgeable or unavailable provenance markers.
