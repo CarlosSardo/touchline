@@ -83,6 +83,7 @@ test("response diagnostics distinguish denial/error channels without exposing mo
   assert.deepEqual(JSON.parse(responseDiagnostic("")), { format: "empty", bytes: 0, lines: 0, signals: [] });
   assert.equal(JSON.parse(responseDiagnostic("```json\n{}\n```")).format, "fenced");
   assert.equal(JSON.parse(responseDiagnostic("{}\nStats: 1 turn")).format, "object-prefixed");
+  assert.deepEqual(JSON.parse(responseDiagnostic('{"claim":"Authentication is required for this feature"}')).signals, []);
 });
 
 test("main merge protection requires stable checks, up-to-date branches, and no human approvals", () => {
@@ -275,6 +276,18 @@ for (const invalidReport of [false, true]) {
     assert.throws(() => captureReport(JSON.stringify({
       ...report, claims: [{ status: "unverified" }],
     }), path.join(directory, "unsupported.json")), /unsupported claim/);
+    for (const [response, reason] of [
+      ['{"private":"PRIVATE_SOURCE', "incomplete-json"],
+      [`${raw}\nPRIVATE_STATS_SUFFIX`, "trailing-content"],
+      ['{"private":"PRIVATE\\q"}', "invalid-string-escape"],
+      ['{"private":"PRIVATE",}', "invalid-object-property"],
+    ]) {
+      assert.throws(() => captureReport(response, path.join(directory, "parse-failure.json")), (error) => {
+        assert.match(error.message, new RegExp(`parse=${reason}`));
+        assert.doesNotMatch(error.message, /PRIVATE|private|STATS_SUFFIX/);
+        return true;
+      });
+    }
   });
 }
 
@@ -368,7 +381,7 @@ test("prompts pin exact revisions and enumerate changed files", () => {
   assert.match(checker, new RegExp(head));
   assert.match(checker, new RegExp(base));
   assert.match(checker, /README\.md/);
-  assert.match(checker, /exactly one JSON object/);
+  assert.match(checker, /exactly one complete minified JSON object/);
 });
 
 test("checker response must be current, complete, passing, and fully reviewed", () => {

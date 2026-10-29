@@ -177,6 +177,10 @@ multiple objects, stale reports, and unsupported facts still fail closed.
 Diagnostics identify only the response format, byte/line counts, and fixed
 authentication/quota/trust/tool/error-envelope signal labels, separately for
 stdout and stderr. They never echo model/source text, raw CLI errors, or secrets.
+Malformed JSON also reports only a fixed parser category and numeric offset,
+not the parser's raw error message (which can include private content).
+The checker is asked for compact complete JSON and concise line citations,
+without omitting material claims, evidence or required coverage.
 These heuristic labels help triage failures; they neither establish the root
 cause nor turn a failed response into a passing report.
 
