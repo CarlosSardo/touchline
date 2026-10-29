@@ -10,7 +10,6 @@ on:
         type: boolean
         default: false
   pull_request:
-    branches: [main]
     types: [opened, synchronize, reopened, ready_for_review, edited]
 
 permissions:
@@ -196,6 +195,15 @@ jobs:
       - name: Test the trusted runtime
         run: node --test trusted/.github/scripts/docs/maintenance.test.mjs trusted/.github/scripts/docs/runtime.test.mjs
 
+      - name: Test the exact proposed docs automation
+        run: node --test candidate/.github/scripts/docs/*.test.mjs
+
+      - name: Install documentation site dependencies
+        run: npm ci --prefix candidate/website
+
+      - name: Verify the exact proposed documentation site
+        run: npm --prefix candidate/website run verify
+
       - name: Determine whether docs validation is needed
         id: scope
         run: >-
@@ -203,6 +211,14 @@ jobs:
           --candidate-root "$GITHUB_WORKSPACE/candidate"
           --base "${{ github.event.pull_request.base.sha }}"
           --head "${{ github.event.pull_request.head.sha }}"
+
+      - name: Fail closed for docs changes targeting a non-main branch
+        if: >-
+          steps.scope.outputs.verify_docs == 'true' &&
+          github.event.pull_request.base.ref != 'main'
+        run: |
+          echo "::error::Documentation changes targeting a non-main branch are not supported by the trusted verifier."
+          exit 1
 
       - name: Create a read-only GitHub App policy token
         if: >-
@@ -218,6 +234,7 @@ jobs:
           permission-administration: read
 
       - name: Re-run independent fact-check on the exact PR head
+        if: github.event.pull_request.base.ref == 'main'
         env:
           COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
