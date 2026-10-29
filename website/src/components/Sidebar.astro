@@ -1,0 +1,52 @@
+---
+import type { NavSection } from "../lib/docs";
+
+interface Props {
+  sections: NavSection[];
+  currentHref: string;
+}
+const { sections, currentHref } = Astro.props;
+const norm = (h: string) => (h.endsWith("/") ? h : `${h}/`);
+const current = norm(currentHref);
+---
+
+<nav aria-label="Documentation" class="space-y-8 text-sm">
+  {
+    sections.map((section) => (
+      <div>
+        <a
+          href={section.href}
+          class="mb-3 flex items-center gap-2 font-display text-xs font-bold uppercase tracking-wider text-ink-400 hover:text-pitch-600 dark:text-ink-400"
+        >
+          <span class={`size-1.5 rounded-full ${section.key === "technical" ? "bg-sky-500" : "bg-pitch-500"}`} aria-hidden="true" />
+          {section.label}
+        </a>
+        <ul class="space-y-5">
+          {section.groups.map((group) => (
+            <li>
+              {(section.groups.length > 1 || group.label !== section.label) && (
+                <p class="mb-1.5 font-semibold text-ink-900 dark:text-white">{group.label}</p>
+              )}
+              <ul class="space-y-0.5 border-l border-ink-200 dark:border-ink-800">
+                {group.pages.map((page) => {
+                  const isCurrent = norm(page.href) === current;
+                  return (
+                    <li>
+                      <a
+                        href={page.href}
+                        aria-current={isCurrent ? "page" : undefined}
+                        class="-ml-px block border-l border-transparent py-1 pl-3 pr-2 text-ink-600 hover:border-ink-400 hover:text-ink-900 aria-[current=page]:border-pitch-500 aria-[current=page]:font-semibold aria-[current=page]:text-pitch-700 dark:text-ink-300 dark:hover:text-white dark:aria-[current=page]:text-pitch-300"
+                      >
+                        {page.label}
+                      </a>
+                    </li>
+                  );
+                })}
+              </ul>
+            </li>
+          ))}
+        </ul>
+      </div>
+    ))
+  }
+</nav>

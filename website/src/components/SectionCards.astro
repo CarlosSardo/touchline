@@ -1,0 +1,23 @@
+---
+import type { NavSection } from "../lib/docs";
+
+interface Props {
+  section: NavSection;
+}
+const { section } = Astro.props;
+const pages = section.groups.flatMap((g) => g.pages);
+---
+
+<div class="not-prose grid gap-4 sm:grid-cols-2">
+  {
+    pages.map((page) => (
+      <a
+        href={page.href}
+        class="group rounded-2xl border border-ink-200 bg-white p-5 transition hover:-translate-y-0.5 hover:border-pitch-500 hover:shadow-lg dark:border-ink-800 dark:bg-ink-900"
+      >
+        <h2 class="font-display text-lg font-bold text-ink-900 group-hover:text-pitch-700 dark:text-white dark:group-hover:text-pitch-300">{page.label}</h2>
+        {page.description && <p class="mt-1.5 text-sm text-ink-500 dark:text-ink-300">{page.description}</p>}
+      </a>
+    ))
+  }
+</div>

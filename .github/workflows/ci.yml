@@ -7,7 +7,7 @@ name: CI
 # whose tree that run's Plan job records in its log) reuses that result instead of running again.
 # A successful push run starts CD (cd.yml): image + deploy.
 on:
-  # Changes only to docs and editor files skip CI on both triggers (no test or image reads them), so a
+  # Changes only to docs (including the website/ docs site, built by docs.yml) and editor files skip CI on both triggers (no test or image reads them), so a
   # docs-only merge to main runs neither CI nor CD. Keep the two lists equal.
   push:
     branches: [main]
@@ -20,6 +20,8 @@ on:
       - ".mcp.json"
       - ".github/agents/**"
       - ".github/skills/**"
+      - "website/**"
+      - ".github/workflows/docs.yml"
   workflow_dispatch:
     inputs:
       suites:
@@ -46,6 +48,8 @@ on:
       - ".mcp.json"
       - ".github/agents/**"
       - ".github/skills/**"
+      - "website/**"
+      - ".github/workflows/docs.yml"
 
 permissions:
   contents: read

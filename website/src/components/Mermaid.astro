@@ -1,0 +1,37 @@
+<script>
+  // Renders ```mermaid blocks client-side, only on pages that have them, and re-renders on theme change.
+  const blocks = [...document.querySelectorAll<HTMLElement>('pre[data-language="mermaid"], pre > code.language-mermaid')].map(
+    (el) => (el.tagName === "CODE" ? (el.parentElement as HTMLElement) : el),
+  );
+  if (blocks.length) {
+    const sources = blocks.map((pre) => pre.textContent ?? "");
+    const holders = blocks.map((pre, i) => {
+      const figure = document.createElement("figure");
+      figure.className = "mermaid-diagram not-prose";
+      figure.setAttribute("role", "img");
+      figure.setAttribute("aria-label", `Diagram ${i + 1}`);
+      const fallback = pre.cloneNode(true) as HTMLElement;
+      fallback.classList.add("w-full");
+      figure.append(fallback);
+      pre.replaceWith(figure);
+      return figure;
+    });
+    let run = 0;
+    const draw = async () => {
+      const id = ++run;
+      try {
+        const { default: mermaid } = await import("mermaid");
+        const dark = document.documentElement.classList.contains("dark");
+        mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme: dark ? "dark" : "neutral", fontFamily: "Manrope Variable, sans-serif" });
+        for (const [i, holder] of holders.entries()) {
+          const { svg } = await mermaid.render(`mermaid-${id}-${i}`, sources[i]);
+          if (id === run) holder.innerHTML = svg;
+        }
+      } catch (error) {
+        console.error("Mermaid rendering failed; showing diagram source.", error);
+      }
+    };
+    void draw();
+    document.addEventListener("themechange", () => void draw());
+  }
+</script>

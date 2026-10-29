@@ -1,0 +1,38 @@
+---
+import { render } from "astro:content";
+import DocsLayout from "../../layouts/DocsLayout.astro";
+import SectionCards from "../../components/SectionCards.astro";
+import { getDocPages, getNavigation, SECTIONS, type DocPage, type NavSection } from "../../lib/docs";
+
+export async function getStaticPaths() {
+  const pages = await getDocPages();
+  const nav = await getNavigation();
+  const paths: { params: { slug: string | undefined }; props: { page?: DocPage; landing?: NavSection } }[] = pages
+    .filter((page) => page.slug !== "")
+    .map((page) => ({ params: { slug: page.slug }, props: { page } }));
+  // A section folder without its own index.md still gets a landing page.
+  for (const section of nav) {
+    if (section.key === "other" || pages.some((p) => p.slug === section.key)) continue;
+    paths.push({ params: { slug: section.key }, props: { landing: section } });
+  }
+  return paths;
+}
+
+const { page, landing } = Astro.props;
+const rendered = page ? await render(page.entry) : undefined;
+const sourcePath = page?.entry.filePath ? `website/${page.entry.filePath.replace(/^.*?(src\/content\/docs\/)/, "$1")}` : undefined;
+---
+
+{
+  page && rendered ? (
+    <DocsLayout title={page.title} description={page.description} section={page.section} headings={rendered.headings} sourcePath={sourcePath}>
+      <rendered.Content />
+    </DocsLayout>
+  ) : (
+    landing && (
+      <DocsLayout title={landing.label} description={SECTIONS[landing.key].blurb} section={landing.key}>
+        <SectionCards section={landing} />
+      </DocsLayout>
+    )
+  )
+}

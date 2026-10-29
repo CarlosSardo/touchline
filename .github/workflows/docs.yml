@@ -1,0 +1,97 @@
+name: Docs
+
+# Builds the static documentation site in website/ (Astro + Tailwind CSS + Pagefind) on pull requests and pushes
+# to main that touch it. The site is an isolated npm package: app CI (ci.yml, the Dagger pipeline) ignores
+# website/**, and this workflow never builds or deploys the game.
+# Publishing to GitHub Pages is opt-in: enable Pages with "GitHub Actions" as the source, then set the
+# repository variable DOCS_PAGES_ENABLED to "true". Until then, main builds only validate the site.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "website/**"
+      - ".nvmrc"
+      - ".github/workflows/docs.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "website/**"
+      - ".nvmrc"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+    working-directory: website
+
+jobs:
+  build:
+    name: Build docs site
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      ASTRO_TELEMETRY_DISABLED: "1"
+      PUBLISH: ${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && vars.DOCS_PAGES_ENABLED == 'true' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: website/package-lock.json
+
+      - name: Configure Pages
+        id: pages
+        if: env.PUBLISH == 'true'
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+
+      - name: Install
+        run: npm ci
+
+      - name: Type-check content and components
+        run: npm run check
+
+      - name: Build site and search index
+        env:
+          DOCS_SITE: ${{ steps.pages.outputs.origin }}
+          DOCS_BASE: ${{ steps.pages.outputs.base_path && format('{0}/', steps.pages.outputs.base_path) || '' }}
+        run: npm run build
+
+      - name: Upload Pages artifact
+        if: env.PUBLISH == 'true'
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: website/dist
+
+  deploy:
+    name: Publish to GitHub Pages
+    needs: build
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && vars.DOCS_PAGES_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    concurrency:
+      group: docs-pages
+      cancel-in-progress: false
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

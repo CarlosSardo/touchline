@@ -1,0 +1,208 @@
+---
+import BaseLayout from "../layouts/BaseLayout.astro";
+import BrowserFrame from "../components/BrowserFrame.astro";
+import Gallery from "../components/Gallery.astro";
+import { screenshots, shot } from "../lib/screenshots";
+import { REPO_URL, url } from "../lib/site";
+
+const hero = shot("director-overview.png");
+
+const stats = [
+  { value: "211", label: "football associations" },
+  { value: "107", label: "national league pyramids" },
+  { value: "U17 → senior", label: "national teams and youth tournaments" },
+  { value: "9", label: "loan types, from development to obligation" },
+];
+
+const features = [
+  {
+    title: "Recruit with uncertainty",
+    body: "Scouts return reports, not truths. Shortlist targets, weigh potential against risk and personality, and decide who is worth the fee.",
+    icon: "M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14Zm9 16-4.3-4.3",
+  },
+  {
+    title: "Negotiate real deals",
+    body: "Instalments, sell-on and buy-back clauses, loan-backs, release clauses and part-exchanges, with rivals bidding and best-and-final rounds.",
+    icon: "M7 7h10l-3-3M17 17H7l3 3",
+  },
+  {
+    title: "Grow your academy",
+    body: "First team, reserves, U19 and U17 groups with development plans, mentors and squad roles. Call players up when they are ready.",
+    icon: "M12 3v18M5 10l7-7 7 7",
+  },
+  {
+    title: "Read the match, not the score",
+    body: "A reproducible match engine produces ratings, xG, xA and expected points, with interactive shot and pitch maps for every fixture.",
+    icon: "M4 19V9M10 19V5M16 19v-7M22 19H2",
+  },
+  {
+    title: "Live inside the rules",
+    body: "Registration, foreign quotas and work permits are decided separately from signing; GBE points and Financial Fair Play shape every window.",
+    icon: "M12 3 4 6v6c0 4.5 3.4 8.3 8 9 4.6-.7 8-4.5 8-9V6l-8-3Z",
+  },
+  {
+    title: "A world that moves without you",
+    body: "AI clubs buy, sell and loan every day, change owners, appoint directors, invest in facilities and sometimes fall into administration.",
+    icon: "M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Zm-10 10h20M12 2c3 3.5 3 16.5 0 20M12 2c-3 3.5-3 16.5 0 20",
+  },
+];
+
+const loop = [
+  { step: "01", title: "Set the project", body: "Take charge on 1 July 2026. Read the board's expectations, the budget and the squad you inherit." },
+  { step: "02", title: "Shape the squad", body: "Scout, sign, sell and loan. Agree contracts and roles so the manager has the players they need." },
+  { step: "03", title: "Press continue", body: "Advance day by day or a week at a time. Matches, injuries, offers and news arrive as the calendar moves." },
+  { step: "04", title: "Build a legacy", body: "Develop academy graduates, keep the finances healthy and turn a club into a project that lasts for seasons." },
+];
+---
+
+<BaseLayout current="home" image={hero.src}>
+  <main id="main" data-pagefind-body data-pagefind-filter="section:Overview" data-pagefind-meta="title:Touchline — football sporting-director simulation">
+    <section class="relative overflow-hidden bg-linear-to-b from-pitch-950 via-pitch-900 to-ink-950 text-white">
+      <div class="pitch-lines absolute inset-0" aria-hidden="true"></div>
+      <div class="absolute inset-x-0 bottom-0 h-40 bg-linear-to-t from-ink-50 to-transparent dark:from-ink-950" aria-hidden="true"></div>
+      <div class="relative mx-auto max-w-7xl px-4 pb-10 pt-20 sm:px-6 sm:pt-28">
+        <div class="mx-auto max-w-3xl text-center">
+          <p class="inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/5 px-3 py-1 text-sm font-semibold text-pitch-200">
+            <span class="size-2 animate-pulse rounded-full bg-pitch-400" aria-hidden="true"></span>
+            Transfer window open · 1 July 2026
+          </p>
+          <h1 class="mt-6 font-display text-5xl font-extrabold leading-[1.05] tracking-tight sm:text-7xl">
+            The manager picks the team.<br />
+            <span class="bg-linear-to-r from-pitch-300 to-amber-accent bg-clip-text text-transparent">You build the club.</span>
+          </h1>
+          <p class="mx-auto mt-6 max-w-2xl text-lg leading-relaxed text-pitch-50/80 sm:text-xl">
+            Touchline is a football sporting-director simulation. Recruit, negotiate, develop the academy and balance the books in a living,
+            procedurally generated football world, then watch your decisions play out season after season.
+          </p>
+          <div class="mt-10 flex flex-col items-center justify-center gap-3 sm:flex-row">
+            <a href={url("docs/play/")} class="w-full rounded-xl bg-pitch-400 px-6 py-3 text-base font-bold text-pitch-950 shadow-lg shadow-pitch-500/30 hover:bg-pitch-300 sm:w-auto">
+              Learn to play →
+            </a>
+            <a href="#screenshots" class="w-full rounded-xl border border-white/20 bg-white/5 px-6 py-3 text-base font-semibold text-white hover:bg-white/10 sm:w-auto">
+              See it in action
+            </a>
+          </div>
+        </div>
+        <BrowserFrame shot={hero} eager class="mx-auto mt-16 max-w-6xl" />
+      </div>
+    </section>
+
+    <section aria-label="Touchline in numbers" class="mx-auto max-w-6xl px-4 py-12 sm:px-6">
+      <dl class="grid grid-cols-2 gap-6 text-center lg:grid-cols-4">
+        {
+          stats.map((s) => (
+            <div class="rounded-2xl border border-ink-200 bg-white p-6 dark:border-ink-800 dark:bg-ink-900">
+              <dt class="order-2 mt-1 text-sm text-ink-500 dark:text-ink-300">{s.label}</dt>
+              <dd class="font-display text-3xl font-extrabold text-pitch-700 dark:text-pitch-300">{s.value}</dd>
+            </div>
+          ))
+        }
+      </dl>
+    </section>
+
+    <section aria-labelledby="features-heading" class="mx-auto max-w-7xl px-4 py-16 sm:px-6">
+      <div class="mx-auto max-w-2xl text-center">
+        <p class="font-semibold text-pitch-600 dark:text-pitch-400">The job</p>
+        <h2 id="features-heading" class="mt-2 font-display text-4xl font-extrabold tracking-tight text-ink-900 dark:text-white">Every decision has a long tail</h2>
+        <p class="mt-4 text-lg text-ink-500 dark:text-ink-300">
+          You are not on the touchline shouting tactics. You are the one deciding who is in the building, on what terms, and for how long.
+        </p>
+      </div>
+      <div class="mt-14 grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
+        {
+          features.map((f) => (
+            <div class="rounded-2xl border border-ink-200 bg-white p-6 transition hover:border-pitch-500 hover:shadow-lg dark:border-ink-800 dark:bg-ink-900">
+              <div class="flex size-11 items-center justify-center rounded-xl bg-pitch-100 text-pitch-700 dark:bg-pitch-900 dark:text-pitch-300">
+                <svg class="size-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d={f.icon} />
+                </svg>
+              </div>
+              <h3 class="mt-4 font-display text-lg font-bold text-ink-900 dark:text-white">{f.title}</h3>
+              <p class="mt-2 text-ink-500 dark:text-ink-300">{f.body}</p>
+            </div>
+          ))
+        }
+      </div>
+    </section>
+
+    <section aria-labelledby="showcase-heading" class="bg-white py-20 dark:bg-ink-900">
+      <div class="mx-auto grid max-w-7xl items-center gap-12 px-4 sm:px-6 lg:grid-cols-5">
+        <div class="lg:col-span-2">
+          <p class="font-semibold text-pitch-600 dark:text-pitch-400">Match centre</p>
+          <h2 id="showcase-heading" class="mt-2 font-display text-4xl font-extrabold tracking-tight text-ink-900 dark:text-white">See what the scoreline misses</h2>
+          <p class="mt-4 text-lg text-ink-500 dark:text-ink-300">
+            Every fixture is simulated with a reproducible engine. Review shot maps, expected goals and assists, possession and passing, then
+            decide whether the squad needs a finisher or just a bit of luck.
+          </p>
+          <a href={url("docs/play/")} class="mt-6 inline-block font-semibold text-pitch-700 hover:underline dark:text-pitch-300">Read the player guide →</a>
+        </div>
+        <BrowserFrame shot={shot("match-analysis.png")} class="lg:col-span-3" />
+      </div>
+      <div class="mx-auto mt-20 grid max-w-7xl items-center gap-12 px-4 sm:px-6 lg:grid-cols-5">
+        <BrowserFrame shot={shot("scouting-dossier.png")} class="lg:order-1 lg:col-span-3" />
+        <div class="lg:order-2 lg:col-span-2">
+          <p class="font-semibold text-pitch-600 dark:text-pitch-400">Scouting</p>
+          <h2 class="mt-2 font-display text-4xl font-extrabold tracking-tight text-ink-900 dark:text-white">Look beyond the rating</h2>
+          <p class="mt-4 text-lg text-ink-500 dark:text-ink-300">
+            Scout reports estimate ability and potential with honest uncertainty, and add personality, tactical fit and risk. A complete player
+            dossier covers career, attributes, contract, registration and medical history.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <section aria-labelledby="loop-heading" class="mx-auto max-w-7xl px-4 py-20 sm:px-6">
+      <div class="mx-auto max-w-2xl text-center">
+        <p class="font-semibold text-pitch-600 dark:text-pitch-400">How it plays</p>
+        <h2 id="loop-heading" class="mt-2 font-display text-4xl font-extrabold tracking-tight text-ink-900 dark:text-white">A season in four moves</h2>
+      </div>
+      <ol class="mt-12 grid gap-6 md:grid-cols-2 lg:grid-cols-4">
+        {
+          loop.map((l) => (
+            <li class="relative rounded-2xl border border-ink-200 bg-white p-6 dark:border-ink-800 dark:bg-ink-900">
+              <span class="font-display text-4xl font-extrabold text-pitch-200 dark:text-pitch-900" aria-hidden="true">{l.step}</span>
+              <h3 class="mt-2 font-display text-lg font-bold text-ink-900 dark:text-white">{l.title}</h3>
+              <p class="mt-2 text-ink-500 dark:text-ink-300">{l.body}</p>
+            </li>
+          ))
+        }
+      </ol>
+    </section>
+
+    <section id="screenshots" aria-labelledby="gallery-heading" class="scroll-mt-20 bg-white py-20 dark:bg-ink-900">
+      <div class="mx-auto max-w-7xl px-4 sm:px-6">
+        <div class="mx-auto max-w-2xl text-center">
+          <p class="font-semibold text-pitch-600 dark:text-pitch-400">Screenshots</p>
+          <h2 id="gallery-heading" class="mt-2 font-display text-4xl font-extrabold tracking-tight text-ink-900 dark:text-white">Straight from a real career</h2>
+          <p class="mt-4 text-lg text-ink-500 dark:text-ink-300">Captured in the browser from a locally generated career. No mock-ups.</p>
+        </div>
+        <div class="mt-12">
+          <Gallery shots={screenshots} />
+        </div>
+      </div>
+    </section>
+
+    <section aria-labelledby="docs-heading" class="mx-auto max-w-7xl px-4 py-20 sm:px-6">
+      <div class="grid gap-6 lg:grid-cols-2">
+        <a href={url("docs/play/")} class="group relative overflow-hidden rounded-3xl bg-linear-to-br from-pitch-700 to-pitch-950 p-10 text-white shadow-xl">
+          <p class="text-sm font-semibold uppercase tracking-wider text-pitch-200">Player guide</p>
+          <h2 id="docs-heading" class="mt-3 font-display text-3xl font-extrabold">Master the director's chair</h2>
+          <p class="mt-3 max-w-md text-pitch-50/80">From your first transfer window to long-term club strategy: every screen, rule and trick explained.</p>
+          <span class="mt-8 inline-block font-bold group-hover:underline">Start reading →</span>
+        </a>
+        <a href={url("docs/technical/")} class="group relative overflow-hidden rounded-3xl border border-ink-200 bg-white p-10 shadow-sm dark:border-ink-800 dark:bg-ink-900">
+          <p class="text-sm font-semibold uppercase tracking-wider text-sky-600 dark:text-sky-400">Engineering</p>
+          <h2 class="mt-3 font-display text-3xl font-extrabold text-ink-900 dark:text-white">How Touchline is built</h2>
+          <p class="mt-3 max-w-md text-ink-500 dark:text-ink-300">
+            React, Express and PostgreSQL in one self-hosted stack: architecture, simulation engine, persistence, identity and delivery.
+          </p>
+          <span class="mt-8 inline-block font-bold text-ink-900 group-hover:underline dark:text-white">Explore the architecture →</span>
+        </a>
+      </div>
+      <p class="mt-10 text-center text-sm text-ink-500 dark:text-ink-400">
+        Touchline is open source under the MIT license. All names, clubs and results are procedurally generated, not licensed real-world records.
+        <a href={REPO_URL} class="font-semibold text-pitch-700 hover:underline dark:text-pitch-300">View the source on GitHub</a>.
+      </p>
+    </section>
+  </main>
+</BaseLayout>
