@@ -9,6 +9,7 @@ const run = {
   id: 12, run_attempt: 1, status: "completed", conclusion: "success",
   path: ".github/workflows/docs-maintenance.yml", event: "pull_request",
   head_sha: identity.head, created_at: "2026-10-29T00:01:00Z",
+  run_started_at: "2026-10-29T00:01:00Z",
   pull_requests: [{ number: 35, head: { sha: identity.head }, base: { sha: identity.base } }],
 };
 const envelope = {
@@ -44,9 +45,12 @@ test("three conservative daily starts include failures, cancellations and rerun 
   assert.throws(() => assertDailyReviewBudget([
     run, { ...run, id: 13, conclusion: "cancelled" }, { ...run, id: 14, conclusion: "failure" },
   ], options), /cap reached/);
-  assert.equal(assertDailyReviewBudget([{ ...run, created_at: "2026-10-28T23:59:59Z" }], options), 0);
+  assert.equal(assertDailyReviewBudget([{ ...run, run_started_at: "2026-10-28T23:59:59Z" }], options), 0);
+  assert.throws(() => assertDailyReviewBudget([{
+    ...run, created_at: "2026-10-01T00:00:00Z", run_attempt: 3,
+  }], options), /cap reached/);
   assert.equal(assertDailyReviewBudget([{ ...run, pull_requests: [{ number: 36 }] }], options), 0);
-  assert.throws(() => assertDailyReviewBudget(Array(100).fill(run), options), /bounded/);
+  assert.throws(() => assertDailyReviewBudget(Array(1000).fill(run), options), /bounded/);
   assert.throws(() => assertDailyReviewBudget([], { ...options, currentAttempt: NaN }), /bounded/);
   assert.throws(() => assertDailyReviewBudget([{ ...run, run_attempt: undefined }], options), /bounded/);
 });

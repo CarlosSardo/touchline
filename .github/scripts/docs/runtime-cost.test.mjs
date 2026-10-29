@@ -57,6 +57,7 @@ for (const mode of ["cached", "fresh", "cap", "bad-provenance", "build-failure"]
       id: 21, run_attempt: 1, path: ".github/workflows/docs-maintenance.yml",
       event: "pull_request", head_sha: head, status: "completed", conclusion: "success",
       created_at: new Date().toISOString(),
+      run_started_at: new Date().toISOString(),
       pull_requests: [{ number: 35, head: { sha: head }, base: { sha: base } }],
     };
     const envelope = {

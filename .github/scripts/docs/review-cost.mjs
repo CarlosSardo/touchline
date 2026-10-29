@@ -39,17 +39,17 @@ export function validateVerdict(envelope, expected, run, repository, prNumber) {
 }
 
 export function assertDailyReviewBudget(runs, { prNumber, now = new Date(), currentRunId, currentAttempt }) {
-  if (!Array.isArray(runs) || runs.length >= 100 ||
+  if (!Array.isArray(runs) || runs.length >= 1000 ||
       ![prNumber, currentRunId, currentAttempt].every((value) => Number.isSafeInteger(value) && value > 0) ||
       runs.some((run) => !Number.isSafeInteger(run.id) || !Number.isSafeInteger(run.run_attempt) ||
-        run.run_attempt < 1 || typeof run.created_at !== "string" ||
-        !/^\d{4}-\d{2}-\d{2}T/.test(run.created_at))) {
+        run.run_attempt < 1 || typeof run.run_started_at !== "string" ||
+        !/^\d{4}-\d{2}-\d{2}T/.test(run.run_started_at))) {
     throw new Error("Cannot establish a bounded daily documentation review budget");
   }
   const day = now.toISOString().slice(0, 10);
   const priorAttempts = runs.filter((run) =>
     run.event === "pull_request" && run.path === WORKFLOW &&
-    run.created_at?.slice(0, 10) === day &&
+    run.run_started_at.slice(0, 10) === day &&
     run.pull_requests?.some((pr) => pr.number === prNumber))
     .reduce((sum, run) => sum + (run.id === currentRunId ?
       Math.max(0, currentAttempt - 1) : run.run_attempt), 0);

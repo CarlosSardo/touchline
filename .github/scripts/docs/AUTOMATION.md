@@ -132,7 +132,11 @@ including runs that stopped before AI; authenticated reuse is checked before the
 cap and does not call the model. At the cap, the required check fails with an
 explicit message rather than silently passing, delaying itself or creating a
 new run. There is no next-day scheduler or unbounded retry. An unavailable or
-truncated Actions history fails closed. This bounds paid independent PR checks,
+truncated Actions history fails closed. For reruns of old run IDs, the cap uses the most recent attempt's start
+date rather than the original run creation date, and conservatively counts all
+of that run's attempts. It scans at most 1,000 workflow runs; larger or incomplete
+history requires operator investigation and fails closed rather than losing the cap.
+This bounds paid independent PR checks,
 not the separate main writer's existing maximum three correction attempts.
 
 Enable **Allow auto-merge** in repository settings. The workflow requires

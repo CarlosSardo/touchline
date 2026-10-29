@@ -510,14 +510,21 @@ function previousVerdict(identity, directory, prNumber) {
 }
 
 function enforceReviewBudget(prNumber) {
-  const day = new Date().toISOString().slice(0, 10);
-  const response = JSON.parse(actionsApi(
-    `repos/${REPO}/actions/workflows/docs-maintenance.yml/runs?event=pull_request&created=%3E%3D${day}&per_page=100`,
-  ));
-  if (!Array.isArray(response.workflow_runs) || response.total_count >= 100) {
-    throw new Error("Cannot establish a bounded daily documentation review budget");
+  const runs = [];
+  for (let page = 1; page <= 10; page += 1) {
+    const response = JSON.parse(actionsApi(
+      `repos/${REPO}/actions/workflows/docs-maintenance.yml/runs?event=pull_request&per_page=100&page=${page}`,
+    ));
+    if (!Array.isArray(response.workflow_runs) || response.total_count >= 1000) {
+      throw new Error("Cannot establish a bounded daily documentation review budget");
+    }
+    runs.push(...response.workflow_runs);
+    if (runs.length >= response.total_count) break;
+    if (response.workflow_runs.length === 0 || page === 10) {
+      throw new Error("Cannot establish a complete daily documentation review history");
+    }
   }
-  assertDailyReviewBudget(response.workflow_runs, {
+  assertDailyReviewBudget(runs, {
     prNumber, currentRunId: Number(process.env.GITHUB_RUN_ID),
     currentAttempt: Number(process.env.GITHUB_RUN_ATTEMPT),
   });
