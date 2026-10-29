@@ -249,6 +249,13 @@ jobs:
           repositories: ${{ github.event.repository.name }}
           permission-administration: read
 
+      - name: Install pinned Copilot CLI for independent PR verification
+        if: >-
+          steps.scope.outputs.verify_docs == 'true' &&
+          github.event.pull_request.base.ref == 'main' &&
+          github.event.pull_request.head.repo.full_name == github.repository
+        run: npm install --global @github/copilot@1.0.105
+
       - name: Re-run independent fact-check on the exact PR head
         if: github.event.pull_request.base.ref == 'main'
         env:
