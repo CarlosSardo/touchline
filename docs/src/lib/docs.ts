@@ -54,7 +54,7 @@ function relPath(entry: Doc): string {
   return file.replace(/\\/g, "/").replace(/^.*?src\/content\/docs\//, "");
 }
 
-const sourcePathOf = (entry: Doc): string => rootDocKey(entry) ?? `website/src/content/docs/${relPath(entry)}`;
+const sourcePathOf = (entry: Doc): string => rootDocKey(entry) ?? `docs/src/content/docs/${relPath(entry)}`;
 
 /** Root documents carry no frontmatter: use the first "# " heading as their title. */
 const firstHeading = (body = "") => /^#[ \t]+(.+?)[ \t#]*$/m.exec(body.replace(/^```[\s\S]*?^```/gm, ""))?.[1];

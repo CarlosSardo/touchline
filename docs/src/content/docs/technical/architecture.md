@@ -26,7 +26,7 @@ flowchart LR
   Store --> Saves["Checkpoint tables"]
 ```
 
-The matching [diagram source](https://github.com/CarlosSardo/touchline/blob/main/website/src/content/docs/technical/diagrams/runtime.mmd) is kept with this section.
+The matching [diagram source](https://github.com/CarlosSardo/touchline/blob/main/docs/src/content/docs/technical/diagrams/runtime.mmd) is kept with this section.
 
 ## Technology stack
 

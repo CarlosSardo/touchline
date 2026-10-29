@@ -1,6 +1,6 @@
 // Lets docs be written as plain Markdown that also reads well on GitHub:
 // - relative links to other docs (`../play/transfers.md#fees`) become site routes;
-// - relative or root links to files in website/public (`/images/game/x.png`) get the site base;
+// - relative or root links to files in docs/public (`/images/game/x.png`) get the site base;
 // - a leading h1 is dropped (the layout shows the title);
 // - relative links to anything else in the repository (`../../../../server/db.ts`) open on GitHub.
 import path from "node:path";
@@ -8,10 +8,10 @@ import { fileURLToPath } from "node:url";
 import { visit } from "unist-util-visit";
 import { docHref, REPO_BRANCH, REPO_URL, ROOT_DOCS, slugFromRelPath, withBase } from "../lib/routes.mjs";
 
-const websiteRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
-const repoRoot = path.resolve(websiteRoot, "..");
-const contentRoot = path.join(websiteRoot, "src/content/docs");
-const publicRoot = path.join(websiteRoot, "public");
+const docsRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+const repoRoot = path.resolve(docsRoot, "..");
+const contentRoot = path.join(docsRoot, "src/content/docs");
+const publicRoot = path.join(docsRoot, "public");
 
 const inside = (root, target) => {
   const rel = path.relative(root, target);

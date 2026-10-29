@@ -144,7 +144,7 @@ export class TouchlineCi {
         ".github",
         ".copilot",
         "ci-logs",
-        "website",
+        "docs",
       ],
     })
   }

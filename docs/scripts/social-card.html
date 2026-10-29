@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Touchline documentation social card</title>
+<style>
+  @font-face { font-family: Manrope; src: url("../node_modules/@fontsource-variable/manrope/files/manrope-latin-wght-normal.woff2"); font-weight: 200 800; }
+  * { box-sizing: border-box; }
+  body { margin: 0; width: 1200px; height: 630px; color: #f7fcfa; font-family: Manrope, sans-serif; background: repeating-linear-gradient(90deg, #082e29 0 90px, #0b3530 90px 180px); }
+  main { height: 100%; padding: 48px 66px; position: relative; overflow: hidden; }
+  main::after { content: ""; position: absolute; width: 490px; height: 490px; border: 2px solid #65d9ad22; border-radius: 50%; right: -270px; bottom: -180px; }
+  header { display: flex; align-items: center; gap: 14px; font-size: 30px; font-weight: 800; }
+  header img { width: 42px; height: 42px; }
+  .label { display: inline-block; margin-top: 40px; padding: 8px 15px; border: 1px solid #7ae3bb55; border-radius: 30px; color: #a4eacb; font-size: 15px; font-weight: 700; letter-spacing: 2px; text-transform: uppercase; }
+  h1 { margin: 25px 0 18px; font-size: 66px; line-height: 1.16; letter-spacing: -3px; font-weight: 800; }
+  h1 span { color: #9de6bb; background: linear-gradient(95deg, #73e5b7, #dfcf8a); background-clip: text; -webkit-text-fill-color: transparent; }
+  p { color: #b6d2c8; font-size: 23px; margin: 0; }
+  footer { margin-top: 38px; color: #d3e6df; font-size: 18px; letter-spacing: .3px; }
+</style>
+<main>
+  <header><img src="../public/touchline.svg" alt="">Touchline</header>
+  <div class="label">The sporting director's handbook</div>
+  <h1>The manager picks the team.<br><span>You build the club.</span></h1>
+  <p>Master the game. Understand the world. Build a legacy.</p>
+  <footer>Player guide &nbsp; / &nbsp; Engineering &nbsp; / &nbsp; Searchable docs</footer>
+</main>
+</html>

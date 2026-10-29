@@ -20,7 +20,7 @@ on:
       - ".mcp.json"
       - ".github/agents/**"
       - ".github/skills/**"
-      - "website/**"
+      - "docs/**"
       - ".github/workflows/docs.yml"
   workflow_dispatch:
     inputs:
