@@ -1,0 +1,12 @@
+flowchart LR
+  Main["Main commit"] --> CI["Dagger verification"]
+  CI --> Candidate["Newest verified release"]
+  Candidate --> Publish["GitHub-hosted image build"]
+  Publish --> GHCR["GHCR amd64 and arm64"]
+  GHCR --> Runner["Pi deploy runner"]
+  Runner --> Deploy["Locked revision-checked deploy"]
+  Deploy --> App["App container"]
+  App --> DB["PostgreSQL worlds"]
+  Browser["Player browser"] --> Proxy["HTTPS proxy"]
+  Proxy --> App
+  App --> IdP["OIDC provider"]
