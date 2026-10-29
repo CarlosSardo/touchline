@@ -1,0 +1,14 @@
+flowchart LR
+  Browser["React browser"] --> Proxy["HTTPS proxy"]
+  Proxy --> App["Express application"]
+  App --> Auth["OIDC session validation"]
+  Auth --> IdP["Identity provider"]
+  App --> Accounts["Account resolver"]
+  Accounts --> Registry["accounts schema"]
+  Accounts --> Store["World-scoped Store"]
+  App --> Queries["Queries and actions"]
+  Queries --> Simulation["Simulation modules"]
+  Queries --> Store
+  Simulation --> Store
+  Store --> World["Private world schema"]
+  Store --> Saves["Checkpoint tables"]

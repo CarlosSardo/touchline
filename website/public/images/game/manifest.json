@@ -1,0 +1,81 @@
+{
+  "source": {
+    "revision": "514e1e8",
+    "fixture": "scripts/e2e-server.ts",
+    "seed": "touchline-2026",
+    "nations": ["EN", "DE", "LU"],
+    "club": "Birmingham Wanderers",
+    "theme": "minimal",
+    "browser": "Chromium (Playwright)",
+    "deviceScaleFactor": 1,
+    "reducedMotion": "reduce",
+    "data": "Real, locally generated E2E career. No production or personal account data; no mocked responses, injected UI or edited gameplay.",
+    "reproduction": [
+      "Install repository dependencies with npm ci and the browser with npx playwright install chromium.",
+      "Use a fresh disposable loopback PostgreSQL 18 database named touchline_checks; set SQL_HOST, SQL_PORT, SQL_USER, SQL_PASSWORD and SQL_DATABASE for that database only.",
+      "Set SQL_TEST_MODE=true, SQL_SCHEMA=touchline_e2e_<fresh UUID without hyphens>, API_PORT=3049 and UI_PORT=5199.",
+      "Launch npx concurrently -k --kill-timeout 120000 \"tsx scripts/e2e-server.ts\" \"vite --host 127.0.0.1 --strictPort\" and wait for /api/health/details to report testCareer=true.",
+      "Capture the initial overview, squad and academy at 1600x1100, device scale 1, using the default minimal theme.",
+      "POST /api/advance with JSON bodies {\"days\":28}, {\"days\":28}, then {\"days\":5}; check every response for success. This plays the career from 1 July to 31 August 2026 and creates real match and finance history.",
+      "Capture finances and match centre at 1600x1100. In match centre select the 29 August Birmingham Wanderers v Bristol Wanderers match, Pitch analysis, Shot map, Birmingham Wanderers and All players.",
+      "At 1600x1200 open Scouting, select Dan Johnson, then the Scouting tab in his player dossier.",
+      "Wait for visible content and loaded fonts before each viewport screenshot. Stop the app gracefully to drop its E2E schema, then stop the disposable database."
+    ]
+  },
+  "screenshots": [
+    {
+      "file": "director-overview.png",
+      "route": "/#office",
+      "date": "2026-07-01",
+      "width": 1600,
+      "height": 1100,
+      "caption": "Your club. Your project. Every decision starts at the director's desk.",
+      "alt": "Touchline sporting director overview with transfer and wage budgets, board confidence, squad harmony, recruitment priorities and upcoming fixtures."
+    },
+    {
+      "file": "scouting-dossier.png",
+      "route": "/#scouting",
+      "date": "2026-08-31",
+      "width": 1600,
+      "height": 1200,
+      "caption": "Look beyond the rating: scout potential, personality, tactical fit and risk.",
+      "alt": "Dan Johnson's player dossier showing a real scout report with ability and potential estimates, strengths, weaknesses, personality notes, tactical fit and projected resale value."
+    },
+    {
+      "file": "academy-pathways.png",
+      "route": "/#academy",
+      "date": "2026-07-01",
+      "width": 1600,
+      "height": 1100,
+      "caption": "Turn academy potential into a first-team pathway.",
+      "alt": "Touchline U19 academy view with prospect ability and potential, physical development, burnout, age-out reviews and mentoring actions."
+    },
+    {
+      "file": "first-team-squad.png",
+      "route": "/#squad",
+      "date": "2026-07-01",
+      "width": 1600,
+      "height": 1100,
+      "caption": "Build a balanced squad, not just a collection of stars.",
+      "alt": "Birmingham Wanderers' first-team squad showing positional groups, player ability, potential, eligibility, squad roles, fitness, morale, wages and availability."
+    },
+    {
+      "file": "match-analysis.png",
+      "route": "/#analytics",
+      "date": "2026-08-31",
+      "width": 1600,
+      "height": 1100,
+      "caption": "See what the scoreline misses with shot maps and expected-goal analysis.",
+      "alt": "Touchline match centre after a simulated 3-0 Birmingham Wanderers win, displaying the pitch shot map, expected goals, possession, passing and shooting statistics."
+    },
+    {
+      "file": "club-finances.png",
+      "route": "/#finances",
+      "date": "2026-08-31",
+      "width": 1600,
+      "height": 1100,
+      "caption": "Keep ambition sustainable with a clear view of your club's finances.",
+      "alt": "Touchline club finances with transfer and wage budgets, cash balance history, season income and expenditure, enterprise estimate and weekly financial charts."
+    }
+  ]
+}

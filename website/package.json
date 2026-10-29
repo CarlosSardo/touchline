@@ -1,0 +1,40 @@
+{
+  "name": "touchline-docs",
+  "description": "Touchline player handbook, marketing and engineering documentation site (Astro + Tailwind CSS + Pagefind).",
+  "private": true,
+  "version": "0.0.0",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build && pagefind --site dist",
+    "preview": "astro preview",
+    "check": "astro check",
+    "verify": "npm run check && npm run build && node scripts/check-dist.mjs"
+  },
+  "engines": {
+    "node": ">=24.11.0"
+  },
+  "dependencies": {
+    "@astrojs/markdown-remark": "^7.3.5",
+    "@fontsource-variable/dm-sans": "^5.3.0",
+    "@fontsource-variable/manrope": "^5.3.0",
+    "@tailwindcss/typography": "^0.5.20",
+    "@tailwindcss/vite": "^4.3.3",
+    "astro": "^7.4.4",
+    "mermaid": "^12.2.0",
+    "pagefind": "^1.5.2",
+    "tailwindcss": "^4.3.3",
+    "unist-util-visit": "^5.2.0"
+  },
+  "devDependencies": {
+    "@astrojs/check": "^0.9.12",
+    "@types/node": "^24.19.2",
+    "typescript": "^5.9.3"
+  },
+  "overrides": {
+    "@tailwindcss/typography": {
+      "postcss-selector-parser": "^6.1.5"
+    }
+  }
+}

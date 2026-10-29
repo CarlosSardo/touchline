@@ -1,0 +1,14 @@
+flowchart TD
+  Request["Advance request"] --> Guard["Validate and mark busy"]
+  Guard --> Day["Begin next day"]
+  Day --> Deals["Deals and club life"]
+  Deals --> Market["World market and offers"]
+  Market --> Eligibility["Call-ups and registration"]
+  Eligibility --> Matches["Followed and batch matches"]
+  Matches --> Records["News and records"]
+  Records --> Cadence["Weekly or season work"]
+  Cadence --> Commit["Commit day"]
+  Commit --> Save["Due autosave and maintenance"]
+  Save --> Next{"More days?"}
+  Next -->|yes| Day
+  Next -->|no| Response["Return progress"]

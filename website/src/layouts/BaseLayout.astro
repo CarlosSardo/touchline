@@ -1,0 +1,64 @@
+---
+import "@fontsource-variable/manrope";
+import "@fontsource-variable/dm-sans";
+import "../styles/global.css";
+import Header from "../components/Header.astro";
+import Search from "../components/Search.astro";
+import { REPO_URL, SITE_DESCRIPTION, SITE_TITLE, url } from "../lib/site";
+
+interface Props {
+  title?: string;
+  description?: string;
+  current?: "home" | "play" | "technical";
+  showMenuButton?: boolean;
+  image?: string;
+}
+const { title, description = SITE_DESCRIPTION, current, showMenuButton, image } = Astro.props;
+const pageTitle = title ? `${title} · ${SITE_TITLE}` : `${SITE_TITLE} — football sporting-director simulation`;
+const canonical = new URL(Astro.url.pathname, Astro.site);
+const ogImage = image ? new URL(image, Astro.site) : undefined;
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{pageTitle}</title>
+    <meta name="description" content={description} />
+    <link rel="canonical" href={canonical} />
+    <link rel="icon" type="image/svg+xml" href={url("touchline.svg")} />
+    <meta name="theme-color" content="#087f6d" />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content={pageTitle} />
+    <meta property="og:description" content={description} />
+    <meta property="og:url" content={canonical} />
+    {ogImage && <meta property="og:image" content={ogImage} />}
+    <meta name="twitter:card" content={ogImage ? "summary_large_image" : "summary"} />
+    <script is:inline>
+      try {
+        const stored = localStorage.getItem("touchline-docs-theme");
+        const dark = stored ? stored === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+        document.documentElement.classList.toggle("dark", dark);
+      } catch {}
+    </script>
+  </head>
+  <body class="min-h-dvh font-sans">
+    <Header current={current} showMenuButton={showMenuButton} />
+    <slot />
+    <footer class="border-t border-ink-900/5 bg-white/60 dark:border-white/5 dark:bg-ink-950" data-pagefind-ignore>
+      <div class="mx-auto flex max-w-[90rem] flex-col gap-4 px-4 py-10 text-sm text-ink-500 sm:flex-row sm:items-center sm:px-6 dark:text-ink-400">
+        <div class="flex items-center gap-2 font-display font-bold text-ink-900 dark:text-white">
+          <img src={url("touchline.svg")} alt="" width="24" height="24" class="size-6" /> Touchline
+        </div>
+        <p>All names, clubs and results are procedurally generated. MIT licensed.</p>
+        <nav aria-label="Footer" class="flex gap-4 sm:ml-auto">
+          <a class="hover:text-pitch-600" href={url("docs/play/")}>Player guide</a>
+          <a class="hover:text-pitch-600" href={url("docs/technical/")}>Engineering</a>
+          <a class="hover:text-pitch-600" href={REPO_URL}>GitHub</a>
+        </nav>
+      </div>
+    </footer>
+    <Search />
+  </body>
+</html>

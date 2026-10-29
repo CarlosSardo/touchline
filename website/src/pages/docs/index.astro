@@ -1,0 +1,38 @@
+---
+import BaseLayout from "../../layouts/BaseLayout.astro";
+import { getNavigation } from "../../lib/docs";
+
+const sections = await getNavigation();
+---
+
+<BaseLayout title="Documentation" description="The Touchline player guide and engineering documentation.">
+  <main id="main" class="mx-auto max-w-6xl px-4 py-16 sm:px-6" data-pagefind-ignore>
+    <p class="text-sm font-semibold text-pitch-600 dark:text-pitch-400">Documentation</p>
+    <h1 class="mt-2 font-display text-4xl font-extrabold tracking-tight text-ink-900 sm:text-5xl dark:text-white">Everything about Touchline</h1>
+    <p class="mt-4 max-w-2xl text-lg text-ink-500 dark:text-ink-300">
+      Learn how to run a football club as its sporting director, or dig into how the simulation is built.
+      Press <kbd class="rounded border border-ink-300 px-1.5 font-sans text-sm font-semibold dark:border-ink-700">/</kbd> to search.
+    </p>
+    <div class="mt-12 grid gap-8 lg:grid-cols-2">
+      {
+        sections.map((section) => (
+          <section aria-labelledby={`section-${section.key}`} class="rounded-3xl border border-ink-200 bg-white p-8 dark:border-ink-800 dark:bg-ink-900">
+            <h2 id={`section-${section.key}`} class="font-display text-2xl font-bold text-ink-900 dark:text-white">
+              <a href={section.href} class="hover:text-pitch-700 dark:hover:text-pitch-300">{section.label}</a>
+            </h2>
+            <p class="mt-2 text-ink-500 dark:text-ink-300">{section.blurb}</p>
+            <ul class="mt-6 grid gap-x-6 gap-y-2 sm:grid-cols-2">
+              {section.groups.flatMap((g) => g.pages).map((page) => (
+                <li>
+                  <a href={page.href} class="text-sm font-medium text-ink-700 hover:text-pitch-700 dark:text-ink-200 dark:hover:text-pitch-300">
+                    → {page.label}
+                  </a>
+                </li>
+              ))}
+            </ul>
+          </section>
+        ))
+      }
+    </div>
+  </main>
+</BaseLayout>

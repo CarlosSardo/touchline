@@ -1,14 +1,14 @@
 name: CI
 
 # CI: full verification against throwaway PostgreSQL 18 containers, without secrets, on every pull request
-# and every push to main. Each job runs scripts/ci.sh, the same Dagger pipeline (.dagger/modules/touchline-ci)
+# and every relevant push to main. Each job runs scripts/ci.sh, the same Dagger pipeline (.dagger/modules/touchline-ci)
 # developers run locally with `npm run ci`, on a local Dagger engine in the runner's Docker. No Dagger Cloud.
 # A push whose exact git tree is the one every job tested and passed on its pull request (the PR's test merge,
 # whose tree that run's Plan job records in its log) reuses that result instead of running again.
 # A successful push run starts CD (cd.yml): image + deploy.
 on:
-  # Changes only to docs and editor files skip CI on both triggers (no test or image reads them), so a
-  # docs-only merge to main runs neither CI nor CD. Keep the two lists equal.
+  # Docs/editor-only pushes skip CI. Every PR runs a stable aggregate check; its plan job skips
+  # application suites when all changed paths are in this same docs/editor-only set.
   push:
     branches: [main]
     paths-ignore:
@@ -20,6 +20,8 @@ on:
       - ".mcp.json"
       - ".github/agents/**"
       - ".github/skills/**"
+      - "website/**"
+      - ".github/workflows/docs.yml"
   workflow_dispatch:
     inputs:
       suites:
@@ -35,17 +37,7 @@ on:
         type: boolean
         default: false
   pull_request:
-    branches: [main]
     types: [opened, synchronize, reopened, ready_for_review]
-    paths-ignore:
-      - "**/*.md"
-      - "LICENSE"
-      - ".env.example"
-      - ".copilot/**"
-      - ".vscode/**"
-      - ".mcp.json"
-      - ".github/agents/**"
-      - ".github/skills/**"
 
 permissions:
   contents: read
@@ -80,6 +72,7 @@ jobs:
         if: github.event_name != 'workflow_dispatch'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
       - name: Record the tree under test
         if: github.event_name == 'pull_request'
@@ -101,10 +94,21 @@ jobs:
           verified=$(scripts/ci/verified.sh "$GITHUB_SHA") || true
           if [[ "$verified" != true ]]; then verified=false; fi
           echo "verified=${verified}" >> "$GITHUB_OUTPUT"
+      - name: Test CI path planning
+        if: github.event_name == 'pull_request'
+        run: node --test scripts/ci/plan-suites.test.mjs
+      - name: Determine whether application CI suites are required
+        id: scope
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: node scripts/ci/plan-suites.mjs --base "$BASE_SHA" --head "$HEAD_SHA"
       - name: Validate inputs
         id: plan
         env:
           REUSED: ${{ steps.reuse.outputs.verified == 'true' }}
+          NEEDS_CI: ${{ github.event_name != 'pull_request' || steps.scope.outputs.run == 'true' }}
           SUITES: ${{ inputs.suites }}
           SEASONS: ${{ inputs.seasons }}
           FULL_WORLD: ${{ inputs.full_world == true }}
@@ -113,6 +117,12 @@ jobs:
             for suite in static backend world e2e; do echo "${suite}=false"; done >> "$GITHUB_OUTPUT"
             { echo "seasons=3"; echo "full_world=false"; } >> "$GITHUB_OUTPUT"
             echo "Verified: this exact tree already passed every job on its pull request (see the Plan log)." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if [[ "$NEEDS_CI" != true ]]; then
+            for suite in static backend world e2e; do echo "${suite}=false"; done >> "$GITHUB_OUTPUT"
+            { echo "seasons=3"; echo "full_world=false"; } >> "$GITHUB_OUTPUT"
+            echo "Documentation/editor-only PR: application CI suites are intentionally skipped." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           suites="${SUITES:-all}"
@@ -238,3 +248,43 @@ jobs:
           path: ci-logs/
           if-no-files-found: ignore
           retention-days: 7
+
+  required:
+    name: Required CI
+    needs: [plan, static, backend, world, e2e]
+    if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require each planned result, allowing only explicit skips
+        env:
+          PLAN_RESULT: ${{ needs.plan.result }}
+          STATIC_REQUIRED: ${{ needs.plan.outputs.static }}
+          STATIC_RESULT: ${{ needs.static.result }}
+          BACKEND_REQUIRED: ${{ needs.plan.outputs.backend }}
+          BACKEND_RESULT: ${{ needs.backend.result }}
+          WORLD_REQUIRED: ${{ needs.plan.outputs.world }}
+          WORLD_RESULT: ${{ needs.world.result }}
+          E2E_REQUIRED: ${{ needs.plan.outputs.e2e }}
+          E2E_RESULT: ${{ needs.e2e.result }}
+        run: |
+          if [[ "$PLAN_RESULT" != success ]]; then
+            echo "::error::CI planning did not succeed (result: ${PLAN_RESULT})."
+            exit 1
+          fi
+          check_suite() {
+            local name="$1" required="$2" result="$3"
+            if [[ "$required" == true && "$result" != success ]]; then
+              echo "::error::Required ${name} suite did not pass (result: ${result})."
+              return 1
+            fi
+            if [[ "$required" != true && "$result" != skipped ]]; then
+              echo "::error::Unplanned ${name} suite did not skip cleanly (result: ${result})."
+              return 1
+            fi
+          }
+          check_suite static "$STATIC_REQUIRED" "$STATIC_RESULT"
+          check_suite backend "$BACKEND_REQUIRED" "$BACKEND_RESULT"
+          check_suite world "$WORLD_REQUIRED" "$WORLD_RESULT"
+          check_suite e2e "$E2E_REQUIRED" "$E2E_RESULT"
+          echo "All planned CI suites passed; unplanned suites were explicitly skipped." >> "$GITHUB_STEP_SUMMARY"

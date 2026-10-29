@@ -1,0 +1,73 @@
+---
+import type { Screenshot } from "../lib/screenshots";
+
+interface Props {
+  shots: Screenshot[];
+}
+const { shots } = Astro.props;
+---
+
+<div class="grid gap-6 sm:grid-cols-2 lg:grid-cols-3" data-gallery>
+  {
+    shots.map((shot, i) => (
+      <figure class="group">
+        <button
+          type="button"
+          data-gallery-open={i}
+          class="block w-full overflow-hidden rounded-xl ring-1 ring-ink-900/10 transition hover:-translate-y-1 hover:shadow-xl hover:ring-pitch-500 dark:ring-white/10"
+        >
+          <span class="sr-only">View larger: </span>
+          <img src={shot.src} alt={shot.alt} width={shot.width} height={shot.height} loading="lazy" decoding="async" class="aspect-[16/10] w-full object-cover object-top" />
+        </button>
+        <figcaption class="mt-3 text-sm text-ink-600 dark:text-ink-300">{shot.caption}</figcaption>
+      </figure>
+    ))
+  }
+</div>
+
+<dialog
+  data-gallery-dialog
+  aria-label="Screenshot viewer"
+  class="m-auto max-h-[95dvh] w-[min(96vw,1600px)] max-w-none bg-transparent p-0 backdrop:bg-ink-950/85 backdrop:backdrop-blur"
+>
+  <figure class="relative">
+    <img data-gallery-image src="" alt="" class="mx-auto max-h-[85dvh] w-auto rounded-lg shadow-2xl" />
+    <figcaption data-gallery-caption class="mt-3 text-center text-sm text-ink-100"></figcaption>
+  </figure>
+  <div class="mt-3 flex justify-center gap-2">
+    <button type="button" data-gallery-prev class="rounded-lg bg-white/10 px-3 py-1.5 text-sm font-semibold text-white hover:bg-white/20">← Previous</button>
+    <button type="button" data-gallery-close class="rounded-lg bg-white/10 px-3 py-1.5 text-sm font-semibold text-white hover:bg-white/20">Close</button>
+    <button type="button" data-gallery-next class="rounded-lg bg-white/10 px-3 py-1.5 text-sm font-semibold text-white hover:bg-white/20">Next →</button>
+  </div>
+</dialog>
+
+<script>
+  const dialog = document.querySelector<HTMLDialogElement>("[data-gallery-dialog]");
+  const image = document.querySelector<HTMLImageElement>("[data-gallery-image]");
+  const caption = document.querySelector<HTMLElement>("[data-gallery-caption]");
+  const triggers = [...document.querySelectorAll<HTMLButtonElement>("[data-gallery-open]")];
+  let index = 0;
+  const show = (i: number) => {
+    if (!dialog || !image || !caption) return;
+    index = (i + triggers.length) % triggers.length;
+    const thumb = triggers[index].querySelector("img")!;
+    image.src = thumb.currentSrc || thumb.src;
+    image.alt = thumb.alt;
+    caption.textContent = triggers[index].closest("figure")?.querySelector("figcaption")?.textContent ?? "";
+  };
+  triggers.forEach((t, i) =>
+    t.addEventListener("click", () => {
+      show(i);
+      dialog?.showModal();
+    }),
+  );
+  dialog?.querySelector("[data-gallery-prev]")?.addEventListener("click", () => show(index - 1));
+  dialog?.querySelector("[data-gallery-next]")?.addEventListener("click", () => show(index + 1));
+  dialog?.querySelector("[data-gallery-close]")?.addEventListener("click", () => dialog.close());
+  dialog?.addEventListener("click", (e) => e.target === dialog && dialog.close());
+  dialog?.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowLeft") show(index - 1);
+    if (e.key === "ArrowRight") show(index + 1);
+  });
+  dialog?.addEventListener("close", () => triggers[index]?.focus());
+</script>

@@ -126,7 +126,7 @@ exit 0
 
 @object()
 export class TouchlineCi {
-  /** The checked-out project: tracked and untracked files, minus .gitignore'd files and CI/agent metadata. */
+  /** The checked-out project: tracked and untracked files, minus .gitignore'd files, CI/agent metadata and the separately built docs site. */
   @func()
   source: Directory
 
@@ -144,6 +144,7 @@ export class TouchlineCi {
         ".github",
         ".copilot",
         "ci-logs",
+        "website",
       ],
     })
   }
