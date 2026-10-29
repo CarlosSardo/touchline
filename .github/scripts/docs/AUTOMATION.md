@@ -60,8 +60,9 @@ Copilot or running the candidate build. Do not grant the App permission to
 bypass branch protections or rulesets.
 
 Protect `main` with classic branch protection that requires branches to be up
-to date and both `Docs maintenance / Verify docs maintenance PR` and
-`CI / Required CI` from GitHub Actions (app ID `15368`). Require zero PR
+to date and both `Verify docs maintenance PR` and `Required CI` from GitHub
+Actions (app ID `15368`). These are the exact check-run names; do not prepend
+workflow names. Require zero PR
 approvals, block force pushes and deletion, and do not require human approval
 or code-owner review in any active repository or inherited ruleset. The runtime
 reads both classic protection and effective branch rules before using tags or

@@ -30,8 +30,8 @@ const CLI_VERSION = "1.0.105";
 const MAX_REPORT_BYTES = 8 * 1024 * 1024;
 const MAX_FEEDBACK_BYTES = 12 * 1024;
 const REQUIRED_STATUS_CHECKS = [
-  "Docs maintenance / Verify docs maintenance PR",
-  "CI / Required CI",
+  "Verify docs maintenance PR",
+  "Required CI",
 ];
 const GITHUB_ACTIONS_APP_ID = 15368;
 const VERIFIED_TAG_PATTERN = "refs/tags/docs-maintenance-verified-*";
