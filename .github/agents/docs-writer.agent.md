@@ -22,7 +22,8 @@ You may edit only these documentation files:
 - `DEVELOPMENT.md`
 - `CONTRIBUTING.md`
 - `REQUIREMENTS.md`
-- Markdown files under `website/src/content/docs/`
+- Markdown files under the selected site's `website/src/content/docs/` or
+  `docs/src/content/docs/` (exactly one site root exists)
 
 Do not edit images, source code, tests, workflow files, agent profiles, scripts,
 configuration, dependencies, generated site output, or any other path. Do not
