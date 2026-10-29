@@ -1,7 +1,7 @@
 import { getCollection, type CollectionEntry } from "astro:content";
-import { docHref, slugFromRelPath } from "./routes.mjs";
+import { docHref, ROOT_DOCS, slugFromRelPath } from "./routes.mjs";
 
-export type Doc = CollectionEntry<"docs">;
+export type Doc = CollectionEntry<"docs"> | CollectionEntry<"rootDocs">;
 
 export interface DocPage {
   entry: Doc;
@@ -11,6 +11,10 @@ export interface DocPage {
   label: string;
   description?: string;
   section: SectionKey;
+  /** Repository-relative path of the canonical Markdown file. */
+  sourcePath: string;
+  /** Explicit sidebar position, when set. */
+  order?: number;
 }
 
 export interface NavGroup {
@@ -38,10 +42,22 @@ export const SECTIONS: Record<SectionKey, { label: string; blurb: string }> = {
 
 const base = import.meta.env.BASE_URL;
 
+type RootDocKey = keyof typeof ROOT_DOCS;
+const rootDocKey = (entry: Doc): RootDocKey | undefined =>
+  entry.collection === "rootDocs" ? (entry.filePath ?? "").replace(/\\/g, "/").replace(/^(\.\.\/)+/, "") as RootDocKey : undefined;
+
+/** Path relative to src/content/docs; root documents report the path of the route they are mounted at. */
 function relPath(entry: Doc): string {
+  const root = rootDocKey(entry);
+  if (root) return `${ROOT_DOCS[root].slug}.md`;
   const file = entry.filePath ?? `${entry.id}.md`;
   return file.replace(/\\/g, "/").replace(/^.*?src\/content\/docs\//, "");
 }
+
+const sourcePathOf = (entry: Doc): string => rootDocKey(entry) ?? `website/src/content/docs/${relPath(entry)}`;
+
+/** Root documents carry no frontmatter: use the first "# " heading as their title. */
+const firstHeading = (body = "") => /^#[ \t]+(.+?)[ \t#]*$/m.exec(body.replace(/^```[\s\S]*?^```/gm, ""))?.[1];
 
 const sectionOf = (slug: string): SectionKey => {
   const top = slug.split("/")[0];
@@ -65,9 +81,7 @@ function learnIndexOrder(pages: DocPage[]) {
 }
 
 const orderOf = (page: DocPage): number => {
-  const data = page.entry.data;
-  if (typeof data.order === "number") return data.order;
-  if (typeof data.sidebar?.order === "number") return data.sidebar.order;
+  if (typeof page.order === "number") return page.order;
   if (/(^|\/)index\.md$/i.test(relPath(page.entry))) return -1000;
   const linked = indexLinkOrder.get(page.slug);
   if (linked !== undefined) return linked;
@@ -82,8 +96,8 @@ const titleCase = (s: string) => s.replace(/^\d+[-_]/, "").replace(/[-_]+/g, " "
 let cache: Promise<DocPage[]> | undefined;
 
 export function getDocPages(): Promise<DocPage[]> {
-  cache ??= getCollection("docs", (entry) => !entry.data.draft).then((entries) =>
-    entries.map((entry) => {
+  cache ??= Promise.all([getCollection("docs", (entry) => !entry.data.draft), getCollection("rootDocs")]).then(([docs, roots]) => [
+    ...docs.map((entry): DocPage => {
       const slug = slugFromRelPath(relPath(entry));
       return {
         entry,
@@ -93,9 +107,26 @@ export function getDocPages(): Promise<DocPage[]> {
         label: entry.data.sidebar?.label ?? entry.data.title,
         description: entry.data.description,
         section: sectionOf(slug),
+        sourcePath: sourcePathOf(entry),
+        order: entry.data.order ?? entry.data.sidebar?.order,
       };
     }),
-  ).then((pages) => {
+    ...roots.map((entry): DocPage => {
+      const meta = ROOT_DOCS[rootDocKey(entry)!];
+      const title = firstHeading(entry.body) ?? meta.label;
+      return {
+        entry,
+        slug: meta.slug,
+        href: docHref(base, meta.slug),
+        title,
+        label: meta.label,
+        description: meta.description,
+        section: sectionOf(meta.slug),
+        sourcePath: sourcePathOf(entry),
+        order: meta.order,
+      };
+    }),
+  ]).then((pages) => {
     learnIndexOrder(pages);
     return pages;
   });

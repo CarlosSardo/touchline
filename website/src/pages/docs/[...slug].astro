@@ -20,7 +20,7 @@ export async function getStaticPaths() {
 
 const { page, landing } = Astro.props;
 const rendered = page ? await render(page.entry) : undefined;
-const sourcePath = page?.entry.filePath ? `website/${page.entry.filePath.replace(/^.*?(src\/content\/docs\/)/, "$1")}` : undefined;
+const sourcePath = page?.sourcePath;
 ---
 
 {

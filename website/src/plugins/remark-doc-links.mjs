@@ -6,7 +6,7 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { visit } from "unist-util-visit";
-import { docHref, REPO_BRANCH, REPO_URL, slugFromRelPath, withBase } from "../lib/routes.mjs";
+import { docHref, REPO_BRANCH, REPO_URL, ROOT_DOCS, slugFromRelPath, withBase } from "../lib/routes.mjs";
 
 const websiteRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const repoRoot = path.resolve(websiteRoot, "..");
@@ -18,7 +18,17 @@ const inside = (root, target) => {
   return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
 };
 
+const repoBlob = `${REPO_URL}/blob/${REPO_BRANCH}/`;
+
 export function rewriteUrl(url, filePath, base) {
+  // GitHub links to a root document the site renders (e.g. DEVELOPMENT.md) stay on the site.
+  if (url?.startsWith(repoBlob)) {
+    const rest = url.slice(repoBlob.length);
+    const cut = rest.search(/[?#]/);
+    const rel = decodeURI(cut === -1 ? rest : rest.slice(0, cut));
+    if (ROOT_DOCS[rel]) return docHref(base, ROOT_DOCS[rel].slug) + (cut === -1 ? "" : rest.slice(cut));
+    return url;
+  }
   if (!url || /^[a-z][a-z0-9+.-]*:/i.test(url) || url.startsWith("#") || url.startsWith("//")) return url;
   const cut = url.search(/[?#]/);
   const target = cut === -1 ? url : url.slice(0, cut);
@@ -41,6 +51,7 @@ export function rewriteUrl(url, filePath, base) {
   }
   if (inside(repoRoot, absolute)) {
     const rel = path.relative(repoRoot, absolute).split(path.sep).join("/");
+    if (ROOT_DOCS[rel]) return docHref(base, ROOT_DOCS[rel].slug) + suffix;
     return `${REPO_URL}/blob/${REPO_BRANCH}/${rel}${suffix}`;
   }
   return url;

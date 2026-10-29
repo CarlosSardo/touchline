@@ -2,6 +2,17 @@
 export const REPO_URL = "https://github.com/CarlosSardo/touchline";
 export const REPO_BRANCH = "main";
 
+// Repository-root Markdown rendered by the site straight from its canonical file (no copies under website/).
+// Keys are repository-relative paths; links to them (relative or GitHub blob URLs) become site routes.
+export const ROOT_DOCS = {
+  "DEVELOPMENT.md": {
+    slug: "technical/development",
+    label: "Engineering guide",
+    description: "Run, test, configure, self-host, back up and upgrade Touchline: the operational runbook.",
+    order: 900,
+  },
+};
+
 /** "play/transfers/index.md" -> "play/transfers"; "technical/Architecture.md" -> "technical/architecture". */
 export function slugFromRelPath(rel) {
   return rel

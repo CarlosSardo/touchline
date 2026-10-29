@@ -1,8 +1,11 @@
 name: Docs
 
-# Builds the static documentation site in website/ (Astro + Tailwind CSS + Pagefind) on pull requests and pushes
-# to main that touch it. The site is an isolated npm package: app CI (ci.yml, the Dagger pipeline) ignores
-# website/**, and this workflow never builds or deploys the game.
+# Builds and verifies the static documentation site in website/ (Astro + Tailwind CSS + Pagefind) on pull requests
+# and pushes to main that touch it or the root Markdown it renders in place (website/src/lib/routes.mjs ROOT_DOCS;
+# keep the path lists below in sync). The site is an isolated npm package: app CI (ci.yml, the Dagger pipeline)
+# ignores website/** and Markdown, and this workflow never builds or deploys the game.
+# Pages only receives a site whose build and link/anchor/search checks passed, so a failing change leaves the
+# last published site in place.
 # Publishing to GitHub Pages is opt-in: enable Pages with "GitHub Actions" as the source, then set the
 # repository variable DOCS_PAGES_ENABLED to "true". Until then, main builds only validate the site.
 on:
@@ -10,12 +13,14 @@ on:
     branches: [main]
     paths:
       - "website/**"
+      - "DEVELOPMENT.md"
       - ".nvmrc"
       - ".github/workflows/docs.yml"
   pull_request:
     branches: [main]
     paths:
       - "website/**"
+      - "DEVELOPMENT.md"
       - ".nvmrc"
       - ".github/workflows/docs.yml"
   workflow_dispatch:
@@ -61,14 +66,11 @@ jobs:
       - name: Install
         run: npm ci
 
-      - name: Type-check content and components
-        run: npm run check
-
-      - name: Build site and search index
+      - name: Type-check, build, then check links, anchors and the search index
         env:
           DOCS_SITE: ${{ steps.pages.outputs.origin }}
           DOCS_BASE: ${{ steps.pages.outputs.base_path && format('{0}/', steps.pages.outputs.base_path) || '' }}
-        run: npm run build
+        run: npm run verify
 
       - name: Upload Pages artifact
         if: env.PUBLISH == 'true'

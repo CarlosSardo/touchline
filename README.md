@@ -33,6 +33,8 @@
 
 **[Player handbook](website/src/content/docs/play/index.md)** · **[Screenshots](#a-look-inside)** · **[Engineering docs](website/src/content/docs/technical/index.md)** · **[Run it yourself](DEVELOPMENT.md)**
 
+📚 **Explore the [Touchline docs site](#documentation)**: a searchable player handbook and engineering guide.
+
 </div>
 
 ## Your club. Your project.
@@ -81,14 +83,16 @@ Start with the **[player handbook](website/src/content/docs/play/index.md)** and
 
 ## Documentation
 
+Everything about playing and running Touchline lives in the **Touchline docs site** ([website/](website/)): a searchable static site with a marketing home page, the full player handbook, the engineering section and the operations runbook. It is built with Astro, Tailwind CSS and Pagefind from the same Markdown files linked below, so you can read every page here on GitHub too.
+
+> **Hosted docs:** the site is set up to publish to GitHub Pages at `https://carlossardo.github.io/touchline/`. That address is not live yet; until Pages is enabled, use the links below or [preview the site locally](website/README.md).
+
 | Read this | If you want to |
 | --- | --- |
 | 📘 [Player handbook](website/src/content/docs/play/index.md) | Learn the game, from your first transfer window to long-term squad strategy. |
 | 🏗️ [Engineering docs](website/src/content/docs/technical/index.md) | Understand the architecture, simulation, persistence, identity and delivery. |
-| 🛠️ [DEVELOPMENT.md](DEVELOPMENT.md) | Run, test, self-host, back up and upgrade Touchline. |
+| 🛠️ [Engineering guide (DEVELOPMENT.md)](DEVELOPMENT.md) | Run, test, self-host, back up and upgrade Touchline. |
 | 🗺️ [REQUIREMENTS.md](REQUIREMENTS.md) | See the current product scope and known gaps. |
-
-The documentation is also a searchable static website in [website/](website/), built with Astro, Tailwind CSS and Pagefind.
 
 Touchline is self-hosted for a small private group: one Docker Compose stack runs on a Raspberry Pi 4 or any 64-bit Linux host, and players sign in through your own OpenID Connect provider. [DEVELOPMENT.md](DEVELOPMENT.md) explains how.
 
