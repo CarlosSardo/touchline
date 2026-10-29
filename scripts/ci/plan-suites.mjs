@@ -3,6 +3,7 @@ import { appendFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+// Keep these exclusions identical to ci.yml's push.paths-ignore.
 const sourceRequiredPath = (value) =>
   !/(^|\/)[^/]*\.md$/.test(value) &&
   value !== "LICENSE" &&
@@ -12,8 +13,10 @@ const sourceRequiredPath = (value) =>
   value !== ".mcp.json" &&
   !value.startsWith(".github/agents/") &&
   !value.startsWith(".github/skills/") &&
+  !value.startsWith(".github/scripts/docs/") &&
   !value.startsWith("docs/") &&
-  value !== ".github/workflows/docs.yml";
+  value !== ".github/workflows/docs.yml" &&
+  value !== ".github/workflows/docs-maintenance.yml";
 
 export function requiresApplicationCi(paths) {
   if (!Array.isArray(paths) || paths.some((value) => typeof value !== "string")) {
