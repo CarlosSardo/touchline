@@ -7,7 +7,7 @@ name: CI
 # whose tree that run's Plan job records in its log) reuses that result instead of running again.
 # A successful push run starts CD (cd.yml): image + deploy.
 on:
-  # Changes only to docs, Squad and editor files skip CI on both triggers (no test or image reads them), so a
+  # Changes only to docs and editor files skip CI on both triggers (no test or image reads them), so a
   # docs-only merge to main runs neither CI nor CD. Keep the two lists equal.
   push:
     branches: [main]
@@ -15,14 +15,11 @@ on:
       - "**/*.md"
       - "LICENSE"
       - ".env.example"
-      - ".squad/**"
       - ".copilot/**"
       - ".vscode/**"
       - ".mcp.json"
       - ".github/agents/**"
       - ".github/skills/**"
-      - ".github/workflows/squad-*.yml"
-      - ".github/workflows/sync-squad-labels.yml"
   workflow_dispatch:
     inputs:
       suites:
@@ -44,14 +41,11 @@ on:
       - "**/*.md"
       - "LICENSE"
       - ".env.example"
-      - ".squad/**"
       - ".copilot/**"
       - ".vscode/**"
       - ".mcp.json"
       - ".github/agents/**"
       - ".github/skills/**"
-      - ".github/workflows/squad-*.yml"
-      - ".github/workflows/sync-squad-labels.yml"
 
 permissions:
   contents: read
