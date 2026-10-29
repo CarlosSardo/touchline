@@ -63,11 +63,14 @@ test("checker invocation is read-only and uses an independent agent profile", ()
   assert.ok(!args.includes("--trust-folder"));
 });
 
-test("main merge protection requires the docs check, up-to-date branches, and no human approvals", () => {
+test("main merge protection requires stable checks, up-to-date branches, and no human approvals", () => {
   const protection = {
     required_status_checks: {
       strict: true,
-      checks: [{ context: "Docs maintenance / Verify docs maintenance PR", app_id: 15368 }],
+      checks: [
+        { context: "Docs maintenance / Verify docs maintenance PR", app_id: 15368 },
+        { context: "CI / Required CI", app_id: 15368 },
+      ],
     },
     required_pull_request_reviews: {
       required_approving_review_count: 0,
@@ -89,6 +92,13 @@ test("main merge protection requires the docs check, up-to-date branches, and no
       checks: [{ context: "Docs maintenance / Verify docs maintenance PR", app_id: null }],
     },
   }), /GitHub Actions/);
+  assert.throws(() => validateMainProtection({
+    ...protection,
+    required_status_checks: {
+      ...protection.required_status_checks,
+      checks: [{ context: "Docs maintenance / Verify docs maintenance PR", app_id: 15368 }],
+    },
+  }), /CI \/ Required CI/);
   assert.throws(() => validateMainProtection({
     ...protection,
     required_pull_request_reviews: { required_approving_review_count: 1 },

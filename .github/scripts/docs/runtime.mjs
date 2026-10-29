@@ -29,7 +29,10 @@ import {
 const CLI_VERSION = "1.0.105";
 const MAX_REPORT_BYTES = 8 * 1024 * 1024;
 const MAX_FEEDBACK_BYTES = 12 * 1024;
-const REQUIRED_DOCS_CHECK = "Docs maintenance / Verify docs maintenance PR";
+const REQUIRED_STATUS_CHECKS = [
+  "Docs maintenance / Verify docs maintenance PR",
+  "CI / Required CI",
+];
 const GITHUB_ACTIONS_APP_ID = 15368;
 const VERIFIED_TAG_PATTERN = "refs/tags/docs-maintenance-verified-*";
 const REPO = process.env.GITHUB_REPOSITORY;
@@ -143,10 +146,13 @@ export function copilotArguments(agent, prompt, { readOnly = false, root } = {})
 
 export function validateMainProtection(protection) {
   const checks = protection?.required_status_checks;
-  const requiredCheck = checks?.checks?.some((check) =>
-    check?.context === REQUIRED_DOCS_CHECK && check.app_id === GITHUB_ACTIONS_APP_ID);
-  if (checks?.strict !== true || !requiredCheck) {
-    throw new Error(`main must require the up-to-date ${REQUIRED_DOCS_CHECK} check from GitHub Actions`);
+  const requiredContexts = new Set((checks?.checks ?? [])
+    .filter((check) => check?.app_id === GITHUB_ACTIONS_APP_ID)
+    .map((check) => check.context));
+  const missingChecks = REQUIRED_STATUS_CHECKS.filter((context) => !requiredContexts.has(context));
+  if (checks?.strict !== true || missingChecks.length > 0) {
+    const required = missingChecks.length > 0 ? missingChecks.join(" and ") : REQUIRED_STATUS_CHECKS.join(" and ");
+    throw new Error(`main must require up-to-date ${required} checks from GitHub Actions`);
   }
   const reviews = protection.required_pull_request_reviews;
   if (reviews && ((reviews.required_approving_review_count ?? 0) > 0 ||

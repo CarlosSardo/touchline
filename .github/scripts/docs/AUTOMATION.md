@@ -60,21 +60,24 @@ Copilot or running the candidate build. Do not grant the App permission to
 bypass branch protections or rulesets.
 
 Protect `main` with classic branch protection that requires branches to be up
-to date, requires the `Docs maintenance / Verify docs maintenance PR` check
-from GitHub Actions, and requires zero PR approvals. Also block force pushes
-and deletion. No active repository or inherited ruleset may require human
-approvals or code-owner reviews. The runtime reads both classic protection and
-effective branch rules before using tags or requesting auto-merge; an
-unavailable policy API or a missing rule fails closed.
+to date and both `Docs maintenance / Verify docs maintenance PR` and
+`CI / Required CI` from GitHub Actions (app ID `15368`). Require zero PR
+approvals, block force pushes and deletion, and do not require human approval
+or code-owner review in any active repository or inherited ruleset. The runtime
+reads both classic protection and effective branch rules before using tags or
+requesting auto-merge; an unavailable policy API or a missing rule fails
+closed.
 
-Protect `refs/tags/docs-maintenance-verified-*` using two active tag rulesets:
-one permits creation only to the automation App, and a separate ruleset with no
-bypass actors blocks updates and deletions for everyone. The runtime checks
-both policies before using or writing these tags. A tag is written only after
-a full successful review found no docs changes; merged docs PR titles carry
-the verified source revision otherwise. This durable anchor prevents repeated
-full baselines while preserving the last successfully published source
-boundary.
+Protect `refs/tags/docs-maintenance-verified-*` using two active tag rulesets
+with that exact include pattern and no exclusions. The creation-only ruleset
+must have exactly one bypass actor: the `Integration` whose ID equals
+`DOCS_AUTOMATION_APP_ID`, with bypass mode `always` or `exempt`. A separate
+ruleset must block both updates and deletions, have no bypass actors, and set
+`current_user_can_bypass` to `never`. The runtime checks both policies before
+using or writing these tags. A tag is written only after a full successful
+review found no docs changes; merged docs PR titles carry the verified source
+revision otherwise. This durable anchor prevents repeated full baselines while
+preserving the last successfully published source boundary.
 
 Enable **Allow auto-merge** in repository settings. The workflow requires
 classic branch protection with the strict check above; merge-queue-only setups
