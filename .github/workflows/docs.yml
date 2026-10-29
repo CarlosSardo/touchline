@@ -2,7 +2,8 @@ name: Docs
 
 # Builds and verifies the static documentation site in website/ (Astro + Tailwind CSS + Pagefind) on pull requests
 # and relevant pushes to main (website/src/lib/routes.mjs ROOT_DOCS lists the root Markdown rendered in place).
-# Every PR emits the required verification context, including stacked PRs. The site is an isolated npm package: app CI (ci.yml, the Dagger pipeline)
+# Every PR builds the site, including stacked PRs; docs-maintenance.yml owns the required docs verification context.
+# The site is an isolated npm package: app CI (ci.yml, the Dagger pipeline)
 # ignores website/** and Markdown, and this workflow never builds or deploys the game.
 # Pages only receives a site whose build and link/anchor/search checks passed, so a failing change leaves the
 # last published site in place.
@@ -72,26 +73,6 @@ jobs:
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: website/dist
-
-  maintenance-required:
-    name: Verify docs maintenance PR
-    needs: build
-    if: always()
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    defaults:
-      run:
-        working-directory: .
-    steps:
-      - name: Require genuine site verification
-        env:
-          BUILD_RESULT: ${{ needs.build.result }}
-        run: |
-          if [[ "$BUILD_RESULT" != success ]]; then
-            echo "::error::Documentation verification did not pass (result: ${BUILD_RESULT})."
-            exit 1
-          fi
-          echo "Documentation type-check, build, links, anchors and search verification passed."
 
   deploy:
     name: Publish to GitHub Pages

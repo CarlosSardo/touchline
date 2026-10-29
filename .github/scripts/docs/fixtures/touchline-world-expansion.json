@@ -1,0 +1,23 @@
+{
+  "sourceRevision": "514e1e8d7c69d06498f33d37bbee4fcf1b4d9a24",
+  "claim": "Existing careers can use World > Expand career world in the current UI.",
+  "status": "contradicted",
+  "limitations": "Archived source excerpts, not a fresh browser observation or an automated semantic proof. The independent checker must inspect the full current component and API before judging current behavior.",
+  "excerpts": [
+    {
+      "path": "REQUIREMENTS.md",
+      "originalStartLine": 46,
+      "text": "- **Explicit world upgrade:** existing careers, including version 2, require **World > Expand career world**. The guard uses `WORLD_VERSION`; a current-version career is unchanged. A named **Before world expansion** checkpoint commits independently before transactional expansion and remains available after rollback. New memberships and structural changes activate next season once a calendar exists; only 1 July without fixtures permits immediate activation. Current-season memberships and fixtures are preserved. Deployment does not automatically expand a career or redraw its calendar.\n"
+    },
+    {
+      "path": "src/views/World.tsx",
+      "originalStartLine": 83,
+      "text": "        title=\"World browser\"\n"
+    },
+    {
+      "path": "server/app.ts",
+      "originalStartLine": 1649,
+      "text": "    \"/api/world/clubs\",\n"
+    }
+  ]
+}
