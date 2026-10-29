@@ -142,7 +142,6 @@ export class TouchlineCi {
         "dagger.toml",
         "dagger.lock",
         ".github",
-        ".squad",
         ".copilot",
         "ci-logs",
       ],
