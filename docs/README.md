@@ -4,7 +4,7 @@ The player handbook, engineering docs and marketing home page, built as a static
 
 ## Commands
 
-Run these from `website/` with the Node version in [../.nvmrc](../.nvmrc).
+Run these from `docs/` with the Node version in [../.nvmrc](../.nvmrc).
 
 | Command | What it does |
 | --- | --- |
@@ -37,3 +37,7 @@ Root documents listed in `ROOT_DOCS` ([src/lib/routes.mjs](src/lib/routes.mjs)) 
 ## Publishing
 
 [.github/workflows/docs.yml](../.github/workflows/docs.yml) builds and verifies the site for every pull request and every push to `main` that changes it or `DEVELOPMENT.md`. Only a verified build is published, so a failing change leaves the last published site in place. It publishes to GitHub Pages only after Pages is enabled with "GitHub Actions" as the source and the repository variable `DOCS_PAGES_ENABLED` is set to `true`.
+
+## Social preview
+
+The shared layout uses [public/images/social/touchline-docs.png](public/images/social/touchline-docs.png), an intentional 1200x630 PNG rather than a gameplay screenshot, with page-specific titles and descriptions. To reproduce it after installing dependencies, open [scripts/social-card.html](scripts/social-card.html) in Chromium at a 1200x630 viewport with device scale 1, wait for the local font to load, and capture the viewport without browser chrome. No image-generation dependency is needed. `npm run verify` checks the image dimensions and built social metadata. WhatsApp and other services cache previews; publishing new metadata cannot guarantee an immediate refresh of an already-shared URL.

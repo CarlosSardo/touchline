@@ -1,4 +1,4 @@
-// Deterministic post-build check of website/dist, run by `npm run verify`:
+// Deterministic post-build check of docs/dist, run by `npm run verify`:
 // every internal link, image and asset resolves to a built file, every same-site #fragment exists on its target
 // page, every docs page is marked for the Pagefind index, and each canonical root document (ROOT_DOCS) was rendered.
 // Exits non-zero with a list of problems so CI and automation fail closed.
@@ -7,10 +7,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ROOT_DOCS } from "../src/lib/routes.mjs";
 
-const websiteRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const dist = path.join(websiteRoot, "dist");
+const docsRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const dist = path.join(docsRoot, "dist");
 const base = (process.env.DOCS_BASE || "/touchline/").replace(/\/?$/, "/");
 const problems = [];
+const socialImage = `${base}images/social/touchline-docs.png`;
 
 if (!fs.existsSync(dist)) {
   console.error(`check-dist: ${dist} does not exist; run the build first.`);
@@ -44,6 +45,17 @@ for (const file of htmlFiles) {
   const relFile = path.relative(dist, file).split(path.sep).join("/");
   const pageUrl = base + relFile.replace(/index\.html$/, "");
   const html = fs.readFileSync(file, "utf8").replace(/<script[\s\S]*?<\/script>/g, "");
+  const metadata = new Map([...html.matchAll(/<meta\s+(?:property|name)="([^"]+)"\s+content="([^"]*)"/g)].map((m) => [m[1], decode(m[2])]));
+  const canonical = html.match(/<link\s+rel="canonical"\s+href="([^"]+)"/)?.[1];
+  if (!canonical?.startsWith("https://") || metadata.get("og:url") !== canonical) problems.push(`/${relFile}: missing or inconsistent absolute HTTPS canonical/og:url`);
+  const image = metadata.get("og:image");
+  if (!image?.startsWith("https://") || new URL(image).pathname !== socialImage) problems.push(`/${relFile}: missing branded absolute social image`);
+  for (const [key, expected] of [["og:image:width", "1200"], ["og:image:height", "630"], ["og:image:type", "image/png"], ["twitter:card", "summary_large_image"], ["twitter:image", image]]) {
+    if (metadata.get(key) !== expected) problems.push(`/${relFile}: invalid ${key}`);
+  }
+  for (const key of ["og:site_name", "og:title", "og:description", "og:image:alt", "twitter:title", "twitter:description", "twitter:image:alt"]) {
+    if (!metadata.get(key)) problems.push(`/${relFile}: missing ${key}`);
+  }
   for (const m of html.matchAll(/\s(?:href|src)="([^"]+)"/g)) {
     const raw = decode(m[1]);
     if (/^[a-z][a-z0-9+.-]*:/i.test(raw) || raw.startsWith("//")) continue;
@@ -59,6 +71,13 @@ for (const file of htmlFiles) {
   }
 }
 
+const socialFile = fileFor(socialImage);
+if (!socialFile) problems.push("Branded social PNG is missing");
+else {
+  const png = fs.readFileSync(socialFile);
+  if (png.length < 24 || png.subarray(0, 8).toString("hex") !== "89504e470d0a1a0a" || png.readUInt32BE(16) !== 1200 || png.readUInt32BE(20) !== 630) problems.push("Branded social image must be a real 1200x630 PNG");
+}
+
 const docsPages = htmlFiles.filter((f) => /^docs\/.+\/index\.html$/.test(path.relative(dist, f).split(path.sep).join("/")));
 if (!fs.existsSync(path.join(dist, "pagefind", "pagefind.js"))) problems.push("Pagefind index is missing (dist/pagefind/pagefind.js)");
 for (const f of docsPages) {
@@ -72,7 +91,7 @@ for (const [source, { slug }] of Object.entries(ROOT_DOCS)) {
 }
 
 // Root edits must rebuild on push; unfiltered PRs also cover stacked branches and required checks.
-const workflow = path.join(websiteRoot, "..", ".github", "workflows", "docs.yml");
+const workflow = path.join(docsRoot, "..", ".github", "workflows", "docs.yml");
 if (fs.existsSync(workflow)) {
   const yaml = fs.readFileSync(workflow, "utf8");
   const push = yaml.match(/^  push:\n([\s\S]*?)(?=^  [a-z_]+:)/m)?.[1] || "";

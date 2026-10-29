@@ -12,7 +12,7 @@ const sourceRequiredPath = (value) =>
   value !== ".mcp.json" &&
   !value.startsWith(".github/agents/") &&
   !value.startsWith(".github/skills/") &&
-  !value.startsWith("website/") &&
+  !value.startsWith("docs/") &&
   value !== ".github/workflows/docs.yml";
 
 export function requiresApplicationCi(paths) {

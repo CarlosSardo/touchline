@@ -12,11 +12,18 @@ interface Props {
   current?: "home" | "play" | "technical";
   showMenuButton?: boolean;
   image?: string;
+  imageAlt?: string;
+  imageWidth?: number;
+  imageHeight?: number;
+  imageType?: string;
 }
-const { title, description = SITE_DESCRIPTION, current, showMenuButton, image } = Astro.props;
+const { title, description = SITE_DESCRIPTION, current, showMenuButton, image,
+  imageAlt = "Touchline docs. The manager picks the team. You build the club.",
+  imageWidth = image ? undefined : 1200, imageHeight = image ? undefined : 630,
+  imageType = image ? undefined : "image/png" } = Astro.props;
 const pageTitle = title ? `${title} · ${SITE_TITLE}` : `${SITE_TITLE} — football sporting-director simulation`;
 const canonical = new URL(Astro.url.pathname, Astro.site);
-const ogImage = image ? new URL(image, Astro.site) : undefined;
+const ogImage = new URL(image || url("images/social/touchline-docs.png"), Astro.site);
 ---
 
 <!doctype html>
@@ -30,11 +37,21 @@ const ogImage = image ? new URL(image, Astro.site) : undefined;
     <link rel="icon" type="image/svg+xml" href={url("touchline.svg")} />
     <meta name="theme-color" content="#087f6d" />
     <meta property="og:type" content="website" />
+    <meta property="og:site_name" content={SITE_TITLE} />
     <meta property="og:title" content={pageTitle} />
     <meta property="og:description" content={description} />
     <meta property="og:url" content={canonical} />
-    {ogImage && <meta property="og:image" content={ogImage} />}
-    <meta name="twitter:card" content={ogImage ? "summary_large_image" : "summary"} />
+    <meta property="og:image" content={ogImage} />
+    <meta property="og:image:secure_url" content={ogImage} />
+    <meta property="og:image:alt" content={imageAlt} />
+    {imageWidth && <meta property="og:image:width" content={String(imageWidth)} />}
+    {imageHeight && <meta property="og:image:height" content={String(imageHeight)} />}
+    {imageType && <meta property="og:image:type" content={imageType} />}
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content={pageTitle} />
+    <meta name="twitter:description" content={description} />
+    <meta name="twitter:image" content={ogImage} />
+    <meta name="twitter:image:alt" content={imageAlt} />
     <script is:inline>
       try {
         const stored = localStorage.getItem("touchline-docs-theme");
