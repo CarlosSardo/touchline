@@ -7,8 +7,9 @@ name: CI
 # whose tree that run's Plan job records in its log) reuses that result instead of running again.
 # A successful push run starts CD (cd.yml): image + deploy.
 on:
-  # Docs/editor-only pushes skip CI. Every PR runs a stable aggregate check; its plan job skips
-  # application suites when all changed paths are in this same docs/editor-only set.
+  # Docs/editor/automation-only pushes skip CI (and therefore push-triggered CD).
+  # Every PR runs a stable aggregate check; keep this list identical to the ignored
+  # paths in scripts/ci/plan-suites.mjs. Docs automation tests run in docs-maintenance.yml.
   push:
     branches: [main]
     paths-ignore:
@@ -20,8 +21,10 @@ on:
       - ".mcp.json"
       - ".github/agents/**"
       - ".github/skills/**"
+      - ".github/scripts/docs/**"
       - "docs/**"
       - ".github/workflows/docs.yml"
+      - ".github/workflows/docs-maintenance.yml"
   workflow_dispatch:
     inputs:
       suites:

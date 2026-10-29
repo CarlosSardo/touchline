@@ -283,7 +283,7 @@ There is no in-app access revocation. Disable/delete the provider account to pre
 
 ## Continuous deployment
 
-[ci.yml](.github/workflows/ci.yml) verifies PRs, pushes to `main` and manual dispatches. A push can reuse a successful PR run only when its git tree matches exactly. Docs/editor-only changes matching workflow `paths-ignore` skip game CI and do not trigger CD. This is path-based, not a semantic guarantee: site source/configuration changes outside those ignore patterns may still run game CI.
+[ci.yml](.github/workflows/ci.yml) verifies PRs, pushes to `main` and manual dispatches. A push can reuse a successful PR run only when its git tree matches exactly. Docs/editor-only changes matching workflow `push.paths-ignore`, including `.github/scripts/docs/**` and `.github/workflows/docs-maintenance.yml`, skip game CI and do not trigger push-driven CD. The PR planner uses the identical path set to skip application suites while still reporting `Required CI` on every ready PR; PR triggers have no workflow-level path filters. Docs automation tests remain covered by [docs-maintenance.yml](.github/workflows/docs-maintenance.yml). Any mixed change outside the ignored paths still requires application CI and remains eligible for CD after a successful push CI run. This is path-based, not a semantic guarantee: site source/configuration changes outside those ignore patterns may still run game CI.
 
 [cd.yml](.github/workflows/cd.yml) starts after successful push CI and reconciles every six hours. [scripts/ci/cd.sh](scripts/ci/cd.sh) chooses the newest ancestor of `main` with successful push CI, recomputes the candidate at release steps, and refuses downgrade deployments. A newer failing commit does not block the last verified one.
 
