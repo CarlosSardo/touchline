@@ -1,11 +1,18 @@
 import { execFileSync } from "node:child_process";
-import { lstatSync, realpathSync } from "node:fs";
+import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const SHA = /^[0-9a-f]{40}$/;
 const MAX_FILES = 80;
 const MAX_DIFF_BYTES = 512 * 1024;
+const SAFE_HTML_TAGS = new Set([
+  "a", "abbr", "b", "blockquote", "br", "caption", "code", "dd", "del",
+  "details", "div", "dl", "dt", "em", "figcaption", "figure", "h1", "h2",
+  "h3", "h4", "hr", "i", "img", "li", "ol", "p", "pre", "s", "small",
+  "span", "strong", "sub", "summary", "sup", "table", "tbody", "td", "th",
+  "thead", "tr", "u", "ul",
+]);
 const GUIDE_SOURCE_MARKER = /^docs: refresh documentation from ([0-9a-f]{40})(?: \(#[0-9]+\))?$/;
 
 export function assertSha(value, label) {
@@ -24,10 +31,17 @@ export function isAllowedDocumentationPath(value) {
   if (/^(README|DEVELOPMENT|CONTRIBUTING|REQUIREMENTS)\.md$/.test(value)) {
     return true;
   }
-  if (/^website\/src\/content\/docs\/.+\.md$/.test(value)) {
-    return true;
-  }
-  return /^website\/public\/images\/game\/.+\.(png|jpe?g|gif|webp)$/i.test(value);
+  return /^website\/src\/content\/docs\/.+\.md$/.test(value);
+}
+
+export function isDocumentationScopePath(value) {
+  return isAllowedDocumentationPath(value) ||
+    /^website\/src\/content\/docs\/.+\.mdx$/.test(value) ||
+    /^website\/public\/images\/game\/.+$/.test(value);
+}
+
+export function isUnsupportedScreenshotPath(value) {
+  return /^website\/public\/images\/game\/.+$/.test(value);
 }
 
 export function isAutomationOwnedPath(value) {
@@ -81,6 +95,109 @@ function assertRegularNonExecutable(root, revision, filePath) {
   }
 }
 
+function withoutMarkdownCode(source) {
+  let fence = null;
+  const visible = source.split("\n").map((line) => {
+    if (fence) {
+      const close = new RegExp(`^ {0,3}${fence.character}{${fence.length},}\\s*$`);
+      if (close.test(line)) fence = null;
+      return "";
+    }
+    const opening = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+    if (opening && (opening[1][0] === "~" || !opening[2].includes("`"))) {
+      fence = { character: opening[1][0], length: opening[1].length };
+      return "";
+    }
+    return line;
+  }).join("\n");
+  const masked = visible.split("");
+  const escaped = (index) => {
+    let slashes = 0;
+    for (let cursor = index - 1; cursor >= 0 && visible[cursor] === "\\"; cursor -= 1) slashes += 1;
+    return slashes % 2 === 1;
+  };
+  for (let index = 0; index < visible.length;) {
+    if (visible[index] !== "`" || escaped(index)) {
+      index += 1;
+      continue;
+    }
+    let delimiterLength = 1;
+    while (visible[index + delimiterLength] === "`") delimiterLength += 1;
+    let closing = -1;
+    for (let cursor = index + delimiterLength; cursor < visible.length;) {
+      if (visible[cursor] !== "`" || escaped(cursor)) {
+        cursor += 1;
+        continue;
+      }
+      let closingLength = 1;
+      while (visible[cursor + closingLength] === "`") closingLength += 1;
+      if (closingLength === delimiterLength) {
+        closing = cursor;
+        break;
+      }
+      cursor += closingLength;
+    }
+    if (closing < 0) {
+      index += delimiterLength;
+      continue;
+    }
+    for (let cursor = index; cursor < closing + delimiterLength; cursor += 1) {
+      if (masked[cursor] !== "\n") masked[cursor] = " ";
+    }
+    index = closing + delimiterLength;
+  }
+  return masked.join("");
+}
+
+export function validateDocumentationContent(filePath, source) {
+  const visible = withoutMarkdownCode(source);
+  if (/<!--|<!|<\?/i.test(visible)) {
+    throw new Error(`HTML comments and declarations are not allowed in documentation output: ${filePath}`);
+  }
+  if (/!\[[^\]\n]*\]\s*\[[^\]\n]*\]/.test(visible)) {
+    throw new Error(`Reference-style images are unsupported in documentation output: ${filePath}`);
+  }
+  for (const tag of visible.matchAll(/<\/?\s*([A-Za-z][A-Za-z0-9-]*)\b((?:[^'"<>]|"[^"]*"|'[^']*')*)>/g)) {
+    if (/^<(?:https?:\/\/[^<>]+|mailto:[^<>]+|[^<>@\s]+@[^<>@\s]+)>$/i.test(tag[0])) continue;
+    if (!SAFE_HTML_TAGS.has(tag[1].toLowerCase())) {
+      throw new Error(`Unsafe or unsupported HTML element in documentation output: ${filePath}`);
+    }
+    if (/(?:^|\s)(?:on[a-z0-9_:-]+|srcdoc|style)\s*(?:=|(?=\s|\/|$))/i.test(tag[2])) {
+      throw new Error(`Executable HTML attributes are not allowed in documentation output: ${filePath}`);
+    }
+  }
+  const normalized = visible
+    .replace(/&#x([0-9a-f]+);?/gi, (_match, hex) => {
+      const codePoint = Number.parseInt(hex, 16);
+      return codePoint <= 0x10ffff ? String.fromCodePoint(codePoint) : " ";
+    })
+    .replace(/&#([0-9]+);?/g, (_match, decimal) => {
+      const codePoint = Number.parseInt(decimal, 10);
+      return codePoint <= 0x10ffff ? String.fromCodePoint(codePoint) : " ";
+    })
+    .replace(/&colon;/gi, ":")
+    .replace(/&Tab;/gi, "\t")
+    .replace(/&NewLine;/gi, "\n")
+    .replace(/[\u0000-\u0020\u007f]+/g, "");
+  if (/\b(?:javascript|vbscript|file):|\bdata:(?:text\/html|image\/svg\+xml|application\/(?:javascript|ecmascript|xml|xhtml\+xml))/i.test(normalized)) {
+    throw new Error(`Executable or local-resource URL is not allowed in documentation output: ${filePath}`);
+  }
+}
+
+function imageMarkup(source) {
+  const visible = withoutMarkdownCode(source);
+  const markdownLines = visible.split("\n").filter((line) => /!\s*\[/.test(line));
+  const htmlImages = [...visible.matchAll(/<img\b(?:[^'"<>]|"[^"]*"|'[^']*')*>/gi)]
+    .map((match) => match[0]);
+  return [...markdownLines, ...htmlImages].sort();
+}
+
+function assertImageMarkupUnchanged(filePath, baseSource, headSource) {
+  if (JSON.stringify(imageMarkup(baseSource)) !== JSON.stringify(imageMarkup(headSource))) {
+    throw new Error(`Image references cannot change without authenticated provenance: ${filePath}`);
+  }
+}
+
 export function listChangedPaths(root, base, head) {
   assertSha(base, "base");
   assertSha(head, "head");
@@ -99,7 +216,9 @@ export function listChangedPaths(root, base, head) {
   ]).split("\0").filter(Boolean);
 }
 
-export function validateDocumentationDiff(root, base, head, { maxFiles = MAX_FILES } = {}) {
+export function validateDocumentationDiff(root, base, head, {
+  maxFiles = MAX_FILES, allowSourceChanges = false,
+} = {}) {
   const resolvedRoot = realpathSync(root);
   const files = listChangedPaths(resolvedRoot, base, head);
   if (files.length > maxFiles) {
@@ -107,10 +226,20 @@ export function validateDocumentationDiff(root, base, head, { maxFiles = MAX_FIL
   }
   for (const filePath of files) {
     if (!isAllowedDocumentationPath(filePath)) {
-      throw new Error(`Change is outside the documentation allowlist: ${filePath}`);
+      if (!allowSourceChanges || isAutomationOwnedPath(filePath)) {
+        throw new Error(`Change is outside the documentation allowlist: ${filePath}`);
+      }
+      continue;
     }
     for (const revision of [base, head]) {
       assertRegularNonExecutable(resolvedRoot, revision, filePath);
+    }
+    if (trackedMode(resolvedRoot, head, filePath) !== null) {
+      const headContent = runGit(resolvedRoot, ["show", `${head}:${filePath}`]);
+      validateDocumentationContent(filePath, headContent);
+      const baseContent = trackedMode(resolvedRoot, base, filePath) === null ? "" :
+        runGit(resolvedRoot, ["show", `${base}:${filePath}`]);
+      assertImageMarkupUnchanged(filePath, baseContent, headContent);
     }
   }
   return files;
@@ -140,6 +269,7 @@ export function validateWorkingTree(root, { maxFiles = MAX_FILES } = {}) {
       if (stat.isSymbolicLink() || !stat.isFile() || (stat.mode & 0o111) !== 0) {
         throw new Error(`Documentation output must not be a symlink or executable: ${filePath}`);
       }
+      validateDocumentationContent(filePath, readFileSync(absolute, "utf8"));
     } catch (error) {
       if (error.code !== "ENOENT" || !tracked.includes(filePath)) throw error;
     }

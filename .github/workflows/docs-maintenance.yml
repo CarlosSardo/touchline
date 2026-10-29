@@ -11,14 +11,7 @@ on:
         default: false
   pull_request:
     branches: [main]
-    types: [opened, synchronize, reopened, ready_for_review]
-    paths:
-      - README.md
-      - DEVELOPMENT.md
-      - CONTRIBUTING.md
-      - REQUIREMENTS.md
-      - website/src/content/docs/**/*.md
-      - website/public/images/game/**
+    types: [opened, synchronize, reopened, ready_for_review, edited]
 
 permissions:
   contents: read
@@ -28,8 +21,44 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  policy:
+    name: Verify docs automation protections
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the exact main revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+
+      - name: Create a read-only GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ secrets.DOCS_AUTOMATION_APP_ID }}
+          private-key: ${{ secrets.DOCS_AUTOMATION_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-administration: read
+
+      - name: Require safe branch and tag protections
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          DOCS_AUTOMATION_APP_ID: ${{ secrets.DOCS_AUTOMATION_APP_ID }}
+        run: node .github/scripts/docs/runtime.mjs check-policy --root "$GITHUB_WORKSPACE"
+
   maintain:
     name: Generate and verify docs
+    needs: policy
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 180
@@ -112,6 +141,7 @@ jobs:
           repositories: ${{ github.event.repository.name }}
           permission-contents: write
           permission-pull-requests: write
+          permission-administration: read
 
       - name: Download the verified bundle
         if: needs.maintain.outputs.publish == 'true'
@@ -124,20 +154,19 @@ jobs:
         if: needs.maintain.outputs.publish == 'true'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          DOCS_AUTOMATION_APP_ID: ${{ secrets.DOCS_AUTOMATION_APP_ID }}
         run: node .github/scripts/docs/runtime.mjs publish --root "$GITHUB_WORKSPACE" --bundle "$RUNNER_TEMP/docs-bundle"
 
       - name: Record a successful no-change verification
         if: needs.maintain.outputs.no_change == 'true'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          DOCS_AUTOMATION_APP_ID: ${{ secrets.DOCS_AUTOMATION_APP_ID }}
         run: node .github/scripts/docs/runtime.mjs record-state --root "$GITHUB_WORKSPACE" --source "${{ needs.maintain.outputs.verified_source }}"
 
   verify-docs-pr:
     name: Verify docs maintenance PR
-    if: >-
-      github.event_name == 'pull_request' &&
-      github.event.pull_request.head.repo.full_name == github.repository &&
-      startsWith(github.head_ref, 'docs/maintenance-')
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 120
     permissions:
@@ -167,9 +196,32 @@ jobs:
       - name: Test the trusted runtime
         run: node --test trusted/.github/scripts/docs/maintenance.test.mjs trusted/.github/scripts/docs/runtime.test.mjs
 
+      - name: Determine whether docs validation is needed
+        id: scope
+        run: >-
+          node trusted/.github/scripts/docs/runtime.mjs plan-pr
+          --candidate-root "$GITHUB_WORKSPACE/candidate"
+          --base "${{ github.event.pull_request.base.sha }}"
+          --head "${{ github.event.pull_request.head.sha }}"
+
+      - name: Create a read-only GitHub App policy token
+        if: >-
+          steps.scope.outputs.verify_docs == 'true' &&
+          github.event.pull_request.head.repo.full_name == github.repository
+        id: app-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ secrets.DOCS_AUTOMATION_APP_ID }}
+          private-key: ${{ secrets.DOCS_AUTOMATION_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-administration: read
+
       - name: Re-run independent fact-check on the exact PR head
         env:
           COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          DOCS_AUTOMATION_APP_ID: ${{ secrets.DOCS_AUTOMATION_APP_ID }}
           DOCS_TRUSTED_ROOT: ${{ github.workspace }}/trusted
           GITHUB_HEAD_REF: ${{ github.head_ref }}
           GITHUB_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}

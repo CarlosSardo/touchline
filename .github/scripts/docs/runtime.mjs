@@ -17,7 +17,9 @@ import {
   assertSha,
   findLastPublishedSource,
   isAllowedDocumentationPath,
+  isDocumentationScopePath,
   isRelevantSourceChange,
+  isUnsupportedScreenshotPath,
   listChangedPaths,
   requiresFullBaseline,
   validateDocumentationDiff,
@@ -27,6 +29,9 @@ import {
 const CLI_VERSION = "1.0.105";
 const MAX_REPORT_BYTES = 8 * 1024 * 1024;
 const MAX_FEEDBACK_BYTES = 12 * 1024;
+const REQUIRED_DOCS_CHECK = "Docs maintenance / Verify docs maintenance PR";
+const GITHUB_ACTIONS_APP_ID = 15368;
+const VERIFIED_TAG_PATTERN = "refs/tags/docs-maintenance-verified-*";
 const REPO = process.env.GITHUB_REPOSITORY;
 
 function command(file, args, options = {}) {
@@ -86,6 +91,10 @@ function planMaintenance(root) {
   }
   const base = baseForEvent(event, head, root);
   const changedPaths = listChangedPaths(root, base, head);
+  const screenshot = changedPaths.find(isUnsupportedScreenshotPath);
+  if (screenshot) {
+    throw new Error(`Screenshot changes require separately authenticated provenance: ${screenshot}`);
+  }
   const force = isForceBaseline() && process.env.GITHUB_EVENT_NAME === "workflow_dispatch";
   const shouldRun = force || requiresFullBaseline(changedPaths) || isRelevantSourceChange(changedPaths);
   writeOutput("run", String(shouldRun));
@@ -115,7 +124,6 @@ export function copilotArguments(agent, prompt, { readOnly = false, root } = {})
   const availableTools = readOnly ? "read,search" : "read,search,edit";
   const permission = readOnly ? "read,search" : "write";
   return [
-    "--trust-folder",
     "--no-custom-instructions",
     ...(root ? ["-C", root] : []),
     "-p", prompt,
@@ -131,6 +139,112 @@ export function copilotArguments(agent, prompt, { readOnly = false, root } = {})
     "--silent",
     "--stream=off",
   ];
+}
+
+export function validateMainProtection(protection) {
+  const checks = protection?.required_status_checks;
+  const requiredCheck = checks?.checks?.some((check) =>
+    check?.context === REQUIRED_DOCS_CHECK && check.app_id === GITHUB_ACTIONS_APP_ID);
+  if (checks?.strict !== true || !requiredCheck) {
+    throw new Error(`main must require the up-to-date ${REQUIRED_DOCS_CHECK} check from GitHub Actions`);
+  }
+  const reviews = protection.required_pull_request_reviews;
+  if (reviews && ((reviews.required_approving_review_count ?? 0) > 0 ||
+      reviews.require_code_owner_reviews === true || reviews.require_last_push_approval === true)) {
+    throw new Error("main must not require human pull request approval for unattended docs merging");
+  }
+  if (protection.allow_force_pushes?.enabled !== false ||
+      protection.allow_deletions?.enabled !== false) {
+    throw new Error("main must block force pushes and branch deletion");
+  }
+}
+
+export function validateMainRules(rules) {
+  if (!Array.isArray(rules)) throw new Error("Could not verify active main branch rules");
+  const approvalRequired = rules.some((rule) => {
+    if (rule?.type !== "pull_request") return false;
+    const parameters = rule.parameters ?? {};
+    return (parameters.required_approving_review_count ?? 0) > 0 ||
+      parameters.require_code_owner_review === true ||
+      parameters.require_last_push_approval === true;
+  });
+  if (approvalRequired) {
+    throw new Error("Active main branch rules must not require human pull request approval");
+  }
+}
+
+export function validateVerifiedTagRulesets(rulesets, appId) {
+  if (!Array.isArray(rulesets) || !Number.isSafeInteger(appId) || appId <= 0) {
+    throw new Error("Could not verify the protected docs baseline tag policy");
+  }
+  const matching = rulesets.filter((ruleset) =>
+    ruleset?.target === "tag" && ruleset.enforcement === "active" &&
+    ruleset.conditions?.ref_name?.include?.length === 1 &&
+    ruleset.conditions.ref_name.include[0] === VERIFIED_TAG_PATTERN &&
+    ruleset.conditions.ref_name.exclude?.length === 0);
+  const creation = matching.some((ruleset) => {
+    const types = ruleset.rules?.map((rule) => rule.type) ?? [];
+    const actors = ruleset.bypass_actors ?? [];
+    return types.includes("creation") && !types.includes("update") && !types.includes("deletion") &&
+      actors.length === 1 && actors[0].actor_type === "Integration" &&
+      actors[0].actor_id === appId &&
+      ["always", "exempt"].includes(actors[0].bypass_mode);
+  });
+  const immutable = matching.some((ruleset) => {
+    const types = ruleset.rules?.map((rule) => rule.type) ?? [];
+    return types.includes("update") && types.includes("deletion") &&
+      !types.includes("creation") && (ruleset.bypass_actors ?? []).length === 0 &&
+      ruleset.current_user_can_bypass === "never";
+  });
+  if (!creation || !immutable) {
+    throw new Error("Protect docs baseline tags with separate active create-only and immutable tag rulesets");
+  }
+}
+
+function assertVerifiedTagPolicy() {
+  const appId = Number(process.env.DOCS_AUTOMATION_APP_ID);
+  if (!Number.isSafeInteger(appId) || appId <= 0) {
+    throw new Error("DOCS_AUTOMATION_APP_ID is required to verify the protected tag rules");
+  }
+  const pages = JSON.parse(command("gh", [
+    "api", "--paginate", "--slurp",
+    `repos/${REPO}/rulesets?per_page=100&includes_parents=true&targets=tag`,
+  ]));
+  if (!Array.isArray(pages) || pages.some((page) => !Array.isArray(page))) {
+    throw new Error("Could not read all docs baseline tag rulesets");
+  }
+  validateVerifiedTagRulesets(pages.flat(), appId);
+}
+
+function assertAutomationPolicy() {
+  if (!REPO || !/^[^/]+\/[^/]+$/.test(REPO)) {
+    throw new Error("GITHUB_REPOSITORY is required to verify docs automation protections");
+  }
+  const protection = JSON.parse(command("gh", [
+    "api", `repos/${REPO}/branches/main/protection`,
+  ]));
+  validateMainProtection(protection);
+  const branchRules = JSON.parse(command("gh", [
+    "api", `repos/${REPO}/rules/branches/main`,
+  ]));
+  validateMainRules(branchRules);
+  assertVerifiedTagPolicy();
+}
+
+function planPullRequestVerification({ candidateRoot, base, head }) {
+  candidateRoot = assertCheckout(candidateRoot, head);
+  const changedPaths = listChangedPaths(candidateRoot, base, head);
+  const screenshot = changedPaths.find(isUnsupportedScreenshotPath);
+  if (screenshot) {
+    throw new Error(`Screenshot changes require separately authenticated provenance: ${screenshot}`);
+  }
+  const shouldVerify = changedPaths.some(isDocumentationScopePath);
+  if (shouldVerify) {
+    validateDocumentationDiff(candidateRoot, base, head, { allowSourceChanges: true });
+  }
+  writeOutput("verify_docs", String(shouldVerify));
+  if (!shouldVerify) console.log("No documentation paths changed; Copilot and policy credentials are not needed.");
+  return shouldVerify;
 }
 
 function assertNoWorkspaceHooks(root) {
@@ -330,15 +444,23 @@ function removeWorktree(root, directory) {
 async function verifyPullRequest({ trustedRoot, candidateRoot, base, head }) {
   trustedRoot = assertCheckout(trustedRoot, base);
   candidateRoot = assertCheckout(candidateRoot, head);
-  if (!process.env.GITHUB_HEAD_REF?.startsWith("docs/maintenance-") ||
-      process.env.GITHUB_HEAD_REPOSITORY !== REPO) {
-    throw new Error("Only same-repository docs-maintenance pull requests are verified here");
-  }
   if (git(trustedRoot, "rev-parse", "refs/remotes/origin/main") !== base) {
     throw new Error("main advanced after this pull request verification event; refusing a stale check");
   }
-  const files = validateDocumentationDiff(candidateRoot, base, head);
-  if (!files.length) throw new Error("Documentation pull request has no file changes");
+  const changedPaths = listChangedPaths(candidateRoot, base, head);
+  if (!changedPaths.some(isDocumentationScopePath)) {
+    console.log("No documentation paths changed; the docs verification check passes without invoking Copilot.");
+    return;
+  }
+  const screenshot = changedPaths.find(isUnsupportedScreenshotPath);
+  if (screenshot) {
+    throw new Error(`Screenshot changes require separately authenticated provenance: ${screenshot}`);
+  }
+  validateDocumentationDiff(candidateRoot, base, head, { allowSourceChanges: true });
+  if (process.env.GITHUB_HEAD_REPOSITORY !== REPO) {
+    throw new Error("Documentation changes from forks cannot use the private Copilot credential");
+  }
+  assertAutomationPolicy();
   const reportBase = findLastPublishedSource(candidateRoot, base) ?? base;
   const mode = reportBase === base ? "baseline" : "affected";
   const reportPaths = listChangedPaths(candidateRoot, reportBase, head);
@@ -514,6 +636,7 @@ function readBundle(bundleDirectory) {
 function publish(root, bundleDirectory) {
   root = realpathSync(root);
   const { manifest, patch } = readBundle(bundleDirectory);
+  assertAutomationPolicy();
   if (git(root, "rev-parse", "refs/remotes/origin/main") !== manifest.sourceHead) {
     throw new Error("main advanced after verification; refusing to publish a stale proposal");
   }
@@ -581,6 +704,7 @@ function publish(root, bundleDirectory) {
 function recordVerifiedSource(root, source) {
   root = realpathSync(root);
   assertSha(source, "source");
+  assertAutomationPolicy();
   if (git(root, "rev-parse", "refs/remotes/origin/main") !== source) {
     throw new Error("main advanced after verification; refusing to record a stale source revision");
   }
@@ -620,6 +744,21 @@ function parseOptions(args, required) {
 
 export async function main(args) {
   const [action, ...rest] = args;
+  if (action === "check-policy") {
+    parseOptions(rest, ["--root"]);
+    assertAutomationPolicy();
+    console.log("Docs auto-merge and baseline tag protections are active.");
+    return;
+  }
+  if (action === "plan-pr") {
+    const options = parseOptions(rest, ["--candidate-root", "--base", "--head"]);
+    planPullRequestVerification({
+      candidateRoot: options["--candidate-root"],
+      base: options["--base"],
+      head: options["--head"],
+    });
+    return;
+  }
   if (action === "maintain") {
     const options = parseOptions(rest, ["--root", "--output"]);
     await maintain(options["--root"], options["--output"]);
@@ -650,7 +789,7 @@ export async function main(args) {
     });
     return;
   }
-  throw new Error("Usage: runtime.mjs maintain --root <checkout> --output <bundle-dir> | publish --root <checkout> --bundle <bundle-dir> | record-state --root <checkout> --source <sha> | verify-pr --trusted-root <checkout> --candidate-root <checkout> --base <sha> --head <sha>");
+  throw new Error("Usage: runtime.mjs check-policy --root <checkout> | plan-pr --candidate-root <checkout> --base <sha> --head <sha> | maintain --root <checkout> --output <bundle-dir> | publish --root <checkout> --bundle <bundle-dir> | record-state --root <checkout> --source <sha> | verify-pr --trusted-root <checkout> --candidate-root <checkout> --base <sha> --head <sha>");
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

@@ -10,10 +10,11 @@ The workflow has three trust boundaries:
 
 1. The writer runs the pinned GitHub Copilot CLI in a non-interactive session
    with only read, search, and edit tools. Shell, MCP, URL access, temp-file
-   access, and custom repository instructions are disabled. The runtime checks
+   access, custom repository instructions, folder trust, workspace hooks, and
+   workspace MCP servers are disabled. The runtime checks
    every path and file mode; only root README/DEVELOPMENT/CONTRIBUTING/
-   REQUIREMENTS, Markdown guides under `website/src/content/docs/`, and
-   allowlisted game-image paths can be proposed.
+   REQUIREMENTS and Markdown guides under `website/src/content/docs/` can be
+   proposed. Binary images are not writable or eligible for automatic review.
 2. The fact-checker runs as a new Copilot CLI process in a clean detached
    checkout. It has read/search tools only. The runtime captures its bounded
    JSON response outside the checkout, and `fact-check.mjs` verifies the
@@ -25,10 +26,19 @@ The workflow has three trust boundaries:
 3. Only a separate publish job receives a repository-scoped GitHub App token.
    It checks the source revision is still current, verifies the artifact hash
    and reconstructed content tree, pushes a docs-only branch, opens a PR, and
-   requests GitHub auto-merge. It never directly updates `main`, disables
-   required checks, or bypasses branch protection. The PR workflow repeats the
-   checker and website verification on the exact PR head. A failed gate leaves
-   the last merged/published site unchanged.
+   requests GitHub auto-merge only after API checks confirm strict `main`
+   protection requires the exact docs-verification check, requires no human
+   approval, and blocks force-pushes/deletion. It never directly updates
+   `main`, disables required checks, or bypasses branch protection. A separate
+   configuration job checks the protected tag rules before the AI job can run.
+   The docs check runs on every pull request so its required status exists even
+   when no documentation changed; for such PRs it passes without invoking
+   Copilot or minting a policy token. Documentation changes, including mixed source-and-documentation
+   PRs, are independently checked on the exact PR head; changes to automation
+   policy cannot be combined with documentation changes. Changes under
+   `website/public/images/game/` fail closed until a separate authenticated
+   screenshot-provenance workflow exists. A failed gate leaves the last
+   merged/published site unchanged.
 
 ## One-time repository configuration
 
@@ -40,28 +50,38 @@ Add these Actions secrets without putting their values in the repository:
 | `DOCS_AUTOMATION_APP_ID` | The GitHub App ID for the automation identity. |
 | `DOCS_AUTOMATION_APP_PRIVATE_KEY` | The private key for that App. Rotate it using the organization's normal secret-rotation process. |
 
-Install the App on this repository with **Contents: read and write** and
-**Pull requests: read and write**. The workflow requests only write access to
-contents and pull requests in its short-lived publish-job token. Do not grant
-the App permission to bypass branch protections or rulesets.
+Install the App on this repository with **Contents: read and write**,
+**Pull requests: read and write**, and **Administration: read** so the runtime
+can confirm branch and tag protection before publishing. The workflow requests
+administration read access in separate preflight and same-repository verifier
+steps; the publish-job token requests contents and pull-request writes plus
+administration read. The verifier's runtime strips this token before starting
+Copilot or running the candidate build. Do not grant the App permission to
+bypass branch protections or rulesets.
 
-Protect the `docs-maintenance-verified-*` tag namespace with a tag ruleset:
-only the automation App may create those tags, and nobody may update or delete
-them. A tag is written only after a full successful review found no docs
-changes; merged docs PR titles carry the verified source revision otherwise.
-This durable anchor prevents repeated full baselines while preserving the last
-successfully published source boundary.
+Protect `main` with classic branch protection that requires branches to be up
+to date, requires the `Docs maintenance / Verify docs maintenance PR` check
+from GitHub Actions, and requires zero PR approvals. Also block force pushes
+and deletion. No active repository or inherited ruleset may require human
+approvals or code-owner reviews. The runtime reads both classic protection and
+effective branch rules before using tags or requesting auto-merge; an
+unavailable policy API or a missing rule fails closed.
 
-Enable **Allow auto-merge** in repository settings. Keep the existing rulesets
-and branch protections in force, and require the `Docs maintenance / Verify
-docs maintenance PR` check if the repository requires checks for merges. Do not
-add a required human approval for this bot if the intended policy is unattended
-publication. If a protection, required check, or repository setting prevents
-auto-merge, the PR remains unmerged and the existing published site is retained;
-the automation does not work around the setting.
-Require branches to be up to date before merge, or use a merge queue that
-revalidates the current base; otherwise `main` could advance after the PR check
-and before auto-merge.
+Protect `refs/tags/docs-maintenance-verified-*` using two active tag rulesets:
+one permits creation only to the automation App, and a separate ruleset with no
+bypass actors blocks updates and deletions for everyone. The runtime checks
+both policies before using or writing these tags. A tag is written only after
+a full successful review found no docs changes; merged docs PR titles carry
+the verified source revision otherwise. This durable anchor prevents repeated
+full baselines while preserving the last successfully published source
+boundary.
+
+Enable **Allow auto-merge** in repository settings. The workflow requires
+classic branch protection with the strict check above; merge-queue-only setups
+are not supported because this workflow does not subscribe to `merge_group`.
+The runtime will not merge when protection cannot be read, is incomplete, or
+requires human review. Keep repository protections in force; the automation
+never works around them.
 
 Run **Docs maintenance** with `force_baseline: true` once after the docs site
 and verifier are merged to seed the full guide baseline. A normal push only

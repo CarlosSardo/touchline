@@ -23,9 +23,8 @@ You may edit only these documentation files:
 - `CONTRIBUTING.md`
 - `REQUIREMENTS.md`
 - Markdown files under `website/src/content/docs/`
-- PNG, JPEG, GIF, or WebP files under `website/public/images/game/`
 
-Do not edit source code, tests, workflow files, agent profiles, scripts,
+Do not edit images, source code, tests, workflow files, agent profiles, scripts,
 configuration, dependencies, generated site output, or any other path. Do not
 create symlinks, executable files, or binary assets. Do not run shell commands,
 tests, builds, browsers, or external tools. The trusted runtime checks every
