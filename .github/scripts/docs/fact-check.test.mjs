@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { main, validateReport } from "./fact-check.mjs";
+import { isImplementationEvidencePath, main, validateReport } from "./fact-check.mjs";
 
 const script = fileURLToPath(new URL("./fact-check.mjs", import.meta.url));
 
@@ -54,6 +54,44 @@ test("valid baseline and CLI success are revision-pinned", (t) => {
     "--head", f.options.head, "--base", f.options.base], { encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
   assert.equal(JSON.parse(result.stdout).result, "pass");
+});
+
+test("artwork and its design source cannot substitute for current implementation evidence", () => {
+  for (const name of ["docs/scripts/social-card.html", "docs/public/images/social/touchline-docs.png"]) {
+    assert.equal(isImplementationEvidencePath(name), false, name);
+  }
+  for (const name of ["docs/src/layouts/BaseLayout.astro", "website/src/layouts/BaseLayout.astro", "server/db.ts"]) {
+    assert.equal(isImplementationEvidencePath(name), true, name);
+  }
+});
+
+test("site relocation preserves full current-guide evidence and only exempts identical moved binaries", (t) => {
+  const f = setup(t, {
+    "website/package.json": "{}\n",
+    "website/package-lock.json": "{}\n",
+    "website/src/content/docs/guide.md": "The counter starts at one.\n",
+    "website/src/lib/count.ts": "export const count = 1;\n",
+    "website/public/images/game/shot.png": Buffer.from([137, 80, 78, 71, 0]),
+  });
+  f.git("mv", "website", "docs");
+  const head = f.commit();
+  f.options.head = head;
+  f.report.headSha = head;
+  const names = ["docs/src/content/docs/guide.md", "docs/src/lib/count.ts"];
+  f.report.claims = [f.claim(names)];
+  f.report.coverage.reviewedFiles = names;
+  assert.equal(f.run().requiredFiles, 1);
+  f.report.claims = [f.claim(["docs/src/lib/count.ts"])];
+  f.report.coverage.reviewedFiles = ["docs/src/lib/count.ts"];
+  assert.throws(f.run, /Missing material coverage/);
+  f.report.claims = [f.claim(names)];
+  f.report.coverage.reviewedFiles = names;
+  f.put("docs/public/images/game/shot.png", Buffer.from([137, 80, 78, 71, 0, 1]));
+  f.options.head = f.commit();
+  f.report.headSha = f.options.head;
+  assert.throws(f.run, /Missing material coverage/);
+  f.report.coverage.reviewedFiles.push("docs/public/images/game/shot.png");
+  assert.throws(f.run, /Binary evidence/);
 });
 
 for (const [name, mutate, message] of [
