@@ -15,12 +15,15 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   assertSha,
+  documentationSite,
   isAllowedDocumentationPath,
   isDocumentationScopePath,
   isRelevantSourceChange,
   isUnsupportedScreenshotPath,
   listChangedPaths,
   requiresFullBaseline,
+  reviewedArtworkPaths,
+  unchangedSiteMoves,
   validateDocumentationDiff,
   validateWorkingTree,
 } from "./maintenance.mjs";
@@ -92,7 +95,7 @@ function planMaintenance(root) {
   }
   const base = baseForEvent(event, head, root);
   const changedPaths = listChangedPaths(root, base, head);
-  const screenshot = changedPaths.find(isUnsupportedScreenshotPath);
+  const screenshot = reviewPaths(root, base, head).find(isUnsupportedScreenshotPath);
   if (screenshot) {
     throw new Error(`Screenshot changes require separately authenticated provenance: ${screenshot}`);
   }
@@ -122,15 +125,17 @@ function assertCopilotVersion() {
 }
 
 export function copilotArguments(agent, prompt, { readOnly = false, root } = {}) {
-  const availableTools = readOnly ? "read,search" : "read,search,edit";
-  const permission = readOnly ? "read,search" : "write";
+  if (!["docs-writer", "docs-fact-checker"].includes(agent)) {
+    throw new Error("Unsupported documentation agent");
+  }
+  const availableTools = readOnly ? "view,rg,glob" : "view,rg,glob,apply_patch";
   return [
     "--no-custom-instructions",
     ...(root ? ["-C", root] : []),
     "-p", prompt,
-    `--agent=${agent}`,
     `--available-tools=${availableTools}`,
-    `--allow-tool=${permission}`,
+    ...(readOnly ? ["--deny-tool=write"] : ["--allow-tool=write"]),
+    "--deny-tool=shell",
     "--disable-builtin-mcps",
     "--disallow-temp-dir",
     "--no-ask-user",
@@ -194,7 +199,7 @@ function assertAutomationPolicy() {
 function planPullRequestVerification({ candidateRoot, base, head }) {
   candidateRoot = assertCheckout(candidateRoot, head);
   const changedPaths = listChangedPaths(candidateRoot, base, head);
-  const screenshot = changedPaths.find(isUnsupportedScreenshotPath);
+  const screenshot = reviewPaths(candidateRoot, base, head).find(isUnsupportedScreenshotPath);
   if (screenshot) {
     throw new Error(`Screenshot changes require separately authenticated provenance: ${screenshot}`);
   }
@@ -220,7 +225,12 @@ function runCopilot(root, agent, prompt, { readOnly = false } = {}) {
     throw new Error("COPILOT_GITHUB_TOKEN is required for unattended Copilot CLI");
   }
   assertNoWorkspaceHooks(root);
-  const args = copilotArguments(agent, prompt, { readOnly, root });
+  if (!["docs-writer", "docs-fact-checker"].includes(agent)) {
+    throw new Error("Unsupported documentation agent");
+  }
+  const profilePath = fileURLToPath(new URL(`../../agents/${agent}.agent.md`, import.meta.url));
+  const profile = readFileSync(profilePath, "utf8").replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, "");
+  const args = copilotArguments(agent, `${profile}\n\n${prompt}`, { readOnly, root });
   const env = { ...process.env };
   delete env.GH_TOKEN;
   delete env.GITHUB_TOKEN;
@@ -295,23 +305,30 @@ export function reportHasPassShape(report, head, base) {
   return report;
 }
 
-function captureReport(output, reportPath) {
-  let report;
-  try {
-    report = JSON.parse(output);
-  } catch {
-    throw new Error("Fact-checker response was not a single valid JSON object");
-  }
+export function captureReport(output, reportPath) {
   if (Buffer.byteLength(output) > MAX_REPORT_BYTES) {
     throw new Error(`Fact-checker response exceeds ${MAX_REPORT_BYTES} bytes`);
   }
-  reportHasPassShape(report, report.headSha, report.baseSha);
+  let report;
+  try {
+    const fenced = /^```(?:json)?\s*\n([\s\S]*)\n```\s*$/.exec(output);
+    report = JSON.parse(fenced ? fenced[1] : output);
+  } catch {
+    const format = output.startsWith("```") ? "fenced text" :
+      output.startsWith("{") ? "incomplete or multiple JSON objects" : "non-JSON text";
+    throw new Error(`Fact-checker response was not a single valid JSON object (${format}, ${Buffer.byteLength(output)} bytes)`);
+  }
+  reportHasPassShape(report, report?.headSha, report?.baseSha);
   writeFileSync(reportPath, `${JSON.stringify(report)}\n`, { flag: "wx", mode: 0o600 });
   return report;
 }
 
 function stageWriterOutput(root, sourceHead) {
   const { files } = validateWorkingTree(root);
+  const siteRoot = documentationSite(root);
+  if (files.some((name) => /^(docs|website)\//.test(name) && !name.startsWith(`${siteRoot}/`))) {
+    throw new Error("Writer changed documentation outside the selected site root");
+  }
   if (!files.length) return { files, candidateHead: sourceHead, patch: Buffer.alloc(0) };
   command("git", ["--no-pager", "-C", root, "add", "-A", "--", ...files]);
   const checked = validateWorkingTree(root);
@@ -356,8 +373,9 @@ function cleanBuildEnv() {
 }
 
 function runDocsVerification(root) {
-  const packageJson = path.join(root, "website", "package.json");
-  const packageLock = path.join(root, "website", "package-lock.json");
+  const siteRoot = documentationSite(root);
+  const packageJson = path.join(root, siteRoot, "package.json");
+  const packageLock = path.join(root, siteRoot, "package-lock.json");
   try {
     if (!lstatSync(packageJson).isFile() || !lstatSync(packageLock).isFile()) {
       throw new Error("The docs site manifests must be regular files");
@@ -366,12 +384,20 @@ function runDocsVerification(root) {
     throw new Error("The docs site and its package-lock.json are required for verification");
   }
   const env = cleanBuildEnv();
-  command("npm", ["ci", "--prefix", path.join(root, "website")], {
+  command("npm", ["ci", "--prefix", path.join(root, siteRoot)], {
     cwd: root, env, maxBuffer: 16 * 1024 * 1024,
   });
-  command("npm", ["--prefix", path.join(root, "website"), "run", "verify"], {
+  command("npm", ["--prefix", path.join(root, siteRoot), "run", "verify"], {
     cwd: root, env, maxBuffer: 32 * 1024 * 1024,
   });
+}
+
+function reviewPaths(root, base, head) {
+  const moves = unchangedSiteMoves(root, base, head);
+  const movedPaths = new Set([...moves.keys(), ...moves.values()]);
+  const artwork = reviewedArtworkPaths(root, head);
+  return [...new Set(listChangedPaths(root, base, head)
+    .filter((name) => !movedPaths.has(name)).map((name) => artwork.get(name) ?? name))];
 }
 
 function reportWithValidator({ root, candidateHead, reportBase, mode, reportPath }) {
@@ -414,7 +440,7 @@ async function verifyPullRequest({ trustedRoot, candidateRoot, base, head }) {
     console.log("No documentation paths changed; the docs verification check passes without invoking Copilot.");
     return;
   }
-  const screenshot = changedPaths.find(isUnsupportedScreenshotPath);
+  const screenshot = reviewPaths(candidateRoot, base, head).find(isUnsupportedScreenshotPath);
   if (screenshot) {
     throw new Error(`Screenshot changes require separately authenticated provenance: ${screenshot}`);
   }
@@ -425,7 +451,7 @@ async function verifyPullRequest({ trustedRoot, candidateRoot, base, head }) {
   assertAutomationPolicy();
   const reportBase = base;
   const mode = "baseline";
-  const reportPaths = listChangedPaths(candidateRoot, reportBase, head);
+  const reportPaths = reviewPaths(candidateRoot, reportBase, head);
   const privateDirectory = mkdtempSync(path.join(os.tmpdir(), "touchline-docs-pr-report-"));
   const checkerDirectory = mkdtempSync(path.join(os.tmpdir(), "touchline-docs-pr-checker-"));
   const reportPath = path.join(privateDirectory, "fact-check-report.json");
@@ -485,7 +511,7 @@ async function maintain(root, outputDirectory) {
       sourceHead, reportBase, mode, changedPaths: changedSourcePaths, feedback,
     }));
     const candidate = stageWriterOutput(root, sourceHead);
-    const candidatePaths = listChangedPaths(root, reportBase, candidate.candidateHead);
+    const candidatePaths = reviewPaths(root, reportBase, candidate.candidateHead);
     const checkerDirectory = mkdtempSync(path.join(os.tmpdir(), "touchline-docs-checker-"));
     const privateDirectory = mkdtempSync(path.join(os.tmpdir(), "touchline-docs-report-"));
     const reportPath = path.join(privateDirectory, "fact-check-report.json");
@@ -536,7 +562,7 @@ async function maintain(root, outputDirectory) {
       writeOutput("candidate_head", candidate.candidateHead);
       writeOutput("report_base", reportBase);
       writeOutput("review_mode", mode);
-      console.log(`Fact-check and website verification passed at ${candidate.candidateHead}.`);
+      console.log(`Fact-check and documentation site verification passed at ${candidate.candidateHead}.`);
       return;
     } catch (error) {
       if (attempt === 3) {
@@ -608,7 +634,7 @@ function publish(root, bundleDirectory) {
     `- Fact-check report SHA-256: \`${manifest.reportSha256}\``,
     `- Verification attempt: ${manifest.attempt}/3`,
     "",
-    "The independent checker and `npm --prefix website run verify` passed before this pull request was opened. The workflow revalidates the pull request head. Auto-merge is requested without bypassing branch protection.",
+    "The independent checker and the selected documentation site's `npm run verify` passed before this pull request was opened. The workflow revalidates the pull request head. Auto-merge is requested without bypassing branch protection.",
   ].join("\n");
   if (git(root, "rev-parse", "HEAD") !== manifest.sourceHead) {
     throw new Error("Publish checkout does not match the verified source revision");

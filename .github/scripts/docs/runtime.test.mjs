@@ -6,6 +6,7 @@ import path from "node:path";
 import test from "node:test";
 import {
   checkerPrompt,
+  captureReport,
   copilotArguments,
   main,
   reportHasPassShape,
@@ -40,13 +41,15 @@ test.afterEach(() => {
 
 test("writer invocation has no shell, URL, MCP, or all-tools capability", () => {
   const args = copilotArguments("docs-writer", "Update the guides", { root: "/checkout" });
-  assert.ok(args.includes("--available-tools=read,search,edit"));
+  assert.ok(args.includes("--available-tools=view,rg,glob,apply_patch"));
   assert.ok(args.includes("--allow-tool=write"));
   assert.ok(args.includes("--disable-builtin-mcps"));
   assert.ok(args.includes("--disallow-temp-dir"));
   assert.ok(args.includes("--no-ask-user"));
   assert.ok(!args.includes("--trust-folder"));
-  assert.ok(!args.some((arg) => /shell|url|mcp-server=|allow-all/.test(arg) && arg !== "--disable-builtin-mcps"));
+  assert.ok(args.includes("--deny-tool=shell"));
+  assert.ok(!args.some((arg) => /allow-tool=shell|allow-url|mcp-server=|allow-all/.test(arg)));
+  assert.ok(!args.some((arg) => arg.startsWith("--agent")));
   assert.ok(!args.includes("--allow-all"));
 });
 
@@ -55,10 +58,11 @@ test("checker invocation is read-only and uses an independent agent profile", ()
     readOnly: true,
     root: "/fresh-checkout",
   });
-  assert.ok(args.includes("--available-tools=read,search"));
-  assert.ok(args.includes("--allow-tool=read,search"));
+  assert.ok(args.includes("--available-tools=view,rg,glob"));
+  assert.ok(args.includes("--deny-tool=write"));
+  assert.ok(args.includes("--deny-tool=shell"));
   assert.ok(!args.includes("--allow-tool=write"));
-  assert.ok(!args.includes("--available-tools=read,search,edit"));
+  assert.ok(!args.includes("--available-tools=view,rg,glob,apply_patch"));
   assert.ok(!args.includes("--trust-folder"));
 });
 
@@ -148,7 +152,7 @@ for (const invalidReport of [false, true]) {
         if (args[0] === "--version") { console.log("1.0.105"); process.exit(0); }
         appendFileSync(process.env.TEST_TRACE, JSON.stringify({ tool: "copilot", args }) + "\\n");
         const prompt = args[args.indexOf("-p") + 1];
-        if (args.includes("--agent=docs-writer")) { console.log("No changes needed"); process.exit(0); }
+        if (prompt.includes("You maintain Touchline's user-facing documentation.")) { console.log("No changes needed"); process.exit(0); }
         if (process.env.TEST_INVALID_REPORT === "true") { console.log("{}"); process.exit(0); }
         console.log(JSON.stringify({
           schemaVersion: 1,
@@ -201,7 +205,7 @@ for (const invalidReport of [false, true]) {
       assert.match(prompt, new RegExp(sourceHead));
       assert.match(prompt, /complete current documentation/);
       assert.doesNotMatch(prompt, /Review mode: affected/);
-      if (args.includes("--agent=docs-writer")) {
+      if (prompt.includes("You maintain Touchline's user-facing documentation.")) {
         assert.match(prompt, new RegExp(`Review base: ${sourceBase}`));
         assert.match(prompt, /feature\.ts/);
       } else {
@@ -223,6 +227,29 @@ for (const invalidReport of [false, true]) {
     assert.equal(git(root, "rev-parse", "HEAD^{tree}"), beforeTree);
     assert.equal(git(root, "status", "--porcelain"), "");
     assert.equal(git(root, "tag", "--list"), `docs-maintenance-verified-${sourceBase}`);
+  });
+
+  test("checker parsing accepts only a complete object, optionally entirely fenced", () => {
+    const directory = mkdtempSync(path.join(os.tmpdir(), "touchline-docs-response-test-"));
+    temporaryDirectories.push(directory);
+    const report = {
+      schemaVersion: 1, headSha: head, baseSha: base,
+      claims: [{ status: "supported" }], omissions: [],
+      coverage: { reviewedFiles: ["README.md"], unreviewedFiles: [] },
+    };
+    const raw = JSON.stringify(report);
+    for (const [index, response] of [raw, `\`\`\`json\n${raw}\n\`\`\``].entries()) {
+      assert.deepEqual(captureReport(response, path.join(directory, `report-${index}.json`)), report);
+    }
+    for (const response of [
+      `Here is the report:\n${raw}`, `${raw}\nStats: 1 turn`, `${raw}\n${raw}`,
+      `\`\`\`json\n${raw}\n\`\`\`\nDone`, "{", "Unable to inspect files",
+    ]) {
+      assert.throws(() => captureReport(response, path.join(directory, "bad.json")), /not a single valid JSON object/);
+    }
+    assert.throws(() => captureReport(JSON.stringify({
+      ...report, claims: [{ status: "unverified" }],
+    }), path.join(directory, "unsupported.json")), /unsupported claim/);
   });
 }
 
