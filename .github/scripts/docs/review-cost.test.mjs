@@ -36,11 +36,13 @@ test("reuse binds independent report to exact successful workflow, revision, bas
   assert.notEqual(policyDigest([["runtime", "old"]]), policyDigest([["runtime", "new"]]));
 });
 
-test("three conservative daily starts include failures, cancellations and rerun attempts", () => {
+test("one conservative daily start includes failures, cancellations and rerun attempts", () => {
   const options = { prNumber: 35, now: new Date("2026-10-29T18:00:00Z"), currentRunId: 99, currentAttempt: 1 };
   assert.equal(assertDailyReviewBudget([], options), 0);
-  assert.equal(assertDailyReviewBudget([{ ...run, conclusion: "failure" }], options), 1);
-  assert.equal(assertDailyReviewBudget([{ ...run, id: 99, run_attempt: 3 }], { ...options, currentAttempt: 3 }), 2);
+  assert.throws(() => assertDailyReviewBudget([{ ...run, conclusion: "failure" }], options), /cap reached/);
+  assert.equal(assertDailyReviewBudget([{ ...run, id: 99 }], options), 0);
+  assert.throws(() => assertDailyReviewBudget([{ ...run, id: 99, run_attempt: 2 }],
+    { ...options, currentAttempt: 2 }), /cap reached/);
   assert.throws(() => assertDailyReviewBudget([{ ...run, run_attempt: 3 }], options), /cap reached/);
   assert.throws(() => assertDailyReviewBudget([
     run, { ...run, id: 13, conclusion: "cancelled" }, { ...run, id: 14, conclusion: "failure" },

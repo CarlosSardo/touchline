@@ -126,7 +126,7 @@ a fresh budgeted review, and malformed/inaccessible provenance fails closed.
 Neither cached nor fresh reports replace current deterministic site checks.
 The read-only Actions token is removed from build and agent subprocesses.
 
-At most three fresh PR-review workflow starts per PR per UTC day may reach AI.
+At most one fresh PR-review workflow start per PR per UTC day may reach AI.
 The cap conservatively counts previous failed/cancelled runs and rerun attempts,
 including runs that stopped before AI; authenticated reuse is checked before the
 cap and does not call the model. At the cap, the required check fails with an

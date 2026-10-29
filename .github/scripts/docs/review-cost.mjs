@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-export const MAX_DAILY_PR_REVIEWS = 3;
+export const MAX_DAILY_PR_REVIEWS = 1;
 export const VERDICT_FILE = "docs-verdict.json";
 const WORKFLOW = ".github/workflows/docs-maintenance.yml";
 
