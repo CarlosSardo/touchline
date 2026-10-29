@@ -49,7 +49,7 @@ jobs:
           repositories: ${{ github.event.repository.name }}
           permission-administration: read
 
-      - name: Require safe branch and tag protections
+      - name: Require safe branch protections
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           DOCS_AUTOMATION_APP_ID: ${{ secrets.DOCS_AUTOMATION_APP_ID }}
@@ -65,8 +65,6 @@ jobs:
       contents: read
     outputs:
       publish: ${{ steps.maintain.outputs.publish }}
-      no_change: ${{ steps.maintain.outputs.no_change }}
-      verified_source: ${{ steps.maintain.outputs.verified_source }}
     defaults:
       run:
         shell: bash
@@ -112,7 +110,7 @@ jobs:
   publish:
     name: Open protected docs pull request
     needs: maintain
-    if: needs.maintain.outputs.publish == 'true' || needs.maintain.outputs.no_change == 'true'
+    if: needs.maintain.outputs.publish == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -155,13 +153,6 @@ jobs:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           DOCS_AUTOMATION_APP_ID: ${{ secrets.DOCS_AUTOMATION_APP_ID }}
         run: node .github/scripts/docs/runtime.mjs publish --root "$GITHUB_WORKSPACE" --bundle "$RUNNER_TEMP/docs-bundle"
-
-      - name: Record a successful no-change verification
-        if: needs.maintain.outputs.no_change == 'true'
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          DOCS_AUTOMATION_APP_ID: ${{ secrets.DOCS_AUTOMATION_APP_ID }}
-        run: node .github/scripts/docs/runtime.mjs record-state --root "$GITHUB_WORKSPACE" --source "${{ needs.maintain.outputs.verified_source }}"
 
   verify-docs-pr:
     name: Verify docs maintenance PR

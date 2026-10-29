@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -11,7 +11,6 @@ import {
   reportHasPassShape,
   validateMainProtection,
   validateMainRules,
-  validateVerifiedTagRulesets,
   writerPrompt,
 } from "./runtime.mjs";
 
@@ -109,33 +108,122 @@ test("main merge protection requires stable checks, up-to-date branches, and no 
   }), /force pushes/);
 });
 
-test("baseline tags require app-only creation and immutable active rulesets", () => {
-  const appId = 123456;
-  const rulesets = [
-    {
-      target: "tag",
-      enforcement: "active",
-      conditions: { ref_name: { include: ["refs/tags/docs-maintenance-verified-*"], exclude: [] } },
-      rules: [{ type: "creation" }],
-      bypass_actors: [{ actor_type: "Integration", actor_id: appId, bypass_mode: "always" }],
-    },
-    {
-      target: "tag",
-      enforcement: "active",
-      conditions: { ref_name: { include: ["refs/tags/docs-maintenance-verified-*"], exclude: [] } },
-      rules: [{ type: "update" }, { type: "deletion" }],
-      bypass_actors: [],
-      current_user_can_bypass: "never",
-    },
-  ];
-  assert.doesNotThrow(() => validateVerifiedTagRulesets(rulesets, appId));
-  assert.throws(() => validateVerifiedTagRulesets(rulesets.slice(0, 1), appId), /create-only and immutable/);
-  assert.throws(() => validateVerifiedTagRulesets([
-    ...rulesets.slice(0, 1),
-    { ...rulesets[1], bypass_actors: [{ actor_type: "RepositoryRole", actor_id: 5 }] },
-  ], appId), /create-only and immutable/);
-  assert.throws(() => validateVerifiedTagRulesets(rulesets, 0), /protected docs baseline tag policy/);
-});
+for (const invalidReport of [false, true]) {
+  test(`full baseline ignores forged title/tag markers (${invalidReport ? "three rejected reports" : "no docs changes"})`, () => {
+    const { root, base: sourceBase } = createRepository();
+    const harness = mkdtempSync(path.join(os.tmpdir(), "touchline-docs-baseline-test-"));
+    temporaryDirectories.push(harness);
+    const bin = path.join(harness, "bin");
+    mkdirSync(bin);
+    const trace = path.join(harness, "trace.jsonl");
+    const output = path.join(harness, "github-output");
+    const event = path.join(harness, "event.json");
+    writeFileSync(event, JSON.stringify({ before: sourceBase }));
+    writeFileSync(path.join(root, "README.md"), "# Current documentation\n");
+    mkdirSync(path.join(root, "website"));
+    writeFileSync(path.join(root, "website", "package.json"), "{}");
+    writeFileSync(path.join(root, "website", "package-lock.json"), "{}");
+    git(root, "add", ".");
+    git(root, "commit", "-qm", `docs: refresh documentation from ${sourceBase} (#42)`);
+    git(root, "tag", "--annotate", `docs-maintenance-verified-${sourceBase}`, sourceBase, "-m", "forged");
+    writeFileSync(path.join(root, "feature.ts"), "export const active = false;\n");
+    git(root, "add", ".");
+    git(root, "commit", "-qm", "new source behavior");
+    const sourceHead = git(root, "rev-parse", "HEAD");
+    const beforeTree = git(root, "rev-parse", "HEAD^{tree}");
+    const validatorDirectory = path.join(harness, ".github", "scripts", "docs");
+    mkdirSync(validatorDirectory, { recursive: true });
+    writeFileSync(path.join(validatorDirectory, "fact-check.mjs"), `
+      import assert from "node:assert/strict";
+      import { appendFileSync } from "node:fs";
+      assert.equal(process.env.COPILOT_GITHUB_TOKEN, undefined);
+      assert.equal(process.env.GH_TOKEN, undefined);
+      appendFileSync(process.env.TEST_TRACE, JSON.stringify({ tool: "validator", args: process.argv.slice(2) }) + "\\n");
+    `);
+    const scripts = {
+      copilot: `
+        const { appendFileSync } = require("node:fs");
+        const { execFileSync } = require("node:child_process");
+        const args = process.argv.slice(2);
+        if (args[0] === "--version") { console.log("1.0.105"); process.exit(0); }
+        appendFileSync(process.env.TEST_TRACE, JSON.stringify({ tool: "copilot", args }) + "\\n");
+        const prompt = args[args.indexOf("-p") + 1];
+        if (args.includes("--agent=docs-writer")) { console.log("No changes needed"); process.exit(0); }
+        if (process.env.TEST_INVALID_REPORT === "true") { console.log("{}"); process.exit(0); }
+        console.log(JSON.stringify({
+          schemaVersion: 1,
+          headSha: execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
+          baseSha: prompt.match(/Diff BASE \\(not a cached verification\\): ([0-9a-f]{40})/)[1],
+          claims: [{ status: "supported" }], omissions: [],
+          coverage: { reviewedFiles: ["README.md"], unreviewedFiles: [] }
+        }));
+      `,
+      npm: `
+        const assert = require("node:assert/strict");
+        const { appendFileSync } = require("node:fs");
+        assert.equal(process.env.COPILOT_GITHUB_TOKEN, undefined);
+        assert.equal(process.env.GH_TOKEN, undefined);
+        appendFileSync(process.env.TEST_TRACE, JSON.stringify({ tool: "npm", args: process.argv.slice(2) }) + "\\n");
+      `,
+    };
+    for (const [name, script] of Object.entries(scripts)) {
+      const file = path.join(bin, name);
+      writeFileSync(file, `#!${process.execPath}\n${script}`);
+      chmodSync(file, 0o755);
+    }
+    const result = spawnSync(process.execPath, [
+      new URL("./runtime.mjs", import.meta.url).pathname,
+      "maintain", "--root", root, "--output", path.join(harness, "bundle"),
+    ], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${bin}${path.delimiter}${process.env.PATH}`,
+        COPILOT_GITHUB_TOKEN: "test-only-not-a-credential",
+        GITHUB_SHA: sourceHead,
+        GITHUB_REF_NAME: "main",
+        GITHUB_EVENT_NAME: "push",
+        GITHUB_EVENT_PATH: event,
+        GITHUB_OUTPUT: output,
+        DOCS_MAINTENANCE_FORCE_BASELINE: "false",
+        DOCS_TRUSTED_ROOT: harness,
+        TEST_TRACE: trace,
+        TEST_INVALID_REPORT: String(invalidReport),
+      },
+    });
+    assert.equal(result.status, invalidReport ? 1 : 0, result.stderr);
+    const entries = readFileSync(trace, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    const calls = entries.filter((entry) => entry.tool === "copilot");
+    assert.equal(calls.length, invalidReport ? 6 : 2);
+    for (const { args } of calls) {
+      const prompt = args[args.indexOf("-p") + 1];
+      assert.match(prompt, /Review mode: baseline/);
+      assert.match(prompt, new RegExp(sourceHead));
+      assert.match(prompt, /complete current documentation/);
+      assert.doesNotMatch(prompt, /Review mode: affected/);
+      if (args.includes("--agent=docs-writer")) {
+        assert.match(prompt, new RegExp(`Review base: ${sourceHead}`));
+        assert.match(prompt, /feature\.ts/);
+      } else {
+        assert.match(prompt, new RegExp(`Diff BASE \\(not a cached verification\\): ${sourceHead}`));
+      }
+    }
+    if (invalidReport) {
+      assert.match(result.stderr, /failed after three attempts/);
+      assert.ok(!entries.some((entry) => entry.tool === "npm" || entry.tool === "validator"));
+    } else {
+      assert.equal(readFileSync(output, "utf8"), "run=true\npublish=false\n");
+      assert.deepEqual(entries.filter((entry) => entry.tool === "npm")
+        .map((entry) => entry.args.includes("ci") ? "install" : "verify"), ["install", "verify"]);
+      const args = entries.find((entry) => entry.tool === "validator").args;
+      assert.equal(args[args.indexOf("--mode") + 1], "baseline");
+      assert.equal(args[args.indexOf("--base") + 1], sourceHead);
+    }
+    assert.equal(git(root, "rev-parse", "HEAD^{tree}"), beforeTree);
+    assert.equal(git(root, "status", "--porcelain"), "");
+    assert.equal(git(root, "tag", "--list"), `docs-maintenance-verified-${sourceBase}`);
+  });
+}
 
 test("PR scope planning skips app policy for source-only changes and rejects screenshots", async () => {
   const { root, base: sourceBase } = createRepository();

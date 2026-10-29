@@ -8,7 +8,6 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import {
-  findLastPublishedSource,
   isAllowedDocumentationPath,
   isDocumentationScopePath,
   isAutomationOwnedPath,
@@ -205,22 +204,6 @@ test("symlink and executable documentation are rejected", () => {
   chmodSync(path.join(docsDirectory, "guide.md"), 0o755);
   const executableHead = commit(root, "add executable guide");
   assert.throws(() => validateDocumentationDiff(root, nextBase, executableHead), /regular non-executable/);
-});
-
-test("published source marker is accepted only from a docs-only descendant commit", () => {
-  const { root, initial } = createRepository();
-  writeFileSync(path.join(root, "server", "feature.ts"), "export const active = false;\n");
-  const source = commit(root, "change application behavior");
-  writeFileSync(path.join(root, "README.md"), "# Updated guide\n");
-  const published = commit(root, `docs: refresh documentation from ${source} (#42)`);
-  assert.equal(findLastPublishedSource(root, published), source);
-  assert.equal(findLastPublishedSource(root, initial), null);
-});
-
-test("successful no-change baselines can be anchored by exact-source verification tags", () => {
-  const { root, initial } = createRepository();
-  git(root, "tag", "--annotate", `docs-maintenance-verified-${initial}`, initial, "-m", "verified");
-  assert.equal(findLastPublishedSource(root, initial), initial);
 });
 
 test("working-tree validation includes staged and untracked allowlisted files", () => {

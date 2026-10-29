@@ -13,7 +13,6 @@ const SAFE_HTML_TAGS = new Set([
   "span", "strong", "sub", "summary", "sup", "table", "tbody", "td", "th",
   "thead", "tr", "u", "ul",
 ]);
-const GUIDE_SOURCE_MARKER = /^docs: refresh documentation from ([0-9a-f]{40})(?: \(#[0-9]+\))?$/;
 
 export function assertSha(value, label) {
   if (typeof value !== "string" || !SHA.test(value)) {
@@ -284,51 +283,6 @@ export function validateWorkingTree(root, { maxFiles = MAX_FILES } = {}) {
     stdio: "ignore",
   });
   return { files, patch };
-}
-
-export function findLastPublishedSource(root, head) {
-  const resolvedRoot = realpathSync(root);
-  assertSha(head, "head");
-  const history = runGit(resolvedRoot, ["log", "--format=%H", head]).split("\n").filter(Boolean);
-  const historyOrder = new Map(history.map((sha, index) => [sha, index]));
-  const candidates = new Set();
-  const commits = runGit(resolvedRoot, ["log", "--format=%H%x09%s", head])
-    .split("\n").filter(Boolean);
-  for (const line of commits) {
-    const separator = line.indexOf("\t");
-    if (separator < 0) continue;
-    const commit = line.slice(0, separator);
-    const match = GUIDE_SOURCE_MARKER.exec(line.slice(separator + 1));
-    if (!match) continue;
-    const source = match[1];
-    try {
-      runGit(resolvedRoot, ["merge-base", "--is-ancestor", source, `${commit}^`], {
-        stdio: "ignore",
-      });
-      const changed = runGit(resolvedRoot, [
-        "diff", "--no-ext-diff", "--no-renames", "--name-only", "-z", `${commit}^`, commit,
-      ]).split("\0").filter(Boolean);
-      if (!changed.length || changed.every(isAllowedDocumentationPath)) candidates.add(source);
-    } catch {
-      // Ignore malformed, unrelated, or non-ancestor markers and keep searching.
-    }
-  }
-  for (const tag of runGit(resolvedRoot, ["tag", "--list", "docs-maintenance-verified-*"])
-    .split("\n").filter(Boolean)) {
-    const match = /^docs-maintenance-verified-([0-9a-f]{40})$/.exec(tag);
-    if (!match) continue;
-    const source = match[1];
-    try {
-      if (runGit(resolvedRoot, ["rev-parse", `${tag}^{}`]) !== source) continue;
-      runGit(resolvedRoot, ["merge-base", "--is-ancestor", source, head], { stdio: "ignore" });
-      candidates.add(source);
-    } catch {
-      // Ignore tags that do not point to an ancestor source commit.
-    }
-  }
-  return [...candidates]
-    .filter((source) => historyOrder.has(source))
-    .sort((left, right) => historyOrder.get(left) - historyOrder.get(right))[0] ?? null;
 }
 
 export function shouldRunMaintenance(paths, forceBaseline = false) {

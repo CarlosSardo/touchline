@@ -1,10 +1,10 @@
 # Automated documentation maintenance
 
 `.github/workflows/docs-maintenance.yml` starts on pushes to `main`. It skips
-docs-only changes, performs a full guide baseline after automation or checker
-policy changes and until a verified documentation PR has merged, and otherwise
-reviews every source change since the source revision named by the latest merged
-`docs: refresh documentation from <40-hex-sha>` commit.
+docs-only changes and performs a full guide baseline on every source or
+automation-policy review. Every current guide is checked against the exact
+current implementation. Earlier reports, commit titles/authors, PR metadata,
+and tags are never reused as verification or as a source-review boundary.
 
 The workflow has three trust boundaries:
 
@@ -30,7 +30,7 @@ The workflow has three trust boundaries:
    protection requires the exact docs-verification check, requires no human
    approval, and blocks force-pushes/deletion. It never directly updates
    `main`, disables required checks, or bypasses branch protection. A separate
-   configuration job checks the protected tag rules before the AI job can run.
+   configuration job checks branch protection before the AI job can run.
    The docs check runs on every pull request so its required status exists even
    when no documentation changed; for such PRs it passes without invoking
    Copilot or minting a policy token. Documentation changes, including mixed source-and-documentation
@@ -52,7 +52,7 @@ Add these Actions secrets without putting their values in the repository:
 
 Install the App on this repository with **Contents: read and write**,
 **Pull requests: read and write**, and **Administration: read** so the runtime
-can confirm branch and tag protection before publishing. The workflow requests
+can confirm branch protection before publishing. The workflow requests
 administration read access in separate preflight and same-repository verifier
 steps; the publish-job token requests contents and pull-request writes plus
 administration read. The verifier's runtime strips this token before starting
@@ -65,20 +65,15 @@ Actions (app ID `15368`). These are the exact check-run names; do not prepend
 workflow names. Require zero PR
 approvals, block force pushes and deletion, and do not require human approval
 or code-owner review in any active repository or inherited ruleset. The runtime
-reads both classic protection and effective branch rules before using tags or
+reads both classic protection and effective branch rules before
 requesting auto-merge; an unavailable policy API or a missing rule fails
 closed.
 
-Protect `refs/tags/docs-maintenance-verified-*` using two active tag rulesets
-with that exact include pattern and no exclusions. The creation-only ruleset
-must have exactly one bypass actor: the `Integration` whose ID equals
-`DOCS_AUTOMATION_APP_ID`, with bypass mode `always` or `exempt`. A separate
-ruleset must block both updates and deletions, have no bypass actors, and set
-`current_user_can_bypass` to `never`. The runtime checks both policies before
-using or writing these tags. A tag is written only after a full successful
-review found no docs changes; merged docs PR titles carry the verified source
-revision otherwise. This durable anchor prevents repeated full baselines while
-preserving the last successfully published source boundary.
+No verification tags, tag rulesets, Checks write permission, or organization
+migration are required. If a full review finds no documentation changes, the
+run succeeds without creating a commit, tag, or PR. Its result does not exempt
+any content from the next full review. Authenticated cached provenance is a
+possible future optimization, not part of this workflow.
 
 Enable **Allow auto-merge** in repository settings. The workflow requires
 classic branch protection with the strict check above; merge-queue-only setups
@@ -88,7 +83,7 @@ requires human review. Keep repository protections in force; the automation
 never works around them.
 
 Run **Docs maintenance** with `force_baseline: true` once after the docs site
-and verifier are merged to seed the full guide baseline. A normal push only
+and verifier are merged to perform the initial full guide baseline. A normal push only
 starts a review when its commit includes an application-source change. Docs-only
 automation PR merges do not recursively start another writer run.
 
@@ -109,6 +104,8 @@ access; GitHub-hosted runner network egress itself is not firewall-restricted by
 this workflow. Documentation and source context are sent to GitHub Copilot for
 processing under the account's Copilot policy.
 
+Always reviewing the complete baseline costs more than incremental cached
+verification, but avoids trusting forgeable or unavailable provenance markers.
 Copilot CLI usage consumes GitHub AI Credits. Credit use varies with model,
 input size, and the number of writer/checker calls; a run may use up to three
 correction attempts. Included credits, additional-usage controls, and

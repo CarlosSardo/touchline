@@ -15,7 +15,6 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   assertSha,
-  findLastPublishedSource,
   isAllowedDocumentationPath,
   isDocumentationScopePath,
   isRelevantSourceChange,
@@ -34,7 +33,6 @@ const REQUIRED_STATUS_CHECKS = [
   "Required CI",
 ];
 const GITHUB_ACTIONS_APP_ID = 15368;
-const VERIFIED_TAG_PATTERN = "refs/tags/docs-maintenance-verified-*";
 const REPO = process.env.GITHUB_REPOSITORY;
 
 function command(file, args, options = {}) {
@@ -179,49 +177,6 @@ export function validateMainRules(rules) {
   }
 }
 
-export function validateVerifiedTagRulesets(rulesets, appId) {
-  if (!Array.isArray(rulesets) || !Number.isSafeInteger(appId) || appId <= 0) {
-    throw new Error("Could not verify the protected docs baseline tag policy");
-  }
-  const matching = rulesets.filter((ruleset) =>
-    ruleset?.target === "tag" && ruleset.enforcement === "active" &&
-    ruleset.conditions?.ref_name?.include?.length === 1 &&
-    ruleset.conditions.ref_name.include[0] === VERIFIED_TAG_PATTERN &&
-    ruleset.conditions.ref_name.exclude?.length === 0);
-  const creation = matching.some((ruleset) => {
-    const types = ruleset.rules?.map((rule) => rule.type) ?? [];
-    const actors = ruleset.bypass_actors ?? [];
-    return types.includes("creation") && !types.includes("update") && !types.includes("deletion") &&
-      actors.length === 1 && actors[0].actor_type === "Integration" &&
-      actors[0].actor_id === appId &&
-      ["always", "exempt"].includes(actors[0].bypass_mode);
-  });
-  const immutable = matching.some((ruleset) => {
-    const types = ruleset.rules?.map((rule) => rule.type) ?? [];
-    return types.includes("update") && types.includes("deletion") &&
-      !types.includes("creation") && (ruleset.bypass_actors ?? []).length === 0 &&
-      ruleset.current_user_can_bypass === "never";
-  });
-  if (!creation || !immutable) {
-    throw new Error("Protect docs baseline tags with separate active create-only and immutable tag rulesets");
-  }
-}
-
-function assertVerifiedTagPolicy() {
-  const appId = Number(process.env.DOCS_AUTOMATION_APP_ID);
-  if (!Number.isSafeInteger(appId) || appId <= 0) {
-    throw new Error("DOCS_AUTOMATION_APP_ID is required to verify the protected tag rules");
-  }
-  const pages = JSON.parse(command("gh", [
-    "api", "--paginate", "--slurp",
-    `repos/${REPO}/rulesets?per_page=100&includes_parents=true&targets=tag`,
-  ]));
-  if (!Array.isArray(pages) || pages.some((page) => !Array.isArray(page))) {
-    throw new Error("Could not read all docs baseline tag rulesets");
-  }
-  validateVerifiedTagRulesets(pages.flat(), appId);
-}
-
 function assertAutomationPolicy() {
   if (!REPO || !/^[^/]+\/[^/]+$/.test(REPO)) {
     throw new Error("GITHUB_REPOSITORY is required to verify docs automation protections");
@@ -234,7 +189,6 @@ function assertAutomationPolicy() {
     "api", `repos/${REPO}/rules/branches/main`,
   ]));
   validateMainRules(branchRules);
-  assertVerifiedTagPolicy();
 }
 
 function planPullRequestVerification({ candidateRoot, base, head }) {
@@ -298,6 +252,7 @@ export function writerPrompt({ sourceHead, reportBase, mode, changedPaths, feedb
     `Source HEAD: ${sourceHead}`,
     `Review base: ${reportBase}`,
     `Review mode: ${mode}`,
+    "Review the complete current documentation against the current implementation; never reuse earlier verification.",
     "",
     "Changed source paths:",
     changes,
@@ -312,8 +267,9 @@ export function checkerPrompt({ head, base, mode, changedPaths }) {
   return [
     "Independently fact-check Touchline documentation for the supplied exact revisions.",
     `Documentation candidate HEAD: ${head}`,
-    `Last successfully published source BASE: ${base}`,
+    `Diff BASE (not a cached verification): ${base}`,
     `Review mode: ${mode}`,
+    "Review the complete current documentation against the current implementation, even when the changed-file inventory is empty. Never trust commit titles, authors, or tags as verification.",
     "",
     "Runtime-derived changed-file inventory:",
     changedPaths.map((item) => `- ${item}`).join("\n") || "- No changed paths",
@@ -467,8 +423,8 @@ async function verifyPullRequest({ trustedRoot, candidateRoot, base, head }) {
     throw new Error("Documentation changes from forks cannot use the private Copilot credential");
   }
   assertAutomationPolicy();
-  const reportBase = findLastPublishedSource(candidateRoot, base) ?? base;
-  const mode = reportBase === base ? "baseline" : "affected";
+  const reportBase = base;
+  const mode = "baseline";
   const reportPaths = listChangedPaths(candidateRoot, reportBase, head);
   const privateDirectory = mkdtempSync(path.join(os.tmpdir(), "touchline-docs-pr-report-"));
   const checkerDirectory = mkdtempSync(path.join(os.tmpdir(), "touchline-docs-pr-checker-"));
@@ -510,17 +466,13 @@ async function maintain(root, outputDirectory) {
   const plan = planMaintenance(root);
   root = realpathSync(root);
   const sourceHead = plan.head;
-  const forced = isForceBaseline() && process.env.GITHUB_EVENT_NAME === "workflow_dispatch";
   if (!plan.shouldRun) {
     writeOutput("publish", "false");
     return;
   }
-  const fullBaseline = forced || requiresFullBaseline(plan.changedPaths);
-  const publishedSource = fullBaseline ? null : findLastPublishedSource(root, sourceHead);
-  const mode = publishedSource ? "affected" : "baseline";
-  const reportBase = publishedSource ?? sourceHead;
-  const reviewPaths = listChangedPaths(root, reportBase, sourceHead);
-  const changedSourcePaths = reviewPaths.filter((item) => isRelevantSourceChange([item]));
+  const mode = "baseline";
+  const reportBase = sourceHead;
+  const changedSourcePaths = plan.changedPaths.filter((item) => isRelevantSourceChange([item]));
   const token = process.env.COPILOT_GITHUB_TOKEN;
   if (!token) throw new Error("Set the COPILOT_GITHUB_TOKEN repository secret before enabling this workflow");
   assertCopilotVersion();
@@ -556,8 +508,6 @@ async function maintain(root, outputDirectory) {
       if (candidate.patch.length === 0) {
         console.log("Verification passed; the published documentation already matches this source.");
         writeOutput("publish", "false");
-        writeOutput("no_change", "true");
-        writeOutput("verified_source", sourceHead);
         return;
       }
 
@@ -629,7 +579,7 @@ function readBundle(bundleDirectory) {
       Number.isNaN(Date.parse(manifest.candidateDate))) {
     throw new Error("Bundle candidate date is invalid");
   }
-  if (manifest.schemaVersion !== 1 || !["baseline", "affected"].includes(manifest.mode) ||
+  if (manifest.schemaVersion !== 1 || manifest.mode !== "baseline" ||
       !Array.isArray(manifest.files) || manifest.files.length > 80 ||
       !Number.isInteger(manifest.attempt) || manifest.attempt < 1 || manifest.attempt > 3 ||
       sha256(patch) !== manifest.patchSha256 || sha256(report) !== manifest.reportSha256) {
@@ -707,33 +657,6 @@ function publish(root, bundleDirectory) {
   console.log(`Auto-merge requested for ${pullRequestUrl}; branch protection remains authoritative.`);
 }
 
-function recordVerifiedSource(root, source) {
-  root = realpathSync(root);
-  assertSha(source, "source");
-  assertAutomationPolicy();
-  if (git(root, "rev-parse", "refs/remotes/origin/main") !== source) {
-    throw new Error("main advanced after verification; refusing to record a stale source revision");
-  }
-  const tag = `docs-maintenance-verified-${source}`;
-  if (git(root, "tag", "--list", tag)) {
-    if (git(root, "rev-parse", `${tag}^{}`) !== source) {
-      throw new Error(`Existing verification tag ${tag} points to a different commit`);
-    }
-    return;
-  }
-  command("git", ["-C", root, "tag", "--annotate", tag, source,
-    "--message", `Verified documentation baseline for source ${source}`], {
-    env: {
-      ...process.env,
-      GIT_COMMITTER_NAME: "Touchline Docs Automation",
-      GIT_COMMITTER_EMAIL: "touchline-docs-automation@users.noreply.github.com",
-    },
-  });
-  command("gh", ["auth", "setup-git"]);
-  command("git", ["-C", root, "push", "origin", `refs/tags/${tag}`]);
-  console.log(`Recorded verified source revision ${source}.`);
-}
-
 function parseOptions(args, required) {
   const options = {};
   const names = new Set(required);
@@ -753,7 +676,7 @@ export async function main(args) {
   if (action === "check-policy") {
     parseOptions(rest, ["--root"]);
     assertAutomationPolicy();
-    console.log("Docs auto-merge and baseline tag protections are active.");
+    console.log("Docs auto-merge branch protections are active; every review uses a full baseline.");
     return;
   }
   if (action === "plan-pr") {
@@ -780,11 +703,6 @@ export async function main(args) {
     publish(options["--root"], options["--bundle"]);
     return;
   }
-  if (action === "record-state") {
-    const options = parseOptions(rest, ["--root", "--source"]);
-    recordVerifiedSource(options["--root"], options["--source"]);
-    return;
-  }
   if (action === "verify-pr") {
     const options = parseOptions(rest, ["--trusted-root", "--candidate-root", "--base", "--head"]);
     await verifyPullRequest({
@@ -795,7 +713,7 @@ export async function main(args) {
     });
     return;
   }
-  throw new Error("Usage: runtime.mjs check-policy --root <checkout> | plan-pr --candidate-root <checkout> --base <sha> --head <sha> | maintain --root <checkout> --output <bundle-dir> | publish --root <checkout> --bundle <bundle-dir> | record-state --root <checkout> --source <sha> | verify-pr --trusted-root <checkout> --candidate-root <checkout> --base <sha> --head <sha>");
+  throw new Error("Usage: runtime.mjs check-policy --root <checkout> | plan-pr --candidate-root <checkout> --base <sha> --head <sha> | maintain --root <checkout> --output <bundle-dir> | publish --root <checkout> --bundle <bundle-dir> | verify-pr --trusted-root <checkout> --candidate-root <checkout> --base <sha> --head <sha>");
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
