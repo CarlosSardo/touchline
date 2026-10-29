@@ -471,7 +471,7 @@ async function maintain(root, outputDirectory) {
     return;
   }
   const mode = "baseline";
-  const reportBase = sourceHead;
+  const reportBase = plan.base;
   const changedSourcePaths = plan.changedPaths.filter((item) => isRelevantSourceChange([item]));
   const token = process.env.COPILOT_GITHUB_TOKEN;
   if (!token) throw new Error("Set the COPILOT_GITHUB_TOKEN repository secret before enabling this workflow");

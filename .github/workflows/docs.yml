@@ -1,8 +1,9 @@
 name: Docs
 
 # Builds and verifies the static documentation site in website/ (Astro + Tailwind CSS + Pagefind) on pull requests
-# and pushes to main that touch it or the root Markdown it renders in place (website/src/lib/routes.mjs ROOT_DOCS;
-# keep the path lists below in sync). The site is an isolated npm package: app CI (ci.yml, the Dagger pipeline)
+# and relevant pushes to main (website/src/lib/routes.mjs ROOT_DOCS lists the root Markdown rendered in place).
+# Every PR builds the site, including stacked PRs; docs-maintenance.yml owns the required docs verification context.
+# The site is an isolated npm package: app CI (ci.yml, the Dagger pipeline)
 # ignores website/** and Markdown, and this workflow never builds or deploys the game.
 # Pages only receives a site whose build and link/anchor/search checks passed, so a failing change leaves the
 # last published site in place.
@@ -17,12 +18,6 @@ on:
       - ".nvmrc"
       - ".github/workflows/docs.yml"
   pull_request:
-    branches: [main]
-    paths:
-      - "website/**"
-      - "DEVELOPMENT.md"
-      - ".nvmrc"
-      - ".github/workflows/docs.yml"
   workflow_dispatch:
 
 permissions:
@@ -49,6 +44,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
 
       - name: Set up Node.js

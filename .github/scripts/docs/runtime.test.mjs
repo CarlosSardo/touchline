@@ -202,10 +202,11 @@ for (const invalidReport of [false, true]) {
       assert.match(prompt, /complete current documentation/);
       assert.doesNotMatch(prompt, /Review mode: affected/);
       if (args.includes("--agent=docs-writer")) {
-        assert.match(prompt, new RegExp(`Review base: ${sourceHead}`));
+        assert.match(prompt, new RegExp(`Review base: ${sourceBase}`));
         assert.match(prompt, /feature\.ts/);
       } else {
-        assert.match(prompt, new RegExp(`Diff BASE \\(not a cached verification\\): ${sourceHead}`));
+        assert.match(prompt, new RegExp(`Diff BASE \\(not a cached verification\\): ${sourceBase}`));
+        assert.match(prompt, /feature\.ts/);
       }
     }
     if (invalidReport) {
@@ -217,7 +218,7 @@ for (const invalidReport of [false, true]) {
         .map((entry) => entry.args.includes("ci") ? "install" : "verify"), ["install", "verify"]);
       const args = entries.find((entry) => entry.tool === "validator").args;
       assert.equal(args[args.indexOf("--mode") + 1], "baseline");
-      assert.equal(args[args.indexOf("--base") + 1], sourceHead);
+      assert.equal(args[args.indexOf("--base") + 1], sourceBase);
     }
     assert.equal(git(root, "rev-parse", "HEAD^{tree}"), beforeTree);
     assert.equal(git(root, "status", "--porcelain"), "");
