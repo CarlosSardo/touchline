@@ -1,0 +1,266 @@
+name: Docs maintenance
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      force_baseline:
+        description: Recheck every guide against current source, even without a source change
+        type: boolean
+        default: false
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('docs-maintenance-pr-{0}', github.event.pull_request.number) || 'docs-maintenance-main' }}
+  cancel-in-progress: false
+
+jobs:
+  policy:
+    name: Verify docs automation protections
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the exact main revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+
+      - name: Create a read-only GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ secrets.DOCS_AUTOMATION_APP_ID }}
+          private-key: ${{ secrets.DOCS_AUTOMATION_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-administration: read
+
+      - name: Require safe branch protections
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          DOCS_AUTOMATION_APP_ID: ${{ secrets.DOCS_AUTOMATION_APP_ID }}
+        run: node .github/scripts/docs/runtime.mjs check-policy --root "$GITHUB_WORKSPACE"
+
+  maintain:
+    name: Generate and verify docs
+    needs: policy
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    outputs:
+      publish: ${{ steps.maintain.outputs.publish }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out the exact main revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+
+      - name: Plan source review
+        id: plan
+        env:
+          DOCS_MAINTENANCE_FORCE_BASELINE: ${{ github.event_name == 'workflow_dispatch' && inputs.force_baseline || false }}
+        run: node .github/scripts/docs/runtime.mjs plan --root "$GITHUB_WORKSPACE"
+
+      - name: Install pinned Copilot CLI
+        if: steps.plan.outputs.run == 'true'
+        run: npm install --global @github/copilot@1.0.105
+
+      - name: Generate, independently fact-check, and verify documentation
+        id: maintain
+        if: steps.plan.outputs.run == 'true'
+        env:
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+          DOCS_MAINTENANCE_FORCE_BASELINE: ${{ github.event_name == 'workflow_dispatch' && inputs.force_baseline || false }}
+        run: node .github/scripts/docs/runtime.mjs maintain --root "$GITHUB_WORKSPACE" --output "$RUNNER_TEMP/docs-bundle"
+
+      - name: Preserve the verified patch and evidence report
+        if: steps.maintain.outputs.publish == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: docs-maintenance-${{ github.run_id }}
+          path: ${{ runner.temp }}/docs-bundle/
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    name: Open protected docs pull request
+    needs: maintain
+    if: needs.maintain.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Check out the source revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+
+      - name: Create a repository-scoped GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ secrets.DOCS_AUTOMATION_APP_ID }}
+          private-key: ${{ secrets.DOCS_AUTOMATION_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-administration: read
+
+      - name: Download the verified bundle
+        if: needs.maintain.outputs.publish == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: docs-maintenance-${{ github.run_id }}
+          path: ${{ runner.temp }}/docs-bundle
+
+      - name: Create the docs-only pull request and request auto-merge
+        if: needs.maintain.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          DOCS_AUTOMATION_APP_ID: ${{ secrets.DOCS_AUTOMATION_APP_ID }}
+        run: node .github/scripts/docs/runtime.mjs publish --root "$GITHUB_WORKSPACE" --bundle "$RUNNER_TEMP/docs-bundle"
+
+  verify-docs-pr:
+    name: Verify docs maintenance PR
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+      - name: Check out trusted verifier at the PR base
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: trusted
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check out the exact proposed documentation commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: candidate
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+
+      - name: Test the trusted runtime
+        if: hashFiles('trusted/.github/scripts/docs/runtime.mjs') != ''
+        run: node --test trusted/.github/scripts/docs/maintenance.test.mjs trusted/.github/scripts/docs/runtime.test.mjs
+
+      - name: Test the exact proposed docs automation
+        run: node --test candidate/.github/scripts/docs/*.test.mjs
+
+      - name: Install documentation site dependencies
+        run: npm ci --prefix candidate/website
+
+      - name: Verify the exact proposed documentation site
+        run: npm --prefix candidate/website run verify
+
+      - name: Determine whether docs validation is needed
+        id: scope
+        if: hashFiles('trusted/.github/scripts/docs/runtime.mjs') != ''
+        run: >-
+          node trusted/.github/scripts/docs/runtime.mjs plan-pr
+          --candidate-root "$GITHUB_WORKSPACE/candidate"
+          --base "${{ github.event.pull_request.base.sha }}"
+          --head "${{ github.event.pull_request.head.sha }}"
+
+      - name: Determine docs scope without an established trusted runtime
+        id: initial_scope
+        if: hashFiles('trusted/.github/scripts/docs/runtime.mjs') == ''
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          git -C candidate diff --name-only --no-renames -z "$BASE_SHA" "$HEAD_SHA" |
+            node -e '
+              let input = "";
+              process.stdin.setEncoding("utf8");
+              process.stdin.on("data", chunk => input += chunk);
+              process.stdin.on("end", () => {
+                const docs = input.split("\0").some(path =>
+                  /^(README|DEVELOPMENT|CONTRIBUTING|REQUIREMENTS)\.md$/.test(path) ||
+                  /^website\/src\/content\/docs\/.+\.(md|mdx)$/.test(path) ||
+                  /^website\/public\/images\/game\/.+$/.test(path));
+                require("node:fs").appendFileSync(process.env.GITHUB_OUTPUT, `verify_docs=${docs}\n`);
+                console.log(docs ? "Documentation paths changed." : "No documentation paths changed.");
+              });
+            '
+
+      - name: Fail closed for docs changes targeting a non-main branch
+        if: >-
+          (steps.scope.outputs.verify_docs == 'true' ||
+           steps.initial_scope.outputs.verify_docs == 'true') &&
+          github.event.pull_request.base.ref != 'main'
+        run: |
+          echo "::error::Documentation changes targeting a non-main branch are not supported by the trusted verifier."
+          exit 1
+
+      - name: Create a read-only GitHub App policy token
+        if: >-
+          steps.scope.outputs.verify_docs == 'true' &&
+          github.event.pull_request.head.repo.full_name == github.repository
+        id: app-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ secrets.DOCS_AUTOMATION_APP_ID }}
+          private-key: ${{ secrets.DOCS_AUTOMATION_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-administration: read
+
+      - name: Re-run independent fact-check on the exact PR head
+        if: github.event.pull_request.base.ref == 'main'
+        env:
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          DOCS_AUTOMATION_APP_ID: ${{ secrets.DOCS_AUTOMATION_APP_ID }}
+          DOCS_TRUSTED_ROOT: ${{ github.workspace }}/trusted
+          GITHUB_HEAD_REF: ${{ github.head_ref }}
+          GITHUB_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+        run: >-
+          node trusted/.github/scripts/docs/runtime.mjs verify-pr
+          --trusted-root "$GITHUB_WORKSPACE/trusted"
+          --candidate-root "$GITHUB_WORKSPACE/candidate"
+          --base "${{ github.event.pull_request.base.sha }}"
+          --head "${{ github.event.pull_request.head.sha }}"
