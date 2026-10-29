@@ -190,11 +190,20 @@ jobs:
       - name: Test the exact proposed docs automation
         run: node --test candidate/.github/scripts/docs/*.test.mjs
 
+      - name: Select exactly one documentation site root
+        id: site
+        run: |
+          node --input-type=module <<'NODE'
+          import { appendFileSync } from "node:fs";
+          import { documentationSite } from "./candidate/.github/scripts/docs/maintenance.mjs";
+          appendFileSync(process.env.GITHUB_OUTPUT, `root=${documentationSite("./candidate")}\n`);
+          NODE
+
       - name: Install documentation site dependencies
-        run: npm ci --prefix candidate/website
+        run: npm ci --prefix "candidate/${{ steps.site.outputs.root }}"
 
       - name: Verify the exact proposed documentation site
-        run: npm --prefix candidate/website run verify
+        run: npm --prefix "candidate/${{ steps.site.outputs.root }}" run verify
 
       - name: Determine whether docs validation is needed
         id: scope
@@ -220,8 +229,8 @@ jobs:
               process.stdin.on("end", () => {
                 const docs = input.split("\0").some(path =>
                   /^(README|DEVELOPMENT|CONTRIBUTING|REQUIREMENTS)\.md$/.test(path) ||
-                  /^website\/src\/content\/docs\/.+\.(md|mdx)$/.test(path) ||
-                  /^website\/public\/images\/game\/.+$/.test(path));
+                  /^(website|docs)\/src\/content\/docs\/.+\.(md|mdx)$/.test(path) ||
+                  /^(website|docs)\/public\/images\/game\/.+$/.test(path));
                 require("node:fs").appendFileSync(process.env.GITHUB_OUTPUT, `verify_docs=${docs}\n`);
                 console.log(docs ? "Documentation paths changed." : "No documentation paths changed.");
               });
@@ -248,6 +257,13 @@ jobs:
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
           permission-administration: read
+
+      - name: Install pinned Copilot CLI for independent PR verification
+        if: >-
+          steps.scope.outputs.verify_docs == 'true' &&
+          github.event.pull_request.base.ref == 'main' &&
+          github.event.pull_request.head.repo.full_name == github.repository
+        run: npm install --global @github/copilot@1.0.105
 
       - name: Re-run independent fact-check on the exact PR head
         if: github.event.pull_request.base.ref == 'main'

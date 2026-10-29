@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { REVIEWED_SOCIAL_ARTWORK, reviewedArtworkPaths, unchangedSiteMoves } from "./maintenance.mjs";
 
 const SHA = /^[0-9a-f]{40}$/;
 const MAX_BYTES = 8 * 1024 * 1024;
@@ -10,10 +11,10 @@ const object = (value) => value !== null && typeof value === "object" && !Array.
 const text = (value) => typeof value === "string" && value.trim().length > 0;
 const guide = (name) => /^(README|REQUIREMENTS|CONTRIBUTING|DEVELOPMENT)\.md$/.test(name) ||
   /^(docs|website\/src\/content\/docs)\/.*\.(md|mdx)$/.test(name);
-const source = (name) => (/\.(ts|tsx|js|jsx|mjs|cjs|sql|sh|json|yaml|yml|css|html|dang)$/.test(name) &&
+export const isImplementationEvidencePath = (name) => name !== REVIEWED_SOCIAL_ARTWORK.sourcePath && ((/\.(ts|tsx|js|jsx|mjs|cjs|sql|sh|json|yaml|yml|css|html|astro|dang)$/.test(name) &&
   !name.includes("/fixtures/") &&
-  /^(src|server|shared|scripts|e2e|deploy|website|\.dagger|\.github\/(workflows|scripts))\//.test(name)) ||
-  /^(package\.json|Dockerfile|compose[^/]*\.ya?ml|\.env\.example|[^/]*config\.(ts|js|json))$/.test(name);
+  /^(src|server|shared|scripts|e2e|deploy|website|docs|\.dagger|\.github\/(workflows|scripts))\//.test(name)) ||
+  /^(package\.json|Dockerfile|compose[^/]*\.ya?ml|\.env\.example|[^/]*config\.(ts|js|json))$/.test(name));
 
 function repoPath(value) {
   if (!text(value) || value.includes("\\") || value.includes("\0") ||
@@ -51,6 +52,7 @@ export function validateReport({ reportPath, head, base, root, mode = "baseline"
   }
   git("merge-base", "--is-ancestor", base, head);
   if (git("status", "--porcelain", "--untracked-files=no")) fail("Checkout has tracked modifications");
+  const artwork = reviewedArtworkPaths(root, head);
 
   const reportReal = realpathSync(reportPath);
   const relative = path.relative(root, reportReal);
@@ -131,7 +133,7 @@ export function validateReport({ reportPath, head, base, root, mode = "baseline"
   const documented = new Set();
   function disposition(item, label) {
     const refs = evidence(item.evidence, label);
-    if (!refs.some((ref) => ref.revision !== "base" && source(ref.path))) {
+    if (!refs.some((ref) => ref.revision !== "base" && isImplementationEvidencePath(ref.path))) {
       fail(`Current implementation evidence required: ${label}`);
     }
     const names = stringList(item.subjectFiles, `${label} subjectFiles`, true);
@@ -159,7 +161,10 @@ export function validateReport({ reportPath, head, base, root, mode = "baseline"
   }
   const changed = git("diff", "--no-ext-diff", "--name-only", "--no-renames", "-z", base, head)
     .split("\0").filter(Boolean);
-  const required = new Set(changed);
+  const moves = unchangedSiteMoves(root, base, head);
+  const movedPaths = new Set([...moves.keys(), ...moves.values()]);
+  const required = new Set(changed.filter((name) => !movedPaths.has(name))
+    .map((name) => artwork.get(name) ?? name));
   if (mode === "baseline") {
     for (const name of trees.get("head").keys()) if (guide(name)) required.add(name);
   }
@@ -171,7 +176,8 @@ export function validateReport({ reportPath, head, base, root, mode = "baseline"
     }
   }
   return { schemaVersion: 1, headSha: head, baseSha: base, mode, claims: report.claims.length,
-    reviewedFiles: reviewed.length, requiredFiles: required.size };
+    reviewedFiles: reviewed.length, requiredFiles: required.size,
+    authenticatedArtworkFiles: [...artwork.keys()] };
 }
 
 export function main(args) {

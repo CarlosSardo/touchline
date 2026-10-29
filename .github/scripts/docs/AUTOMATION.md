@@ -9,18 +9,20 @@ and tags are never reused as verification or as a source-review boundary.
 The workflow has three trust boundaries:
 
 1. The writer runs the pinned GitHub Copilot CLI in a non-interactive session
-   with only read, search, and edit tools. Shell, MCP, URL access, temp-file
+   with concrete `view`, `rg`, `glob`, and `apply_patch` tools. The checker only
+   receives `view`, `rg`, and `glob`. Shell, MCP, URL access, temp-file
    access, custom repository instructions, folder trust, workspace hooks, and
    workspace MCP servers are disabled. The runtime checks
    every path and file mode; only root README/DEVELOPMENT/CONTRIBUTING/
-   REQUIREMENTS and Markdown guides under `website/src/content/docs/` can be
+   REQUIREMENTS and Markdown guides under the selected site's
+   `website/src/content/docs/` or `docs/src/content/docs/` can be
    proposed. Binary images are not writable or eligible for automatic review.
 2. The fact-checker runs as a new Copilot CLI process in a clean detached
    checkout. It has read/search tools only. The runtime captures its bounded
    JSON response outside the checkout, and `fact-check.mjs` verifies the
    report's schema, exact revisions, tracked evidence, source references, and
    coverage. A passing model response alone is not sufficient. The docs site's
-   locked dependencies and `npm --prefix website run verify` also run on the
+   locked dependencies and its `npm run verify` also run on the
    exact candidate tree without the Copilot token. Up to three writer/checker
    attempts are allowed; any uncertainty or exhausted attempt fails closed.
 3. Only a separate publish job receives a repository-scoped GitHub App token.
@@ -37,8 +39,33 @@ The workflow has three trust boundaries:
    PRs, are independently checked on the exact PR head; changes to automation
    policy cannot be combined with documentation changes. Changes under
    `website/public/images/game/` fail closed until a separate authenticated
-   screenshot-provenance workflow exists. A failed gate leaves the last
+   screenshot-provenance workflow exists. A one-way site migration may relocate
+   existing images only with identical Git blob IDs and regular-file modes.
+   Regular-file relocations count once toward the 80-file limit; changed text
+   still requires normal review. Image URLs may follow an authenticated exact
+   relocation, but changed image bytes, alt text, and destinations
+   still block. Badge hyperlink changes do not alter the embedded badge image.
+   This never authenticates a new or changed gameplay image. Exactly one tracked site
+   manifest/lock pair must exist, under `website/` or `docs/`; ambiguous,
+   missing, symlinked, or executable site manifests fail. A failed gate leaves the last
    merged/published site unchanged.
+
+The user-requested social preview has a separate, deliberately fixed provenance
+record in trusted `maintenance.mjs`: the reviewed
+`docs/public/images/social/touchline-docs.png` must match SHA-256
+`80b29db681d49c8554180a210073a5e5d60ee68c53a621edf93edd76ac7dd91e`,
+and its `docs/scripts/social-card.html` source must match SHA-256
+`2e6ce0dea9bc2847b679de0ba4021a7406ffa811453ec0c87d0ca6cbfba8b680`.
+Both must be tracked regular mode `100644` files; the PNG must be 1200x630.
+Missing or altered bytes, source, paths or modes fail closed. This attests only
+the exact reviewed intentional artwork, not a gameplay observation or arbitrary
+binary. The independent report must still cover the HTML source with current-code
+evidence; neither the artwork nor that HTML is implementation evidence for product
+claims. The validator reports authenticated artwork separately, never as textual
+model evidence. Updating these pins requires an ordinary policy-only PR before
+an artwork change; neither pin is configurable through reports or workflow input.
+The AI writer cannot modify either file, and the gameplay screenshot policy is
+unchanged.
 
 ## One-time repository configuration
 
@@ -103,6 +130,18 @@ responses. Agent tools do not include shell, URL fetch, MCP, or nested-agent
 access; GitHub-hosted runner network egress itself is not firewall-restricted by
 this workflow. Documentation and source context are sent to GitHub Copilot for
 processing under the account's Copilot policy.
+
+The runtime inserts the trusted agent profile into each fresh prompt rather than
+trusting candidate agent configuration through `--agent`/folder trust. It uses
+the CLI's concrete tool names, not profile aliases, for the actual tool filter.
+Checker responses must be one complete JSON object (an enclosing JSON Markdown
+fence is accepted only when it wraps the whole response); prefixes, suffixes,
+multiple objects, stale reports, and unsupported facts still fail closed.
+Diagnostics identify only the response format, byte/line counts, and fixed
+authentication/quota/trust/tool/error-envelope signal labels, separately for
+stdout and stderr. They never echo model/source text, raw CLI errors, or secrets.
+These heuristic labels help triage failures; they neither establish the root
+cause nor turn a failed response into a passing report.
 
 Always reviewing the complete baseline costs more than incremental cached
 verification, but avoids trusting forgeable or unavailable provenance markers.
