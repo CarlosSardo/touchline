@@ -184,6 +184,26 @@ without omitting material claims, evidence or required coverage.
 These heuristic labels help triage failures; they neither establish the root
 cause nor turn a failed response into a passing report.
 
+The checker uses the pinned CLI's `--output-format=json` JSONL event transport,
+not concatenated text-mode stdout. Every event line must parse as a typed
+envelope; any session error, malformed line, missing/failed/duplicate terminal
+`result` (`exitCode` must be zero), output after that result, or pending tool
+request blocks. Only the last complete `assistant.message.data.content` is
+the final checker response. Earlier assistant narration, deltas and tool results
+are never concatenated into a report. The selected final content still passes
+the exact same strict JSON, SHA, coverage, implementation-evidence and factual
+disposition gates; no JSON substring extraction or fallback is used.
+The stream is bounded to 16 MiB and final content to 8 MiB. Only event/message/
+tool counts and final byte counts are logged; raw event contents are not.
+
+The JSONL shapes are documented by the official CLI's output-format help and
+the public [MCP skill evaluator](https://github.com/modelcontextprotocol/servers/blob/194cc86e3ae6400958555bd4116849d822d69263/scripts/skill-eval.mjs)
+(`assistant.message`, `data.toolRequests`, terminal `result.exitCode`) and
+[a CLI integration](https://github.com/multica-ai/multica/blob/2083970b51c03c0773188636c24a96acd09ad4c3/server/pkg/agent/copilot.go)
+(`data.content`, latest complete message rather than concatenated narration).
+These sources establish the transport contract, not the precise syntax failure
+in older Touchline runs: their private malformed stdout was never retained.
+
 Always reviewing the complete baseline costs more than incremental cached
 verification, but avoids trusting forgeable or unavailable provenance markers.
 Copilot CLI usage consumes GitHub AI Credits. Credit use varies with model,

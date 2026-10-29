@@ -112,7 +112,9 @@ for (const mode of ["cached", "fresh", "cap", "bad-provenance", "build-failure"]
         assert.equal(process.env.DOCS_ACTIONS_TOKEN,undefined);
         assert.equal(process.env.GH_TOKEN,undefined);
         appendFileSync(process.env.TEST_TRACE,"model\\n");
-        console.log(process.env.TEST_REPORT);
+        console.log(JSON.stringify({type:"assistant.message",data:{
+          content:process.env.TEST_REPORT,toolRequests:[]}}));
+        console.log(JSON.stringify({type:"result",exitCode:0}));
       `,
     };
     for (const [name, script] of Object.entries(scripts)) {
