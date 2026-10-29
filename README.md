@@ -33,7 +33,7 @@
 
 **[Player handbook](website/src/content/docs/play/index.md)** · **[Screenshots](#a-look-inside)** · **[Engineering docs](website/src/content/docs/technical/index.md)** · **[Run it yourself](DEVELOPMENT.md)**
 
-📚 **Explore the [Touchline docs site](#documentation)**: a searchable player handbook and engineering guide.
+📚 **Explore the [Touchline docs site](https://carlossardo.github.io/touchline/)**: a searchable player handbook and engineering guide.
 
 </div>
 
@@ -83,9 +83,9 @@ Start with the **[player handbook](website/src/content/docs/play/index.md)** and
 
 ## Documentation
 
-Everything about playing and running Touchline lives in the **Touchline docs site** ([website/](website/)): a searchable static site with a marketing home page, the full player handbook, the engineering section and the operations runbook. It is built with Astro, Tailwind CSS and Pagefind from the same Markdown files linked below, so you can read every page here on GitHub too.
+Everything about playing and running Touchline lives in the **[Touchline docs site](https://carlossardo.github.io/touchline/)**: a searchable static site with a marketing home page, the full player handbook, the engineering section and the operations runbook. It is built with Astro, Tailwind CSS and Pagefind from the same Markdown files linked below, so you can read every page here on GitHub too.
 
-> **Hosted docs:** the site is set up to publish to GitHub Pages at `https://carlossardo.github.io/touchline/`. That address is not live yet; until Pages is enabled, use the links below or [preview the site locally](website/README.md).
+> **Hosted docs:** visit [carlossardo.github.io/touchline](https://carlossardo.github.io/touchline/). Browse the Markdown sources below or [preview the site locally](website/README.md).
 
 | Read this | If you want to |
 | --- | --- |
