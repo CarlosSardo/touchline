@@ -28,7 +28,7 @@ Run these from `website/` with the Node version in [../.nvmrc](../.nvmrc).
 
 Pages are plain Markdown with `title` and `description` frontmatter, so they also read well on GitHub.
 
-Root documents listed in `ROOT_DOCS` ([src/lib/routes.mjs](src/lib/routes.mjs)) are loaded from their canonical repository files instead of being copied. They need no frontmatter: the first `# ` heading becomes the title. Each one must also be a path in [docs.yml](../.github/workflows/docs.yml), and `npm run verify` enforces that.
+Root documents listed in `ROOT_DOCS` ([src/lib/routes.mjs](src/lib/routes.mjs)) are loaded from their canonical repository files instead of being copied. They need no frontmatter: the first `# ` heading becomes the title. Each one must also be a push path in [docs.yml](../.github/workflows/docs.yml), and `npm run verify` enforces that. Pull requests are unfiltered, including stacked branches, so every PR receives the required verification context.
 
 - Link between pages with relative `.md` links. The build rewrites them to site routes, including relative links and GitHub `blob/main` links to root documents. Links to other repository files become GitHub links.
 - Sidebar order follows the links in each folder's `index.md`. An optional `order:` frontmatter value overrides it.

@@ -71,13 +71,14 @@ for (const [source, { slug }] of Object.entries(ROOT_DOCS)) {
   else if (!fs.readFileSync(built, "utf8").includes(`/edit/main/${source}"`)) problems.push(`${source}: rendered page does not point back to its canonical source`);
 }
 
-// Edits to a rendered root document must rebuild the site: each one must trigger docs.yml on push and pull_request.
+// Root edits must rebuild on push; unfiltered PRs also cover stacked branches and required checks.
 const workflow = path.join(websiteRoot, "..", ".github", "workflows", "docs.yml");
 if (fs.existsSync(workflow)) {
   const yaml = fs.readFileSync(workflow, "utf8");
+  const push = yaml.match(/^  push:\n([\s\S]*?)(?=^  [a-z_]+:)/m)?.[1] || "";
+  if (!/^  pull_request:\s*\n(?=  [a-z_]+:|\n)/m.test(yaml)) problems.push("docs.yml: pull_request must be unfiltered so every PR emits required verification");
   for (const source of Object.keys(ROOT_DOCS)) {
-    const triggers = yaml.split("\n").filter((line) => line.trim() === `- "${source}"`).length;
-    if (triggers < 2) problems.push(`${source}: rendered by the site but not a push and pull_request path in .github/workflows/docs.yml`);
+    if (!push.split("\n").some((line) => line.trim() === `- "${source}"`)) problems.push(`${source}: rendered by the site but not a push path in .github/workflows/docs.yml`);
   }
 }
 
