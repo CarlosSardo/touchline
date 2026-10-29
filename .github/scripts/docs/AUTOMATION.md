@@ -4,7 +4,8 @@
 docs-only changes and performs a full guide baseline on every source or
 automation-policy review. Every current guide is checked against the exact
 current implementation. Earlier reports, commit titles/authors, PR metadata,
-and tags are never reused as verification or as a source-review boundary.
+and tags never establish a main source-review boundary. Only an authenticated
+identical-input PR verdict can avoid repeating that same independent review.
 
 The workflow has three trust boundaries:
 
@@ -100,7 +101,43 @@ No verification tags, tag rulesets, Checks write permission, or organization
 migration are required. If a full review finds no documentation changes, the
 run succeeds without creating a commit, tag, or PR. Its result does not exempt
 any content from the next full review. Authenticated cached provenance is a
-possible future optimization, not part of this workflow.
+separate PR-only cost control described below; main writer reviews never reuse
+an earlier baseline.
+
+## PR review cost controls
+
+Body/title edits do not trigger this workflow. Superseded PR runs are cancelled;
+main maintenance remains serialized without cancellation during publication.
+Required PR checks remain unfiltered. Deterministic manifest, policy, content,
+site build and link checks run before a paid checker request; maintenance also
+builds the source site before invoking its writer and each candidate before its
+independent checker.
+
+A passing independent PR report may be reused only for the identical head SHA,
+head tree, base SHA and digest of the trusted workflow, runtime, validators and
+agent profiles. The candidate workflow must exactly match the trusted base
+workflow. The runtime downloads its verdict artifact using read-only Actions
+access, verifies the GitHub-hosted run/attempt is a successful `pull_request`
+execution of the expected workflow on that exact PR/head/base, and reruns the
+protected report validator on the clean exact checkout. No passing skip-only
+check, title, author, branch name, PR comment, tag or model-awarded result is
+provenance. Artifacts expire after seven days; missing/expired provenance requires
+a fresh budgeted review, and malformed/inaccessible provenance fails closed.
+Neither cached nor fresh reports replace current deterministic site checks.
+The read-only Actions token is removed from build and agent subprocesses.
+
+At most one fresh PR-review workflow start per PR per UTC day may reach AI.
+The cap conservatively counts previous failed/cancelled runs and rerun attempts,
+including runs that stopped before AI; authenticated reuse is checked before the
+cap and does not call the model. At the cap, the required check fails with an
+explicit message rather than silently passing, delaying itself or creating a
+new run. There is no next-day scheduler or unbounded retry. An unavailable or
+truncated Actions history fails closed. For reruns of old run IDs, the cap uses the most recent attempt's start
+date rather than the original run creation date, and conservatively counts all
+of that run's attempts. It scans at most 1,000 workflow runs; larger or incomplete
+history requires operator investigation and fails closed rather than losing the cap.
+This bounds paid independent PR checks,
+not the separate main writer's existing maximum three correction attempts.
 
 Enable **Allow auto-merge** in repository settings. The workflow requires
 classic branch protection with the strict check above; merge-queue-only setups
@@ -140,6 +177,10 @@ multiple objects, stale reports, and unsupported facts still fail closed.
 Diagnostics identify only the response format, byte/line counts, and fixed
 authentication/quota/trust/tool/error-envelope signal labels, separately for
 stdout and stderr. They never echo model/source text, raw CLI errors, or secrets.
+Malformed JSON also reports only a fixed parser category and numeric offset,
+not the parser's raw error message (which can include private content).
+The checker is asked for compact complete JSON and concise line citations,
+without omitting material claims, evidence or required coverage.
 These heuristic labels help triage failures; they neither establish the root
 cause nor turn a failed response into a passing report.
 

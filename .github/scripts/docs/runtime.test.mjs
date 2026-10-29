@@ -83,6 +83,7 @@ test("response diagnostics distinguish denial/error channels without exposing mo
   assert.deepEqual(JSON.parse(responseDiagnostic("")), { format: "empty", bytes: 0, lines: 0, signals: [] });
   assert.equal(JSON.parse(responseDiagnostic("```json\n{}\n```")).format, "fenced");
   assert.equal(JSON.parse(responseDiagnostic("{}\nStats: 1 turn")).format, "object-prefixed");
+  assert.deepEqual(JSON.parse(responseDiagnostic('{"claim":"Authentication is required for this feature"}')).signals, []);
 });
 
 test("main merge protection requires stable checks, up-to-date branches, and no human approvals", () => {
@@ -234,14 +235,20 @@ for (const invalidReport of [false, true]) {
     }
     if (invalidReport) {
       assert.match(result.stderr, /failed after three attempts/);
-      assert.ok(!entries.some((entry) => entry.tool === "npm" || entry.tool === "validator"));
+      assert.ok(!entries.some((entry) => entry.tool === "validator"));
     } else {
       assert.equal(readFileSync(output, "utf8"), "run=true\npublish=false\n");
       assert.deepEqual(entries.filter((entry) => entry.tool === "npm")
-        .map((entry) => entry.args.includes("ci") ? "install" : "verify"), ["install", "verify"]);
+        .map((entry) => entry.args.includes("ci") ? "install" : "verify"), ["install", "verify", "install", "verify"]);
       const args = entries.find((entry) => entry.tool === "validator").args;
       assert.equal(args[args.indexOf("--mode") + 1], "baseline");
       assert.equal(args[args.indexOf("--base") + 1], sourceBase);
+    }
+    assert.equal(entries[0].tool, "npm");
+    for (let index = 0; index < entries.length; index += 1) {
+      if (entries[index].tool === "copilot" && entries[index].agent === "docs-fact-checker") {
+        assert.ok(entries.slice(0, index).some((entry) => entry.tool === "npm"));
+      }
     }
     assert.equal(git(root, "rev-parse", "HEAD^{tree}"), beforeTree);
     assert.equal(git(root, "status", "--porcelain"), "");
@@ -269,6 +276,18 @@ for (const invalidReport of [false, true]) {
     assert.throws(() => captureReport(JSON.stringify({
       ...report, claims: [{ status: "unverified" }],
     }), path.join(directory, "unsupported.json")), /unsupported claim/);
+    for (const [response, reason] of [
+      ['{"private":"PRIVATE_SOURCE', "incomplete-json"],
+      [`${raw}\nPRIVATE_STATS_SUFFIX`, "trailing-content"],
+      ['{"private":"PRIVATE\\q"}', "invalid-string-escape"],
+      ['{"private":"PRIVATE",}', "invalid-object-property"],
+    ]) {
+      assert.throws(() => captureReport(response, path.join(directory, "parse-failure.json")), (error) => {
+        assert.match(error.message, new RegExp(`parse=${reason}`));
+        assert.doesNotMatch(error.message, /PRIVATE|private|STATS_SUFFIX/);
+        return true;
+      });
+    }
   });
 }
 
@@ -362,7 +381,7 @@ test("prompts pin exact revisions and enumerate changed files", () => {
   assert.match(checker, new RegExp(head));
   assert.match(checker, new RegExp(base));
   assert.match(checker, /README\.md/);
-  assert.match(checker, /exactly one JSON object/);
+  assert.match(checker, /exactly one complete minified JSON object/);
 });
 
 test("checker response must be current, complete, passing, and fully reviewed", () => {
