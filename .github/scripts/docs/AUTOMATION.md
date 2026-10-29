@@ -4,7 +4,8 @@
 docs-only changes and performs a full guide baseline on every source or
 automation-policy review. Every current guide is checked against the exact
 current implementation. Earlier reports, commit titles/authors, PR metadata,
-and tags are never reused as verification or as a source-review boundary.
+and tags never establish a main source-review boundary. Only an authenticated
+identical-input PR verdict can avoid repeating that same independent review.
 
 The workflow has three trust boundaries:
 
@@ -100,7 +101,39 @@ No verification tags, tag rulesets, Checks write permission, or organization
 migration are required. If a full review finds no documentation changes, the
 run succeeds without creating a commit, tag, or PR. Its result does not exempt
 any content from the next full review. Authenticated cached provenance is a
-possible future optimization, not part of this workflow.
+separate PR-only cost control described below; main writer reviews never reuse
+an earlier baseline.
+
+## PR review cost controls
+
+Body/title edits do not trigger this workflow. Superseded PR runs are cancelled;
+main maintenance remains serialized without cancellation during publication.
+Required PR checks remain unfiltered. Deterministic manifest, policy, content,
+site build and link checks run before a paid checker request; maintenance also
+builds the source site before invoking its writer and each candidate before its
+independent checker.
+
+A passing independent PR report may be reused only for the identical head SHA,
+head tree, base SHA and digest of the trusted workflow, runtime, validators and
+agent profiles. The candidate workflow must exactly match the trusted base
+workflow. The runtime downloads its verdict artifact using read-only Actions
+access, verifies the GitHub-hosted run/attempt is a successful `pull_request`
+execution of the expected workflow on that exact PR/head/base, and reruns the
+protected report validator on the clean exact checkout. No passing skip-only
+check, title, author, branch name, PR comment, tag or model-awarded result is
+provenance. Artifacts expire after seven days; missing/expired provenance requires
+a fresh budgeted review, and malformed/inaccessible provenance fails closed.
+Neither cached nor fresh reports replace current deterministic site checks.
+The read-only Actions token is removed from build and agent subprocesses.
+
+At most three fresh PR-review workflow starts per PR per UTC day may reach AI.
+The cap conservatively counts previous failed/cancelled runs and rerun attempts,
+including runs that stopped before AI; authenticated reuse is checked before the
+cap and does not call the model. At the cap, the required check fails with an
+explicit message rather than silently passing, delaying itself or creating a
+new run. There is no next-day scheduler or unbounded retry. An unavailable or
+truncated Actions history fails closed. This bounds paid independent PR checks,
+not the separate main writer's existing maximum three correction attempts.
 
 Enable **Allow auto-merge** in repository settings. The workflow requires
 classic branch protection with the strict check above; merge-queue-only setups

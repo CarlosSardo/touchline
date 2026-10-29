@@ -10,14 +10,14 @@ on:
         type: boolean
         default: false
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review, edited]
+    types: [opened, synchronize, reopened, ready_for_review]
 
 permissions:
   contents: read
 
 concurrency:
   group: ${{ github.event_name == 'pull_request' && format('docs-maintenance-pr-{0}', github.event.pull_request.number) || 'docs-maintenance-main' }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   policy:
@@ -161,6 +161,7 @@ jobs:
     timeout-minutes: 120
     permissions:
       contents: read
+      actions: read
     steps:
       - name: Check out trusted verifier at the PR base
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -266,6 +267,7 @@ jobs:
         run: npm install --global @github/copilot@1.0.105
 
       - name: Re-run independent fact-check on the exact PR head
+        id: verify
         if: github.event.pull_request.base.ref == 'main'
         env:
           COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
@@ -274,9 +276,21 @@ jobs:
           DOCS_TRUSTED_ROOT: ${{ github.workspace }}/trusted
           GITHUB_HEAD_REF: ${{ github.head_ref }}
           GITHUB_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          DOCS_ACTIONS_TOKEN: ${{ github.token }}
+          DOCS_VERDICT_OUTPUT: ${{ runner.temp }}/docs-independent-verdict
         run: >-
           node trusted/.github/scripts/docs/runtime.mjs verify-pr
           --trusted-root "$GITHUB_WORKSPACE/trusted"
           --candidate-root "$GITHUB_WORKSPACE/candidate"
           --base "${{ github.event.pull_request.base.sha }}"
           --head "${{ github.event.pull_request.head.sha }}"
+
+      - name: Preserve authenticated exact-input independent verdict
+        if: steps.verify.outputs.verdict_artifact != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.verify.outputs.verdict_artifact }}
+          path: ${{ runner.temp }}/docs-independent-verdict/docs-verdict.json
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: true

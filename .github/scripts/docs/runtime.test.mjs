@@ -234,14 +234,20 @@ for (const invalidReport of [false, true]) {
     }
     if (invalidReport) {
       assert.match(result.stderr, /failed after three attempts/);
-      assert.ok(!entries.some((entry) => entry.tool === "npm" || entry.tool === "validator"));
+      assert.ok(!entries.some((entry) => entry.tool === "validator"));
     } else {
       assert.equal(readFileSync(output, "utf8"), "run=true\npublish=false\n");
       assert.deepEqual(entries.filter((entry) => entry.tool === "npm")
-        .map((entry) => entry.args.includes("ci") ? "install" : "verify"), ["install", "verify"]);
+        .map((entry) => entry.args.includes("ci") ? "install" : "verify"), ["install", "verify", "install", "verify"]);
       const args = entries.find((entry) => entry.tool === "validator").args;
       assert.equal(args[args.indexOf("--mode") + 1], "baseline");
       assert.equal(args[args.indexOf("--base") + 1], sourceBase);
+    }
+    assert.equal(entries[0].tool, "npm");
+    for (let index = 0; index < entries.length; index += 1) {
+      if (entries[index].tool === "copilot" && entries[index].agent === "docs-fact-checker") {
+        assert.ok(entries.slice(0, index).some((entry) => entry.tool === "npm"));
+      }
     }
     assert.equal(git(root, "rev-parse", "HEAD^{tree}"), beforeTree);
     assert.equal(git(root, "status", "--porcelain"), "");
