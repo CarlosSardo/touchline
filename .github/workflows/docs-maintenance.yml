@@ -193,6 +193,7 @@ jobs:
           node-version: 24
 
       - name: Test the trusted runtime
+        if: hashFiles('trusted/.github/scripts/docs/runtime.mjs') != ''
         run: node --test trusted/.github/scripts/docs/maintenance.test.mjs trusted/.github/scripts/docs/runtime.test.mjs
 
       - name: Test the exact proposed docs automation
@@ -206,15 +207,39 @@ jobs:
 
       - name: Determine whether docs validation is needed
         id: scope
+        if: hashFiles('trusted/.github/scripts/docs/runtime.mjs') != ''
         run: >-
           node trusted/.github/scripts/docs/runtime.mjs plan-pr
           --candidate-root "$GITHUB_WORKSPACE/candidate"
           --base "${{ github.event.pull_request.base.sha }}"
           --head "${{ github.event.pull_request.head.sha }}"
 
+      - name: Determine docs scope without an established trusted runtime
+        id: initial_scope
+        if: hashFiles('trusted/.github/scripts/docs/runtime.mjs') == ''
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          git -C candidate diff --name-only --no-renames -z "$BASE_SHA" "$HEAD_SHA" |
+            node -e '
+              let input = "";
+              process.stdin.setEncoding("utf8");
+              process.stdin.on("data", chunk => input += chunk);
+              process.stdin.on("end", () => {
+                const docs = input.split("\0").some(path =>
+                  /^(README|DEVELOPMENT|CONTRIBUTING|REQUIREMENTS)\.md$/.test(path) ||
+                  /^website\/src\/content\/docs\/.+\.(md|mdx)$/.test(path) ||
+                  /^website\/public\/images\/game\/.+$/.test(path));
+                require("node:fs").appendFileSync(process.env.GITHUB_OUTPUT, `verify_docs=${docs}\n`);
+                console.log(docs ? "Documentation paths changed." : "No documentation paths changed.");
+              });
+            '
+
       - name: Fail closed for docs changes targeting a non-main branch
         if: >-
-          steps.scope.outputs.verify_docs == 'true' &&
+          (steps.scope.outputs.verify_docs == 'true' ||
+           steps.initial_scope.outputs.verify_docs == 'true') &&
           github.event.pull_request.base.ref != 'main'
         run: |
           echo "::error::Documentation changes targeting a non-main branch are not supported by the trusted verifier."
