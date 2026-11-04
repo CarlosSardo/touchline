@@ -1,10 +1,10 @@
 # Touchline: Graphify versus no Graphify
 
-Status: benchmark design, not a measured productivity claim. Installation and
-local graph/query smoke checks were performed; agent trials, hidden task fixtures
-and statistical results are not implemented or executed here. This document is
-for the evaluator, **never agent-visible input**. Running the proposed trials
-requires a separate decision on model, budget and permission to process source.
+Status: protocol and confirmatory-study design. An approved 16-session Opus 5.5
+pilot has now run; see [measured results and deviations](graphify-results.md).
+The full repeated study below has **not** run, and no causal productivity benefit
+is established. This document is for the evaluator, **never agent-visible
+input**. Further paid trials require a separate model/budget/privacy decision.
 
 ## 1. Question and treatment
 
@@ -447,9 +447,10 @@ There was an initial failed CLI invocation: `--backend none` is rejected even
 though `GRAPHIFY_BACKEND=none` is supported; the wrapper now uses the environment
 setting. Python 3.14 was not the tested environment; the tool pins 3.12.
 
-Application tests/builds were not run for this developer-tool-only change; the
-available host Node was 22.22.1, below Touchline's required 24.11+. No Node package,
-application, CI, database or deployment behavior was changed. Before benchmark
-execution, use the pinned supported Node and materialize/validate the hidden
-fixtures and runner isolation described above. No productivity/cost conclusion
-is available until those paired trials are approved and run.
+At installation time, application tests/builds were not run for the
+developer-tool-only change; the host Node was 22.22.1, below Touchline's required
+24.11+. No Node package, application, CI, database or deployment behavior was
+changed. The subsequent approved pilot used isolated Node 24 containers and
+validated fixtures/oracles before trials; its checks, measurements and deviations
+are recorded in [the pilot report](graphify-results.md). The installation smoke
+checks alone remain insufficient evidence of productivity improvement.

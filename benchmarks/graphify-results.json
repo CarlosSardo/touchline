@@ -1,0 +1,1953 @@
+{
+  "manifest": {
+    "phase": "exploratory_16_session_pilot",
+    "source_sha": "d092fff101f7c2301309d84c301b028685867705",
+    "integration_sha": "2a771bbc108405a9030947b426d18a88c60e0aaa",
+    "source_archive_sha256": "2828a85822f4109cd919cb2ecb41bbf6134fd0db89ef93dac1e3ffd5cf54b20e",
+    "model": "claude-opus-5.5",
+    "reasoning_effort": "high",
+    "context": "default",
+    "model_snapshot_immutable": false,
+    "seed": 20261104,
+    "schedule": [
+      {
+        "task": "D2",
+        "order": "AB"
+      },
+      {
+        "task": "D1",
+        "order": "BA"
+      },
+      {
+        "task": "C2",
+        "order": "AB"
+      },
+      {
+        "task": "P2",
+        "order": "AB"
+      },
+      {
+        "task": "P1",
+        "order": "AB"
+      },
+      {
+        "task": "I1",
+        "order": "BA"
+      },
+      {
+        "task": "I2",
+        "order": "BA"
+      },
+      {
+        "task": "C1",
+        "order": "BA"
+      }
+    ],
+    "trials": [
+      {
+        "task": "D2",
+        "arm": "A",
+        "fixture_tree": "adbc0667c62d870085a4b01231acd3df1b5c3679",
+        "prompt_sha256": "c6d11cd44e14c205561a101cc9957853792b439531ce0f820a258473f39b8de1"
+      },
+      {
+        "task": "D2",
+        "arm": "B",
+        "fixture_tree": "adbc0667c62d870085a4b01231acd3df1b5c3679",
+        "prompt_sha256": "c6d11cd44e14c205561a101cc9957853792b439531ce0f820a258473f39b8de1"
+      },
+      {
+        "task": "D1",
+        "arm": "B",
+        "fixture_tree": "f1f084997fe46c167d1b58e3825841c849fb2046",
+        "prompt_sha256": "cb588bb93130c2c0a558381e6cdd177a2ef63343c9c67b5c7d5f395d2f30d903"
+      },
+      {
+        "task": "D1",
+        "arm": "A",
+        "fixture_tree": "f1f084997fe46c167d1b58e3825841c849fb2046",
+        "prompt_sha256": "cb588bb93130c2c0a558381e6cdd177a2ef63343c9c67b5c7d5f395d2f30d903"
+      },
+      {
+        "task": "C2",
+        "arm": "A",
+        "fixture_tree": "cbee9767ace47c8d7c68f85bdf0d4e23f55010ba",
+        "prompt_sha256": "f3e0e86f07e3786a4fa50e9602a67bb99ab986a525765f7caab3c980b1af19d9"
+      },
+      {
+        "task": "C2",
+        "arm": "B",
+        "fixture_tree": "cbee9767ace47c8d7c68f85bdf0d4e23f55010ba",
+        "prompt_sha256": "f3e0e86f07e3786a4fa50e9602a67bb99ab986a525765f7caab3c980b1af19d9"
+      },
+      {
+        "task": "P2",
+        "arm": "A",
+        "fixture_tree": "cbee9767ace47c8d7c68f85bdf0d4e23f55010ba",
+        "prompt_sha256": "bb56c621ea75f44173aecbdf34d6b2564193d7b27a9d4cec89ee506edc443457"
+      },
+      {
+        "task": "P2",
+        "arm": "B",
+        "fixture_tree": "cbee9767ace47c8d7c68f85bdf0d4e23f55010ba",
+        "prompt_sha256": "bb56c621ea75f44173aecbdf34d6b2564193d7b27a9d4cec89ee506edc443457"
+      },
+      {
+        "task": "P1",
+        "arm": "A",
+        "fixture_tree": "4a394ad06fe2bd38e076d95dbaae94555c8519ec",
+        "prompt_sha256": "c1020439c279301a75ac2646014de04995b9be375399f00165ec844856d8741a"
+      },
+      {
+        "task": "P1",
+        "arm": "B",
+        "fixture_tree": "4a394ad06fe2bd38e076d95dbaae94555c8519ec",
+        "prompt_sha256": "c1020439c279301a75ac2646014de04995b9be375399f00165ec844856d8741a"
+      },
+      {
+        "task": "I1",
+        "arm": "B",
+        "fixture_tree": "cbee9767ace47c8d7c68f85bdf0d4e23f55010ba",
+        "prompt_sha256": "4e7a5a9219c752332518384de47ad1336c34da6ce4fc584dfd710f294c868991"
+      },
+      {
+        "task": "I1",
+        "arm": "A",
+        "fixture_tree": "cbee9767ace47c8d7c68f85bdf0d4e23f55010ba",
+        "prompt_sha256": "4e7a5a9219c752332518384de47ad1336c34da6ce4fc584dfd710f294c868991"
+      },
+      {
+        "task": "I2",
+        "arm": "B",
+        "fixture_tree": "cbee9767ace47c8d7c68f85bdf0d4e23f55010ba",
+        "prompt_sha256": "9c83cdf2615cff7a9e668de064dff2d232c5acd5eb69b1e1c4524fb0ca41d0a7"
+      },
+      {
+        "task": "I2",
+        "arm": "A",
+        "fixture_tree": "cbee9767ace47c8d7c68f85bdf0d4e23f55010ba",
+        "prompt_sha256": "9c83cdf2615cff7a9e668de064dff2d232c5acd5eb69b1e1c4524fb0ca41d0a7"
+      },
+      {
+        "task": "C1",
+        "arm": "B",
+        "fixture_tree": "cbee9767ace47c8d7c68f85bdf0d4e23f55010ba",
+        "prompt_sha256": "bfca75a213c5c870c6fa8a278a328dd62042616e2d326a657e944c33945288ce"
+      },
+      {
+        "task": "C1",
+        "arm": "A",
+        "fixture_tree": "cbee9767ace47c8d7c68f85bdf0d4e23f55010ba",
+        "prompt_sha256": "bfca75a213c5c870c6fa8a278a328dd62042616e2d326a657e944c33945288ce"
+      }
+    ],
+    "caps": {
+      "answer_wall_s": 600,
+      "patch_wall_s": 1500,
+      "answer_tool_calls": 60,
+      "patch_tool_calls": 150,
+      "session_ai_credits_soft": 30,
+      "per_tool_wall_s": 100,
+      "tool_output_chars": 40000
+    },
+    "token_cap": "not enforced; final provider telemetry collected",
+    "per_turn_output_cap": "provider default; not exposed by CLI",
+    "prompt_cache": "provider-managed; measured and not disabled",
+    "graphify_sha": "59b5ab1151e031fb42e39cfc9a50bf96f2d57ae0",
+    "graphify_version": "0.9.102",
+    "tool_image": "sha256:2eab72f365d51f5b5d57e644bb879690b6b4b777b464d46f9f8579bfabb2ab1f",
+    "tool_resources": {
+      "cpus": 2,
+      "ram_bytes": 4294967296,
+      "swap_bytes": 0,
+      "pids": 256,
+      "network": "none"
+    },
+    "cli_version": "1.0.105",
+    "hidden_sha256": "84cbbf4456f006e337c51f63eb6d03d91b5972e49dbd9bfa27e6a8dcc228e82e",
+    "runner_sha256": {
+      "invoke.py": "42cf270bdb4652225a3d30c84f799501b06c55bfae49ccbc0336dbac18b7d4fb",
+      "mcp_runner.py": "ff24f90e00f5a847071e95fedbd270f7c53761f252c3f99da7e3010f883269d9",
+      "prepare.py": "ed745cc97ffa8a8b4a23043b7ec3d423641d9500b3d3d13d17f415989d56a7ff",
+      "Dockerfile": "84cc25436bfe020d92de262c9e4ad183876383568a5b451cd2dda97973156318",
+      "execute.py": "a113bbc8236345b0e6c9a52689b18f50f163a7324b4891b37f1fec257410280e"
+    },
+    "rubric_sha256": "a9256f47d9137e4facb34597eb3766548fb914bd61cc3ef5e7e1ee2fabc3ac57",
+    "deviations": [
+      "Single repetition per task, exploratory rather than confirmatory; no two-reviewer or blinded scoring.",
+      "No SQL or browser harness supplied; pure hidden checks, applicable existing local suites, lint and build used.",
+      "D1 uses source-expression evaluation of actual load-screen expression, not a rendered-browser assertion.",
+      "Model endpoint snapshot cannot be pinned beyond the provider model ID.",
+      "Provider prompt caching cannot be disabled and is recorded as a confound.",
+      "Docker limits apply to repository tools/Graphify, not the host CLI model client."
+    ],
+    "fixture_validator": "esbuild transpilation of pure modules; source-expression extraction for D1, source-call counts for P1",
+    "limit_one_policy": "Preserve both the newly created and explicitly kept save, even when their count exceeds limit=1.",
+    "execution_started_utc": "2026-11-04T10:28:04Z"
+  },
+  "manifest_sha256": "98890cc9717fc5f51d8e3e34cd5900093a4e3279be6391a6a136d7c5f535a42c",
+  "records": [
+    {
+      "task": "D2",
+      "arm": "A",
+      "order": "AB",
+      "phase": "exploratory_16_session_pilot",
+      "model_requested": "claude-opus-5.5",
+      "model_actual": "claude-opus-5.5",
+      "agent_wall_s": 58.01175252600024,
+      "returncode": 0,
+      "stop_reason": null,
+      "input_tokens_including_cache": 110253,
+      "output_tokens": 4946,
+      "cache_read_tokens": 92867,
+      "cache_write_tokens": 16530,
+      "reasoning_tokens": 1189,
+      "ai_credits": 20.35674,
+      "legacy_premium_request_cost": 15,
+      "cost_currency": null,
+      "tool_calls": 9,
+      "tools_by_name": {
+        "terminal": 9
+      },
+      "tool_errors": 0,
+      "raw_tool_output_bytes_before_truncation": 22618,
+      "graph_used": false,
+      "terminal_graph_access_calls": [],
+      "graph_build": null,
+      "checks": {
+        "build": {
+          "exit_code": 0,
+          "wall_s": 3.2394692810003107,
+          "evidence_sha256": "3b125da180e776383346e11c62d369a91c5423d5561f21241457b2ef102762cc"
+        },
+        "lint": {
+          "exit_code": 0,
+          "wall_s": 0.4797362239996801,
+          "evidence_sha256": "f7ea46a999396585d476eaa6b22d18fa2c6c84fd7a2dcdcfb7f07dd2909ddf51"
+        },
+        "pure-eligibility": {
+          "exit_code": 0,
+          "wall_s": 1.8809313369993106,
+          "evidence_sha256": "490cc77c0964bcbb3729ccb7acbb5f2471be62044f9a7bcaa45df0b2c99fe221"
+        },
+        "unit": {
+          "exit_code": 0,
+          "wall_s": 1.3033175679993292,
+          "evidence_sha256": "40c701d67f07d2aa2d327356eed11237be48e2d585b46f0c4b50241221fe1c3b"
+        }
+      },
+      "hidden": {
+        "passed": 17,
+        "total": 18,
+        "failures": [
+          {
+            "name": "loan secondary-only block retains loan label",
+            "pass": false,
+            "error": "expected {\"label\":\"loaned_out\",\"text\":\"On loan \u00b7 eligible\"}, got {\"label\":\"loaned_out\",\"text\":\"On loan \u00b7 eligible (some competitions)\"}"
+          }
+        ]
+      },
+      "negative_control_ok": true,
+      "patch_sha256": "1c691b1ebbf7160500caae5f37e182b630abccf8b3e914bf65aa2b3d2f0902a4",
+      "answer_sha256": "64e3cae1e97a2fcb4b9e233220ba759000966998b586c50fc998f7bff02917a6",
+      "events_sha256": "a9e843a7f9df0469856a15bb1864ff9f07cd5d144d884f5578792e229c2ade60",
+      "tool_log_sha256": "0daaa7857dbbd9f8b3c4d54481d2a63df8b72346eebc5462298f626ee0c660b0",
+      "cgroup_memory_peak_bytes_including_file_cache": 603537408,
+      "container_cpu_stat": {
+        "usage_usec": 5696224,
+        "user_usec": 4761577,
+        "system_usec": 934646,
+        "nice_usec": 0,
+        "core_sched.force_idle_usec": 0,
+        "nr_periods": 66,
+        "nr_throttled": 0,
+        "throttled_usec": 0,
+        "nr_bursts": 0,
+        "burst_usec": 0
+      },
+      "scoring": {
+        "trial": "D2-A",
+        "quality_units": [
+          2,
+          2,
+          1,
+          2,
+          2
+        ],
+        "evidence": "Fixes precedence and adds focused pure eligibility cases without changing persistence/rules/dependencies or weakening tests. Partial API compatibility credit: existing eligible-loan text is changed for secondary-only blocks. Same predeclared exact-text assertion fails in both arms (17/18); functional root cause is fixed.",
+        "score": 95.11111111111111,
+        "pass": false
+      }
+    },
+    {
+      "task": "D2",
+      "arm": "B",
+      "order": "AB",
+      "phase": "exploratory_16_session_pilot",
+      "model_requested": "claude-opus-5.5",
+      "model_actual": "claude-opus-5.5",
+      "agent_wall_s": 57.054272260999824,
+      "returncode": 0,
+      "stop_reason": null,
+      "input_tokens_including_cache": 64133,
+      "output_tokens": 5175,
+      "cache_read_tokens": 50750,
+      "cache_write_tokens": 12699,
+      "reasoning_tokens": 1242,
+      "ai_credits": 17.9881,
+      "legacy_premium_request_cost": 15,
+      "cost_currency": null,
+      "tool_calls": 7,
+      "tools_by_name": {
+        "terminal": 7
+      },
+      "tool_errors": 0,
+      "raw_tool_output_bytes_before_truncation": 12428,
+      "graph_used": false,
+      "terminal_graph_access_calls": [],
+      "graph_build": {
+        "wall_s": 32.65654504699978,
+        "nodes_after": 13395,
+        "edges_after": 33352,
+        "bytes_after": 14010955,
+        "sha256_before": "9e2695a21b88fdcbfdbc4f3d40cd54174fab3733decee266fd3dc88e6aacb95e",
+        "build_evidence_sha256": "ed0f1c9937721887868d976e9618c3fca7fdf9471ed46209180988c2f4aa70dd"
+      },
+      "checks": {
+        "build": {
+          "exit_code": 0,
+          "wall_s": 5.956056886000624,
+          "evidence_sha256": "f47d961c57055785d9510433edcb9be2270cff69bd9654514f11203974b60885"
+        },
+        "lint": {
+          "exit_code": 0,
+          "wall_s": 0.47705835400029173,
+          "evidence_sha256": "f0e41b7b117afaf4c4e08546f490eb73ea6b8b95f50929d13c012360ab22fda4"
+        },
+        "pure-eligibility": {
+          "exit_code": 0,
+          "wall_s": 3.044965787000365,
+          "evidence_sha256": "ee07658a86f934507ca527bc7c9ba6f5354d46568316fd519a9d48ea0b5a0992"
+        },
+        "unit": {
+          "exit_code": 0,
+          "wall_s": 1.7910603589998573,
+          "evidence_sha256": "ea9dc7d98439c5057a5a70bc53706ca43cd3dbea046054732c2bf8219a28d0b2"
+        }
+      },
+      "hidden": {
+        "passed": 17,
+        "total": 18,
+        "failures": [
+          {
+            "name": "loan secondary-only block retains loan label",
+            "pass": false,
+            "error": "expected {\"label\":\"loaned_out\",\"text\":\"On loan \u00b7 eligible\"}, got {\"label\":\"loaned_out\",\"text\":\"On loan \u00b7 eligible (some competitions)\"}"
+          }
+        ]
+      },
+      "negative_control_ok": true,
+      "patch_sha256": "9689f60ef05ba86020332b02734a756518f0668f88bc62d3d79f59b00e0e99d1",
+      "answer_sha256": "0a112ef0a4862abe919b9a72754f3d2daa55e6a7632017b29d8484e3507d0ba5",
+      "events_sha256": "83f2d488e4948b2113a7930a8b60a4b95f7bc388b3da4ea97299c6e56f57cc62",
+      "tool_log_sha256": "8e89f92a36d5896339cc7064f0a992c2c0cf310f8b3d956ac6508aa264a52af1",
+      "cgroup_memory_peak_bytes_including_file_cache": 615985152,
+      "container_cpu_stat": {
+        "usage_usec": 57058218,
+        "user_usec": 52881303,
+        "system_usec": 4176915,
+        "nice_usec": 0,
+        "core_sched.force_idle_usec": 0,
+        "nr_periods": 387,
+        "nr_throttled": 96,
+        "throttled_usec": 3144629,
+        "nr_bursts": 0,
+        "burst_usec": 0
+      },
+      "scoring": {
+        "trial": "D2-B",
+        "quality_units": [
+          2,
+          2,
+          1,
+          2,
+          2
+        ],
+        "evidence": "Equivalent focused precedence fix and additive pure tests. Partial compatibility credit for the same secondary-only eligible-loan text change as A; 17/18 frozen behavior assertions pass. This is a strict preservation failure, not failure to fix primary-block precedence.",
+        "score": 95.11111111111111,
+        "pass": false
+      }
+    },
+    {
+      "task": "D1",
+      "arm": "B",
+      "order": "BA",
+      "phase": "exploratory_16_session_pilot",
+      "model_requested": "claude-opus-5.5",
+      "model_actual": "claude-opus-5.5",
+      "agent_wall_s": 70.38192258600066,
+      "returncode": 0,
+      "stop_reason": null,
+      "input_tokens_including_cache": 159612,
+      "output_tokens": 5738,
+      "cache_read_tokens": 143637,
+      "cache_write_tokens": 14775,
+      "reasoning_tokens": 1500,
+      "ai_credits": 22.21624,
+      "legacy_premium_request_cost": 15,
+      "cost_currency": null,
+      "tool_calls": 13,
+      "tools_by_name": {
+        "terminal": 13
+      },
+      "tool_errors": 0,
+      "raw_tool_output_bytes_before_truncation": 21662,
+      "graph_used": false,
+      "terminal_graph_access_calls": [],
+      "graph_build": {
+        "wall_s": 36.73206572699928,
+        "nodes_after": 13395,
+        "edges_after": 33352,
+        "bytes_after": 14010955,
+        "sha256_before": "944e88b60ac002df568105398f31233101072495a47d1eb0ecd5c647af2894fd",
+        "build_evidence_sha256": "f10b82e289725b11174b7563b93c7d8a31dfc05196d3b90ae94937b072d29380"
+      },
+      "checks": {
+        "build": {
+          "exit_code": 0,
+          "wall_s": 6.095408242000303,
+          "evidence_sha256": "20632d9e9e87dd710ce51b1d78ece04d18e55dc4a32aa61dbff6ce646c420093"
+        },
+        "lint": {
+          "exit_code": 0,
+          "wall_s": 0.6760320210005375,
+          "evidence_sha256": "f2070c8c8e627dae8d8f64dedee34748dae43a029d9f76796cf33e3276af9e48"
+        },
+        "unit": {
+          "exit_code": 0,
+          "wall_s": 1.5855483280001863,
+          "evidence_sha256": "07020ea4191434c921f17615942b5e40d71a89c242ecbe8deba80207c3e591e3"
+        }
+      },
+      "hidden": {
+        "passed": 25,
+        "total": 25,
+        "failures": [],
+        "original_instrumentation_result": {
+          "passed": 0,
+          "total": 25,
+          "failures": [
+            {
+              "name": "actual load-screen replacement expression exists",
+              "pass": false,
+              "error": "loadReplaces expression absent"
+            },
+            {
+              "name": "load-screen n=0 keep=save-100",
+              "pass": false,
+              "error": "Cannot read properties of undefined (reading 'map')"
+            },
+            {
+              "name": "load-screen n=0 keep=undefined",
+              "pass": false,
+              "error": "Cannot read properties of undefined (reading 'map')"
+            },
+            {
+              "name": "load-screen n=0 keep=save-100",
+              "pass": false,
+              "error": "Cannot read properties of undefined (reading 'map')"
+            },
+            {
+              "name": "load-screen n=0 keep=save-101",
+              "pass": false,
+              "error": "Cannot read properties of undefined (reading 'map')"
+            },
+            {
+              "name": "load-screen n=0 keep=save-102",
+              "pass": false,
+              "error": "Cannot read properties of undefined (reading 'map')"
+            },
+            {
+              "name": "load-screen n=0 keep=missing",
+              "pass": false,
+              "error": "Cannot read properties of undefined (reading 'map')"
+            },
+            {
+              "name": "load-screen n=9 keep=save-001",
+              "pass": false,
+              "error": "Cannot read properties of undefined (reading 'map')"
+            },
+            {
+              "name": "load-screen n=9 keep=save-005",
+              "pass": false,
+              "error": "Cannot read properties of undefined (reading 'map')"
+            },
+            {
+              "name": "load-screen n=9 keep=save-100",
+              "pass": false,
+              "error": "Cannot read properties of undefined (reading 'map')"
+            },
+            {
+              "name": "load-screen n=9 keep=save-101",
+              "pass": false,
+              "error": "Cannot read properties of undefined (reading 'map')"
+            },
+            {
+              "name": "load-screen n=9 keep=save-102",
+              "pass": false,
+              "error": "Cannot read properties of undefined (reading 'map')"
+            },
+            {
+              "name": "load-screen n=9 keep=missing",
+              "pass": false,
+              "error": "Cannot read properties of undefined (reading 'map')"
+            },
+            {
+              "name": "load-screen n=10 keep=save-001",
+              "pass": false,
+              "error": "Cannot read properties of undefined (reading 'map')"
+            },
+            {
+              "name": "load-screen n=10 keep=save-005",
+              "pass": false,
+              "error": "Cannot read properties of undefined (reading 'map')"
+            },
+            {
+              "name": "load-screen n=10 keep=save-100",
+              "pass": false,
+              "error": "Cannot read properties of undefined (reading 'map')"
+            },
+            {
+              "name": "load-screen n=10 keep=save-101",
+              "pass": false,
+              "error": "Cannot read properties of undefined (reading 'map')"
+            },
+            {
+              "name": "load-screen n=10 keep=save-102",
+              "pass": false,
+              "error": "Cannot read properties of undefined (reading 'map')"
+            },
+            {
+              "name": "load-screen n=10 keep=missing",
+              "pass": false,
+              "error": "Cannot read properties of undefined (reading 'map')"
+            },
+            {
+              "name": "load-screen n=12 keep=save-001",
+              "pass": false,
+              "error": "Cannot read properties of undefined (reading 'map')"
+            },
+            {
+              "name": "load-screen n=12 keep=save-005",
+              "pass": false,
+              "error": "Cannot read properties of undefined (reading 'map')"
+            },
+            {
+              "name": "load-screen n=12 keep=save-100",
+              "pass": false,
+              "error": "Cannot read properties of undefined (reading 'map')"
+            },
+            {
+              "name": "load-screen n=12 keep=save-101",
+              "pass": false,
+              "error": "Cannot read properties of undefined (reading 'map')"
+            },
+            {
+              "name": "load-screen n=12 keep=save-102",
+              "pass": false,
+              "error": "Cannot read properties of undefined (reading 'map')"
+            },
+            {
+              "name": "load-screen n=12 keep=missing",
+              "pass": false,
+              "error": "Cannot read properties of undefined (reading 'map')"
+            }
+          ]
+        },
+        "evaluator_correction": "D1 equivalent source-binding extraction; frozen behavior assertions unchanged"
+      },
+      "negative_control_ok": true,
+      "patch_sha256": "3fc86c08426215fa1e7a60f6dcb108ef6c4717a70170badf7f8fad37211d113d",
+      "answer_sha256": "8c49098ec988c17ef7dae09dc3fc820657687dab039b46ae94c306599dfcdb43",
+      "events_sha256": "18ff6ca6987bb10ed8a7f838db6fe2e464aabe4fb3023d48ee4557a30bf39737",
+      "tool_log_sha256": "08f3c85c620d8dcd12d5012222df08c3abef346c7afd879b8f16332f7ff91ff4",
+      "cgroup_memory_peak_bytes_including_file_cache": 547631104,
+      "container_cpu_stat": {
+        "usage_usec": 66698296,
+        "user_usec": 61193529,
+        "system_usec": 5504767,
+        "nice_usec": 0,
+        "core_sched.force_idle_usec": 0,
+        "nr_periods": 446,
+        "nr_throttled": 134,
+        "throttled_usec": 3366790,
+        "nr_bursts": 0,
+        "burst_usec": 0
+      },
+      "scoring": {
+        "trial": "D1-B",
+        "quality_units": [
+          2,
+          2,
+          2,
+          2,
+          2
+        ],
+        "evidence": "Focused Start/save-rotation/helper-test patch with equivalent load-screen helper, protected file and spared flag. Existing API and tests preserved, no dependency change. Corrected actual-source evaluator passes 25/25.",
+        "score": 100.0,
+        "pass": true
+      }
+    },
+    {
+      "task": "D1",
+      "arm": "A",
+      "order": "BA",
+      "phase": "exploratory_16_session_pilot",
+      "model_requested": "claude-opus-5.5",
+      "model_actual": "claude-opus-5.5",
+      "agent_wall_s": 127.47079259399925,
+      "returncode": 0,
+      "stop_reason": null,
+      "input_tokens_including_cache": 79641,
+      "output_tokens": 5234,
+      "cache_read_tokens": 67080,
+      "cache_write_tokens": 11791,
+      "reasoning_tokens": 1125,
+      "ai_credits": 18.0131,
+      "legacy_premium_request_cost": 15,
+      "cost_currency": null,
+      "tool_calls": 9,
+      "tools_by_name": {
+        "terminal": 9
+      },
+      "tool_errors": 1,
+      "raw_tool_output_bytes_before_truncation": 14517,
+      "graph_used": false,
+      "terminal_graph_access_calls": [],
+      "graph_build": null,
+      "checks": {
+        "build": {
+          "exit_code": 0,
+          "wall_s": 5.145620102999601,
+          "evidence_sha256": "105f286d7f5a5a7b9e8a402b010e8790b30b50fea7f2f8b3cbb533c6214b7e30"
+        },
+        "lint": {
+          "exit_code": 0,
+          "wall_s": 0.4728188669996598,
+          "evidence_sha256": "fc7eca986798e6426511d54e517c8b99f5980f92e75e67795f4d62370f95f218"
+        },
+        "unit": {
+          "exit_code": 0,
+          "wall_s": 1.4041089100001045,
+          "evidence_sha256": "cb52bff37c510db12a6d506bd0ab9cc56cb17961c9b587dcd9560a8511cf4fa8"
+        }
+      },
+      "hidden": {
+        "passed": 25,
+        "total": 25,
+        "failures": [],
+        "original_instrumentation_result": {
+          "passed": 0,
+          "total": 25,
+          "failures": [
+            {
+              "name": "actual load-screen replacement expression exists",
+              "pass": false,
+              "error": "loadReplaces expression absent"
+            },
+            {
+              "name": "load-screen n=0 keep=save-100",
+              "pass": false,
+              "error": "Cannot read properties of undefined (reading 'map')"
+            },
+            {
+              "name": "load-screen n=0 keep=undefined",
+              "pass": false,
+              "error": "Cannot read properties of undefined (reading 'map')"
+            },
+            {
+              "name": "load-screen n=0 keep=save-100",
+              "pass": false,
+              "error": "Cannot read properties of undefined (reading 'map')"
+            },
+            {
+              "name": "load-screen n=0 keep=save-101",
+              "pass": false,
+              "error": "Cannot read properties of undefined (reading 'map')"
+            },
+            {
+              "name": "load-screen n=0 keep=save-102",
+              "pass": false,
+              "error": "Cannot read properties of undefined (reading 'map')"
+            },
+            {
+              "name": "load-screen n=0 keep=missing",
+              "pass": false,
+              "error": "Cannot read properties of undefined (reading 'map')"
+            },
+            {
+              "name": "load-screen n=9 keep=save-001",
+              "pass": false,
+              "error": "Cannot read properties of undefined (reading 'map')"
+            },
+            {
+              "name": "load-screen n=9 keep=save-005",
+              "pass": false,
+              "error": "Cannot read properties of undefined (reading 'map')"
+            },
+            {
+              "name": "load-screen n=9 keep=save-100",
+              "pass": false,
+              "error": "Cannot read properties of undefined (reading 'map')"
+            },
+            {
+              "name": "load-screen n=9 keep=save-101",
+              "pass": false,
+              "error": "Cannot read properties of undefined (reading 'map')"
+            },
+            {
+              "name": "load-screen n=9 keep=save-102",
+              "pass": false,
+              "error": "Cannot read properties of undefined (reading 'map')"
+            },
+            {
+              "name": "load-screen n=9 keep=missing",
+              "pass": false,
+              "error": "Cannot read properties of undefined (reading 'map')"
+            },
+            {
+              "name": "load-screen n=10 keep=save-001",
+              "pass": false,
+              "error": "Cannot read properties of undefined (reading 'map')"
+            },
+            {
+              "name": "load-screen n=10 keep=save-005",
+              "pass": false,
+              "error": "Cannot read properties of undefined (reading 'map')"
+            },
+            {
+              "name": "load-screen n=10 keep=save-100",
+              "pass": false,
+              "error": "Cannot read properties of undefined (reading 'map')"
+            },
+            {
+              "name": "load-screen n=10 keep=save-101",
+              "pass": false,
+              "error": "Cannot read properties of undefined (reading 'map')"
+            },
+            {
+              "name": "load-screen n=10 keep=save-102",
+              "pass": false,
+              "error": "Cannot read properties of undefined (reading 'map')"
+            },
+            {
+              "name": "load-screen n=10 keep=missing",
+              "pass": false,
+              "error": "Cannot read properties of undefined (reading 'map')"
+            },
+            {
+              "name": "load-screen n=12 keep=save-001",
+              "pass": false,
+              "error": "Cannot read properties of undefined (reading 'map')"
+            },
+            {
+              "name": "load-screen n=12 keep=save-005",
+              "pass": false,
+              "error": "Cannot read properties of undefined (reading 'map')"
+            },
+            {
+              "name": "load-screen n=12 keep=save-100",
+              "pass": false,
+              "error": "Cannot read properties of undefined (reading 'map')"
+            },
+            {
+              "name": "load-screen n=12 keep=save-101",
+              "pass": false,
+              "error": "Cannot read properties of undefined (reading 'map')"
+            },
+            {
+              "name": "load-screen n=12 keep=save-102",
+              "pass": false,
+              "error": "Cannot read properties of undefined (reading 'map')"
+            },
+            {
+              "name": "load-screen n=12 keep=missing",
+              "pass": false,
+              "error": "Cannot read properties of undefined (reading 'map')"
+            }
+          ]
+        },
+        "evaluator_correction": "D1 equivalent source-binding extraction; frozen behavior assertions unchanged"
+      },
+      "negative_control_ok": true,
+      "patch_sha256": "3cb0d06a032105c71742fc8208a5c1e5bc781ada3a60f4830a666c24018ba8e4",
+      "answer_sha256": "113b3f2b68571829c824bd35f367735e6401232a9cea27700ab0ddf6d6dbf0ea",
+      "events_sha256": "c96afcbbd71ac48cff6738b9ff46900df6e6e7c43a0a9ba46b7180ec6cd631ba",
+      "tool_log_sha256": "93a8a33127452b6a924fef44a0eace88a338848e79f661c6aaf476603cc98969",
+      "cgroup_memory_peak_bytes_including_file_cache": 380502016,
+      "container_cpu_stat": {
+        "usage_usec": 5814514,
+        "user_usec": 4974505,
+        "system_usec": 840008,
+        "nice_usec": 0,
+        "core_sched.force_idle_usec": 0,
+        "nr_periods": 63,
+        "nr_throttled": 3,
+        "throttled_usec": 2675,
+        "nr_bursts": 0,
+        "burst_usec": 0
+      },
+      "scoring": {
+        "trial": "D1-A",
+        "quality_units": [
+          2,
+          2,
+          2,
+          2,
+          2
+        ],
+        "evidence": "Focused Start/save-rotation/helper-test patch. The extracted helper preserves existing APIs, computes both victims and spared flag using the loaded file and adds focused cases without weakening existing checks. Corrected actual-source evaluator passes 25/25.",
+        "score": 100.0,
+        "pass": true
+      }
+    },
+    {
+      "task": "C2",
+      "arm": "A",
+      "order": "AB",
+      "phase": "exploratory_16_session_pilot",
+      "model_requested": "claude-opus-5.5",
+      "model_actual": "claude-opus-5.5",
+      "agent_wall_s": 45.09602864499993,
+      "returncode": 0,
+      "stop_reason": null,
+      "input_tokens_including_cache": 41662,
+      "output_tokens": 3867,
+      "cache_read_tokens": 28763,
+      "cache_write_tokens": 12473,
+      "reasoning_tokens": 1451,
+      "ai_credits": 14.71616,
+      "legacy_premium_request_cost": 15,
+      "cost_currency": null,
+      "tool_calls": 4,
+      "tools_by_name": {
+        "terminal": 4
+      },
+      "tool_errors": 0,
+      "raw_tool_output_bytes_before_truncation": 22741,
+      "graph_used": false,
+      "terminal_graph_access_calls": [],
+      "graph_build": null,
+      "checks": {},
+      "hidden": null,
+      "negative_control_ok": true,
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "answer_sha256": "7447ef664f9952b4ba0df083d996b5ef7de6183402fbbd8c2850392f1fa75841",
+      "events_sha256": "802d79a97959b28c62df6bc16602bb567000b789d5e445075082d433cc069581",
+      "tool_log_sha256": "40c31669a987223b318d1bfba9fdb7bed9a4876cde81650b22dd62eab62bb061",
+      "cgroup_memory_peak_bytes_including_file_cache": 147562496,
+      "container_cpu_stat": {
+        "usage_usec": 1759941,
+        "user_usec": 1409764,
+        "system_usec": 350176,
+        "nice_usec": 0,
+        "core_sched.force_idle_usec": 0,
+        "nr_periods": 25,
+        "nr_throttled": 0,
+        "throttled_usec": 0,
+        "nr_bursts": 0,
+        "burst_usec": 0
+      },
+      "scoring": {
+        "trial": "C2-A",
+        "claim_units": [
+          2,
+          2,
+          2,
+          2,
+          2
+        ],
+        "critical_false_claim": false,
+        "score": 100,
+        "pass": true,
+        "evidence": "Final answer traces Start/Settings to the shared helper and server rotation, identifies limit=10, career/manual/import filters, protected load file and matching descending sort/oldest-first victims; cites source and regression tests. Also identifies unchanged-world warning overprediction."
+      }
+    },
+    {
+      "task": "C2",
+      "arm": "B",
+      "order": "AB",
+      "phase": "exploratory_16_session_pilot",
+      "model_requested": "claude-opus-5.5",
+      "model_actual": "claude-opus-5.5",
+      "agent_wall_s": 54.591862598999796,
+      "returncode": 0,
+      "stop_reason": null,
+      "input_tokens_including_cache": 67562,
+      "output_tokens": 4796,
+      "cache_read_tokens": 50302,
+      "cache_write_tokens": 16748,
+      "reasoning_tokens": 1700,
+      "ai_credits": 19.17684,
+      "legacy_premium_request_cost": 15,
+      "cost_currency": null,
+      "tool_calls": 5,
+      "tools_by_name": {
+        "terminal": 5
+      },
+      "tool_errors": 0,
+      "raw_tool_output_bytes_before_truncation": 32377,
+      "graph_used": false,
+      "terminal_graph_access_calls": [],
+      "graph_build": {
+        "wall_s": 33.901843873999496,
+        "nodes_after": 13395,
+        "edges_after": 33352,
+        "bytes_after": 14010955,
+        "sha256_before": "1388f266305ab5d2952506ca21f255d0abc5c7414c6aec39e983e5f80f74469b",
+        "build_evidence_sha256": "a2602c1d33be914a0118438f1699efdbccc0eb03c7a33c3a91884ec8bcd187a5"
+      },
+      "checks": {},
+      "hidden": null,
+      "negative_control_ok": true,
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "answer_sha256": "a976425916027c49f363d9d8169dd33650e716e58de2ad0349230d39d354f7cd",
+      "events_sha256": "590bcf15a2d731ab52bbff838a1251908dd6e342ed13abbe371ddb5711d959f3",
+      "tool_log_sha256": "806dfb0d82fd8e4d1eaf39269c6dd9568ddf953ccc6e3b13a267237ab2d51d93",
+      "cgroup_memory_peak_bytes_including_file_cache": 549163008,
+      "container_cpu_stat": {
+        "usage_usec": 54887173,
+        "user_usec": 50960033,
+        "system_usec": 3927140,
+        "nice_usec": 0,
+        "core_sched.force_idle_usec": 0,
+        "nr_periods": 368,
+        "nr_throttled": 105,
+        "throttled_usec": 2732423,
+        "nr_bursts": 0,
+        "burst_usec": 0
+      },
+      "scoring": {
+        "trial": "C2-B",
+        "claim_units": [
+          2,
+          2,
+          2,
+          2,
+          2
+        ],
+        "critical_false_claim": false,
+        "score": 100,
+        "pass": true,
+        "evidence": "Final answer explains all five source-grounded claims, including server created_at to browser modified mapping, keep-file protection, types and applicable regression tests. Also identifies unchanged-world and stale-list caveats."
+      }
+    },
+    {
+      "task": "P2",
+      "arm": "A",
+      "order": "AB",
+      "phase": "exploratory_16_session_pilot",
+      "model_requested": "claude-opus-5.5",
+      "model_actual": "claude-opus-5.5",
+      "agent_wall_s": 138.44404110699998,
+      "returncode": 0,
+      "stop_reason": null,
+      "input_tokens_including_cache": 64079,
+      "output_tokens": 5919,
+      "cache_read_tokens": 51182,
+      "cache_write_tokens": 12301,
+      "reasoning_tokens": 1389,
+      "ai_credits": 19.25054,
+      "legacy_premium_request_cost": 15,
+      "cost_currency": null,
+      "tool_calls": 6,
+      "tools_by_name": {
+        "terminal": 6
+      },
+      "tool_errors": 1,
+      "raw_tool_output_bytes_before_truncation": 13976,
+      "graph_used": false,
+      "terminal_graph_access_calls": [],
+      "graph_build": null,
+      "checks": {
+        "build": {
+          "exit_code": 0,
+          "wall_s": 6.3182974399996965,
+          "evidence_sha256": "4f2bb05cc7179e14fe857eb3b96eb0920c0419dbf0471a89ae4b4d83eb6134df"
+        },
+        "lint": {
+          "exit_code": 0,
+          "wall_s": 1.0311661809992074,
+          "evidence_sha256": "762f8ab63e1d387aab995f8818bcd6996b81758bf71aaedc10be478287626b88"
+        },
+        "unit": {
+          "exit_code": 0,
+          "wall_s": 2.5674789679997048,
+          "evidence_sha256": "3c049995f2e2bfa0b1a80a6b959d265c987dd367969ed08b30fefa382d7d8cea"
+        }
+      },
+      "hidden": {
+        "passed": 294,
+        "total": 294,
+        "failures": []
+      },
+      "negative_control_ok": true,
+      "patch_sha256": "97368406a2d7571d8f6e77313760d6dd2df946cfca1e99c0bef225b3eeb505f0",
+      "answer_sha256": "ab86c0917b47ffbc5eaaecfdaea7250d11bf48868a797dc7ef4e002b71b4d524",
+      "events_sha256": "edcc6135646f2011cc82ae2fd99959fbf7979afda3eaf61ca63e16c6c2249882",
+      "tool_log_sha256": "0b8e5f312200006c99510b6080ffc6b6d0cc85d1b6560ded8824b03e3f81f9f4",
+      "cgroup_memory_peak_bytes_including_file_cache": 432431104,
+      "container_cpu_stat": {
+        "usage_usec": 15463796,
+        "user_usec": 13391577,
+        "system_usec": 2072218,
+        "nice_usec": 0,
+        "core_sched.force_idle_usec": 0,
+        "nr_periods": 124,
+        "nr_throttled": 5,
+        "throttled_usec": 18499,
+        "nr_bursts": 0,
+        "burst_usec": 0
+      },
+      "scoring": {
+        "trial": "P2-A",
+        "quality_units": [
+          2,
+          2,
+          2,
+          2,
+          2
+        ],
+        "evidence": "Optional positive-safe-integer limit validated before missing-career return; default/API/keep/order/filter behavior preserved. Focused custom-limit, invalid-input and keep tests added, existing tests retained, server/UI/dependencies untouched. All 294 hidden assertions and applicable suites pass.",
+        "score": 100.0,
+        "pass": true
+      }
+    },
+    {
+      "task": "P2",
+      "arm": "B",
+      "order": "AB",
+      "phase": "exploratory_16_session_pilot",
+      "model_requested": "claude-opus-5.5",
+      "model_actual": "claude-opus-5.5",
+      "agent_wall_s": 126.70906160499999,
+      "returncode": 0,
+      "stop_reason": null,
+      "input_tokens_including_cache": 76706,
+      "output_tokens": 5099,
+      "cache_read_tokens": 63326,
+      "cache_write_tokens": 12784,
+      "reasoning_tokens": 423,
+      "ai_credits": 18.09492,
+      "legacy_premium_request_cost": 15,
+      "cost_currency": null,
+      "tool_calls": 6,
+      "tools_by_name": {
+        "terminal": 6
+      },
+      "tool_errors": 2,
+      "raw_tool_output_bytes_before_truncation": 15013,
+      "graph_used": false,
+      "terminal_graph_access_calls": [],
+      "graph_build": {
+        "wall_s": 37.52296509400003,
+        "nodes_after": 13395,
+        "edges_after": 33352,
+        "bytes_after": 14010955,
+        "sha256_before": "8715b0193b30e88077491cf57fd078a3e780df87b2289141ffbf80ad342568ae",
+        "build_evidence_sha256": "9e00b136474ec55e9c1feef8f4fbe94d7b0605c6e1b907f9ffaadbff7e53a513"
+      },
+      "checks": {
+        "build": {
+          "exit_code": 0,
+          "wall_s": 5.764726690000316,
+          "evidence_sha256": "abddd18ac6b5c8fcb11200e70aeb9e9d76920d54e3f140c9bc771eaa3a3f2cc1"
+        },
+        "lint": {
+          "exit_code": 0,
+          "wall_s": 0.7429691000006642,
+          "evidence_sha256": "263407775e74e4da0c0db455fbbd943550db6d8bc56da8c71fe17363247a397d"
+        },
+        "unit": {
+          "exit_code": 0,
+          "wall_s": 1.5248035380000147,
+          "evidence_sha256": "4e8bc42568e9ed52d82294ad18ee04c34bd7660a51f1c47bd0803025b76788e4"
+        }
+      },
+      "hidden": {
+        "passed": 294,
+        "total": 294,
+        "failures": []
+      },
+      "negative_control_ok": true,
+      "patch_sha256": "6f34f4e5437e503953ad5a9f8c01575a8b7a28ad265def969af3902b2909f180",
+      "answer_sha256": "4332c4bee43c8c4a61b715419ef571f2aa046fc7db1a9646d33db7b435335ed5",
+      "events_sha256": "7ec4fa64b0913d98aaee7c3d4759943ef6152d6d07f735e643f819c058616100",
+      "tool_log_sha256": "a6908651c279cdfbafc37aea2a7f7bae908ae66c7ea70bab2d67c94237bd7765",
+      "cgroup_memory_peak_bytes_including_file_cache": 565833728,
+      "container_cpu_stat": {
+        "usage_usec": 73031341,
+        "user_usec": 66841820,
+        "system_usec": 6189520,
+        "nice_usec": 0,
+        "core_sched.force_idle_usec": 0,
+        "nr_periods": 475,
+        "nr_throttled": 147,
+        "throttled_usec": 2708567,
+        "nr_bursts": 0,
+        "burst_usec": 0
+      },
+      "scoring": {
+        "trial": "P2-B",
+        "quality_units": [
+          2,
+          2,
+          2,
+          2,
+          2
+        ],
+        "evidence": "Focused optional-limit extension with early RangeError validation, preserved default/order/filter/keep behavior, additive tests and no server/UI/dependency changes.",
+        "score": 100.0,
+        "pass": true
+      }
+    },
+    {
+      "task": "P1",
+      "arm": "A",
+      "order": "AB",
+      "phase": "exploratory_16_session_pilot",
+      "model_requested": "claude-opus-5.5",
+      "model_actual": "claude-opus-5.5",
+      "agent_wall_s": 66.07905592300085,
+      "returncode": 0,
+      "stop_reason": null,
+      "input_tokens_including_cache": 81033,
+      "output_tokens": 4485,
+      "cache_read_tokens": 70018,
+      "cache_write_tokens": 10245,
+      "reasoning_tokens": 1263,
+      "ai_credits": 15.80086,
+      "legacy_premium_request_cost": 15,
+      "cost_currency": null,
+      "tool_calls": 8,
+      "tools_by_name": {
+        "terminal": 8
+      },
+      "tool_errors": 2,
+      "raw_tool_output_bytes_before_truncation": 12318,
+      "graph_used": false,
+      "terminal_graph_access_calls": [],
+      "graph_build": null,
+      "checks": {
+        "build": {
+          "exit_code": 0,
+          "wall_s": 5.944370518000142,
+          "evidence_sha256": "b363b9c196b25c2b27e243ad9c48c952b2cc08db0d61d64d0bfe5f374a90c3aa"
+        },
+        "lint": {
+          "exit_code": 0,
+          "wall_s": 0.8889244559995859,
+          "evidence_sha256": "d6304e4d850305e50e20b24c1bfc2f56ceaa3de6d9dbabcc32d529f324b8713e"
+        },
+        "unit": {
+          "exit_code": 0,
+          "wall_s": 1.752936105000117,
+          "evidence_sha256": "bd3f1a8c25ddfe50f09ee12880372911ccea9af4f4ff2ca80b3cb7de40a47424"
+        }
+      },
+      "hidden": {
+        "passed": 6,
+        "total": 6,
+        "failures": []
+      },
+      "negative_control_ok": true,
+      "patch_sha256": "692674697bf8379fcb6fc2ccb30e349e40dacbd3365540c6aa7fd64ce6af5add",
+      "answer_sha256": "a3544942e5e41d1ab5d60a5746f18c6d652aec6a290de9d38b724cc163695259",
+      "events_sha256": "d7b1f9242e915542e7348486a5b959ddcff78dae78ab9c20b0cd949b9551cc51",
+      "tool_log_sha256": "ff926d598929a9dc30885bc46176a8f43ec873498da001b614eef8f2e6e95550",
+      "cgroup_memory_peak_bytes_including_file_cache": 436355072,
+      "container_cpu_stat": {
+        "usage_usec": 24888021,
+        "user_usec": 21680249,
+        "system_usec": 3207771,
+        "nice_usec": 0,
+        "core_sched.force_idle_usec": 0,
+        "nr_periods": 188,
+        "nr_throttled": 20,
+        "throttled_usec": 620425,
+        "nr_bursts": 0,
+        "burst_usec": 0
+      },
+      "scoring": {
+        "trial": "P1-A",
+        "quality_units": [
+          2,
+          2,
+          2,
+          2,
+          2
+        ],
+        "evidence": "Pure exact-wording exported helper wired to all three Start and one Settings call sites; additive helper tests; no persistence, API or dependency changes.",
+        "score": 100.0,
+        "pass": true
+      }
+    },
+    {
+      "task": "P1",
+      "arm": "B",
+      "order": "AB",
+      "phase": "exploratory_16_session_pilot",
+      "model_requested": "claude-opus-5.5",
+      "model_actual": "claude-opus-5.5",
+      "agent_wall_s": 39.1442039249996,
+      "returncode": 0,
+      "stop_reason": null,
+      "input_tokens_including_cache": 38542,
+      "output_tokens": 3219,
+      "cache_read_tokens": 31540,
+      "cache_write_tokens": 6490,
+      "reasoning_tokens": 1133,
+      "ai_credits": 10.5186,
+      "legacy_premium_request_cost": 15,
+      "cost_currency": null,
+      "tool_calls": 5,
+      "tools_by_name": {
+        "terminal": 5
+      },
+      "tool_errors": 0,
+      "raw_tool_output_bytes_before_truncation": 5745,
+      "graph_used": false,
+      "terminal_graph_access_calls": [],
+      "graph_build": {
+        "wall_s": 36.09981808700013,
+        "nodes_after": 13394,
+        "edges_after": 33347,
+        "bytes_after": 14009111,
+        "sha256_before": "bed8d2f514f769303ea9a2285fac68611e00e585a489ea1eb93838488f17d423",
+        "build_evidence_sha256": "4696516daa99c82ac3395c8749d5785b279e5d01fbc6b1dedb82c6700334fb0d"
+      },
+      "checks": {
+        "build": {
+          "exit_code": 0,
+          "wall_s": 5.736696431000382,
+          "evidence_sha256": "f509071efcf7b99be17d0e4a65618d164ddbf0794f8bb906aa183bdf4289cac6"
+        },
+        "lint": {
+          "exit_code": 0,
+          "wall_s": 0.940794537000329,
+          "evidence_sha256": "2bd032fdabea958545c00d99403f286e0541ef5f2c5fbf2d81b1503d9d1eef40"
+        },
+        "unit": {
+          "exit_code": 0,
+          "wall_s": 2.0068607679995694,
+          "evidence_sha256": "7d0500110a50b49f977e8b9c55eeae4253443756e666c7fa23caead1216c32a4"
+        }
+      },
+      "hidden": {
+        "passed": 6,
+        "total": 6,
+        "failures": []
+      },
+      "negative_control_ok": true,
+      "patch_sha256": "a82b18cfb7c6218576970235fc79849a8781571a4bdaaf4811a2c550ce5cdee5",
+      "answer_sha256": "06aeff56442be6bd5b91d6e4a3da4b78b7f9c53e2f6a974e61bac956977bf461",
+      "events_sha256": "b0f6adecd9604ccbe1f9f2752a6b51ae9f16082cba479e3b0df585962e0c8565",
+      "tool_log_sha256": "c08695c1eaa1bdda366867bcc44eb86f150770c520d079f34d1b03df2ab93689",
+      "cgroup_memory_peak_bytes_including_file_cache": 564252672,
+      "container_cpu_stat": {
+        "usage_usec": 62927610,
+        "user_usec": 57980434,
+        "system_usec": 4947176,
+        "nice_usec": 0,
+        "core_sched.force_idle_usec": 0,
+        "nr_periods": 405,
+        "nr_throttled": 113,
+        "throttled_usec": 2003014,
+        "nr_bursts": 0,
+        "burst_usec": 0
+      },
+      "scoring": {
+        "trial": "P1-B",
+        "quality_units": [
+          2,
+          2,
+          2,
+          2,
+          2
+        ],
+        "evidence": "Equivalent focused helper extraction, four UI call sites and additive tests. No persistence/API/dependency changes or weakened assertions.",
+        "score": 100.0,
+        "pass": true
+      }
+    },
+    {
+      "task": "I1",
+      "arm": "B",
+      "order": "BA",
+      "phase": "exploratory_16_session_pilot",
+      "model_requested": "claude-opus-5.5",
+      "model_actual": "claude-opus-5.5",
+      "agent_wall_s": 39.58387077499992,
+      "returncode": 0,
+      "stop_reason": null,
+      "input_tokens_including_cache": 49996,
+      "output_tokens": 3243,
+      "cache_read_tokens": 33668,
+      "cache_write_tokens": 15902,
+      "reasoning_tokens": 508,
+      "ai_credits": 15.28076,
+      "legacy_premium_request_cost": 15,
+      "cost_currency": null,
+      "tool_calls": 4,
+      "tools_by_name": {
+        "terminal": 4
+      },
+      "tool_errors": 1,
+      "raw_tool_output_bytes_before_truncation": 31369,
+      "graph_used": false,
+      "terminal_graph_access_calls": [],
+      "graph_build": {
+        "wall_s": 36.17236256900014,
+        "nodes_after": 13395,
+        "edges_after": 33352,
+        "bytes_after": 14010955,
+        "sha256_before": "f8c2a6ff41826f032a03aeb9210c5763e68aa19335b1eaf1900389275a88b518",
+        "build_evidence_sha256": "33e236081f6d5142e936c8ae83928de2790355929add3997914fbf7c2995453a"
+      },
+      "checks": {},
+      "hidden": null,
+      "negative_control_ok": true,
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "answer_sha256": "cfc65971fbeb3ae981e9d41c64d148d6dca2ad6ef5425385f2c92255ee0685b3",
+      "events_sha256": "ba29ff8163a1eb4e7e896955b012d11b16bd0001d122519fda9bb8cfbe4c47a1",
+      "tool_log_sha256": "ce0802003c38d2bc8445efec9773f4996eee07fa354631e684281d75e5ae1f29",
+      "cgroup_memory_peak_bytes_including_file_cache": 563929088,
+      "container_cpu_stat": {
+        "usage_usec": 59450206,
+        "user_usec": 54982809,
+        "system_usec": 4467397,
+        "nice_usec": 0,
+        "core_sched.force_idle_usec": 0,
+        "nr_periods": 379,
+        "nr_throttled": 131,
+        "throttled_usec": 2050155,
+        "nr_bursts": 0,
+        "burst_usec": 0
+      },
+      "scoring": {
+        "trial": "I1-B",
+        "claim_units": [
+          2,
+          2,
+          2,
+          2,
+          2
+        ],
+        "core_files_found": 9,
+        "core_files_total": 9,
+        "false_positive_files": 0,
+        "plan_groups_covered": 4,
+        "critical_false_claim": false,
+        "score": 100,
+        "pass": true,
+        "evidence": "All five source-grounded claims covered, including signing exclusions, registration lifecycle, friendly/competitive and batch-selection parity, production callers and pure badge precedence. All nine frozen core files appear, with relevant additional callers. Ordered regression plan covers all four groups."
+      }
+    },
+    {
+      "task": "I1",
+      "arm": "A",
+      "order": "BA",
+      "phase": "exploratory_16_session_pilot",
+      "model_requested": "claude-opus-5.5",
+      "model_actual": "claude-opus-5.5",
+      "agent_wall_s": 62.36600164399988,
+      "returncode": 0,
+      "stop_reason": null,
+      "input_tokens_including_cache": 67752,
+      "output_tokens": 5688,
+      "cache_read_tokens": 51293,
+      "cache_write_tokens": 15947,
+      "reasoning_tokens": 2257,
+      "ai_credits": 20.58016,
+      "legacy_premium_request_cost": 15,
+      "cost_currency": null,
+      "tool_calls": 5,
+      "tools_by_name": {
+        "terminal": 5
+      },
+      "tool_errors": 0,
+      "raw_tool_output_bytes_before_truncation": 31315,
+      "graph_used": false,
+      "terminal_graph_access_calls": [],
+      "graph_build": null,
+      "checks": {},
+      "hidden": null,
+      "negative_control_ok": true,
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "answer_sha256": "c0c42f7ee6f2ded5552fe9871372753a6280a7aff985647dbadbc86e242a6254",
+      "events_sha256": "aa4ead8367a7f2e662b7458c72070bc05325dd75774c79b668f8f24392fa88c6",
+      "tool_log_sha256": "e80b7cb0c62f80e722750f6c2a572bed33a43a7b91ca966586cf44a051b3f392",
+      "cgroup_memory_peak_bytes_including_file_cache": 17072128,
+      "container_cpu_stat": {
+        "usage_usec": 507021,
+        "user_usec": 341361,
+        "system_usec": 165660,
+        "nice_usec": 0,
+        "core_sched.force_idle_usec": 0,
+        "nr_periods": 18,
+        "nr_throttled": 0,
+        "throttled_usec": 0,
+        "nr_bursts": 0,
+        "burst_usec": 0
+      },
+      "scoring": {
+        "trial": "I1-A",
+        "claim_units": [
+          2,
+          2,
+          2,
+          2,
+          1
+        ],
+        "core_files_found": 9,
+        "core_files_total": 9,
+        "false_positive_files": 0,
+        "plan_groups_covered": 4,
+        "critical_false_claim": false,
+        "score": 95,
+        "pass": true,
+        "evidence": "All core files and four plan groups covered, with source evidence for signing separation, competitive/friendly selection, production callers and lifecycle. Partial fifth-claim credit: badge ownership and generic status-to-label/tone tests are identified, but precedence/partial/loan combinations are not made explicit in the proposed tests."
+      }
+    },
+    {
+      "task": "I2",
+      "arm": "B",
+      "order": "BA",
+      "phase": "exploratory_16_session_pilot",
+      "model_requested": "claude-opus-5.5",
+      "model_actual": "claude-opus-5.5",
+      "agent_wall_s": 49.12062072399931,
+      "returncode": 0,
+      "stop_reason": null,
+      "input_tokens_including_cache": 77568,
+      "output_tokens": 4335,
+      "cache_read_tokens": 61406,
+      "cache_write_tokens": 15564,
+      "reasoning_tokens": 1463,
+      "ai_credits": 17.91932,
+      "legacy_premium_request_cost": 15,
+      "cost_currency": null,
+      "tool_calls": 6,
+      "tools_by_name": {
+        "terminal": 6
+      },
+      "tool_errors": 0,
+      "raw_tool_output_bytes_before_truncation": 27174,
+      "graph_used": false,
+      "terminal_graph_access_calls": [],
+      "graph_build": {
+        "wall_s": 35.56080697499965,
+        "nodes_after": 13395,
+        "edges_after": 33352,
+        "bytes_after": 14010955,
+        "sha256_before": "40b26d0bf9aaca149a75b36a6555e9ca833131ca13c362369ad29b1cb87a1cae",
+        "build_evidence_sha256": "5c39d5c081fde59f8cf789876b3af87c8635887a67d5278f91dbf569dea4376f"
+      },
+      "checks": {},
+      "hidden": null,
+      "negative_control_ok": true,
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "answer_sha256": "4dad31b5e0653b4f05ba75d410335c106d115ec7d8332de51770ae0d7fd49d5f",
+      "events_sha256": "2eb479b253384a6fc02011ca4e05f38ba2a0102e0e3769f09f1a7860c11efa2a",
+      "tool_log_sha256": "b926630bd992553051e18bac11e7251ef196e60826af6022ba81ab8b7ee48b56",
+      "cgroup_memory_peak_bytes_including_file_cache": 561672192,
+      "container_cpu_stat": {
+        "usage_usec": 58377488,
+        "user_usec": 53994878,
+        "system_usec": 4382610,
+        "nice_usec": 0,
+        "core_sched.force_idle_usec": 0,
+        "nr_periods": 377,
+        "nr_throttled": 157,
+        "throttled_usec": 2997389,
+        "nr_bursts": 0,
+        "burst_usec": 0
+      },
+      "scoring": {
+        "trial": "I2-B",
+        "claim_units": [
+          2,
+          2,
+          2,
+          2,
+          2
+        ],
+        "core_files_found": 6,
+        "core_files_total": 6,
+        "false_positive_files": 0,
+        "plan_groups_covered": 3,
+        "critical_false_claim": false,
+        "score": 95,
+        "pass": true,
+        "evidence": "All five claims and six core files covered. Ordered migration/inventory, optional checkpoint and identity-reseed groups are actionable. The fourth group is incomplete: names db-migrate and tests, but does not specify applying the offline migration across all registered worlds (--registered)."
+      }
+    },
+    {
+      "task": "I2",
+      "arm": "A",
+      "order": "BA",
+      "phase": "exploratory_16_session_pilot",
+      "model_requested": "claude-opus-5.5",
+      "model_actual": "claude-opus-5.5",
+      "agent_wall_s": 52.582896605000315,
+      "returncode": 0,
+      "stop_reason": null,
+      "input_tokens_including_cache": 62830,
+      "output_tokens": 4851,
+      "cache_read_tokens": 46884,
+      "cache_write_tokens": 15434,
+      "reasoning_tokens": 1505,
+      "ai_credits": 18.56148,
+      "legacy_premium_request_cost": 15,
+      "cost_currency": null,
+      "tool_calls": 5,
+      "tools_by_name": {
+        "terminal": 5
+      },
+      "tool_errors": 0,
+      "raw_tool_output_bytes_before_truncation": 51591,
+      "graph_used": false,
+      "terminal_graph_access_calls": [],
+      "graph_build": null,
+      "checks": {},
+      "hidden": null,
+      "negative_control_ok": true,
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "answer_sha256": "e588774cc3c2b0a20c8c02abb11dfea2c9533236df7e29b0e8f91832bfb916cf",
+      "events_sha256": "42faccf1ac3080dee6d47d0b88907ef0b8f3a45afdf52c75f72ae0c5fef21f21",
+      "tool_log_sha256": "2834a9809945f0af814b50d809b629839a9f21f2a8c55cdb4d82e1670bd62e20",
+      "cgroup_memory_peak_bytes_including_file_cache": 15556608,
+      "container_cpu_stat": {
+        "usage_usec": 537432,
+        "user_usec": 352215,
+        "system_usec": 185216,
+        "nice_usec": 0,
+        "core_sched.force_idle_usec": 0,
+        "nr_periods": 19,
+        "nr_throttled": 0,
+        "throttled_usec": 0,
+        "nr_bursts": 0,
+        "burst_usec": 0
+      },
+      "scoring": {
+        "trial": "I2-A",
+        "claim_units": [
+          2,
+          2,
+          2,
+          2,
+          2
+        ],
+        "core_files_found": 6,
+        "core_files_total": 6,
+        "false_positive_files": 0,
+        "plan_groups_covered": 4,
+        "critical_false_claim": false,
+        "score": 100,
+        "pass": true,
+        "evidence": "All five claims and six core files covered with source anchors. Ordered plan covers append-only/idempotent migration, three inventories, old-checkpoint empty restore, identity reseeding and current-schema constraints, registry separation, registered-world migration and focused compatibility tests."
+      }
+    },
+    {
+      "task": "C1",
+      "arm": "B",
+      "order": "BA",
+      "phase": "exploratory_16_session_pilot",
+      "model_requested": "claude-opus-5.5",
+      "model_actual": "claude-opus-5.5",
+      "agent_wall_s": 33.37638227200023,
+      "returncode": 0,
+      "stop_reason": null,
+      "input_tokens_including_cache": 64916,
+      "output_tokens": 2347,
+      "cache_read_tokens": 51309,
+      "cache_write_tokens": 13095,
+      "reasoning_tokens": 413,
+      "ai_credits": 12.47248,
+      "legacy_premium_request_cost": 15,
+      "cost_currency": null,
+      "tool_calls": 6,
+      "tools_by_name": {
+        "graphify": 1,
+        "terminal": 5
+      },
+      "tool_errors": 0,
+      "raw_tool_output_bytes_before_truncation": 23663,
+      "graph_used": true,
+      "terminal_graph_access_calls": [],
+      "graph_build": {
+        "wall_s": 34.701568414000576,
+        "nodes_after": 13395,
+        "edges_after": 33352,
+        "bytes_after": 14010955,
+        "sha256_before": "05dd142d0fd79e3f2c02094faff82bcc8b6b0da660d9ccd7b8c9b6111d74bbb6",
+        "build_evidence_sha256": "11159ac3f4e54bbc2d756fe9c48278d1bc8404badc7fcc82f876681b28d2224a"
+      },
+      "checks": {},
+      "hidden": null,
+      "negative_control_ok": true,
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "answer_sha256": "9fb920cc0538626a5d499e64d9670c86c1e23ee835f2b0e0305e8eb0ee61c295",
+      "events_sha256": "a637854cbb956da4c8b885974d42cdcf7a94889dc6269028ebc7d3cae05baa0a",
+      "tool_log_sha256": "5c06aae66705c7c8be7c5cc37a2e2a6eaab2032539f41b09e3a928cdfb579e07",
+      "cgroup_memory_peak_bytes_including_file_cache": 559759360,
+      "container_cpu_stat": {
+        "usage_usec": 57815352,
+        "user_usec": 53596361,
+        "system_usec": 4218990,
+        "nice_usec": 0,
+        "core_sched.force_idle_usec": 0,
+        "nr_periods": 380,
+        "nr_throttled": 156,
+        "throttled_usec": 3725464,
+        "nr_bursts": 0,
+        "burst_usec": 0
+      },
+      "scoring": {
+        "trial": "C1-B",
+        "claim_units": [
+          2,
+          1,
+          1,
+          2,
+          2
+        ],
+        "critical_false_claim": false,
+        "score": 80,
+        "pass": true,
+        "evidence": "Correct trust key, world-router boundary and generation guards. Explicitly did not read finishResolution and relies on a schema-selection test; validation/unique mapping/Store.forSchema control flow is incomplete. Approval is described, but empty-world/no-autoseed provisioning is omitted."
+      }
+    },
+    {
+      "task": "C1",
+      "arm": "A",
+      "order": "BA",
+      "phase": "exploratory_16_session_pilot",
+      "model_requested": "claude-opus-5.5",
+      "model_actual": "claude-opus-5.5",
+      "agent_wall_s": 31.812136600000485,
+      "returncode": 0,
+      "stop_reason": null,
+      "input_tokens_including_cache": 44791,
+      "output_tokens": 2566,
+      "cache_read_tokens": 33074,
+      "cache_write_tokens": 11291,
+      "reasoning_tokens": 672,
+      "ai_credits": 11.60938,
+      "legacy_premium_request_cost": 15,
+      "cost_currency": null,
+      "tool_calls": 4,
+      "tools_by_name": {
+        "terminal": 4
+      },
+      "tool_errors": 0,
+      "raw_tool_output_bytes_before_truncation": 19936,
+      "graph_used": false,
+      "terminal_graph_access_calls": [],
+      "graph_build": null,
+      "checks": {},
+      "hidden": null,
+      "negative_control_ok": true,
+      "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "answer_sha256": "79998f6800239a833871372944fa0a7479d64a545e8260bfbabe7e048bb6cf08",
+      "events_sha256": "160d304b1b88bf8418e4173bcb6bd4d4dda0b756a647a8a53bc340049418ff5a",
+      "tool_log_sha256": "2ef75a0a26b87931287c5d3b7cf3b938180162c9ae90d8d3045e2f00bcf6c9d4",
+      "cgroup_memory_peak_bytes_including_file_cache": 15601664,
+      "container_cpu_stat": {
+        "usage_usec": 406449,
+        "user_usec": 268619,
+        "system_usec": 137830,
+        "nice_usec": 0,
+        "core_sched.force_idle_usec": 0,
+        "nr_periods": 16,
+        "nr_throttled": 0,
+        "throttled_usec": 0,
+        "nr_bursts": 0,
+        "burst_usec": 0
+      },
+      "scoring": {
+        "trial": "C1-A",
+        "claim_units": [
+          2,
+          1,
+          1,
+          2,
+          2
+        ],
+        "critical_false_claim": false,
+        "score": 80,
+        "pass": true,
+        "evidence": "Correct trust key, per-schema router isolation and stale-response/cache invalidation with source anchors. Partial registry/store claim: describes schema validation and routing but does not state the unique game_schema constraint or Store.forSchema selection. Partial provisioning claim: approvals/admin provisioning discussed, but empty-world/no-autoseed behavior omitted."
+      }
+    }
+  ],
+  "paired": [
+    {
+      "task": "C1",
+      "time_ratio": 1.0491713490253187,
+      "cold_time_ratio": 2.1399993198193346,
+      "input_token_ratio": 1.449309012971356,
+      "credit_ratio": 1.0743450554637715
+    },
+    {
+      "task": "C2",
+      "time_ratio": 1.210569184012897,
+      "cold_time_ratio": 1.9623392376661335,
+      "input_token_ratio": 1.6216696269982238,
+      "credit_ratio": 1.3031143994085412
+    },
+    {
+      "task": "D1",
+      "time_ratio": 0.5521415624218369,
+      "cold_time_ratio": 0.8403022067507124,
+      "input_token_ratio": 2.004143594379779,
+      "credit_ratio": 1.2333379595960716
+    },
+    {
+      "task": "D2",
+      "time_ratio": 0.9834950639601643,
+      "cold_time_ratio": 1.5464248777485594,
+      "input_token_ratio": 0.5816893871368579,
+      "credit_ratio": 0.8836434517511154
+    },
+    {
+      "task": "I1",
+      "time_ratio": 0.6347027183328854,
+      "cold_time_ratio": 1.2147040269862872,
+      "input_token_ratio": 0.7379265556736333,
+      "credit_ratio": 0.7424995724037131
+    },
+    {
+      "task": "I2",
+      "time_ratio": 0.9341558547637757,
+      "cold_time_ratio": 1.6104367230873748,
+      "input_token_ratio": 1.234569473181601,
+      "credit_ratio": 0.9654036208319595
+    },
+    {
+      "task": "P1",
+      "time_ratio": 0.5923844307130038,
+      "cold_time_ratio": 1.138696988947276,
+      "input_token_ratio": 0.4756333839300038,
+      "credit_ratio": 0.6656979430233544
+    },
+    {
+      "task": "P2",
+      "time_ratio": 0.9152366587383106,
+      "cold_time_ratio": 1.1862701015211565,
+      "input_token_ratio": 1.1970536369169307,
+      "credit_ratio": 0.9399694761809277
+    }
+  ],
+  "totals": {
+    "A": {
+      "agent_wall_s": 581.8627056440009,
+      "input_tokens_including_cache": 552041,
+      "output_tokens": 37556,
+      "cache_read_tokens": 441161,
+      "cache_write_tokens": 106012,
+      "ai_credits": 138.88842,
+      "tool_calls": 50,
+      "passed_tasks": 7,
+      "mean_score": 96.26388888888889,
+      "graph_direct_queries": 0,
+      "graph_build_wall_s": 0
+    },
+    "B": {
+      "agent_wall_s": 469.9621967469993,
+      "input_tokens_including_cache": 599035,
+      "output_tokens": 33952,
+      "cache_read_tokens": 485938,
+      "cache_write_tokens": 108057,
+      "ai_credits": 133.66726,
+      "tool_calls": 52,
+      "passed_tasks": 7,
+      "mean_score": 96.26388888888889,
+      "graph_direct_queries": 1,
+      "graph_build_wall_s": 283.3479757869991
+    }
+  },
+  "median_pair_ratios": {
+    "time_ratio": 0.9246962567510432,
+    "cold_time_ratio": 1.3805644523674232,
+    "input_token_ratio": 1.2158115550492659,
+    "credit_ratio": 0.9526865485064436
+  },
+  "maintenance": {
+    "records": [
+      {
+        "operation": "first_build",
+        "wall_s": 36.905501819000165,
+        "exit_code": 0,
+        "time_v": "\tCommand being timed: \"/opt/python/bin/python3.12 -m graphify extract /work --code-only --max-workers 2 --exclude docs --exclude benchmarks --exclude tools/graphify\"\n\tUser time (seconds): 55.76\n\tSystem time (seconds): 4.75\n\tPercent of CPU this job got: 164%\n\tElapsed (wall clock) time (h:mm:ss or m:ss): 0:36.85\n\tAverage shared text size (kbytes): 0\n\tAverage unshared data size (kbytes): 0\n\tAverage stack size (kbytes): 0\n\tAverage total size (kbytes): 0\n\tMaximum resident set size (kbytes): 464116\n\tAverage resident set size (kbytes): 0\n\tMajor (requiring I/O) page faults: 1\n\tMinor (reclaiming a frame) page faults: 1030224\n\tVoluntary context switches: 5724\n\tInvoluntary context switches: 1226\n\tSwaps: 0\n\tFile system inputs: 2480\n\tFile system outputs: 30416\n\tSocket messages sent: 0\n\tSocket messages received: 0\n\tSignals delivered: 0\n\tPage size (bytes): 4096\n\tExit status: 0\n"
+      },
+      {
+        "operation": "noop_refresh_1",
+        "wall_s": 9.927455040000496,
+        "exit_code": 0,
+        "time_v": "\tCommand being timed: \"/opt/python/bin/python3.12 -m graphify extract /work --code-only --max-workers 2 --exclude docs --exclude benchmarks --exclude tools/graphify\"\n\tUser time (seconds): 9.54\n\tSystem time (seconds): 0.58\n\tPercent of CPU this job got: 102%\n\tElapsed (wall clock) time (h:mm:ss or m:ss): 0:09.84\n\tAverage shared text size (kbytes): 0\n\tAverage unshared data size (kbytes): 0\n\tAverage stack size (kbytes): 0\n\tAverage total size (kbytes): 0\n\tMaximum resident set size (kbytes): 193580\n\tAverage resident set size (kbytes): 0\n\tMajor (requiring I/O) page faults: 0\n\tMinor (reclaiming a frame) page faults: 69983\n\tVoluntary context switches: 3862\n\tInvoluntary context switches: 224\n\tSwaps: 0\n\tFile system inputs: 8\n\tFile system outputs: 29168\n\tSocket messages sent: 0\n\tSocket messages received: 0\n\tSignals delivered: 0\n\tPage size (bytes): 4096\n\tExit status: 0\n"
+      },
+      {
+        "operation": "noop_refresh_2",
+        "wall_s": 8.22274735800056,
+        "exit_code": 0,
+        "time_v": "\tCommand being timed: \"/opt/python/bin/python3.12 -m graphify extract /work --code-only --max-workers 2 --exclude docs --exclude benchmarks --exclude tools/graphify\"\n\tUser time (seconds): 8.18\n\tSystem time (seconds): 0.24\n\tPercent of CPU this job got: 103%\n\tElapsed (wall clock) time (h:mm:ss or m:ss): 0:08.13\n\tAverage shared text size (kbytes): 0\n\tAverage unshared data size (kbytes): 0\n\tAverage stack size (kbytes): 0\n\tAverage total size (kbytes): 0\n\tMaximum resident set size (kbytes): 194340\n\tAverage resident set size (kbytes): 0\n\tMajor (requiring I/O) page faults: 0\n\tMinor (reclaiming a frame) page faults: 70276\n\tVoluntary context switches: 3860\n\tInvoluntary context switches: 133\n\tSwaps: 0\n\tFile system inputs: 0\n\tFile system outputs: 29168\n\tSocket messages sent: 0\n\tSocket messages received: 0\n\tSignals delivered: 0\n\tPage size (bytes): 4096\n\tExit status: 0\n"
+      },
+      {
+        "operation": "noop_refresh_3",
+        "wall_s": 8.099794284999916,
+        "exit_code": 0,
+        "time_v": "\tCommand being timed: \"/opt/python/bin/python3.12 -m graphify extract /work --code-only --max-workers 2 --exclude docs --exclude benchmarks --exclude tools/graphify\"\n\tUser time (seconds): 8.05\n\tSystem time (seconds): 0.24\n\tPercent of CPU this job got: 103%\n\tElapsed (wall clock) time (h:mm:ss or m:ss): 0:08.01\n\tAverage shared text size (kbytes): 0\n\tAverage unshared data size (kbytes): 0\n\tAverage stack size (kbytes): 0\n\tAverage total size (kbytes): 0\n\tMaximum resident set size (kbytes): 193896\n\tAverage resident set size (kbytes): 0\n\tMajor (requiring I/O) page faults: 0\n\tMinor (reclaiming a frame) page faults: 71347\n\tVoluntary context switches: 3853\n\tInvoluntary context switches: 158\n\tSwaps: 0\n\tFile system inputs: 0\n\tFile system outputs: 29168\n\tSocket messages sent: 0\n\tSocket messages received: 0\n\tSignals delivered: 0\n\tPage size (bytes): 4096\n\tExit status: 0\n"
+      },
+      {
+        "operation": "noop_refresh_4",
+        "wall_s": 8.329274120000264,
+        "exit_code": 0,
+        "time_v": "\tCommand being timed: \"/opt/python/bin/python3.12 -m graphify extract /work --code-only --max-workers 2 --exclude docs --exclude benchmarks --exclude tools/graphify\"\n\tUser time (seconds): 8.31\n\tSystem time (seconds): 0.22\n\tPercent of CPU this job got: 103%\n\tElapsed (wall clock) time (h:mm:ss or m:ss): 0:08.23\n\tAverage shared text size (kbytes): 0\n\tAverage unshared data size (kbytes): 0\n\tAverage stack size (kbytes): 0\n\tAverage total size (kbytes): 0\n\tMaximum resident set size (kbytes): 193800\n\tAverage resident set size (kbytes): 0\n\tMajor (requiring I/O) page faults: 0\n\tMinor (reclaiming a frame) page faults: 70046\n\tVoluntary context switches: 3831\n\tInvoluntary context switches: 163\n\tSwaps: 0\n\tFile system inputs: 0\n\tFile system outputs: 29168\n\tSocket messages sent: 0\n\tSocket messages received: 0\n\tSignals delivered: 0\n\tPage size (bytes): 4096\n\tExit status: 0\n"
+      },
+      {
+        "operation": "noop_refresh_5",
+        "wall_s": 8.493942177999998,
+        "exit_code": 0,
+        "time_v": "\tCommand being timed: \"/opt/python/bin/python3.12 -m graphify extract /work --code-only --max-workers 2 --exclude docs --exclude benchmarks --exclude tools/graphify\"\n\tUser time (seconds): 8.43\n\tSystem time (seconds): 0.24\n\tPercent of CPU this job got: 103%\n\tElapsed (wall clock) time (h:mm:ss or m:ss): 0:08.40\n\tAverage shared text size (kbytes): 0\n\tAverage unshared data size (kbytes): 0\n\tAverage stack size (kbytes): 0\n\tAverage total size (kbytes): 0\n\tMaximum resident set size (kbytes): 194092\n\tAverage resident set size (kbytes): 0\n\tMajor (requiring I/O) page faults: 0\n\tMinor (reclaiming a frame) page faults: 71073\n\tVoluntary context switches: 3924\n\tInvoluntary context switches: 203\n\tSwaps: 0\n\tFile system inputs: 0\n\tFile system outputs: 29168\n\tSocket messages sent: 0\n\tSocket messages received: 0\n\tSignals delivered: 0\n\tPage size (bytes): 4096\n\tExit status: 0\n"
+      },
+      {
+        "operation": "add_refresh",
+        "wall_s": 9.274295387000166,
+        "exit_code": 0,
+        "time_v": "\tCommand being timed: \"/opt/python/bin/python3.12 -m graphify extract /work --code-only --max-workers 2 --exclude docs --exclude benchmarks --exclude tools/graphify\"\n\tUser time (seconds): 9.32\n\tSystem time (seconds): 0.23\n\tPercent of CPU this job got: 104%\n\tElapsed (wall clock) time (h:mm:ss or m:ss): 0:09.18\n\tAverage shared text size (kbytes): 0\n\tAverage unshared data size (kbytes): 0\n\tAverage stack size (kbytes): 0\n\tAverage total size (kbytes): 0\n\tMaximum resident set size (kbytes): 241780\n\tAverage resident set size (kbytes): 0\n\tMajor (requiring I/O) page faults: 0\n\tMinor (reclaiming a frame) page faults: 89164\n\tVoluntary context switches: 3833\n\tInvoluntary context switches: 193\n\tSwaps: 0\n\tFile system inputs: 0\n\tFile system outputs: 29376\n\tSocket messages sent: 0\n\tSocket messages received: 0\n\tSignals delivered: 0\n\tPage size (bytes): 4096\n\tExit status: 0\n"
+      },
+      {
+        "operation": "rename_refresh",
+        "wall_s": 9.57758047400057,
+        "exit_code": 0,
+        "time_v": "\tCommand being timed: \"/opt/python/bin/python3.12 -m graphify extract /work --code-only --max-workers 2 --exclude docs --exclude benchmarks --exclude tools/graphify\"\n\tUser time (seconds): 9.54\n\tSystem time (seconds): 0.30\n\tPercent of CPU this job got: 103%\n\tElapsed (wall clock) time (h:mm:ss or m:ss): 0:09.50\n\tAverage shared text size (kbytes): 0\n\tAverage unshared data size (kbytes): 0\n\tAverage stack size (kbytes): 0\n\tAverage total size (kbytes): 0\n\tMaximum resident set size (kbytes): 242096\n\tAverage resident set size (kbytes): 0\n\tMajor (requiring I/O) page faults: 0\n\tMinor (reclaiming a frame) page faults: 89755\n\tVoluntary context switches: 3824\n\tInvoluntary context switches: 165\n\tSwaps: 0\n\tFile system inputs: 0\n\tFile system outputs: 29376\n\tSocket messages sent: 0\n\tSocket messages received: 0\n\tSignals delivered: 0\n\tPage size (bytes): 4096\n\tExit status: 0\n"
+      },
+      {
+        "operation": "delete_refresh",
+        "wall_s": 10.102669156000047,
+        "exit_code": 0,
+        "time_v": "\tCommand being timed: \"/opt/python/bin/python3.12 -m graphify extract /work --code-only --max-workers 2 --exclude docs --exclude benchmarks --exclude tools/graphify\"\n\tUser time (seconds): 9.68\n\tSystem time (seconds): 0.59\n\tPercent of CPU this job got: 102%\n\tElapsed (wall clock) time (h:mm:ss or m:ss): 0:10.01\n\tAverage shared text size (kbytes): 0\n\tAverage unshared data size (kbytes): 0\n\tAverage stack size (kbytes): 0\n\tAverage total size (kbytes): 0\n\tMaximum resident set size (kbytes): 193564\n\tAverage resident set size (kbytes): 0\n\tMajor (requiring I/O) page faults: 0\n\tMinor (reclaiming a frame) page faults: 69610\n\tVoluntary context switches: 3843\n\tInvoluntary context switches: 160\n\tSwaps: 0\n\tFile system inputs: 0\n\tFile system outputs: 29288\n\tSocket messages sent: 0\n\tSocket messages received: 0\n\tSignals delivered: 0\n\tPage size (bytes): 4096\n\tExit status: 0\n"
+      },
+      {
+        "operation": "independent_fresh_build",
+        "wall_s": 35.28453295899999,
+        "exit_code": 0,
+        "time_v": "\tCommand being timed: \"/opt/python/bin/python3.12 -m graphify extract /work --code-only --max-workers 2 --exclude docs --exclude benchmarks --exclude tools/graphify --out /tmp/fresh-graph\"\n\tUser time (seconds): 53.35\n\tSystem time (seconds): 3.95\n\tPercent of CPU this job got: 162%\n\tElapsed (wall clock) time (h:mm:ss or m:ss): 0:35.19\n\tAverage shared text size (kbytes): 0\n\tAverage unshared data size (kbytes): 0\n\tAverage stack size (kbytes): 0\n\tAverage total size (kbytes): 0\n\tMaximum resident set size (kbytes): 464636\n\tAverage resident set size (kbytes): 0\n\tMajor (requiring I/O) page faults: 0\n\tMinor (reclaiming a frame) page faults: 1029672\n\tVoluntary context switches: 5782\n\tInvoluntary context switches: 617\n\tSwaps: 0\n\tFile system inputs: 0\n\tFile system outputs: 30416\n\tSocket messages sent: 0\n\tSocket messages received: 0\n\tSignals delivered: 0\n\tPage size (bytes): 4096\n\tExit status: 0\n"
+      }
+    ],
+    "probe_correctness": {
+      "added_symbol": true,
+      "added_caller": true,
+      "added_call_edge": true,
+      "renamed_symbol": true,
+      "old_symbol_removed": true,
+      "deleted_sources_removed": true
+    },
+    "initial_vs_noop": {
+      "nodes": {
+        "only_initial": 3,
+        "only_noop": 0
+      },
+      "edges": {
+        "only_initial": 3,
+        "only_noop": 0
+      }
+    },
+    "incremental_vs_fresh": {
+      "nodes": {
+        "only_incremental": 0,
+        "only_fresh": 3
+      },
+      "edges": {
+        "only_incremental": 0,
+        "only_fresh": 3
+      }
+    },
+    "cgroup_memory_peak_bytes_including_file_cache": 566484992,
+    "graph_disk": "15224\t/work/graphify-out\n",
+    "initial_nodes": 13395,
+    "initial_edges": 33352,
+    "pruned_external_module_nodes": [
+      {
+        "id": "http",
+        "label": "http",
+        "source_file": "http"
+      },
+      {
+        "id": "https",
+        "label": "https",
+        "source_file": "https"
+      },
+      {
+        "id": "node_crypto",
+        "label": "node:crypto",
+        "source_file": "node:crypto"
+      }
+    ]
+  },
+  "oracle_correction": {
+    "reason": "Frozen extractor rejected both valid direct-to-helper/destructuring refactors. Only expression/binding extraction changed; the same 25 behavior assertions and source fixture cases apply. No agent reruns or task fixes.",
+    "original_hidden_sha256": "84cbbf4456f006e337c51f63eb6d03d91b5972e49dbd9bfa27e6a8dcc228e82e",
+    "correction_sha256": "24bbee85da6783a6acc060d0af40c30a5187f8eb96fad048f78440f4f06c9aec",
+    "trial_results": [
+      {
+        "trial": "D1-A",
+        "corrected_passed": 25,
+        "total": 25,
+        "original_evidence_sha256": "9f756a2d2e17e4cf59b9627bf030dffe6d53042fd99bfc982c22009a1003facd"
+      },
+      {
+        "trial": "D1-B",
+        "corrected_passed": 25,
+        "total": 25,
+        "original_evidence_sha256": "c688d3b660de566d27aa315545ec23e44b2676ec2e5af1d1b45fd6e8f7575759"
+      }
+    ]
+  },
+  "scoring_disclosure": {
+    "reviewer_count": 1,
+    "blinded": false,
+    "quality_order": [
+      "focused scope",
+      "no test weakening",
+      "API compatibility",
+      "no unnecessary dependency",
+      "readable root-cause fix"
+    ]
+  },
+  "schema_version": 1,
+  "measurement_notes": {
+    "comparison": "Access/intention-to-treat pilot, not forced Graphify usage; one pair per task.",
+    "time": "Agent wall time includes CLI initialization/tools, excludes evaluator checks and prebuild; cold total adds per-fixture prebuild.",
+    "tokens": "Provider inputTokens includes cache read/write; do not add cache fields again. Reasoning tokens remain provider-reported.",
+    "cost": "totalNanoAiu / 1e9 gives provider AI credits. Monetary cost unavailable; legacy premium-request cost is not money or AI credits.",
+    "memory": "GNU time maximum RSS is not aggregate simultaneous process-tree RSS. Cgroup memory peak includes file cache.",
+    "reproducibility": "Model ID is not immutable; sampling/output settings and provider caching not fully controllable. Local OCI image ID frozen, byte-identical future image rebuild not guaranteed.",
+    "trial_scope": "16 paid source trials only, no reruns. Source-free preflight cost excluded. Maintenance is model-free."
+  },
+  "direct_graph_query": {
+    "arguments": {
+      "args": [
+        "query",
+        "hosted player request selects private world account session; client ignores stale response from previous account",
+        "--budget",
+        "1500"
+      ]
+    },
+    "wall_s": 1.0918234889995801,
+    "exit_code": 0,
+    "bytes": 5107,
+    "inspection_note": "One C1-B query found 840 nodes, showed 45 under a 1500-token budget, and mixed relevant source anchors with generated Dagger SDK symbols. Retrieval precision/recall was not independently scored."
+  }
+}

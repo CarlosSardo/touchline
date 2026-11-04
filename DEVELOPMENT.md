@@ -142,8 +142,10 @@ Graphify is Apache-2.0 with retained MIT portions (`LICENSE`, `LICENSE-MIT`,
 `NOTICE` in its installed distribution); Touchline's MIT license is unchanged.
 
 See the evaluator-only [with/without benchmark design](benchmarks/graphify.md)
-for task prompts, scoring, costs and isolation requirements. **No agent benchmark
-trials have been run and no productivity improvement is established.**
+for task prompts, scoring, costs and isolation requirements, and the
+[16-session Opus 5.5 pilot results](benchmarks/graphify-results.md) for measured
+outcomes and limitations. **No causal productivity improvement is established;
+Graphify remains opt-in.**
 
 ## Configuration
 
