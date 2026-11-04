@@ -50,3 +50,8 @@ reports/
 
 # scripts/ci.sh (Dagger) logs and reports
 ci-logs/
+
+# Opt-in Graphify evaluation (tool environment, cache, generated graph)
+/.graphify-tools/
+/graphify-out/
+/tools/graphify/.venv/

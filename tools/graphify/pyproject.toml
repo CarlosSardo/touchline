@@ -1,0 +1,11 @@
+[project]
+name = "touchline-graphify-evaluation"
+version = "0.0.0"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "graphifyy @ git+https://github.com/Graphify-Labs/graphify.git@59b5ab1151e031fb42e39cfc9a50bf96f2d57ae0",
+]
+
+[tool.uv]
+package = false
+build-constraint-dependencies = ["setuptools==83.0.0"]

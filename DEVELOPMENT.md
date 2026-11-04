@@ -6,6 +6,7 @@ This is the operational source of truth for building, testing and running Touchl
 
 - [Local development](#local-development)
 - [Commands](#commands)
+- [Optional Graphify evaluation](#optional-graphify-evaluation)
 - [Configuration](#configuration)
 - [Testing and verification](#testing-and-verification)
 - [CI with Dagger](#ci-with-dagger)
@@ -88,6 +89,61 @@ The build type-checks client/tooling and server code, then emits the Vite UI int
 | `npm run pi:backup` / `npm run pi:restore -- FILE --yes` | Back up / replace the database of the bundled Compose PostgreSQL service |
 
 Inspect the script's `--help` and target before administrative commands. Dry-run flags are not interchangeable with permission to mutate production. Export files and registry backups contain private data and must not be committed.
+
+## Optional Graphify evaluation
+
+Graphify is an **opt-in developer tool**, not an application dependency or CI step.
+Its repository-local environment pins `graphifyy` 0.9.102 to upstream commit
+`59b5ab1151e031fb42e39cfc9a50bf96f2d57ae0`, with runtime dependencies in
+[`tools/graphify/uv.lock`](tools/graphify/uv.lock). It requires `uv` and an already
+installed Python 3.12 (validated with uv 0.12.17 / CPython 3.12.14 on Linux x86_64).
+Python downloads are disabled; the setup fails rather than installing a shared
+interpreter. Dependencies download from GitHub/PyPI during setup only:
+
+```sh
+bash scripts/graphify.sh setup
+bash scripts/graphify.sh version
+bash scripts/graphify.sh build
+bash scripts/graphify.sh query "manual save rotation" --budget 2000 --depth 2
+bash scripts/graphify.sh explain canSign
+bash scripts/graphify.sh affected server/eligibility.ts
+```
+
+The wrapper uses the installed CLI, not an ephemeral `uvx` install. Build scans the
+current working tree, honors ignore rules, and uses `--code-only` with two AST
+workers. It excludes the tool checkout/environment, benchmark material and docs
+website. Application tests and generated Dagger client code remain in scope.
+Run build again after edits or checkout changes; no hooks/watchers run for you.
+This is not a committed-source snapshot: commit or record the diff before making
+measurements, and verify coverage/warnings in the build output.
+
+Runtime commands get a clean environment with `GRAPHIFY_BACKEND=none`, no provider
+credentials, isolated HOME/cache and query logging disabled. The wrapper exposes
+only build, version and local graph lookups. Do not bypass it with `/graphify`,
+enable an LLM/backend, introspect a database, connect Graphify Cloud, or export a
+graph remotely without a separate privacy decision. These settings prevent model
+selection in the reviewed release; they are **not an OS network sandbox**.
+The generated graph contains source paths, symbols and potentially source-derived
+content: treat it as repository data, not a harmless public artifact.
+
+No `graphify install` assistant registration is performed: upstream's
+`install --project --platform copilot` writes `.copilot/skills/graphify/` and
+always-on `AGENTS.md` guidance, including automatic graph-first/rebuild behavior.
+Leaving these out deliberately preserves agent behavior and the benchmark
+baseline. Use the explicit CLI commands above for this evaluation; no global
+configuration, Git hooks, MCP connection, CI, application or deployment changes
+are required.
+
+The environment is `tools/graphify/.venv/`; generated graph/state is in
+`graphify-out/` and `.graphify-tools/`. All are ignored. To uninstall, remove only
+those three named directories from this evaluation checkout. The tracked
+manifest/lock/wrapper remain as reproducible setup instructions; main is unchanged.
+Graphify is Apache-2.0 with retained MIT portions (`LICENSE`, `LICENSE-MIT`,
+`NOTICE` in its installed distribution); Touchline's MIT license is unchanged.
+
+See the evaluator-only [with/without benchmark design](benchmarks/graphify.md)
+for task prompts, scoring, costs and isolation requirements. **No agent benchmark
+trials have been run and no productivity improvement is established.**
 
 ## Configuration
 
