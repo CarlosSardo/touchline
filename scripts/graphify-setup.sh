@@ -16,4 +16,11 @@ git config merge.graphify.name "graphify graph.json union merge"
 git config merge.graphify.driver "\"${py}\" -m graphify merge-driver %O %A %B"
 
 PYTHONHASHSEED=0 graphify update .
+# `update` leaves GRAPH_REPORT.md unwritten when the committed graph is already current (fresh clone), but agents
+# start from it. cluster-only writes it; keep the committed graph.json, whose community labels it would rewrite.
+if [ ! -f graphify-out/GRAPH_REPORT.md ]; then
+	cp graphify-out/graph.json graphify-out/graph.json.keep
+	PYTHONHASHSEED=0 graphify cluster-only . >/dev/null
+	mv graphify-out/graph.json.keep graphify-out/graph.json
+fi
 echo "Graphify ready: $(graphify --version). Hooks: .githooks; graph: graphify-out/graph.json"

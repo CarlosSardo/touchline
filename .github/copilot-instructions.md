@@ -1,35 +1,41 @@
-## graphify
+## Code graph (Graphify): the graph is the answer
 
-For any question about this repo's architecture, structure, components, or how to add/modify/find
-code, your first action should be `graphify query "<question>"` when `graphify-out/graph.json`
-exists. Use `graphify path "<A>" "<B>"` for relationship questions and `graphify explain "<concept>"`
-for focused-concept questions. These return a scoped subgraph, usually much smaller than the full
-report or raw grep output.
+`graphify-out/graph.json` is a current graph of this repository's calls, imports and doc references, extracted
+from the TypeScript AST and refreshed by the `.githooks/pre-commit` hook. For structural questions (who calls X,
+what breaks if X changes, which tests exercise X, how A reaches B), one graphify command at enough depth replaces a
+chain of greps and file reads (server/simulation.ts alone is about 150 KB). Run it from the repository root, answer
+from its output and cite the file:line locations it prints. Do not re-derive with grep what the graph already
+returned. Measured on this repo: about 0.3x to 0.6x the tokens of grep/read for the same accuracy
+(`scripts/bench-graphify/REPORT.md`).
 
-Triggers: "how do I…", "where is…", "what does … do", "add/modify a <component>",
-"explain the architecture", or anything that depends on how files or classes relate.
+| Question                                                   | One command                                                       |
+| ---------------------------------------------------------- | ----------------------------------------------------------------- |
+| What can reach X (callers of callers up to routes/entries) | `graphify affected "X" --depth 6 --relation calls`                |
+| Blast radius of changing X within N call hops              | `graphify affected "X" --depth N --relation calls`                |
+| Everything touching X: callers, importers, tests, docs     | `graphify affected "X" --depth 1`                                 |
+| Which tests exercise X within N hops                       | the `--relation calls` chain above, then the test-file step below |
+| What X calls, and who calls X directly                     | `graphify explain "X"`                                            |
+| How A reaches B                                            | `graphify path "A" "B"`                                           |
+| Where a feature lives                                      | `graphify query "<words>" --budget 2000` (`--seed X` to focus)    |
+| Hub symbols, surprising connections, communities           | read that section of `graphify-out/GRAPH_REPORT.md`               |
+| Aggregates: fan-in, unreferenced exports, most imported    | a short python3 script over `graphify-out/graph.json` (see below) |
 
-If `graphify-out/wiki/index.md` exists, use it for broad navigation. Read `graphify-out/GRAPH_REPORT.md`
-only for broad architecture review or when query/path/explain do not surface enough context. Only read
-source files when (a) modifying/debugging specific code, (b) the graph lacks the needed detail, or
-(c) the graph is missing or stale.
-
-Type `/graphify` in Copilot Chat to build or update the graph.
-
-### Touchline: graph before grep
-
-`graphify-out/graph.json` is committed and refreshed by the `.githooks/pre-commit` hook, so it is
-current. Before running grep or opening large files (server/simulation.ts alone is about 150 KB), run the matching
-command from the repository root and then read only the lines it points to:
-
-| Question                           | Command                                                     |
-| ---------------------------------- | ----------------------------------------------------------- |
-| What does X call, and who calls X? | `graphify explain "X"` (callers and callees with file:line) |
-| What breaks if I change X?         | `graphify affected "X" --depth 1`                           |
-| How does A reach B?                | `graphify path "A" "B"`, then `graphify explain` each hop   |
-| Where is the code for a feature?   | `graphify query "<feature words>" --budget 1500`            |
-
-Caveats: `god-nodes` ranks by total edges, not imports; `path` may shortcut through `contains`/`imports`
-edges, so confirm call chains with `explain`; the graph cannot link a client URL string to its Express
-route (grep `server/app.ts` for those). If the graph looks stale, run `npm run graph:update` (code-only,
-no LLM). Setup: DEVELOPMENT.md, "Code graph (Graphify)".
+- Pass bare names (`"advance"`); output labels functions as `advance()`. `--relation calls` keeps production
+  call chains; without it, `imports` edges also pull in modules and test files that merely import the file, so
+  filter that list to the files that actually call into the chain.
+- Every line of `affected` is `- label() [relation] file:Lline`: that list is the answer set.
+- Tests mostly call production code from inside test callbacks, which the graph does not link. For "which tests
+  exercise X", take the function names from `graphify affected "X" --depth N --relation calls`, list candidate
+  files with `grep -rlwE "X|name1|name2" --include="*.test.ts" server shared src`, then keep only files that call
+  one of those functions (common names such as `advance` or `decide` also match unrelated code).
+- graph.json: `nodes[]` have `id`, `label`, `source_file`, `source_location`; `links[]` have `source`, `target`
+  (node ids), `relation` (`calls`, `imports`, `imports_from`, `references`, `contains`) and `confidence`.
+- GRAPH_REPORT.md sections: God Nodes, Surprising Connections, Import Cycles, Communities. Read sections, not the
+  whole file. Its Import Cycles list is a sample of short cycles, not every file in a cycle: for a complete answer
+  compute strongly connected components over the `imports` and `imports_from` links (mapped to `source_file`) in
+  graph.json, then drop cycles that exist only through `import type`.
+- Open source files only to confirm an INFERRED edge, when the graph returns nothing, or before editing.
+- Blind spots, where grep is the right tool: a client URL string to its Express route (grep `server/app.ts`),
+  method calls such as `store.run()`, and calls made inside test callbacks.
+- If the graph looks stale, run `npm run graph:update` (code-only, no LLM). Setup and details: DEVELOPMENT.md,
+  "Code graph (Graphify)". Type `/graphify` in Copilot Chat to rebuild with docs.

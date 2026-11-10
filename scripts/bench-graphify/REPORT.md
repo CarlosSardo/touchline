@@ -20,6 +20,7 @@ Commit `6cb5b3f`, 2026-11-10, graphify 0.9.105, graph of 5653 nodes / 18046 edge
 | P4 coverage (H4): graph arms score lower than A (predicted loss) | G: Graphify CLI | accuracy **+0 pts** (0…0) | ❌ no loss |
 | P4 coverage (H4): graph arms score lower than A (predicted loss) | M: Graphify MCP | accuracy **+0 pts** (0…0) | ❌ no loss |
 | P4 coverage (H4): graph arms score lower than A (predicted loss) | H: CLI + hook | accuracy **−12 pts** (-37…0) | ✅ loss as predicted |
+| P5 cheap model (claude-haiku-5.5, H1, H2, H3, H5, H6, H7): graph arm accuracy ≥ claude-sonnet-5.5 arm A accuracy | G: Graphify CLI | 99% vs 98% (haiku A 98%) | ✅ confirmed |
 
 ## By task group (graph arm ÷ arm A)
 
@@ -168,23 +169,93 @@ Most missed: H: server/club-life.test.ts (1×); H: server/gbe.test.ts (1×); H: 
 | M: Graphify MCP | 100% (100/100/100) | 3.3 | 107k | 23k | 5.3k | 5.9 | 11 s | 0.0 (first 0/3) | 0 |
 | H: CLI + hook | 100% (100/100/100) | 4.7 | 132k | 16k | 2.3k | 5.4 | 14 s | 1.0 (first 0/3) | 0 |
 
+## Cheap model: claude-haiku-5.5
+
+Model `claude-haiku-5.5` (reasoning effort medium), copilot 1.0.108. CLI, 3 repeats × 7 tasks × 2 arms = 42 runs (0 failed), 12 concurrent sessions, 7 min wall time.
+
+| Task group | Arm vs A | Accuracy Δ | Turns | Input tokens | Task tokens | Cost (AIU) | Wall time |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| structural (H1, H2, H3, H5) | G: Graphify CLI | **+1 pts** (-0…2) | **0.81×** (0.69–1.01) | **0.78×** (0.65–0.98) | **0.70×** (0.48–0.99) | **0.82×** (0.69–0.96) | **0.88×** (0.66–1.28) |
+| change-plan (H6, H7) | G: Graphify CLI | **+0 pts** (0…0) | **0.80×** (0.65–1.00) | **0.81×** (0.64–1.02) | **0.76×** (0.58–0.99) | **0.91×** (0.82–1.02) | **1.02×** (0.91–1.12) |
+| coverage (H4) | G: Graphify CLI | **−49 pts** (-73…0) | **0.74×** (0.62–0.89) | **0.70×** (0.54–0.91) | **0.54×** (0.28–1.01) | **0.59×** (0.42–0.83) | **0.70×** (0.52–0.95) |
+
+#### H1: Reachability: everything that can trigger an AI transfer (structural, F1, 9 key items)
+
+| Arm | Accuracy (runs) | Turns | Input | Task input | Retrieved | AIU | Wall | Graph calls (graph first) | Failed |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| A: grep/read | 95% (95/95/95) | 11.0 | 373k | 101k | 7.1k | 1.1 | 43 s | – | 0 |
+| G: Graphify CLI | 96% (100/95/95) | 7.3 | 225k | 42k | 3.4k | 0.7 | 37 s | 3.0 (first 3/3) | 0 |
+
+#### H2: Transitive blast radius: contractEndDate within 3 call hops (structural, F1, 25 key items)
+
+| Arm | Accuracy (runs) | Turns | Input | Task input | Retrieved | AIU | Wall | Graph calls (graph first) | Failed |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| A: grep/read | 97% (100/100/91) | 12.3 | 444k | 139k | 7.7k | 1.6 | 73 s | – | 0 |
+| G: Graphify CLI | 100% (100/100/100) | 5.3 | 161k | 28k | 2.6k | 0.7 | 35 s | 2.3 (first 3/3) | 0 |
+
+Most missed: A: server/affiliates.ts#affiliateOptionsForNegotiation (1×); A: server/affiliates.ts#setOnwardLoanPlan (1×); A: server/affiliates.ts#startOnwardLoan (1×); A: server/queries.ts#transfers (1×).
+
+#### H3: Structure: import cycles in server/ (structural, F1, 18 key items)
+
+| Arm | Accuracy (runs) | Turns | Input | Task input | Retrieved | AIU | Wall | Graph calls (graph first) | Failed |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| A: grep/read | 100% (100/100/100) | 3.3 | 94k | 12k | 1.6k | 0.4 | 20 s | – | 0 |
+| G: Graphify CLI | 100% (100/100/100) | 5.0 | 144k | 19k | 1.6k | 0.5 | 22 s | 2.3 (first 3/3) | 0 |
+
+#### H5: Aggregate: exported server functions nobody else uses (structural, F1, 54 key items)
+
+| Arm | Accuracy (runs) | Turns | Input | Task input | Retrieved | AIU | Wall | Graph calls (graph first) | Failed |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| A: grep/read | 97% (96/97/97) | 7.7 | 226k | 36k | 2.8k | 0.7 | 182 s | – | 0 |
+| G: Graphify CLI | 96% (96/96/96) | 7.7 | 253k | 62k | 5.2k | 0.8 | 236 s | 0.0 (first 0/3) | 0 |
+
+Most missed: A: server/callups.ts#lineCounts (3×); A: server/callups.ts#median (3×); A: server/gbe.ts#addMonths (3×); G: server/callups.ts#lineCounts (3×); G: server/callups.ts#median (3×); G: server/eligibility.ts#reevaluateRegistrations (3×).
+
+#### H6: Change plan: schema migration 12, code, tests and docs (change-plan, recall, 8 key items)
+
+| Arm | Accuracy (runs) | Turns | Input | Task input | Retrieved | AIU | Wall | Graph calls (graph first) | Failed |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| A: grep/read | 100% (100/100/100) | 8.7 | 337k | 123k | 14k | 1.1 | 35 s | – | 0 |
+| G: Graphify CLI | 100% (100/100/100) | 10.0 | 459k | 210k | 20k | 1.4 | 44 s | 0.3 (first 0/3) | 0 |
+
+#### H7: Planning session: a levy on release-clause payments (change-plan, recall, 15 key items)
+
+| Arm | Accuracy (runs) | Turns | Input | Task input | Retrieved | AIU | Wall | Graph calls (graph first) | Failed |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| A: grep/read | 100% (100/100/100) | 9.7 | 355k | 116k | 8.4k | 1.0 | 39 s | – | 0 |
+| G: Graphify CLI | 100% (100/100/100) | 5.3 | 172k | 39k | 5.0k | 0.7 | 31 s | 1.3 (first 2/3) | 0 |
+
+| Arm | (a) callees | (b) callers | (c) tests | (d) docs |
+| --- | ---: | ---: | ---: | ---: |
+| A: grep/read | 100% | 100% | 100% | 100% |
+| G: Graphify CLI | 100% | 100% | 100% | 100% |
+
+#### H4: Coverage: tests exercising transferProceeds within 3 hops (coverage, F1, 13 key items)
+
+| Arm | Accuracy (runs) | Turns | Input | Task input | Retrieved | AIU | Wall | Graph calls (graph first) | Failed |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| A: grep/read | 100% (100/100/100) | 9.0 | 290k | 68k | 5.5k | 1.1 | 53 s | – | 0 |
+| G: Graphify CLI | 51% (100/27/27) | 6.7 | 203k | 37k | 2.7k | 0.7 | 37 s | 4.0 (first 3/3) | 0 |
+
+Most missed: G: server/affiliates.sql.test.ts (2×); G: server/club-life.test.ts (2×); G: server/gbe.test.ts (2×); G: server/living-world.test.ts (2×); G: server/market-offers.test.ts (2×); G: server/match-stats.test.ts (2×).
+
 ## Retrieval ceilings (scripted)
 
 Hand-written best recipes per task, run without an agent ([tasks.ts](tasks.ts)): **A** = the best grep/read recipe, **G** = the best Graphify CLI recipe. Context recall is the share of answer-key items present in the output: the most an agent could extract from that retrieval. The commands column is the minimum number of agent turns the retrieval needs (A recipes for transitive tasks need one search per hop, and each hop depends on the previous output).
 
 | Task | Commands A / G | Tokens A / G | Context recall A / G | Median time A / G |
 | --- | ---: | ---: | ---: | ---: |
-| H1 Reachability: everything that can trigger an AI transfer | 6 / 1 | 1.5k / 175 | 78% / 100% | 0.04 / 0.31 s |
-| H2 Transitive blast radius: contractEndDate within 3 call hops | 3 / 1 | 4.4k / 511 | 84% / 100% | 0.03 / 0.31 s |
+| H1 Reachability: everything that can trigger an AI transfer | 6 / 1 | 1.5k / 175 | 78% / 100% | 0.04 / 0.36 s |
+| H2 Transitive blast radius: contractEndDate within 3 call hops | 3 / 1 | 4.4k / 511 | 84% / 100% | 0.03 / 0.35 s |
 | H3 Structure: import cycles in server/ | 1 / 1 | 3.5k / 930 | 100% / 72% | 0.01 / 0.00 s |
-| H5 Aggregate: exported server functions nobody else uses | 1 / 1 | 556 / 971 | 94% / 98% | 3.42 / 0.13 s |
-| H6 Change plan: schema migration 12, code, tests and docs | 4 / 3 | 3.4k / 1.7k | 100% / 88% | 0.02 / 1.09 s |
-| H7 Planning session: a levy on release-clause payments | 5 / 3 | 3.0k / 1.9k | 47% / 80% | 0.03 / 1.00 s |
-| T2 Multi-hop: HTTP advance route to the match engine | 4 / 2 | 1.8k / 1.0k | 100% / 60% | 0.01 / 0.73 s |
-| T5 Callees: completing an AI club's transfer | 3 / 2 | 1.3k / 1.4k | 100% / 64% | 0.01 / 0.69 s |
-| H4 Coverage: tests exercising transferProceeds within 3 hops | 2 / 1 | 263 / 1.0k | 100% / 100% | 0.02 / 0.31 s |
-| T7 Control: where is clamp defined | 1 / 1 | 170 / 724 | 100% / 100% | 0.01 / 0.31 s |
-| T8 Limitation: UI caller to Express handler across an HTTP string | 3 / 2 | 186 / 1.8k | 100% / 75% | 0.01 / 0.68 s |
+| H5 Aggregate: exported server functions nobody else uses | 1 / 1 | 556 / 971 | 94% / 98% | 3.49 / 0.16 s |
+| H6 Change plan: schema migration 12, code, tests and docs | 4 / 3 | 3.4k / 1.7k | 100% / 88% | 0.02 / 1.53 s |
+| H7 Planning session: a levy on release-clause payments | 5 / 3 | 3.0k / 1.9k | 47% / 80% | 0.03 / 1.32 s |
+| T2 Multi-hop: HTTP advance route to the match engine | 4 / 2 | 1.8k / 1.0k | 100% / 60% | 0.01 / 0.84 s |
+| T5 Callees: completing an AI club's transfer | 3 / 2 | 1.3k / 1.4k | 100% / 64% | 0.01 / 0.80 s |
+| H4 Coverage: tests exercising transferProceeds within 3 hops | 2 / 1 | 340 / 1.0k | 100% / 100% | 0.02 / 0.36 s |
+| T7 Control: where is clamp defined | 1 / 1 | 170 / 724 | 100% / 100% | 0.01 / 0.34 s |
+| T8 Limitation: UI caller to Express handler across an HTTP string | 3 / 2 | 186 / 1.8k | 100% / 75% | 0.01 / 0.78 s |
 
 ## Tasks
 
