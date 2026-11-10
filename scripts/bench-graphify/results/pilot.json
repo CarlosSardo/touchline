@@ -686,13 +686,20 @@
       "score": {
         "parsed": true,
         "answered": 7,
-        "correct": 5,
-        "recall": 1,
-        "precision": 0.7142857142857143,
+        "correct": 7,
+        "recall": 0.5384615384615384,
+        "precision": 1,
         "hallucinated": [],
-        "missed": [],
+        "missed": [
+          "server/club-life.test.ts",
+          "server/gbe.test.ts",
+          "server/living-world.test.ts",
+          "server/match-stats.test.ts",
+          "server/player-records.test.ts",
+          "server/world-market.test.ts"
+        ],
         "factsOk": true,
-        "accuracy": 0.8333333333333333
+        "accuracy": 0.7000000000000001
       },
       "answer": "Seven test files are in the verified set. Two HTTP-only files (`server/app.test.ts`, `server/integration.test.ts`) are left out.\n\n`transferProceeds` has four callers:\n- `placeFutureTransferAtAffiliate` in `server/affiliates.ts`.\n- `executeMarketTransfer` in `server/transfer-battles.ts`.\n- `completeNegotiation` in `server/systems.ts`.\n- `exerciseOption` in `server/systems.ts`.\n\nThese chains put the test-facing functions within 3 hops:\n- `completeNegotiation` ← `progressDealMilestones` ← `processNegotiations` ← `advance`.\n- `exerciseOption` ← `expireLoans` ← `advance`.\n- `executeMarketTransfer` ← `decide` or `settleMarketBids` ← `processTransferBattles`.\n\n**Test files that call a function on these chains directly:**\n- `server/systems.test.ts` calls `transferProceeds` itself, plus `completeNegotiation`, `progressDealMilestones` and `expireLoans`.\n- `server/affiliates.sql.test.ts` calls `placeFutureTransferAtAffiliate` and `completeNegotiation`.\n- `server/registration.test.ts` calls `completeNegotiation`, `progressDealMilestones` and `advance`.\n- `server/market-offers.test.ts` calls `progressDealMilestones` and `expireLoans`.\n- `server/eligibility.test.ts` calls `progressDealMilestones` and `expireLoans`.\n- `server/transfer-battles.sql.test.ts` calls `processTransferBattles`.\n- `server/simulation.test.ts` calls `advance`.\n\nI did not verify the remaining files that import `advance` (`world-market.test.ts`, `living-world.test.ts`, `match-stats.test.ts`, `club-life.test.ts`, `gbe.test.ts` and `player-records.test.ts`). Each does call `advance(` in a grep count, and `advance` reaches the transfer logic within 3 hops. They would qualify if you count them, and I left them out of the JSON.\n\n`server/app.test.ts` and `server/integration.test.ts` only reach `advance` through the `/api/advance` route. That makes `advance` hop 3 and the route handler hop 4. I excluded them on that basis.\n\n```json\n{\"items\": [\n{\"file\": \"server/systems.test.ts\", \"symbol\": null},\n{\"file\": \"server/affiliates.sql.test.ts\", \"symbol\": null},\n{\"file\": \"server/registration.test.ts\", \"symbol\": null},\n{\"file\": \"server/market-offers.test.ts\", \"symbol\": null},\n{\"file\": \"server/eligibility.test.ts\", \"symbol\": null},\n{\"file\": \"server/transfer-battles.sql.test.ts\", \"symbol\": null},\n{\"file\": \"server/simulation.test.ts\", \"symbol\": null}\n]}\n```",
       "log": "/tmp/touchline-bench/2026-11-10T12-56-28-146Z/logs/H4-A-r1-a1.jsonl"
@@ -735,13 +742,13 @@
       "score": {
         "parsed": true,
         "answered": 13,
-        "correct": 5,
+        "correct": 13,
         "recall": 1,
-        "precision": 0.38461538461538464,
+        "precision": 1,
         "hallucinated": [],
         "missed": [],
         "factsOk": true,
-        "accuracy": 0.5555555555555556
+        "accuracy": 1
       },
       "answer": "Fourteen test files reach `transferProceeds` within 3 call hops, according to the graph. I confirmed each file's import or call by grep. `server/app.test.ts` is excluded.\n\n- **Direct callers of `transferProceeds`:** `completeNegotiation`, `exerciseOption`, `executeMarketTransfer` and `placeFutureTransferAtAffiliate`. `server/systems.test.ts` also imports `transferProceeds` itself.\n- **Two to three hops:** `expireLoans`, `progressDealMilestones`, `processTransferBattles` and `advance`. `advance` is three hops away, through `processNegotiations` and `completeNegotiation`.\n- **Test files by reason:**\n  - `systems.test.ts`, `eligibility.test.ts`, `market-offers.test.ts` and `registration.test.ts` call `progressDealMilestones`, `expireLoans` or `completeNegotiation`.\n  - `affiliates.sql.test.ts` calls `placeFutureTransferAtAffiliate`.\n  - `transfer-battles.sql.test.ts` calls `processTransferBattles`.\n  - `simulation.test.ts`, `world-market.test.ts`, `club-life.test.ts`, `gbe.test.ts`, `living-world.test.ts`, `match-stats.test.ts` and `player-records.test.ts` import and call `advance`. `registration.test.ts` also does.\n- **Excluded:** `app.test.ts` goes through the HTTP route `/api/advance` and `createApp`. That path is four or more hops from `transferProceeds`, so I left it out. The other `createApp` tests (`integration.test.ts`, `competition-scorers.test.ts`, `auth.test.ts`) are out for the same reason.\n\n```json\n{\"items\": [\n{\"file\": \"server/systems.test.ts\", \"symbol\": null},\n{\"file\": \"server/eligibility.test.ts\", \"symbol\": null},\n{\"file\": \"server/market-offers.test.ts\", \"symbol\": null},\n{\"file\": \"server/registration.test.ts\", \"symbol\": null},\n{\"file\": \"server/affiliates.sql.test.ts\", \"symbol\": null},\n{\"file\": \"server/transfer-battles.sql.test.ts\", \"symbol\": null},\n{\"file\": \"server/simulation.test.ts\", \"symbol\": null},\n{\"file\": \"server/world-market.test.ts\", \"symbol\": null},\n{\"file\": \"server/club-life.test.ts\", \"symbol\": null},\n{\"file\": \"server/gbe.test.ts\", \"symbol\": null},\n{\"file\": \"server/living-world.test.ts\", \"symbol\": null},\n{\"file\": \"server/match-stats.test.ts\", \"symbol\": null},\n{\"file\": \"server/player-records.test.ts\", \"symbol\": null}\n]}\n```",
       "log": "/tmp/touchline-bench/2026-11-10T12-56-28-146Z/logs/H4-G-r1-a1.jsonl"
@@ -784,13 +791,13 @@
       "score": {
         "parsed": true,
         "answered": 13,
-        "correct": 5,
+        "correct": 13,
         "recall": 1,
-        "precision": 0.38461538461538464,
+        "precision": 1,
         "hallucinated": [],
         "missed": [],
         "factsOk": true,
-        "accuracy": 0.5555555555555556
+        "accuracy": 1
       },
       "answer": "Thirteen test files reach `transferProceeds` within 3 call hops. I took the caller list from `graphify affected \"transferProceeds\" --depth 3 --relation calls`. I then checked which test files call those functions, and confirmed the `advance` imports in `server/*.test.ts`.\n\n- **Direct:** `server/systems.test.ts` calls `transferProceeds` itself.\n- **Through helpers or `completeNegotiation`:** `server/systems.test.ts` also uses `agreedTransfer`, `agreedLoan` and `completeNegotiation`. `server/registration.test.ts` and `server/affiliates.sql.test.ts` call `completeNegotiation`, and `server/affiliates.sql.test.ts` also calls `placeFutureTransferAtAffiliate`.\n- **Through `progressDealMilestones` or `expireLoans`:** `server/eligibility.test.ts` and `server/market-offers.test.ts` call both. Both functions are graph callers of `transferProceeds`.\n- **Through `processTransferBattles`:** `server/transfer-battles.sql.test.ts` calls it.\n- **Through `advance`:** it reaches `transferProceeds` via `processNegotiations` and `completeNegotiation`. `advance` is imported from `./simulation.ts` and called in `club-life`, `gbe`, `living-world`, `match-stats`, `player-records`, `simulation` and `world-market`; `registration` also calls it.\n\nI left out `server/app.test.ts`. It only goes through `createApp`, which sits at hop 4 or deeper, past your 3-hop limit.\n\n```json\n{\"items\": [\n{\"file\": \"server/systems.test.ts\", \"symbol\": \"transferProceeds\"},\n{\"file\": \"server/affiliates.sql.test.ts\", \"symbol\": \"placeFutureTransferAtAffiliate\"},\n{\"file\": \"server/eligibility.test.ts\", \"symbol\": \"progressDealMilestones\"},\n{\"file\": \"server/market-offers.test.ts\", \"symbol\": \"progressDealMilestones\"},\n{\"file\": \"server/registration.test.ts\", \"symbol\": \"completeNegotiation\"},\n{\"file\": \"server/transfer-battles.sql.test.ts\", \"symbol\": \"processTransferBattles\"},\n{\"file\": \"server/club-life.test.ts\", \"symbol\": \"advance\"},\n{\"file\": \"server/gbe.test.ts\", \"symbol\": \"advance\"},\n{\"file\": \"server/living-world.test.ts\", \"symbol\": \"advance\"},\n{\"file\": \"server/match-stats.test.ts\", \"symbol\": \"advance\"},\n{\"file\": \"server/player-records.test.ts\", \"symbol\": \"advance\"},\n{\"file\": \"server/simulation.test.ts\", \"symbol\": \"advance\"},\n{\"file\": \"server/world-market.test.ts\", \"symbol\": \"advance\"}\n]}\n```",
       "log": "/tmp/touchline-bench/2026-11-10T12-56-28-146Z/logs/H4-H-r1-a1.jsonl"
@@ -838,13 +845,13 @@
       "score": {
         "parsed": true,
         "answered": 13,
-        "correct": 5,
+        "correct": 13,
         "recall": 1,
-        "precision": 0.38461538461538464,
+        "precision": 1,
         "hallucinated": [],
         "missed": [],
         "factsOk": true,
-        "accuracy": 0.5555555555555556
+        "accuracy": 1
       },
       "answer": "Seven of the twelve files below call `transferProceeds` or a function that reaches it within 3 call hops. I read the call edges from the code graph's `graph.json`, then grepped the test files for those function names.\n\nThe callers at each hop, none of them in a test file, are:\n- **1 hop:** `completeNegotiation`, `exerciseOption`, `placeFutureTransferAtAffiliate` and `executeMarketTransfer`.\n- **2 hops:** `progressDealMilestones`, `expireLoans`, `settleMarketBids`, `dispatchAction` and `decide`. The `decide` here is the one in `server/transfer-battles.ts`.\n- **3 hops:** `advance` in `server/simulation.ts`, `processTransferBattles`, `processNegotiations` and `createWorldRouter`.\n\nHow each test file reaches `transferProceeds`:\n- **Direct:** `server/systems.test.ts` imports and calls it.\n- **Via a 1- or 2-hop function:** `server/affiliates.sql.test.ts` (`placeFutureTransferAtAffiliate`, `completeNegotiation`), `server/market-offers.test.ts` and `server/eligibility.test.ts` (`progressDealMilestones`, `expireLoans`).\n- **Via a 3-hop function:** `server/transfer-battles.sql.test.ts` calls `processTransferBattles`. Seven files call `advance` imported from `server/simulation.ts`: `world-market`, `simulation`, `player-records`, `match-stats`, `living-world`, `club-life` and `gbe`. `server/registration.test.ts` calls `advance` as well as `completeNegotiation` and `progressDealMilestones`.\n\nI left out `app.test.ts`, `integration.test.ts` and `admin-routes.test.ts`. They only reach `advance` and `decide` through HTTP requests such as `POST /api/advance`, not by calling the functions. `shared/features/youth-internationals.test.ts` matched on `advance` as a property name, which is unrelated.\n\nI didn't open the individual call sites inside each test file. I confirmed the `advance` and `processTransferBattles` imports, but not every call site of `progressDealMilestones` and `expireLoans`.\n\n```json\n{\"items\": [\n{\"file\": \"server/systems.test.ts\", \"symbol\": null},\n{\"file\": \"server/affiliates.sql.test.ts\", \"symbol\": null},\n{\"file\": \"server/registration.test.ts\", \"symbol\": null},\n{\"file\": \"server/market-offers.test.ts\", \"symbol\": null},\n{\"file\": \"server/eligibility.test.ts\", \"symbol\": null},\n{\"file\": \"server/transfer-battles.sql.test.ts\", \"symbol\": null},\n{\"file\": \"server/world-market.test.ts\", \"symbol\": null},\n{\"file\": \"server/simulation.test.ts\", \"symbol\": null},\n{\"file\": \"server/player-records.test.ts\", \"symbol\": null},\n{\"file\": \"server/match-stats.test.ts\", \"symbol\": null},\n{\"file\": \"server/living-world.test.ts\", \"symbol\": null},\n{\"file\": \"server/club-life.test.ts\", \"symbol\": null},\n{\"file\": \"server/gbe.test.ts\", \"symbol\": null}\n]}\n```",
       "log": "/tmp/touchline-bench/2026-11-10T12-56-28-146Z/logs/H4-M-r1-a1.jsonl"

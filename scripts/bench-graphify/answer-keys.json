@@ -57,14 +57,25 @@
       "server/systems.ts",
       "server/transfer-battles.ts"
     ],
-    ["server/match-v3.ts", "server/match.ts"]
+    [
+      "server/match-v3.ts",
+      "server/match.ts"
+    ]
   ],
   "h4": [
     "server/affiliates.sql.test.ts",
+    "server/club-life.test.ts",
     "server/eligibility.test.ts",
+    "server/gbe.test.ts",
+    "server/living-world.test.ts",
     "server/market-offers.test.ts",
+    "server/match-stats.test.ts",
+    "server/player-records.test.ts",
     "server/registration.test.ts",
-    "server/systems.test.ts"
+    "server/simulation.test.ts",
+    "server/systems.test.ts",
+    "server/transfer-battles.sql.test.ts",
+    "server/world-market.test.ts"
   ],
   "h5": {
     "exported": 559,
@@ -141,7 +152,9 @@
       "server/app.ts#dispatchAction",
       "server/index.ts#start"
     ],
-    "tests": ["server/world-market.test.ts"]
+    "tests": [
+      "server/world-market.test.ts"
+    ]
   },
   "t5": {
     "function": "server/transfer-battles.ts#executeMarketTransfer",

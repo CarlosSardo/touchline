@@ -251,7 +251,8 @@ const h1 = callers(
 ).functions;
 const h2 = callers("server/systems.ts", "contractEndDate", 3, false).functions;
 const h3 = importCycles();
-const h4 = callers("server/systems.ts", "transferProceeds", 3, true).testFiles;
+// A test "reaches it within 3 call hops" when it calls a function at caller depth <= 3, i.e. test depth <= 4.
+const h4 = callers("server/systems.ts", "transferProceeds", 4, true).testFiles;
 const h5 = unreferencedExports();
 const h7Callers = callers(
   "server/deal-clauses.ts",

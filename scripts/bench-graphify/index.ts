@@ -4,18 +4,26 @@
 //   agent [--repeats 3] [--concurrency N] [--model claude-sonnet-5.5] [--tasks H1,H2] [--arms A,G,M,H] [--timeout-min 15]
 //         [--out agent.json]     results file name under results/ (e.g. pilot.json, agent-haiku.json)
 //   all                          scripted, then agent, then report
+//   rescore                      re-score saved answers in results/*.json against the current answer keys, then report
 //   report                       regenerate REPORT.md from results/*.json
 // Arms: A grep/read, G Graphify CLI, M Graphify MCP, H CLI + graph-first hook (see arms.ts). Scripted mode compares A and G.
 // Common: --ref <git ref> (default HEAD), --keep (keep worktrees and logs under /tmp/touchline-bench)
 import { execFileSync } from "node:child_process";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { runAgents } from "./agent.ts";
 import { prepareArms, removeArms } from "./arms.ts";
 import { writeReport } from "./report.ts";
 import { runScripted } from "./scripted.ts";
-import { ARMS, BENCH_DIR, TASKS, type Arm } from "./tasks.ts";
+import { score } from "./score.ts";
+import { ARMS, BENCH_DIR, ROOT, TASKS, type Arm } from "./tasks.ts";
 
 const { positionals, values } = parseArgs({
   allowPositionals: true,
@@ -64,6 +72,23 @@ const version = (cmd: string) =>
 if (command === "keys") {
   await import("./ground-truth.ts");
 } else if (command === "report") {
+  writeReport();
+} else if (command === "rescore") {
+  for (const name of readdirSync(RESULTS).filter(
+    (f) => f.startsWith("agent") || f === "pilot.json",
+  )) {
+    const data = JSON.parse(readFileSync(join(RESULTS, name), "utf8"));
+    let changed = 0;
+    for (const r of data.results) {
+      const task = TASKS.find((t) => t.id === r.task);
+      if (!task || !r.ok) continue;
+      const next = score(task, r.answer, ROOT);
+      if (next.accuracy !== r.score.accuracy) changed++;
+      r.score = next;
+    }
+    save(name, data);
+    console.log(`${name}: ${changed} scores changed`);
+  }
   writeReport();
 } else if (["scripted", "agent", "all"].includes(command)) {
   console.log(`Preparing arms from ${values.ref} in ${runDir} ...`);

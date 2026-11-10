@@ -289,7 +289,7 @@ for n in g["nodes"]:
     recipes: {
       A: [
         `rg -nw "transferProceeds" server scripts ${NO_TESTS}`,
-        `rg -lw "transferProceeds|completeNegotiation|exerciseOption|placeFutureTransferAtAffiliate|executeMarketTransfer|progressDealMilestones|expireLoans|dispatchAction|decide|settleMarketBids" server -g '*.test.ts'`,
+        `rg -lw "transferProceeds|completeNegotiation|exerciseOption|placeFutureTransferAtAffiliate|executeMarketTransfer|progressDealMilestones|expireLoans|dispatchAction|decide|settleMarketBids|advance|processNegotiations|processTransferBattles|createWorldRouter" server -g '*.test.ts'`,
       ],
       G: [`graphify affected "transferProceeds" --depth 3`],
     },
