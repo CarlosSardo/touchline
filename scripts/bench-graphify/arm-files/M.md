@@ -15,7 +15,9 @@ its output and cite the file:line locations it returns. Do not re-derive with gr
 | Hub symbols and communities                              | `graphify-god_nodes`, `graphify-get_community`                                                                              |
 | Import cycles, aggregates (fan-in, unreferenced exports) | `grep -n -A30 "## Import Cycles" graphify-out/GRAPH_REPORT.md`, or a short python3 script over `graphify-out/graph.json`    |
 
-- Pass bare names (`advance`); results label functions as `advance()` with `file:Lline`. That list is the answer set.
+- Pass bare names (`advance`); results label functions as `advance()`. That list is the answer set.
+- In `get_neighbors` output, `at=file:Lline` is where the call happens, not where the neighbour is defined. For a
+  neighbour's own file call `graphify-get_node` with its label (in parallel for several), or look it up in graph.json.
 - graph.json: `nodes[]` have `id`, `label`, `source_file`, `source_location`; `links[]` have `source`, `target`
   (node ids), `relation` (`calls`, `imports`, `imports_from`, `references`, `contains`) and `confidence`.
 - If a graph tool is not yet loaded, load the `graphify-` tools once with tool search, then call them directly.

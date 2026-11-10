@@ -8,35 +8,35 @@ Commit `009637b`, 2026-11-10, graphify 0.9.105, graph of 5653 nodes / 18046 edge
 
 Hand-written best recipes per task, run without an agent ([tasks.ts](tasks.ts)): **A** = the best grep/read recipe, **G** = the best Graphify CLI recipe. Context recall is the share of answer-key items present in the output: the most an agent could extract from that retrieval. The commands column is the minimum number of agent turns the retrieval needs (A recipes for transitive tasks need one search per hop, and each hop depends on the previous output).
 
-| Task                                                              | Commands A / G | Tokens A / G | Context recall A / G | Median time A / G |
-| ----------------------------------------------------------------- | -------------: | -----------: | -------------------: | ----------------: |
-| H1 Reachability: everything that can trigger an AI transfer       |          6 / 1 |   1.5k / 175 |           78% / 100% |     0.04 / 0.32 s |
-| H2 Transitive blast radius: contractEndDate within 3 call hops    |          3 / 1 |   4.4k / 511 |           84% / 100% |     0.03 / 0.32 s |
-| H3 Structure: import cycles in server/                            |          1 / 1 |   3.5k / 930 |           100% / 72% |     0.01 / 0.00 s |
-| H5 Aggregate: exported server functions nobody else uses          |          1 / 1 |    556 / 971 |            94% / 98% |     3.50 / 0.13 s |
-| H6 Change plan: schema migration 12, code, tests and docs         |          4 / 3 |  3.4k / 1.7k |           100% / 88% |     0.02 / 1.08 s |
-| H7 Planning session: a levy on release-clause payments            |          5 / 3 |  3.0k / 1.9k |            47% / 80% |     0.03 / 1.04 s |
-| T2 Multi-hop: HTTP advance route to the match engine              |          4 / 2 |  1.8k / 1.0k |           100% / 60% |     0.01 / 0.75 s |
-| T5 Callees: completing an AI club's transfer                      |          3 / 2 |  1.3k / 1.4k |           100% / 64% |     0.01 / 0.74 s |
-| H4 Coverage: tests exercising transferProceeds within 3 hops      |          2 / 1 |   263 / 1.0k |          100% / 100% |     0.02 / 0.32 s |
-| T7 Control: where is clamp defined                                |          1 / 1 |    170 / 724 |          100% / 100% |     0.01 / 0.31 s |
-| T8 Limitation: UI caller to Express handler across an HTTP string |          3 / 2 |   186 / 1.8k |           100% / 75% |     0.01 / 0.68 s |
+| Task | Commands A / G | Tokens A / G | Context recall A / G | Median time A / G |
+| --- | ---: | ---: | ---: | ---: |
+| H1 Reachability: everything that can trigger an AI transfer | 6 / 1 | 1.5k / 175 | 78% / 100% | 0.04 / 0.32 s |
+| H2 Transitive blast radius: contractEndDate within 3 call hops | 3 / 1 | 4.4k / 511 | 84% / 100% | 0.03 / 0.32 s |
+| H3 Structure: import cycles in server/ | 1 / 1 | 3.5k / 930 | 100% / 72% | 0.01 / 0.00 s |
+| H5 Aggregate: exported server functions nobody else uses | 1 / 1 | 556 / 971 | 94% / 98% | 3.50 / 0.13 s |
+| H6 Change plan: schema migration 12, code, tests and docs | 4 / 3 | 3.4k / 1.7k | 100% / 88% | 0.02 / 1.08 s |
+| H7 Planning session: a levy on release-clause payments | 5 / 3 | 3.0k / 1.9k | 47% / 80% | 0.03 / 1.04 s |
+| T2 Multi-hop: HTTP advance route to the match engine | 4 / 2 | 1.8k / 1.0k | 100% / 60% | 0.01 / 0.75 s |
+| T5 Callees: completing an AI club's transfer | 3 / 2 | 1.3k / 1.4k | 100% / 64% | 0.01 / 0.74 s |
+| H4 Coverage: tests exercising transferProceeds within 3 hops | 2 / 1 | 263 / 1.0k | 100% / 100% | 0.02 / 0.32 s |
+| T7 Control: where is clamp defined | 1 / 1 | 170 / 724 | 100% / 100% | 0.01 / 0.31 s |
+| T8 Limitation: UI caller to Express handler across an HTTP string | 3 / 2 | 186 / 1.8k | 100% / 75% | 0.01 / 0.68 s |
 
 ## Tasks
 
-| Task                                                                  |       Group |         Scoring | Answer key |
-| --------------------------------------------------------------------- | ----------: | --------------: | ---------: |
-| **H1** Reachability: everything that can trigger an AI transfer       |  structural | F1 (closed set) |    9 items |
-| **H2** Transitive blast radius: contractEndDate within 3 call hops    |  structural | F1 (closed set) |   25 items |
-| **H3** Structure: import cycles in server/                            |  structural | F1 (closed set) |   18 items |
-| **H5** Aggregate: exported server functions nobody else uses          |  structural | F1 (closed set) |   54 items |
-| **H6** Change plan: schema migration 12, code, tests and docs         | change-plan |          recall |    8 items |
-| **H7** Planning session: a levy on release-clause payments            | change-plan |          recall |   15 items |
-| **T2** Multi-hop: HTTP advance route to the match engine              |          v1 |          recall |    5 items |
-| **T5** Callees: completing an AI club's transfer                      |          v1 | F1 (closed set) |   11 items |
-| **H4** Coverage: tests exercising transferProceeds within 3 hops      |    coverage | F1 (closed set) |    5 items |
-| **T7** Control: where is clamp defined                                |     control | F1 (closed set) |    1 items |
-| **T8** Limitation: UI caller to Express handler across an HTTP string |  limitation |          recall |    4 items |
+| Task | Group | Scoring | Answer key |
+| --- | ---: | ---: | ---: |
+| **H1** Reachability: everything that can trigger an AI transfer | structural | F1 (closed set) | 9 items |
+| **H2** Transitive blast radius: contractEndDate within 3 call hops | structural | F1 (closed set) | 25 items |
+| **H3** Structure: import cycles in server/ | structural | F1 (closed set) | 18 items |
+| **H5** Aggregate: exported server functions nobody else uses | structural | F1 (closed set) | 54 items |
+| **H6** Change plan: schema migration 12, code, tests and docs | change-plan | recall | 8 items |
+| **H7** Planning session: a levy on release-clause payments | change-plan | recall | 15 items |
+| **T2** Multi-hop: HTTP advance route to the match engine | v1 | recall | 5 items |
+| **T5** Callees: completing an AI club's transfer | v1 | F1 (closed set) | 11 items |
+| **H4** Coverage: tests exercising transferProceeds within 3 hops | coverage | F1 (closed set) | 5 items |
+| **T7** Control: where is clamp defined | control | F1 (closed set) | 1 items |
+| **T8** Limitation: UI caller to Express handler across an HTTP string | limitation | recall | 4 items |
 
 ## Method
 

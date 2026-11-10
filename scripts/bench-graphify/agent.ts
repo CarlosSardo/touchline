@@ -89,9 +89,10 @@ interface Parsed {
   exitCode: number | null;
 }
 
-/** True when a shell command invokes the graphify CLI (not merely mentions `graphify-out`). */
+/** True when a shell command queries the graph: runs the graphify CLI or reads graphify-out (report, graph.json). */
 export const runsGraphify = (command: string) =>
-  /(?:^|[\s;&|(])graphify(?:\s|$)/.test(command);
+  /(?:^|[\s;&|(])graphify(?:\s|$)/.test(command) ||
+  command.includes("graphify-out/");
 
 const SHELL_RETRIEVAL =
   /(^|[\s;&|(])(rg|grep|egrep|find|cat|sed|awk|head|tail|nl|graphify|python3?)(\s|$)/;
@@ -284,6 +285,13 @@ export async function runAgent(
     const graphifyCommands = [
       ...commands.filter(runsGraphify),
       ...parsed.calls
+        .filter(
+          ({ name: tool, args }) =>
+            tool === "view" &&
+            String(args.path ?? "").includes("graphify-out/"),
+        )
+        .map(({ args }) => `view ${String(args.path)}`),
+      ...parsed.calls
         .filter(({ name: tool }) => tool.startsWith("graphify-"))
         .map(({ name: tool, args }) => `mcp:${tool} ${JSON.stringify(args)}`),
     ];
@@ -293,6 +301,7 @@ export async function runAgent(
     const graphFirst =
       !!firstRetrieval &&
       (firstRetrieval.name.startsWith("graphify-") ||
+        String(firstRetrieval.args.path ?? "").includes("graphify-out/") ||
         (typeof firstRetrieval.args.command === "string" &&
           runsGraphify(firstRetrieval.args.command)));
     const inputTokens = parsed.usage.inputTokens ?? 0;

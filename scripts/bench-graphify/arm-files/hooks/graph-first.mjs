@@ -38,7 +38,11 @@ try {
   try {
     seen = readFileSync(state, "utf8");
   } catch {}
-  const usesGraph = tool.startsWith("graphify-") || RUNS_GRAPHIFY.test(command);
+  const usesGraph =
+    tool.startsWith("graphify-") ||
+    RUNS_GRAPHIFY.test(command) ||
+    command.includes("graphify-out/") ||
+    String(args.path ?? "").includes("graphify-out/");
   const searches =
     SEARCH_TOOLS.has(tool) ||
     (tool === "view" && SOURCE.test(String(args.path ?? ""))) ||
