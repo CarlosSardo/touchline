@@ -112,7 +112,7 @@ The point: big files and deep call chains are exactly where agents burn tokens.
 _"A rival club just poached my star striker. What in the game can make a rival club sign a player?"_
 🎯 The benchmark prompt: _"Which functions can reach `executeMarketTransfer`?"_
 
-![w:850](assets/grep-relay.svg)
+![w:820](assets/grep-relay.svg)
 
 <!--
 ⏱ 1:15–2:00
@@ -153,11 +153,13 @@ Stress: deterministic, local, no tokens spent building it. The agent only pays t
 
 # Same question, the graph way 🎬
 
-![w:1040](assets/graphify-demo.svg)
+![w:1010](assets/graphify-demo.svg)
 
 <!--
 ⏱ 2:45–4:00 (live)
-Casual question? Step 1, graphify query "rival club sign player transfer", lands on executeMarketTransfer (real output).
+Casual question? Step 1, graphify query "rival club sign player transfer": it matches words to names, not meaning.
+960 nodes matched, 51 shown; executeMarketTransfer is #28, below the Player type and a JWT .sign() that matched "sign" (real output).
+The model reads that list and picks the function to trace: the judgement is the LLM's, the map is Graphify's.
 Step 2 is the one command the graph agent ran in every Sonnet run: graphify affected "executeMarketTransfer" --depth 6 --relation calls
 Honesty note: the scorecard numbers come from the precise benchmark prompt, which already names the function (no query step).
 Its instructions map "what can reach X" to that command; that's how the agent knew what to type.

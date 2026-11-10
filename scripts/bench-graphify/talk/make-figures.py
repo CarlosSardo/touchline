@@ -22,7 +22,7 @@ import sys
 from html import escape
 from pathlib import Path
 
-W, H, SPLIT = 1200, 620, 640
+W, H, SPLIT = 1200, 650, 640
 FS, LH, PAD = 13.5, 25, 26
 CW = FS * 0.6
 BG0, BG1, EDGE, DOT = "#0c1712", "#0f1e18", "#1c2c25", "#2b3d35"
@@ -273,17 +273,24 @@ def counter(a: Anim, on: float, off, big: str, small: str, color: str) -> str:
 def graphify_demo(frame):
     x, y = PAD, 78
     body = []
-    # Step 1: a casual question has no symbol in it, so the agent finds one (real output, abbreviated).
+    # Step 1: graphify query matches words to names and lists a ranked neighbourhood (real output, 3 of 51 lines).
+    # It does not understand the question: the model reads the list and picks the function to trace.
     query = 'graphify query "rival club sign player transfer"'
     trace = 'graphify affected "executeMarketTransfer" --depth 6 --relation calls'
     found = 0.4 + (2 + len(query)) / 32 + 0.4
+    pick = found + 2.0
     rows = [
-        [("NODE ", DIM), ("executeMarketTransfer()", LIT), (" [src=server/transfer-battles.ts loc=L476]", DIM)],
-        [("\u2026 50 more: RivalClub, processTransferBattles(), decide() \u2026", DIM)],
+        [(" #1 ", DIM), ("Player", PURPLE), ("  shared/types.ts:L110", BLUE)],
+        [(" #6 ", DIM), (".sign()", PURPLE), ("  server/auth.ts:L321", BLUE)],
+        [("#28 ", DIM), ("executeMarketTransfer()", PURPLE), ("  transfer-battles.ts:L476", BLUE)],
+    ]
+    notes = [
+        (0, "a type, not a cause", DIM, found + 0.5),
+        (1, "'sign' = JWT signing!", RED, found + 0.9),
     ]
     # Step 2: one command traces everything that reaches it.
-    cmd_y = y + 3 * LH + 8
-    start2 = found + 1.2
+    cmd_y = y + 4 * LH + 8
+    start2 = pick + 1.1
     end = start2 + (2 + len(trace)) / 32 + 0.4 + 0.4 + 0.55 * 5 + 0.8
     period = end + 4.8 + HOLD
     a = Anim(period, end + 2.8, frame)
@@ -292,7 +299,16 @@ def graphify_demo(frame):
     body.append(part)
     for i, row in enumerate(rows):
         body.append(f'<g opacity="0">{a.show(found + 0.15 * i, fade=0.12)}{text(x, y + (i + 1) * LH, row)}</g>')
-    body.append(light_depth(a, 0, found))
+    nx = x + 40 * CW
+    for i, label, color, at in notes:
+        body.append(f'<g opacity="0">{a.show(at, fade=0.15)}{text(nx, y + (i + 1) * LH, [("\u2190 " + label, color)])}</g>')
+    py = y + 3 * LH
+    body.append(
+        f'<g opacity="0">{a.show(pick, fade=0.2)}'
+        f'<rect x="{x - 6}" y="{py - FS - 5}" width="{SPLIT - PAD - 22}" height="{LH}" rx="4" fill="none" stroke="{LIT}" stroke-width="1.5"/>'
+        f'{text(x + 57 * CW, py, [("\u2190 agent picks", LIT)])}</g>'
+    )
+    body.append(light_depth(a, 0, pick))
     part, t = typed(a, x, cmd_y, [("$ ", GREEN)] + command(trace), start2)
     body.append(part)
     t += 0.4
@@ -323,8 +339,9 @@ def graphify_demo(frame):
         a, end, "graph agent, measured on the benchmark prompt (Sonnet 5.5, 3 runs)", LIT, m["graph"], compare=m["grep"],
         banner=f"{tokens:.1f}\u00d7 fewer tokens \u00b7 {cheaper:.1f}\u00d7 cheaper \u00b7 same answer or better", banner_color=LIT,
     ))
-    body.append(counter(a, found, start2, "1 tool call", "found X: executeMarketTransfer", LIT))
-    body.append(counter(a, t, None, "2 tool calls", "find X \u00b7 6 hops \u00b7 9 callers \u00b7 0 files read", LIT))
+    body.append(counter(a, found, pick, "1 tool call", "960 nodes matched \u00b7 51 shown", LIT))
+    body.append(counter(a, pick, start2, "model reads the list", "picks X = executeMarketTransfer", LIT))
+    body.append(counter(a, t, None, "2 tool calls", "pick X \u00b7 6 hops \u00b7 9 callers \u00b7 0 files read", LIT))
     return a.svg("".join(body))
 
 
