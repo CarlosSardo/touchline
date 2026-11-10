@@ -72,6 +72,10 @@ interface Parsed {
   exitCode: number | null;
 }
 
+/** True when a shell command invokes the graphify CLI (not merely mentions `graphify-out`). */
+export const runsGraphify = (command: string) =>
+  /(?:^|[\s;&|(])graphify(?:\s|$)/.test(command);
+
 function parseEvents(jsonl: string): Parsed {
   const parsed: Parsed = {
     answer: "",
@@ -233,9 +237,7 @@ export async function runAgent(
     const commands = parsed.calls.flatMap(({ args }) =>
       typeof args.command === "string" ? [args.command] : [],
     );
-    const graphifyCommands = commands.filter((command) =>
-      /\bgraphify\b/.test(command),
-    );
+    const graphifyCommands = commands.filter(runsGraphify);
     const viewed = new Set(
       parsed.calls.flatMap(({ name: tool, args }) =>
         tool === "view" && typeof args.path === "string" ? [args.path] : [],
