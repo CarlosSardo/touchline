@@ -1,7 +1,7 @@
 // Usage: npm run bench:graphify -- <keys|scripted|agent|all|report> [options]
 //   keys                         recompute compiler-derived answer keys (answer-keys.json)
 //   scripted [--reps 5]          fixed retrieval recipes per arm: tokens, context recall, median time
-//   agent [--repeats 3] [--concurrency N] [--model claude-sonnet-5.5] [--tasks T1,T2] [--timeout-min 15]
+//   agent [--repeats 3] [--concurrency N] [--model claude-sonnet-5.5] [--tasks T1,T2] [--arms A,B,C] [--timeout-min 15]
 //   all                          scripted, then agent, then report
 //   report                       regenerate REPORT.md from results/*.json
 // Common: --ref <git ref> (default HEAD), --keep (keep worktrees and logs under /tmp/touchline-bench)
@@ -13,7 +13,7 @@ import { runAgents } from "./agent.ts";
 import { prepareArms, removeArms } from "./arms.ts";
 import { writeReport } from "./report.ts";
 import { runScripted } from "./scripted.ts";
-import { BENCH_DIR, TASKS } from "./tasks.ts";
+import { ARMS, BENCH_DIR, TASKS } from "./tasks.ts";
 
 const { positionals, values } = parseArgs({
   allowPositionals: true,
@@ -23,6 +23,7 @@ const { positionals, values } = parseArgs({
     concurrency: { type: "string" },
     model: { type: "string", default: "claude-sonnet-5.5" },
     tasks: { type: "string" },
+    arms: { type: "string" },
     "timeout-min": { type: "string", default: "15" },
     ref: { type: "string", default: "HEAD" },
     keep: { type: "boolean", default: false },
@@ -90,6 +91,9 @@ if (command === "keys") {
           : undefined,
         timeoutMs: Number(values["timeout-min"]) * 60_000,
         tasks,
+        arms: values.arms
+          ? ARMS.filter((arm) => values.arms!.split(",").includes(arm))
+          : undefined,
         onResult: (r, done, total) =>
           console.log(
             `[${done}/${total}] ${r.task} ${r.arm} r${r.repeat}: ${r.ok ? "ok" : `FAILED (${r.error})`} acc=${r.score.accuracy.toFixed(2)} in=${r.inputTokens} out=${r.outputTokens} tools=${r.toolCalls} graphify=${r.graphifyCalls} ${(r.wallMs / 1000).toFixed(0)}s`,
