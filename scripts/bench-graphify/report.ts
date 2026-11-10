@@ -61,6 +61,8 @@ const kindLabel: Record<Task["kind"], string> = {
 function agentSection(data: { meta: any; results: AgentResult[] }) {
   const { meta, results } = data;
   const arms = ARMS.filter((arm) => results.some((r) => r.arm === arm));
+  const graphArms = arms.filter((arm) => arm !== "A");
+  const compared = arms.includes("A") ? graphArms : [];
   const by = (task: string, arm: Arm) =>
     results.filter((r) => r.task === task && r.arm === arm);
   const ok = (runs: AgentResult[]) => runs.filter((r) => r.ok);
@@ -98,9 +100,7 @@ function agentSection(data: { meta: any; results: AgentResult[] }) {
     ) => [
       label,
       ...arms.map((arm) => show(f(runs[arm]))),
-      ...arms
-        .slice(1)
-        .map((arm) => (compare ? delta(f(runs.A), f(runs[arm])) : "")),
+      ...compared.map((arm) => (compare ? delta(f(runs.A), f(runs[arm])) : "")),
     ];
     lines.push(`### ${title}`, "");
     lines.push(
@@ -108,18 +108,16 @@ function agentSection(data: { meta: any; results: AgentResult[] }) {
         [
           "Metric (mean per run)",
           ...arms.map((arm) => ARM_LABEL[arm]),
-          ...arms.slice(1).map((arm) => `${arm} vs A`),
+          ...compared.map((arm) => `${arm} vs A`),
         ],
         [
           [
             "Accuracy",
             ...arms.map((arm) => pct(acc(runs[arm]))),
-            ...arms
-              .slice(1)
-              .map(
-                (arm) =>
-                  `${acc(runs[arm]) >= acc(runs.A) ? "+" : "−"}${Math.abs(Math.round((acc(runs[arm]) - acc(runs.A)) * 100))} pts`,
-              ),
+            ...compared.map(
+              (arm) =>
+                `${acc(runs[arm]) >= acc(runs.A) ? "+" : "−"}${Math.abs(Math.round((acc(runs[arm]) - acc(runs.A)) * 100))} pts`,
+            ),
           ],
           row(
             "Input tokens (all model calls)",
@@ -149,7 +147,7 @@ function agentSection(data: { meta: any; results: AgentResult[] }) {
             (n) => n.toFixed(2),
           ),
           row(
-            "System prompt tokens",
+            "Final context size (median tokens)",
             (r) => median(ok(r).map((x) => x.promptTokens)),
             int,
             false,
@@ -193,8 +191,7 @@ function agentSection(data: { meta: any; results: AgentResult[] }) {
       cell((r) => secs(med((x) => x.wallMs)(r))),
       cell((r) => String(med((x) => x.toolCalls)(r))),
       cell((r) => String(sum(ok(r).map((x) => x.score.hallucinated.length)))),
-      arms
-        .slice(1)
+      graphArms
         .map(
           (arm) =>
             `${by(task.id, arm).filter((r) => r.graphifyCalls > 0).length}/${by(task.id, arm).length}`,
@@ -211,7 +208,7 @@ function agentSection(data: { meta: any; results: AgentResult[] }) {
         "Wall time",
         "Tool calls",
         "Hallucinated",
-        `Used graphify (${arms.slice(1).join(" / ")})`,
+        `Used graphify (${graphArms.join(" / ")})`,
       ],
       rows,
     ),

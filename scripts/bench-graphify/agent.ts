@@ -33,7 +33,7 @@ export interface AgentResult {
   filesViewed: number;
   graphifyCalls: number;
   graphifyCommands: string[];
-  /** System prompt tokens (instructions, skill list, tool schemas): shows what context the arm loaded. */
+  /** Prompt size of the final model call (system prompt plus the whole conversation so far). */
   promptTokens: number;
   score: Score;
   answer: string;
