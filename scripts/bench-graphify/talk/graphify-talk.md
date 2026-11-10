@@ -106,7 +106,7 @@ The point: big files and deep call chains are exactly where agents burn tokens.
 
 # The grep relay 🏃
 
-_"An AI club just poached my star striker. What in the game can trigger an AI transfer?"_
+_"A rival club just poached my star striker. What in the game can make a rival club sign a player?"_
 
 ![w:1000](assets/grep-relay.svg)
 
@@ -177,7 +177,7 @@ Two agents. **Everything is identical except one thing: the map.**
 
 **11 questions a Touchline dev really asks**, in 5 kinds:
 
-- 🔗 **Reachability**: _"What can trigger an AI transfer?"_
+- 🔗 **Reachability**: _"What can make a rival club sign a player?"_
 - 💥 **Blast radius**: _"If I change `contractEndDate`, what breaks within 3 hops?"_
 - 🧪 **Tests**: _"Which tests should I run after touching `transferProceeds`?"_
 - 📝 **Change plans**: _"Plan a release-clause levy: what do I edit?"_
@@ -221,7 +221,7 @@ for (const call of ls.provideCallHierarchyIncomingCalls(file, pos))
   found.set(keyOf(call.from), depth); // "file#function" -> hop count
 ```
 
-- Agents answer `{ items: [{ file, symbol }] }`; the AI-transfer key has **9 functions**
+- Agents answer `{ items: [{ file, symbol }] }`; the rival-signing key has **9 functions**
 - Keys: **TypeScript LanguageService** call hierarchy, refs, imports; 3 hand-traced
 - Thresholds **committed before the first run**; answers re-scorable any time
 
@@ -258,7 +258,7 @@ Re-scoring is deterministic because answers and keys are both just sets of file#
 
 | 🔎 grep → 🕸️ graph                          |          Turns |            Input tokens | Cost ratio |       Accuracy |
 | ------------------------------------------- | -------------: | ----------------------: | ---------: | -------------: |
-| _What can trigger an AI transfer?_          | 11.7 → **2.7** |  335k → **70k** (0.21×) |  **0.41×** | 98% → **100%** |
+| _What can make a rival club sign a player?_ | 11.7 → **2.7** |  335k → **70k** (0.21×) |  **0.41×** | 98% → **100%** |
 | _Blast radius of `contractEndDate`, 3 hops_ |  8.7 → **2.0** |  269k → **53k** (0.20×) |  **0.31×** |    100% → 100% |
 | _Tests exercising `transferProceeds`_       | 11.7 → **4.3** | 346k → **118k** (0.34×) |  **0.51×** |    100% → 100% |
 
