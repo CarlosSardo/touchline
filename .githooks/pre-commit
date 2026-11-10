@@ -11,8 +11,9 @@ if ! command -v graphify >/dev/null 2>&1; then
 	exit 0
 fi
 
-PYTHONHASHSEED=0 graphify update . >/dev/null || {
+if ! out="$(PYTHONHASHSEED=0 graphify update . 2>&1)"; then
+	printf '%s\n' "$out" >&2
 	echo "graphify: graph rebuild failed; rerun 'npm run graph:update' or commit with GRAPHIFY_SKIP_HOOK=1" >&2
 	exit 1
-}
+fi
 git add graphify-out/graph.json
