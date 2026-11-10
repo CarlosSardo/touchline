@@ -271,25 +271,32 @@ def counter(a: Anim, on: float, off, big: str, small: str, color: str) -> str:
 
 
 def graphify_demo(frame):
-    period = 12.0 + HOLD
-    freeze = 10.0
-    a = Anim(period, freeze, frame)
-    body = [background_graph()]
     x, y = PAD, 78
-    part, t = typed(a, x, y, [("$ ", GREEN)] + command('graphify affected "executeMarketTransfer" \\'), 0.4)
+    body = []
+    # Step 1: a casual question has no symbol in it, so the agent finds one (real output, abbreviated).
+    query = 'graphify query "rival club sign player transfer"'
+    trace = 'graphify affected "executeMarketTransfer" --depth 6 --relation calls'
+    found = 0.4 + (2 + len(query)) / 32 + 0.4
+    rows = [
+        [("NODE ", DIM), ("executeMarketTransfer()", LIT), (" [src=server/transfer-battles.ts loc=L476]", DIM)],
+        [("\u2026 50 more: RivalClub, processTransferBattles(), decide() \u2026", DIM)],
+    ]
+    # Step 2: one command traces everything that reaches it.
+    cmd_y = y + 3 * LH + 8
+    start2 = found + 1.2
+    end = start2 + (2 + len(trace)) / 32 + 0.4 + 0.4 + 0.55 * 5 + 0.8
+    period = end + 4.8 + HOLD
+    a = Anim(period, end + 2.8, frame)
+    body.append(background_graph())
+    part, t = typed(a, x, y, [("$ ", GREEN)] + command(query), 0.4)
     body.append(part)
-    part, t = typed(a, x, y + LH, [("    ", FG)] + command("--depth 6 --relation calls"), t + 0.1)
+    for i, row in enumerate(rows):
+        body.append(f'<g opacity="0">{a.show(found + 0.15 * i, fade=0.12)}{text(x, y + (i + 1) * LH, row)}</g>')
+    body.append(light_depth(a, 0, found))
+    part, t = typed(a, x, cmd_y, [("$ ", GREEN)] + command(trace), start2)
     body.append(part)
     t += 0.4
-    rows = [
-        [("Affected nodes for executeMarketTransfer()", FG)],
-        [("Relations: calls   Depth: 6", DIM)],
-    ]
-    y += 2 * LH + 8
-    for row in rows:
-        body.append(f'<g opacity="0">{a.show(t)}{text(x, y, row)}</g>')
-        y += LH
-    body.append(light_depth(a, 0, t))
+    y = cmd_y + LH + 8
     where = {
         "decide": "server/transfer-battles.ts:L927",
         "settleMarketBids": "server/transfer-battles.ts:L1143",
@@ -309,15 +316,15 @@ def graphify_demo(frame):
                 body.append(f'<g opacity="0">{a.show(at, fade=0.12)}{text(x, y, row)}</g>')
                 y += LH
         body.append(light_depth(a, depth, at))
-    end = t + 0.4 + 0.55 * 5 + 0.8
     m = measured()
     tokens = m["grep_raw"]["tokens"] / m["graph_raw"]["tokens"]
     cheaper = m["grep_raw"]["cost"] / m["graph_raw"]["cost"]
     body.append(scorecard(
-        a, end, "graph agent, measured on this question (Claude Sonnet 5.5, 3 runs)", LIT, m["graph"], compare=m["grep"],
+        a, end, "graph agent, measured on the benchmark prompt (Sonnet 5.5, 3 runs)", LIT, m["graph"], compare=m["grep"],
         banner=f"{tokens:.1f}\u00d7 fewer tokens \u00b7 {cheaper:.1f}\u00d7 cheaper \u00b7 same answer or better", banner_color=LIT,
     ))
-    body.append(counter(a, t, None, "1 tool call", "6 hops \u00b7 9 callers \u00b7 0.5 s \u00b7 0 files read", LIT))
+    body.append(counter(a, found, start2, "1 tool call", "found X: executeMarketTransfer", LIT))
+    body.append(counter(a, t, None, "2 tool calls", "find X \u00b7 6 hops \u00b7 9 callers \u00b7 0 files read", LIT))
     return a.svg("".join(body))
 
 
@@ -362,7 +369,7 @@ def grep_relay(frame):
         y += 2 * LH + 6
     m = measured()
     body.append(scorecard(
-        a, end, "grep agent, measured on this question (Claude Sonnet 5.5, 3 runs)", YELLOW, m["grep"],
+        a, end, "grep agent, measured on the benchmark prompt (Sonnet 5.5, 3 runs)", YELLOW, m["grep"],
         banner="the real agent needed even more calls than this replay", banner_color=YELLOW,
     ))
     return a.svg("".join(body))

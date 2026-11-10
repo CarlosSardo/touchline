@@ -110,8 +110,9 @@ The point: big files and deep call chains are exactly where agents burn tokens.
 # The grep relay 🏃
 
 _"A rival club just poached my star striker. What in the game can make a rival club sign a player?"_
+🎯 The benchmark prompt: _"Which functions can reach `executeMarketTransfer`?"_
 
-![w:940](assets/grep-relay.svg)
+![w:850](assets/grep-relay.svg)
 
 <!--
 ⏱ 1:15–2:00
@@ -150,13 +151,17 @@ Stress: deterministic, local, no tokens spent building it. The agent only pays t
 
 <!-- _class: chart -->
 
-# Same question, one command 🎬
+# Same question, the graph way 🎬
 
 ![w:1040](assets/graphify-demo.svg)
 
 <!--
 ⏱ 2:45–4:00 (live)
-Run it live in a terminal: graphify affected "executeMarketTransfer" --depth 6 --relation calls
+Casual question? Step 1, graphify query "rival club sign player transfer", lands on executeMarketTransfer (real output).
+Step 2 is the one command the graph agent ran in every Sonnet run: graphify affected "executeMarketTransfer" --depth 6 --relation calls
+Honesty note: the scorecard numbers come from the precise benchmark prompt, which already names the function (no query step).
+Its instructions map "what can reach X" to that command; that's how the agent knew what to type.
+Run it live in a terminal.
 The full chain in about half a second, file:line for every hop: the whole relay from the previous slide.
 If time allows: graphify explain "payReleaseClause" (callers, callees, EXTRACTED vs INFERRED confidence),
 then graphify export html --node-limit 7000 and zoom into the transfer-battles community.
