@@ -241,12 +241,28 @@ Because answers are saved, every run can be re-scored at any time with zero mode
 
 <!-- _class: chart -->
 
+# The raw data 📦
+
+![w:1130](assets/payloads.svg)
+
+<!--
+⏱ 5:40–6:00
+No magic: this is the actual JSON on disk. Top: the key the compiler wrote for "what can make a rival club sign a player?".
+Bottom: two stored run records. Both agents end with the same {"items": [...]} block; score.ts only reads that block.
+The grep run spent 10 tool calls and 317k input tokens and stopped one hop short (no initialize); the graph run spent 2 calls and 79k tokens and got all 9.
+Fair note: the other two Sonnet grep runs did find all 9. This run is shown because the scorer catching a miss is the point.
+-->
+
+---
+
+<!-- _class: chart -->
+
 # Real answers, real scores 🧾
 
 ![w:1060](assets/score-example.svg)
 
 <!--
-⏱ 5:40–6:10
+⏱ 6:00–6:20
 Real runs on "what can make a rival club sign a player?", marked against the compiler's 9 functions.
 Sonnet with grep stopped one hop early and missed initialize (the e2e server). Haiku with grep found all 9 but added a bare file: precision drops.
 The graph agent: 9 out of 9, from one command.
@@ -273,7 +289,7 @@ The graph agent: 9 out of 9, from one command.
 > Graph-shaped questions: **3–5× fewer tokens, 2–3× cheaper**, same or better answers.
 
 <!--
-⏱ 6:10–6:50
+⏱ 6:20–6:55
 The first two: the agent asks one question and is done in two turns. That's the whole pitch.
 Cost falls less than tokens because output tokens and the fixed system prompt don't shrink.
 "Structural" also includes import cycles and unused exports, where the graph loses (next slide), which is why the group ratio is milder.
@@ -288,7 +304,7 @@ Cost falls less than tokens because output tokens and the fixed system prompt do
 ![w:1000](assets/task-ratios.svg)
 
 <!--
-⏱ 6:50–7:15
+⏱ 6:55–7:15
 Green: graph-shaped questions. Grey: a wash. Red: the graph is overhead.
 Import cycles: GRAPH_REPORT lists a sample of 20 short cycles and misses 5 of 18 files, so the agent writes its own script anyway.
 Unused exports: one script already answers it. URL → route: the graph can't connect a URL string to its Express route.

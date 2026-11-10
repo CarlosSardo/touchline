@@ -7,7 +7,8 @@ Animated, in the style of Graphify's README demo (a terminal on the left, Touchl
 Static diagrams:
   assets/harness.svg         how the benchmark runs (slide "The harness")
   assets/ground-truth.svg    how keys and scores are produced deterministically (slide "Ground truth")
-  assets/score-example.svg   real answers scored against a real key (slide "Scoring, for real")
+  assets/payloads.svg        the raw answer key and two stored run records (slide "The raw data")
+  assets/score-example.svg   real answers scored against a real key (slide "Real answers, real scores")
 
 Terminal output and hit counts are real (captured on this repo); every measured number is read from ../results. SMIL animations play inside an <img> (Marp HTML,
 VS Code preview, GitHub). Every animation begins at -FREEZE seconds, so static renders such as the PDF show the
@@ -531,6 +532,80 @@ def score_example() -> str:
     return static_svg(1200, y + 20, "".join(b))
 
 
+def payloads() -> str:
+    """The raw JSON behind the scoring: the compiler's answer key and two stored run records (the same runs score-example marks)."""
+    key_file = json.loads((BENCH / "answer-keys.json").read_text())
+    keys = key_file["h1"]
+    grep_run, graph_run = runs("H1", "A", "sonnet")[1], runs("H1", "G", "sonnet")[0]
+    fs, lh = 14, 20
+    P, S, N = DIM, FG, PURPLE  # punctuation, strings, numbers
+
+    def line(x, y, spans, fs=fs):
+        out = []
+        for t, c, *bold in spans:
+            w = ' font-weight="800"' if bold else ""
+            out.append(f'<tspan fill="{c}"{w}>{escape(t).replace(" ", "&#160;")}</tspan>')
+        return f'<text x="{x}" y="{y}" font-size="{fs}">{"".join(out)}</text>'
+
+    def k(name):
+        return [(f'"{name}"', BLUE), (": ", P)]
+
+    def panel(x, y, w, h, name, note, color):
+        return (
+            f'<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="10" fill="{PANEL}" stroke="{color}" stroke-width="2"/>'
+            f'<path d="M{x} {y + 34} H{x + w}" stroke="{LINE}"/>'
+            f'<text x="{x + 16}" y="{y + 23}" font-size="15" font-weight="700" fill="{INK}">{escape(name)}</text>'
+            f'<text x="{x + w - 16}" y="{y + 23}" font-size="15" font-weight="700" fill="{color}" text-anchor="end">{escape(note)}</text>'
+        )
+
+    b = []
+    kh = 34 + 18 + 8 * lh
+    b.append(panel(10, 10, 1200, kh, "answer-keys.json", "the key · written by the TypeScript compiler", HEAD))
+    y = 10 + 34 + 24
+    b.append(line(26, y, [("{", P)] + k("generatedFrom") + [(f'"{key_file["generatedFrom"]}"', S), (",", P)]))
+    y += lh
+    b.append(line(26, y, [(" ", P)] + k("h1") + [("[", P)]))
+    half = (len(keys) + 1) // 2
+    for i, entry in enumerate(keys):
+        file, sym = entry.split("#")
+        col, row = divmod(i, half)
+        color = RED if grep_run["score"]["missed"] and entry in grep_run["score"]["missed"] else S
+        b.append(line(50 + col * 560, y + (row + 1) * lh, [(f'"{file}#', color), (sym, RED if color == RED else LIT, 1), ('",', color)]))
+    y += (half + 1) * lh
+    b.append(line(26, y, [(" ],", P), (' "h2": […], "h3": […], …  7 keys, one per question', DIM), ("}", P)]))
+
+    y0 = 10 + kh + 14
+    ah = 34 + 18 + 14 * lh
+    for x, r, who, color in [(10, grep_run, f"grep agent · Sonnet 5.5 · run {grep_run['repeat']}", GOLD),
+                             (615, graph_run, f"graph agent · Sonnet 5.5 · run {graph_run['repeat']}", ACCENT)]:
+        b.append(panel(x, y0, 595, ah, "results/agent.json", who, color))
+        y = y0 + 34 + 24
+        tx = x + 16
+        b.append(line(tx, y, [("{", P)] + k("toolCalls") + [(str(r["toolCalls"]), color, 1), (", ", P)]
+                      + k("inputTokens") + [(f'{r["inputTokens"]}', color, 1), (",", P)]))
+        y += lh
+        b.append(line(tx, y, [(" ", P)] + k("answer") + [('"… ```json {"items": [', S)]))
+        items = r["answer_items"]
+        for it in items:
+            y += lh
+            b.append(line(tx, y, [("  {", P)] + k("file")[:1] + [(":", P), (f'"{it["file"]}"', S), (",", P)]
+                          + k("symbol")[:1] + [(":", P), (f'"{it["symbol"]}"', LIT), ("},", P)], fs=13))
+        for m in r["score"]["missed"]:
+            y += lh
+            b.append(line(tx, y, [(f"  // ✗ no {m}", RED, 1)], fs=13))
+        y += lh
+        b.append(line(tx, y, [(' ]} ```",', S)]))
+        s = r["score"]
+        assert len({f"{i['file']}#{i['symbol']}" for i in items} & set(keys)) == s["correct"], "payload disagrees with score.ts"
+        y += lh
+        b.append(line(tx, y, [(" ", P)] + k("score") + [("{", P)] + k("accuracy") + [(f'{s["accuracy"]:.2f}', color, 1), (", ", P)]
+                      + k("recall") + [(f'{s["recall"]:.2f}', N), (", ", P)] + k("precision") + [(f'{s["precision"]:g}', N), (",", P)]))
+        y += lh
+        missed = ", ".join(f'"{m}"' for m in s["missed"])
+        b.append(line(tx, y, [("          ", P)] + k("missed") + [("[", P), (missed, RED), ("]}}", P)]))
+    return static_svg(1220, y0 + ah + 10, "".join(b))
+
+
 def answer_items(text: str):
     import re
     for block in reversed(re.findall(r"```json\s*([\s\S]*?)```", text)):
@@ -550,7 +625,7 @@ if __name__ == "__main__":
     frame = float(sys.argv[sys.argv.index("--frame") + 1]) if "--frame" in sys.argv else None
     here = Path(__file__).parent
     if frame is None:
-        for name, build in [("harness", harness), ("ground-truth", ground_truth), ("score-example", score_example)]:
+        for name, build in [("harness", harness), ("ground-truth", ground_truth), ("score-example", score_example), ("payloads", payloads)]:
             (here / "assets" / f"{name}.svg").write_text(build())
             print(here / "assets" / f"{name}.svg")
     for name, build in [("graphify-demo", graphify_demo), ("grep-relay", grep_relay)]:
