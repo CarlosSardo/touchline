@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 596" font-family="JetBrains Mono, Fira Code, Menlo, Consolas, monospace" font-size="19">
+<text x="470" y="26" fill="#8b949e" font-size="16">input tokens, graph ÷ grep (sonnet)</text>
+<text x="1190" y="26" fill="#8b949e" font-size="16" text-anchor="end">accuracy % G / A</text>
+<line x1="700" y1="40" x2="700" y2="566" stroke="#e6edf3" stroke-dasharray="6 5" stroke-width="2"/>
+<text x="456" y="74" fill="#e6edf3" text-anchor="end"><tspan fill="#58a6ff">H2</tspan> Blast radius: contractEndDate, 3 hops</text>
+<rect x="470" y="56" width="46" height="26" rx="4" fill="#3fb950"/>
+<text x="524" y="75" fill="#3fb950" font-weight="bold" stroke="#0d1117" stroke-width="5" paint-order="stroke">0.20×</text>
+<text x="1190" y="75" fill="#8b949e" text-anchor="end">100 / 100</text>
+<text x="456" y="120" fill="#e6edf3" text-anchor="end"><tspan fill="#58a6ff">H1</tspan> Who can trigger an AI transfer?</text>
+<rect x="470" y="102" width="48" height="26" rx="4" fill="#3fb950"/>
+<text x="526" y="121" fill="#3fb950" font-weight="bold" stroke="#0d1117" stroke-width="5" paint-order="stroke">0.21×</text>
+<text x="1190" y="121" fill="#8b949e" text-anchor="end">100 / 98</text>
+<text x="456" y="166" fill="#e6edf3" text-anchor="end"><tspan fill="#58a6ff">H4</tspan> Tests exercising transferProceeds</text>
+<rect x="470" y="148" width="78" height="26" rx="4" fill="#3fb950"/>
+<text x="556" y="167" fill="#3fb950" font-weight="bold" stroke="#0d1117" stroke-width="5" paint-order="stroke">0.34×</text>
+<text x="1190" y="167" fill="#8b949e" text-anchor="end">100 / 100</text>
+<text x="456" y="212" fill="#e6edf3" text-anchor="end"><tspan fill="#58a6ff">T5</tspan> What does executeMarketTransfer call?</text>
+<rect x="470" y="194" width="168" height="26" rx="4" fill="#3fb950"/>
+<text x="646" y="213" fill="#3fb950" font-weight="bold" stroke="#0d1117" stroke-width="5" paint-order="stroke">0.73×</text>
+<text x="1190" y="213" fill="#8b949e" text-anchor="end">100 / 100</text>
+<text x="456" y="258" fill="#e6edf3" text-anchor="end"><tspan fill="#58a6ff">H6</tspan> Change plan: schema migration</text>
+<rect x="470" y="240" width="182" height="26" rx="4" fill="#3fb950"/>
+<text x="660" y="259" fill="#3fb950" font-weight="bold" stroke="#0d1117" stroke-width="5" paint-order="stroke">0.79×</text>
+<text x="1190" y="259" fill="#8b949e" text-anchor="end">100 / 100</text>
+<text x="456" y="304" fill="#e6edf3" text-anchor="end"><tspan fill="#58a6ff">H7</tspan> Change plan: release-clause levy</text>
+<rect x="470" y="286" width="186" height="26" rx="4" fill="#3fb950"/>
+<text x="664" y="305" fill="#3fb950" font-weight="bold" stroke="#0d1117" stroke-width="5" paint-order="stroke">0.81×</text>
+<text x="1190" y="305" fill="#8b949e" text-anchor="end">100 / 96</text>
+<text x="456" y="350" fill="#e6edf3" text-anchor="end"><tspan fill="#58a6ff">T7</tspan> Where is clamp defined?</text>
+<rect x="470" y="332" width="209" height="26" rx="4" fill="#8b949e"/>
+<text x="687" y="351" fill="#8b949e" font-weight="bold" stroke="#0d1117" stroke-width="5" paint-order="stroke">0.91×</text>
+<text x="1190" y="351" fill="#8b949e" text-anchor="end">100 / 100</text>
+<text x="456" y="396" fill="#e6edf3" text-anchor="end"><tspan fill="#58a6ff">T2</tspan> HTTP route → match engine</text>
+<rect x="470" y="378" width="246" height="26" rx="4" fill="#8b949e"/>
+<text x="724" y="397" fill="#8b949e" font-weight="bold" stroke="#0d1117" stroke-width="5" paint-order="stroke">1.07×</text>
+<text x="1190" y="397" fill="#8b949e" text-anchor="end">100 / 100</text>
+<text x="456" y="442" fill="#e6edf3" text-anchor="end"><tspan fill="#58a6ff">T8</tspan> UI URL string → Express route</text>
+<rect x="470" y="424" width="253" height="26" rx="4" fill="#8b949e"/>
+<text x="731" y="443" fill="#8b949e" font-weight="bold" stroke="#0d1117" stroke-width="5" paint-order="stroke">1.10×</text>
+<text x="1190" y="443" fill="#8b949e" text-anchor="end">100 / 100</text>
+<text x="456" y="488" fill="#e6edf3" text-anchor="end"><tspan fill="#58a6ff">H5</tspan> Unused exports (aggregate)</text>
+<rect x="470" y="470" width="304" height="26" rx="4" fill="#f85149"/>
+<text x="782" y="489" fill="#f85149" font-weight="bold" stroke="#0d1117" stroke-width="5" paint-order="stroke">1.32×</text>
+<text x="1190" y="489" fill="#8b949e" text-anchor="end">96 / 96</text>
+<text x="456" y="534" fill="#e6edf3" text-anchor="end"><tspan fill="#58a6ff">H3</tspan> Import cycles</text>
+<rect x="470" y="516" width="500" height="26" rx="4" fill="#f85149"/>
+<path d="M 922 546 L 936 512 M 936 546 L 950 512" stroke="#0d1117" stroke-width="5"/>
+<text x="978" y="535" fill="#f85149" font-weight="bold" stroke="#0d1117" stroke-width="5" paint-order="stroke">2.87×</text>
+<text x="1190" y="535" fill="#8b949e" text-anchor="end">96 / 100</text>
+<text x="700" y="588" fill="#e6edf3" text-anchor="middle" font-size="16">1.0 = same as grep</text>
+</svg>
