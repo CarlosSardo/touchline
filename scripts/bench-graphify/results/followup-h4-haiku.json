@@ -1,0 +1,177 @@
+{
+  "meta": {
+    "commit": "2f3d9de",
+    "date": "2026-11-10T13:21:09.916Z",
+    "graphify": "graphify 0.9.105",
+    "graphBuildMs": 23129,
+    "graph": {
+      "nodes": 5652,
+      "edges": 18046
+    },
+    "model": "claude-haiku-5.5",
+    "arms": [
+      "G"
+    ],
+    "tasks": [
+      "H4"
+    ],
+    "copilot": "copilot 1.0.108.",
+    "repeats": 3,
+    "concurrency": 3,
+    "totalWallMs": 46077,
+    "logs": "/tmp/touchline-bench/2026-11-10T13-20-46-555Z"
+  },
+  "results": [
+    {
+      "task": "H4",
+      "arm": "G",
+      "repeat": 1,
+      "model": "claude-haiku-5.5",
+      "ok": true,
+      "attempts": 1,
+      "wallMs": 42258.237372999996,
+      "apiMs": 33781,
+      "inputTokens": 190227,
+      "uncachedInputTokens": 14,
+      "cacheReadTokens": 168092,
+      "cacheWriteTokens": 22121,
+      "freshInputTokens": 22135,
+      "prefixTokens": 25093,
+      "taskInputTokens": 39669,
+      "retrievedTokens": 4879,
+      "outputTokens": 7577,
+      "reasoningTokens": 4982,
+      "modelCalls": 6,
+      "premiumRequests": 1,
+      "nanoAiu": 823594500,
+      "toolCalls": 5,
+      "toolNames": {
+        "bash": 5
+      },
+      "filesViewed": 0,
+      "graphifyCalls": 4,
+      "graphifyCommands": [
+        "cd /tmp/touchline-bench/2026-11-10T13-20-46-555Z/arm-G && graphify affected \"transferProceeds\" --depth 3 --relation calls 2>&1 | head -100; echo ---; graphify affected \"transferProceeds\" --depth 1 2>&1 | head -50",
+        "cd /tmp/touchline-bench/2026-11-10T13-20-46-555Z/arm-G && git ls-files | grep -E '\\.test\\.(ts|tsx|js)$'; echo ---; grep -rlwE \"transferProceeds|placeFutureTransferAtAffiliate|completeNegotiation|exerciseOption|executeMarketTransfer|dispatchAction|progressDealMilestones|agreedLoan|expireLoans|decide|settleMarketBids|createWorldRouter|sign|processNegotiations|agreedTransfer|advance|processTransferBattles\" --include=\"*.test.ts\" --include=\"*.test.tsx\" --include=\"*.test.js\" . ; echo ---; graphify affected \"transferProceeds\" --depth 3 --relation calls 2>&1 | grep -c .",
+        "cd /tmp/touchline-bench/2026-11-10T13-20-46-555Z/arm-G && for n in transferProceeds; do :; done; graphify path \"expireLoans\" \"transferProceeds\" 2>&1 | head -10; echo ---; graphify path \"processTransferBattles\" \"transferProceeds\" 2>&1 | head -10; echo ---; graphify path \"dispatchAction\" \"transferProceeds\" 2>&1 | head -10; echo ---; graphify path \"createWorldRouter\" \"transferProceeds\" 2>&1 | head -10; echo ---; graphify path \"advance\" \"transferProceeds\" 2>&1 | head -10; echo ---; graphify path \"processNegotiations\" \"transferProceeds\" 2>&1 | head -10; echo ---; grep -rnwE \"dispatchAction|createWorldRouter|processNegotiations|settleMarketBids|exerciseOption|executeMarketTransfer|decide|advance|processTransferBattles\" --include=\"*.test.ts\" . | cut -c1-180 | head -60",
+        "cd /tmp/touchline-bench/2026-11-10T13-20-46-555Z/arm-G && graphify affected \"transferProceeds\" --depth 2 --relation calls 2>&1 | head -40; echo ---; graphify explain \"closeNegotiation\" 2>&1 | head -20; echo ---; grep -rnE \"closeNegotiation|sellerCanRelease\" --include=\"*.test.ts\" server | cut -c1-160 | head; echo ---; grep -n \"api/advance\" server/app.ts | head -5"
+      ],
+      "graphFirst": true,
+      "hookDenials": 0,
+      "promptTokens": 39453,
+      "score": {
+        "parsed": true,
+        "answered": 13,
+        "correct": 13,
+        "recall": 1,
+        "precision": 1,
+        "hallucinated": [],
+        "missed": [],
+        "factsOk": true,
+        "accuracy": 1
+      },
+      "answer": "Thirteen test files exercise `transferProceeds` within 3 call hops. I didn't modify anything.\n\n- **Direct caller:** `server/systems.test.ts` calls it directly.\n- **Within 2 hops:** `registration.test.ts`, `market-offers.test.ts`, `eligibility.test.ts`, `affiliates.sql.test.ts`, and `transfer-battles.sql.test.ts` call `completeNegotiation`, `progressDealMilestones`, `expireLoans`, `placeFutureTransferAtAffiliate`, or `processTransferBattles`.\n- **Exactly 3 hops:** the other test files call `advance()`, which reaches `transferProceeds` through `expireLoans` → `exerciseOption`.\n\nExcluded: `app.test.ts` and `integration.test.ts` hit `/api/advance` over HTTP, which is more than 3 hops away, so I left them out. `closeNegotiation` does not reach `transferProceeds`.\n\n```json\n{\"items\": [\n{\"file\": \"server/systems.test.ts\", \"symbol\": null},\n{\"file\": \"server/registration.test.ts\", \"symbol\": null},\n{\"file\": \"server/market-offers.test.ts\", \"symbol\": null},\n{\"file\": \"server/eligibility.test.ts\", \"symbol\": null},\n{\"file\": \"server/affiliates.sql.test.ts\", \"symbol\": null},\n{\"file\": \"server/transfer-battles.sql.test.ts\", \"symbol\": null},\n{\"file\": \"server/world-market.test.ts\", \"symbol\": null},\n{\"file\": \"server/simulation.test.ts\", \"symbol\": null},\n{\"file\": \"server/player-records.test.ts\", \"symbol\": null},\n{\"file\": \"server/match-stats.test.ts\", \"symbol\": null},\n{\"file\": \"server/living-world.test.ts\", \"symbol\": null},\n{\"file\": \"server/gbe.test.ts\", \"symbol\": null},\n{\"file\": \"server/club-life.test.ts\", \"symbol\": null}\n]}\n```",
+      "log": "/tmp/touchline-bench/2026-11-10T13-20-46-555Z/logs/H4-G-r1-a1.jsonl"
+    },
+    {
+      "task": "H4",
+      "arm": "G",
+      "repeat": 2,
+      "model": "claude-haiku-5.5",
+      "ok": true,
+      "attempts": 1,
+      "wallMs": 45757.99170700001,
+      "apiMs": 39011,
+      "inputTokens": 265599,
+      "uncachedInputTokens": 18,
+      "cacheReadTokens": 241973,
+      "cacheWriteTokens": 23608,
+      "freshInputTokens": 23626,
+      "prefixTokens": 25095,
+      "taskInputTokens": 64839,
+      "retrievedTokens": 5106,
+      "outputTokens": 8297,
+      "reasoningTokens": 5282,
+      "modelCalls": 8,
+      "premiumRequests": 1,
+      "nanoAiu": 952103000,
+      "toolCalls": 7,
+      "toolNames": {
+        "bash": 7
+      },
+      "filesViewed": 0,
+      "graphifyCalls": 4,
+      "graphifyCommands": [
+        "cd /tmp/touchline-bench/2026-11-10T13-20-46-555Z/arm-G && graphify affected \"transferProceeds\" --depth 3 --relation calls 2>&1 | head -100; echo ---; grep -rn \"transferProceeds\" server/systems.ts | head",
+        "cd /tmp/touchline-bench/2026-11-10T13-20-46-555Z/arm-G && grep -rlwE \"transferProceeds|placeFutureTransferAtAffiliate|completeNegotiation|exerciseOption|executeMarketTransfer|dispatchAction|progressDealMilestones|expireLoans|decide|settleMarketBids|createWorldRouter|processNegotiations|advance|processTransferBattles|agreedLoan|agreedTransfer|sign\" --include=\"*.test.ts\" . --exclude-dir=node_modules; echo ---; graphify explain \"transferProceeds\" 2>&1 | head -40",
+        "cd /tmp/touchline-bench/2026-11-10T13-20-46-555Z/arm-G && python3 -c \"\nimport json,collections\ng=json.load(open('graphify-out/graph.json'))\nnodes={n['id']:n for n in g['nodes']}\nrev=collections.defaultdict(list)\nfor l in g['links']:\n  if l['relation']=='calls': rev[l['target']].append(l['source'])\nt=[i for i,n in nodes.items() if n['label'].startswith('transferProceeds')]\nprint('target',t)\ndist={t[0]:0}; q=collections.deque([t[0]])\nwhile q:\n  x=q.popleft()\n  if dist[x]>=3: continue\n  for s in rev[x]:\n    if s not in dist:\n      dist[s]=dist[x]+1; q.append(s)\nfor i,d in sorted(dist.items(),key=lambda k:k[1]):\n  n=nodes[i]; print(d,n['label'],n.get('source_file'),n.get('source_location'))\n\"",
+        "cd /tmp/touchline-bench/2026-11-10T13-20-46-555Z/arm-G && graphify path \"advance\" \"transferProceeds\" 2>&1 | head -20; echo ---; graphify path \"processTransferBattles\" \"transferProceeds\" 2>&1 | head -12; echo ---; graphify path \"createWorldRouter\" \"transferProceeds\" 2>&1 | head -12"
+      ],
+      "graphFirst": true,
+      "hookDenials": 0,
+      "promptTokens": 40940,
+      "score": {
+        "parsed": true,
+        "answered": 13,
+        "correct": 13,
+        "recall": 1,
+        "precision": 1,
+        "hallucinated": [],
+        "missed": [],
+        "factsOk": true,
+        "accuracy": 1
+      },
+      "answer": "Thirteen test files exercise `transferProceeds` within 3 call hops. The graph's reverse-call BFS found the depth-≤3 callers, and I checked each test file's call sites. Excluded: `integration.test.ts` and `app.test.ts` reach `dispatchAction` only over HTTP, not by direct call, and `youth-internationals.test.ts` matched on a data field named `advance`.\n\nEach entry lists the chain function the file calls; for `advance` and `processTransferBattles` that is 3 call hops, and for the others 1–2.\n\n```json\n{\"items\": [\n{\"file\": \"server/systems.test.ts\", \"symbol\": \"transferProceeds\"},\n{\"file\": \"server/affiliates.sql.test.ts\", \"symbol\": \"placeFutureTransferAtAffiliate\"},\n{\"file\": \"server/registration.test.ts\", \"symbol\": \"completeNegotiation\"},\n{\"file\": \"server/market-offers.test.ts\", \"symbol\": \"expireLoans\"},\n{\"file\": \"server/eligibility.test.ts\", \"symbol\": \"expireLoans\"},\n{\"file\": \"server/transfer-battles.sql.test.ts\", \"symbol\": \"processTransferBattles\"},\n{\"file\": \"server/simulation.test.ts\", \"symbol\": \"advance\"},\n{\"file\": \"server/world-market.test.ts\", \"symbol\": \"advance\"},\n{\"file\": \"server/player-records.test.ts\", \"symbol\": \"advance\"},\n{\"file\": \"server/match-stats.test.ts\", \"symbol\": \"advance\"},\n{\"file\": \"server/gbe.test.ts\", \"symbol\": \"advance\"},\n{\"file\": \"server/living-world.test.ts\", \"symbol\": \"advance\"},\n{\"file\": \"server/club-life.test.ts\", \"symbol\": \"advance\"}\n]}\n```",
+      "log": "/tmp/touchline-bench/2026-11-10T13-20-46-555Z/logs/H4-G-r2-a1.jsonl"
+    },
+    {
+      "task": "H4",
+      "arm": "G",
+      "repeat": 3,
+      "model": "claude-haiku-5.5",
+      "ok": true,
+      "attempts": 1,
+      "wallMs": 40398.93743599999,
+      "apiMs": 35080,
+      "inputTokens": 226828,
+      "uncachedInputTokens": 16,
+      "cacheReadTokens": 203969,
+      "cacheWriteTokens": 22843,
+      "freshInputTokens": 22859,
+      "prefixTokens": 25092,
+      "taskInputTokens": 51184,
+      "retrievedTokens": 4860,
+      "outputTokens": 7938,
+      "reasoningTokens": 4793,
+      "modelCalls": 7,
+      "premiumRequests": 1,
+      "nanoAiu": 886566500,
+      "toolCalls": 7,
+      "toolNames": {
+        "bash": 7
+      },
+      "filesViewed": 0,
+      "graphifyCalls": 2,
+      "graphifyCommands": [
+        "cd /tmp/touchline-bench/2026-11-10T13-20-46-555Z/arm-G && graphify affected \"transferProceeds\" --depth 3 --relation calls 2>&1 | head -100",
+        "cd /tmp/touchline-bench/2026-11-10T13-20-46-555Z/arm-G && python3 -c \"\nimport json,collections\ng=json.load(open('graphify-out/graph.json'))\nnodes={n['id']:n for n in g['nodes']}\nrev=collections.defaultdict(set)\nfor l in g['links']:\n    if l.get('relation')=='calls': rev[l['target']].add(l['source'])\ntgt=[i for i,n in nodes.items() if n.get('label','').startswith('transferProceeds') and 'systems.ts' in (n.get('source_file') or '')]\nprint('targets',tgt)\ndist={t:0 for t in tgt}; q=collections.deque(tgt)\nwhile q:\n    c=q.popleft()\n    if dist[c]>=3: continue\n    for s in rev[c]:\n        if s not in dist:\n            dist[s]=dist[c]+1; q.append(s)\nfor i,d in sorted(dist.items(), key=lambda x:x[1]):\n    n=nodes[i]; print(d, n.get('label'), n.get('source_file'), n.get('source_location'))\n\""
+      ],
+      "graphFirst": true,
+      "hookDenials": 0,
+      "promptTokens": 40175,
+      "score": {
+        "parsed": true,
+        "answered": 13,
+        "correct": 13,
+        "recall": 1,
+        "precision": 1,
+        "hallucinated": [],
+        "missed": [],
+        "factsOk": true,
+        "accuracy": 1
+      },
+      "answer": "Thirteen test files exercise `transferProceeds` within 3 call hops.\n\n- **Direct call:** `server/systems.test.ts` calls `transferProceeds` itself (L1260).\n- **Via 1–2 hops:** `systems.test.ts`, `registration.test.ts`, `affiliates.sql.test.ts` (via `completeNegotiation`), `market-offers.test.ts` (via `expireLoans`).\n- **Via 3 hops:** `transfer-battles.sql.test.ts` (`processTransferBattles`), `eligibility.test.ts` (its local `sign` helper), and eight files calling `advance()`: `world-market`, `simulation`, `registration`, `player-records`, `match-stats`, `living-world`, `gbe` and `club-life`.\n\nThe graph doesn't link calls made inside test callbacks, so I grepped test files for every reachable name. HTTP-only tests (`app.test.ts`, `integration.test.ts`) and the e2e specs are excluded because their route path exceeds 3 hops in the graph. Nothing was modified.\n\n```json\n{\"items\": [\n{\"file\": \"server/systems.test.ts\", \"symbol\": \"transferProceeds\"},\n{\"file\": \"server/registration.test.ts\", \"symbol\": \"completeNegotiation\"},\n{\"file\": \"server/affiliates.sql.test.ts\", \"symbol\": \"placeFutureTransferAtAffiliate\"},\n{\"file\": \"server/market-offers.test.ts\", \"symbol\": \"expireLoans\"},\n{\"file\": \"server/transfer-battles.sql.test.ts\", \"symbol\": \"processTransferBattles\"},\n{\"file\": \"server/eligibility.test.ts\", \"symbol\": \"sign\"},\n{\"file\": \"server/world-market.test.ts\", \"symbol\": \"advance\"},\n{\"file\": \"server/simulation.test.ts\", \"symbol\": \"advance\"},\n{\"file\": \"server/player-records.test.ts\", \"symbol\": \"advance\"},\n{\"file\": \"server/match-stats.test.ts\", \"symbol\": \"advance\"},\n{\"file\": \"server/living-world.test.ts\", \"symbol\": \"advance\"},\n{\"file\": \"server/gbe.test.ts\", \"symbol\": \"advance\"},\n{\"file\": \"server/club-life.test.ts\", \"symbol\": \"advance\"}\n]}\n```",
+      "log": "/tmp/touchline-bench/2026-11-10T13-20-46-555Z/logs/H4-G-r3-a1.jsonl"
+    }
+  ]
+}

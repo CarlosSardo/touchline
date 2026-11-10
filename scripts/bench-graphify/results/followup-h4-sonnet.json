@@ -1,0 +1,170 @@
+{
+  "meta": {
+    "commit": "2f3d9de",
+    "date": "2026-11-10T13:21:11.055Z",
+    "graphify": "graphify 0.9.105",
+    "graphBuildMs": 18772,
+    "graph": {
+      "nodes": 5652,
+      "edges": 18046
+    },
+    "model": "claude-sonnet-5.5",
+    "arms": [
+      "G"
+    ],
+    "tasks": [
+      "H4"
+    ],
+    "copilot": "copilot 1.0.108.",
+    "repeats": 3,
+    "concurrency": 3,
+    "totalWallMs": 23081,
+    "logs": "/tmp/touchline-bench/2026-11-10T13-20-51-638Z"
+  },
+  "results": [
+    {
+      "task": "H4",
+      "arm": "G",
+      "repeat": 1,
+      "model": "claude-sonnet-5.5",
+      "ok": true,
+      "attempts": 1,
+      "wallMs": 16393.882002,
+      "apiMs": 11846,
+      "inputTokens": 108004,
+      "uncachedInputTokens": 10,
+      "cacheReadTokens": 79900,
+      "cacheWriteTokens": 28094,
+      "freshInputTokens": 28104,
+      "prefixTokens": 25099,
+      "taskInputTokens": 7608,
+      "retrievedTokens": 747,
+      "outputTokens": 1546,
+      "reasoningTokens": 241,
+      "modelCalls": 4,
+      "premiumRequests": 1,
+      "nanoAiu": 9370500000,
+      "toolCalls": 3,
+      "toolNames": {
+        "bash": 3
+      },
+      "filesViewed": 0,
+      "graphifyCalls": 1,
+      "graphifyCommands": [
+        "graphify affected \"transferProceeds\" --depth 3 --relation calls"
+      ],
+      "graphFirst": true,
+      "hookDenials": 0,
+      "promptTokens": 28096,
+      "score": {
+        "parsed": true,
+        "answered": 13,
+        "correct": 13,
+        "recall": 1,
+        "precision": 1,
+        "hallucinated": [],
+        "missed": [],
+        "factsOk": true,
+        "accuracy": 1
+      },
+      "answer": "Eleven test files call `transferProceeds`, or a function that reaches it within 3 call hops, directly. I took the 3-hop caller set from `graphify affected`, then grepped the test files for calls to those functions.\n\n- **Direct call:** `server/systems.test.ts` calls `transferProceeds` itself.\n- **Other hop-reachers called by tests:** `completeNegotiation`, `progressDealMilestones`, `expireLoans`, `placeFutureTransferAtAffiliate`, `processTransferBattles` and `advance`.\n- **Not counted:** `server/app.test.ts` and `server/integration.test.ts` contain no direct calls to any of these functions. They might reach them over HTTP through `createWorldRouter` or `dispatchAction`, but I didn't trace that.\n\n```json\n{\"items\": [\n{\"file\":\"server/systems.test.ts\",\"symbol\":null},\n{\"file\":\"server/registration.test.ts\",\"symbol\":null},\n{\"file\":\"server/market-offers.test.ts\",\"symbol\":null},\n{\"file\":\"server/eligibility.test.ts\",\"symbol\":null},\n{\"file\":\"server/affiliates.sql.test.ts\",\"symbol\":null},\n{\"file\":\"server/transfer-battles.sql.test.ts\",\"symbol\":null},\n{\"file\":\"server/simulation.test.ts\",\"symbol\":null},\n{\"file\":\"server/world-market.test.ts\",\"symbol\":null},\n{\"file\":\"server/player-records.test.ts\",\"symbol\":null},\n{\"file\":\"server/match-stats.test.ts\",\"symbol\":null},\n{\"file\":\"server/living-world.test.ts\",\"symbol\":null},\n{\"file\":\"server/gbe.test.ts\",\"symbol\":null},\n{\"file\":\"server/club-life.test.ts\",\"symbol\":null}\n]}\n```",
+      "log": "/tmp/touchline-bench/2026-11-10T13-20-51-638Z/logs/H4-G-r1-a1.jsonl"
+    },
+    {
+      "task": "H4",
+      "arm": "G",
+      "repeat": 2,
+      "model": "claude-sonnet-5.5",
+      "ok": true,
+      "attempts": 1,
+      "wallMs": 22769.461242999998,
+      "apiMs": 18251,
+      "inputTokens": 138700,
+      "uncachedInputTokens": 12,
+      "cacheReadTokens": 108294,
+      "cacheWriteTokens": 30394,
+      "freshInputTokens": 30406,
+      "prefixTokens": 25104,
+      "taskInputTokens": 13180,
+      "retrievedTokens": 1874,
+      "outputTokens": 2448,
+      "reasoningTokens": 429,
+      "modelCalls": 5,
+      "premiumRequests": 1,
+      "nanoAiu": 11131840000,
+      "toolCalls": 4,
+      "toolNames": {
+        "bash": 4
+      },
+      "filesViewed": 0,
+      "graphifyCalls": 1,
+      "graphifyCommands": [
+        "graphify affected \"transferProceeds\" --depth 3 --relation calls"
+      ],
+      "graphFirst": true,
+      "hookDenials": 0,
+      "promptTokens": 30396,
+      "score": {
+        "parsed": true,
+        "answered": 13,
+        "correct": 13,
+        "recall": 1,
+        "precision": 1,
+        "hallucinated": [],
+        "missed": [],
+        "factsOk": true,
+        "accuracy": 1
+      },
+      "answer": "Seventeen test files reach `transferProceeds` through direct calls or within 3 call hops. The graph lists 16 callers at that depth. I then grepped the test files for calls to those functions and checked the imports.\n\n- **Direct or 1-hop (calls it, or a function that calls it):** `server/systems.test.ts` (`agreedTransfer`, `agreedLoan`) and `server/eligibility.test.ts` (`sign`). The functions the graph lists for these two files are test helpers.\n- **Via `advance` (`simulation.ts`):** `simulation`, `world-market`, `registration`, `player-records`, `match-stats`, `living-world`, `gbe` and `club-life` tests. I confirmed each imports `advance` from `./simulation.ts` and calls it.\n- **Via other callers:**\n  - `server/transfer-battles.sql.test.ts` calls `processTransferBattles`.\n  - `server/registration.test.ts` and `server/market-offers.test.ts` call `progressDealMilestones`; `registration.test.ts` also calls `completeNegotiation`.\n  - `server/market-offers.test.ts` and `server/eligibility.test.ts` call `expireLoans`.\n  - `server/affiliates.sql.test.ts` calls `placeFutureTransferAtAffiliate` and `completeNegotiation`.\n- **Excluded:** `server/app.test.ts`, `server/integration.test.ts` and `server/auth.test.ts` only call `createApp`. The graph puts `createApp` outside the 3-hop set, so I left them out. I did not check whether they reach it through HTTP requests.\n\nI didn't open `systems.test.ts` or `eligibility.test.ts` to check that the helpers are actually used. For `systems.test.ts`, I also didn't check which functions it calls directly. They are listed because the graph links them to `transferProceeds`.\n\n```json\n{\"items\": [\n{\"file\":\"server/systems.test.ts\",\"symbol\":null},\n{\"file\":\"server/eligibility.test.ts\",\"symbol\":null},\n{\"file\":\"server/transfer-battles.sql.test.ts\",\"symbol\":null},\n{\"file\":\"server/affiliates.sql.test.ts\",\"symbol\":null},\n{\"file\":\"server/registration.test.ts\",\"symbol\":null},\n{\"file\":\"server/market-offers.test.ts\",\"symbol\":null},\n{\"file\":\"server/simulation.test.ts\",\"symbol\":null},\n{\"file\":\"server/world-market.test.ts\",\"symbol\":null},\n{\"file\":\"server/player-records.test.ts\",\"symbol\":null},\n{\"file\":\"server/match-stats.test.ts\",\"symbol\":null},\n{\"file\":\"server/living-world.test.ts\",\"symbol\":null},\n{\"file\":\"server/gbe.test.ts\",\"symbol\":null},\n{\"file\":\"server/club-life.test.ts\",\"symbol\":null}\n]}\n```",
+      "log": "/tmp/touchline-bench/2026-11-10T13-20-51-638Z/logs/H4-G-r2-a1.jsonl"
+    },
+    {
+      "task": "H4",
+      "arm": "G",
+      "repeat": 3,
+      "model": "claude-sonnet-5.5",
+      "ok": true,
+      "attempts": 1,
+      "wallMs": 18520.841203,
+      "apiMs": 14446,
+      "inputTokens": 108494,
+      "uncachedInputTokens": 10,
+      "cacheReadTokens": 79692,
+      "cacheWriteTokens": 28792,
+      "freshInputTokens": 28802,
+      "prefixTokens": 25100,
+      "taskInputTokens": 8094,
+      "retrievedTokens": 1286,
+      "outputTokens": 1922,
+      "reasoningTokens": 277,
+      "modelCalls": 4,
+      "premiumRequests": 1,
+      "nanoAiu": 9918920000,
+      "toolCalls": 3,
+      "toolNames": {
+        "bash": 3
+      },
+      "filesViewed": 0,
+      "graphifyCalls": 1,
+      "graphifyCommands": [
+        "graphify affected \"transferProceeds\" --depth 3 --relation calls"
+      ],
+      "graphFirst": true,
+      "hookDenials": 0,
+      "promptTokens": 28794,
+      "score": {
+        "parsed": true,
+        "answered": 13,
+        "correct": 13,
+        "recall": 1,
+        "precision": 1,
+        "hallucinated": [],
+        "missed": [],
+        "factsOk": true,
+        "accuracy": 1
+      },
+      "answer": "Eleven test files call `transferProceeds`, or a function that reaches it within 3 call hops. I took the reachable functions from `graphify affected \"transferProceeds\" --depth 3 --relation calls` and then grepped each test file for calls to them.\n\nDirect callers or imports:\n- `server/systems.test.ts` imports `transferProceeds` directly. It also imports `completeNegotiation`, `expireLoans` and `progressDealMilestones`.\n- `server/affiliates.sql.test.ts` calls `placeFutureTransferAtAffiliate`.\n- `server/transfer-battles.sql.test.ts` calls `processTransferBattles`.\n- `server/market-offers.test.ts` and `server/eligibility.test.ts` call `progressDealMilestones` and `expireLoans`.\n- `server/registration.test.ts` imports `completeNegotiation` and `progressDealMilestones`, and calls `advance`.\n\nFiles that call `advance` (reaches `transferProceeds` via `processNegotiations`):\n- `server/simulation.test.ts`\n- `server/world-market.test.ts`\n- `server/player-records.test.ts`\n- `server/match-stats.test.ts`\n- `server/living-world.test.ts`\n- `server/gbe.test.ts`\n- `server/club-life.test.ts`\n\nI left out `server/app.test.ts` and `server/integration.test.ts`. They only reach `advance` through the `/api/advance` HTTP route, which the graph doesn't link. I also left out `shared/features/youth-internationals.test.ts`, where `advance` is a property name, not a function call.\n\n```json\n{\"items\": [\n{\"file\":\"server/systems.test.ts\",\"symbol\":\"transferProceeds\"},\n{\"file\":\"server/affiliates.sql.test.ts\",\"symbol\":\"placeFutureTransferAtAffiliate\"},\n{\"file\":\"server/transfer-battles.sql.test.ts\",\"symbol\":\"processTransferBattles\"},\n{\"file\":\"server/market-offers.test.ts\",\"symbol\":\"progressDealMilestones\"},\n{\"file\":\"server/eligibility.test.ts\",\"symbol\":\"progressDealMilestones\"},\n{\"file\":\"server/registration.test.ts\",\"symbol\":\"completeNegotiation\"},\n{\"file\":\"server/simulation.test.ts\",\"symbol\":\"advance\"},\n{\"file\":\"server/world-market.test.ts\",\"symbol\":\"advance\"},\n{\"file\":\"server/player-records.test.ts\",\"symbol\":\"advance\"},\n{\"file\":\"server/match-stats.test.ts\",\"symbol\":\"advance\"},\n{\"file\":\"server/living-world.test.ts\",\"symbol\":\"advance\"},\n{\"file\":\"server/gbe.test.ts\",\"symbol\":\"advance\"},\n{\"file\":\"server/club-life.test.ts\",\"symbol\":\"advance\"}\n]}\n```",
+      "log": "/tmp/touchline-bench/2026-11-10T13-20-51-638Z/logs/H4-G-r3-a1.jsonl"
+    }
+  ]
+}
