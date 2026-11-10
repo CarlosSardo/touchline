@@ -4,3 +4,6 @@
 .dagger/modules/*/clients/
 .dagger/modules/*/entrypoint/
 .dagger/modules/*/__dagger.dispatch.ts
+
+# Benchmark harness and its answer keys (kept out of the graph so benchmark agents cannot read them).
+scripts/bench-graphify/

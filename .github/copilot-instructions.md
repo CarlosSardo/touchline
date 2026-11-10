@@ -16,6 +16,20 @@ source files when (a) modifying/debugging specific code, (b) the graph lacks the
 
 Type `/graphify` in Copilot Chat to build or update the graph.
 
-In this repository `graphify-out/graph.json` is committed and refreshed by the `.githooks/pre-commit`
-hook. If it looks stale, run `npm run graph:update` (code-only, no LLM). Setup and conventions:
-DEVELOPMENT.md, "Code graph (Graphify)".
+### Touchline: graph before grep
+
+`graphify-out/graph.json` is committed and refreshed by the `.githooks/pre-commit` hook, so it is
+current. Before running grep or opening large files (server/simulation.ts alone is about 150 KB), run the matching
+command from the repository root and then read only the lines it points to:
+
+| Question                           | Command                                                     |
+| ---------------------------------- | ----------------------------------------------------------- |
+| What does X call, and who calls X? | `graphify explain "X"` (callers and callees with file:line) |
+| What breaks if I change X?         | `graphify affected "X" --depth 1`                           |
+| How does A reach B?                | `graphify path "A" "B"`, then `graphify explain` each hop   |
+| Where is the code for a feature?   | `graphify query "<feature words>" --budget 1500`            |
+
+Caveats: `god-nodes` ranks by total edges, not imports; `path` may shortcut through `contains`/`imports`
+edges, so confirm call chains with `explain`; the graph cannot link a client URL string to its Express
+route (grep `server/app.ts` for those). If the graph looks stale, run `npm run graph:update` (code-only,
+no LLM). Setup: DEVELOPMENT.md, "Code graph (Graphify)".

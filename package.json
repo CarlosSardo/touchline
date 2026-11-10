@@ -45,6 +45,7 @@
     "simulation:check": "tsx server/check-simulation.ts",
     "graph:setup": "bash scripts/graphify-setup.sh",
     "graph:update": "PYTHONHASHSEED=0 graphify update .",
+    "bench:graphify": "tsx scripts/bench-graphify/index.ts",
     "lint": "oxlint",
     "format": "prettier --write src server shared e2e *.ts *.json *.md",
     "preview": "vite preview"

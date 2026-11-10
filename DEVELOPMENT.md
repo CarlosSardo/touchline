@@ -193,6 +193,8 @@ graphify explain "Store"                          # one node and its neighbours
 
 Scan exclusions live in [.graphifyignore](.graphifyignore) (on top of `.gitignore`). If `graph.json` hits a merge conflict, the driver is not registered or rejected a corrupt file: run `npm run graph:setup`, or `rm graphify-out/graph.json && npm run graph:update`. The Copilot skill is in [.github/skills/graphify](.github/skills/graphify) and the always-on guidance in [.github/copilot-instructions.md](.github/copilot-instructions.md); after upgrading the CLI, refresh the skill with `graphify install --project --platform copilot` and move it from `.copilot/skills/` to `.github/skills/`.
 
+Whether the graph pays off is measured by [scripts/bench-graphify](scripts/bench-graphify): `npm run bench:graphify -- all` runs eight Touchline questions as real Copilot CLI sessions (claude-sonnet-5.5 by default; it uses premium requests) in three arms (grep only, Graphify available, Graphify nudged), scores the answers against compiler-derived keys and rewrites [REPORT.md](scripts/bench-graphify/REPORT.md). `scripted` (no model calls), `agent` and `report` run the stages separately; the harness is excluded from the graph so agents cannot read its answer keys.
+
 ## Hosting and first install
 
 The supported hobby topology is an arm64/amd64 Linux host with Docker; the reference host is a Raspberry Pi 4B with 8 GB RAM, 64-bit OS and an SSD. PostgreSQL and the application share that host. Do not add cloud infrastructure or always-on services as an incidental deployment change.
