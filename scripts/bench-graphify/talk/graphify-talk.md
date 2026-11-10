@@ -72,8 +72,6 @@ style: |
 
 ## What a coding agent saves when it stops grepping and starts asking a graph
 
-**224 agent runs · 2 models · 1 compiler-derived ground truth**
-
 Carlos Sardo · Touchline × [Graphify](https://github.com/Graphify-Labs/graphify)
 
 <!--
@@ -104,29 +102,20 @@ The point: big files and deep call chains are exactly where agents burn tokens.
 
 ---
 
+<!-- _class: chart -->
+
 # The grep relay 🏃
 
-```text
-Q: "What can trigger an AI transfer? List every entry point."
+_"An AI club just poached my star striker. What in the game can trigger an AI transfer?"_
 
-turn  rg -nw <pattern>                  hits          next hop
-1     executeMarketTransfer             3 in 1 file   decide, settleMarketBids
-2     'decide|settleMarketBids'         14 in 7       processTransferBattles  (+ an unrelated decide)
-3     processTransferBattles            3 in 2        advance  (simulation.ts, 149 KB)
-4     advance                           20 in 8       createWorldRouter, seasonSoak
-5     'createWorldRouter|seasonSoak'    5 in 2        createApp
-6     createApp                         5 in 3        start, initialize
-```
-
-- Every hop is **one model turn**, and every turn re-sends the whole context
-- Best hand-written grep recipe: **6 commands, 78% recall** (homonyms hurt)
-- Measured with Sonnet: **11.7 turns, 335k input tokens** for this one question
+![w:1000](assets/grep-relay.svg)
 
 <!--
 ⏱ 1:15–2:00
-Each hop depends on the previous result, so you can't parallelise it. That's the cost model:
-turns × context size. A graph collapses the relay into one hop.
-Hit counts are the real recipe (tests excluded).
+This is a replay of the real searches (hit counts are real, tests excluded).
+Each hop depends on the previous result, so it can't be parallelised: one model turn per hop, and every turn re-sends the whole conversation.
+Turn 2 also matches an unrelated decide() in sanctions.ts: homonyms cost recall. Best hand-written grep recipe: 6 commands, 78% recall.
+Measured with Sonnet: 11.7 turns and 335k input tokens for this one question.
 -->
 
 ---
@@ -156,121 +145,109 @@ Stress: deterministic, local, no tokens spent building it. The agent only pays t
 
 ---
 
-<!-- _class: small -->
+<!-- _class: chart -->
 
-# Live demo 🎬
+# Same question, one command 🎬
 
-```text
-$ graphify affected "executeMarketTransfer" --depth 6 --relation calls     # the relay, in 0.4 s
-Affected nodes for executeMarketTransfer()
-- decide() [calls] server/transfer-battles.ts:L927
-- settleMarketBids() [calls] server/transfer-battles.ts:L1143
-- processTransferBattles() [calls] server/transfer-battles.ts:L1052
-- advance() [calls] server/simulation.ts:L3422
-- createWorldRouter() [calls] server/app.ts:L1793
-- seasonSoak() [calls] server/check-simulation.ts:L908
-- createApp() [calls] server/app.ts:L1183
-- initialize() [calls] scripts/e2e-server.ts:L52
-- start() [calls] server/index.ts:L75
-```
-
-```text
-$ graphify explain "payReleaseClause"                     # plan a change: callers, callees, file:line
-$ graphify export html --node-limit 7000                  # the pretty picture
-```
+![w:1100](assets/graphify-demo.svg)
 
 <!--
 ⏱ 2:45–4:00 (live)
-Run 1 and show it's the full chain in under half a second, with file:line for each hop.
-Run 2 and point at the callers and callees, plus EXTRACTED vs INFERRED confidence.
-Run 3 only if time allows: open graphify-out/graph.html and zoom into the transfer-battles community.
-Fallback if the demo fails: the output on this slide is real.
--->
-
----
-
-# The benchmark ⚖️
-
-Four arms, **same commit**, **same prompt** (it never mentions Graphify):
-
-| Arm                | What the agent gets                                                   |
-| ------------------ | --------------------------------------------------------------------- |
-| **A** grep/read    | `rg`, file reads, fair search tips; `graphify` is _command not found_ |
-| **G** Graphify CLI | the graph + a short graph-first protocol in `copilot-instructions.md` |
-| **M** Graphify MCP | the same graph through the Graphify MCP server                        |
-| **H** CLI + hook   | G + a `preToolUse` hook that sends the first search to the graph      |
-
-- **11 tasks, 5 flavours**: structural · change plans · test coverage · controls · a known blind spot
-- **Pre-registered** thresholds, e.g. structural: ≥40% fewer turns, ≥30% fewer tokens, accuracy ≥ A − 5 pts
-
-<!--
-⏱ 4:00–4:40
-Structural = reachability, blast radius, import cycles, unused exports. Control = "where is clamp defined?".
-Blind spot = URL string → Express route.
-The fairness points: A gets good instructions too, the prompts are identical, and we deliberately included
-tasks where we expected the graph to lose or break even.
+Run it live in a terminal: graphify affected "executeMarketTransfer" --depth 6 --relation calls
+The full chain in about half a second, file:line for every hop: the whole relay from the previous slide.
+If time allows: graphify explain "payReleaseClause" (callers, callees, EXTRACTED vs INFERRED confidence),
+then graphify export html --node-limit 7000 and zoom into the transfer-battles community.
+Fallback if the demo fails: this animation replays the real output.
 -->
 
 ---
 
 <!-- _class: small -->
 
-# The harness (geek mode) ⚙️
+# The benchmark: one fair fight ⚖️
 
-```text
-index.ts
- -> prepareArms()   git worktree x 5 at the same commit
-    +- graph        graphify update + cluster-only, copy graphify-out/ into G, M, H
-    +- arm A        PATH shim: graphify = "command not found"
-    +- every arm    harness deleted (no peeking at the answer keys)
- -> runAgents()     copilot -p <prompt> --output-format json --model <m> --reasoning-effort medium
-                    14 concurrent sessions, each with its own COPILOT_HOME
- -> score.ts        final JSON block vs compiler keys (F1 / recall)
- -> report.ts       ratios, geometric means, 95% bootstrap CIs -> REPORT.md
-```
+Two agents. **Everything is identical except one thing: the map.**
 
-- **132 Sonnet runs in 8 minutes**; **224 runs** in total (pilot, Sonnet, Haiku, follow-up)
-- Metrics from CLI telemetry: turns, input tokens, cost (AI units), wall time
-- **Task tokens** = input − turns × fixed prefix: what the _task_ pulled into context
-- Scripted ceilings with no agent: best grep vs graph recipe (H1: **6 vs 1 commands, 78% vs 100% recall**)
+|                              | 🔎 grep agent           | 🕸️ graph agent            |
+| ---------------------------- | ----------------------- | ------------------------- |
+| Model, prompt, commit, tasks | same                    | same                      |
+| Tools                        | `rg`, file reads, shell | same **+ `graphify` CLI** |
+| Instructions                 | a good search protocol  | + a short graph protocol  |
+| The prompt mentions Graphify | never                   | never                     |
+
+**11 questions a Touchline dev really asks**, in 5 kinds:
+
+- 🔗 **Reachability**: _"What can trigger an AI transfer?"_
+- 💥 **Blast radius**: _"If I change `contractEndDate`, what breaks within 3 hops?"_
+- 🧪 **Tests**: _"Which tests should I run after touching `transferProceeds`?"_
+- 📝 **Change plans**: _"Plan a release-clause levy: what do I edit?"_
+- 🎯 **Controls**, where grep _should_ win: _"Where is `clamp` defined?"_
+
+Each question **3 times**, on **Sonnet** and on **Haiku**.
 
 <!--
-⏱ 4:40–5:15
-Parallelism is what made iterating cheap: a full run is 8 minutes, so pilot → fix → rerun was the same afternoon.
-Task tokens matter because raw input is dominated by the cached system prompt (and tool schemas) resent every turn.
+⏱ 4:00–4:40
+The fairness points: the grep agent gets good instructions too, the prompts are identical,
+and we deliberately included questions where we expected the graph to lose or break even.
 -->
 
 ---
+
+<!-- _class: chart -->
+
+# The harness ⚙️
+
+![w:1100](assets/harness.svg)
+
+<!--
+⏱ 4:40–5:10
+Each agent gets its own git worktree of the same commit; the grep agent's PATH makes graphify "command not found".
+The benchmark code (and its answer keys) is deleted from every worktree: no peeking.
+We also tried the graph over MCP and via a hook that redirects searches: that's the delivery slide later.
+Cost comes from the Copilot CLI's own telemetry: turns, input tokens, cost. Parallelism made iterating cheap: pilot, fix, rerun in an afternoon.
+-->
+
+---
+
+<!-- _class: chart -->
 
 # Ground truth: the compiler is the referee 🧑‍⚖️
 
-- Answer keys from the **TypeScript LanguageService** (call hierarchy, references, imports)
-- A few traced by hand, **never derived from Graphify**
-- Agents end with a JSON block: `{ items: [{ file, symbol }] }`
-- Closed sets score **F1**, open tasks **recall**; hallucinated paths are flagged
-- **No LLM judge**: saved answers re-score against a new key without re-running agents
+![w:1100](assets/ground-truth.svg)
+
+```ts
+// ground-truth.ts: breadth-first over the compiler's call hierarchy, up to 6 hops
+for (const call of ls.provideCallHierarchyIncomingCalls(file, pos))
+  found.set(keyOf(call.from), depth); // "file#function" -> hop count
+```
+
+- Agents answer `{ items: [{ file, symbol }] }`; the AI-transfer key has **9 functions**
+- Keys: **TypeScript LanguageService** call hierarchy, refs, imports; 3 hand-traced
+- Thresholds **committed before the first run**; answers re-scorable any time
 
 <!--
-⏱ 5:15–5:35
-Why the compiler: it's independent of both arms. If the keys came from Graphify, the graph arm would be graded by itself.
+⏱ 5:10–5:40
+Why the compiler: it's independent of both agents. If the keys came from Graphify, the graph agent would be graded by its own map.
+Hand-traced keys: the schema-migration plan, HTTP advance → match engine, and URL → Express route.
+Pre-registration: "the graph agent should use ≥30% fewer tokens with accuracy no worse than 5 points" was in git before any run.
 -->
 
 ---
 
-# VAR overturned my answer key 📺
+# Plot twist: a bug in my answer key 🐛
 
-- H4: _"Which tests exercise `transferProceeds`?"_ Every arm scored **0.56**. Suspicious…
-- **12/12 Sonnet runs, all 4 arms**, listed the **same 8 "wrong" tests**
-- The prompt allows a test that calls a function **within 3 hops** of `transferProceeds`; the 8 tests were exactly 3 hops out
-- **My key stopped one hop short** (off-by-one)
-- Fixed the key, re-scored the saved answers, no re-runs: **A, G, M → 100%**, hook 88% (one bad run)
+- _"Which tests exercise `transferProceeds`?"_ **Both agents scored 56%.** Suspicious…
+- **12 out of 12 Sonnet runs** listed the **same 8 "wrong" tests**
+- The question allows tests that call anything within 3 hops; those 8 hit exactly hop 3
+- **My key stopped one hop short.** Off-by-one, in the answer key 🤦
+- Fixed the key, re-scored the saved answers (no re-runs): **100%**
 
 > When every agent disagrees with your key in the same way… check the key. 🧐
 
 <!--
-⏱ 5:35–6:00
-This is the fun one. Independent agents, different tools, same "mistake" → it wasn't theirs.
-Rescoring is deterministic because answers and keys are both just sets of file#symbol.
+⏱ 5:40–6:00
+Independent agents, different tools, the same "mistake": it wasn't theirs.
+Re-scoring is deterministic because answers and keys are both just sets of file#symbol.
 -->
 
 ---
@@ -279,25 +256,25 @@ Rescoring is deterministic because answers and keys are both just sets of file#s
 
 # Where it shines (Sonnet) 🚀
 
-| Task                                           |    Turns A → G |      Input tokens A → G | Cost G ÷ A | Accuracy A → G |
-| ---------------------------------------------- | -------------: | ----------------------: | ---------: | -------------: |
-| H1 _Who can trigger an AI transfer?_           | 11.7 → **2.7** |  335k → **70k** (0.21×) |  **0.41×** | 98% → **100%** |
-| H2 _Blast radius of `contractEndDate`, 3 hops_ |  8.7 → **2.0** |  269k → **53k** (0.20×) |  **0.31×** |    100% → 100% |
-| H4 _Tests exercising `transferProceeds`_       | 11.7 → **4.3** | 346k → **118k** (0.34×) |  **0.51×** |    100% → 100% |
+| 🔎 grep → 🕸️ graph                          |          Turns |            Input tokens | Cost ratio |       Accuracy |
+| ------------------------------------------- | -------------: | ----------------------: | ---------: | -------------: |
+| _What can trigger an AI transfer?_          | 11.7 → **2.7** |  335k → **70k** (0.21×) |  **0.41×** | 98% → **100%** |
+| _Blast radius of `contractEndDate`, 3 hops_ |  8.7 → **2.0** |  269k → **53k** (0.20×) |  **0.31×** |    100% → 100% |
+| _Tests exercising `transferProceeds`_       | 11.7 → **4.3** | 346k → **118k** (0.34×) |  **0.51×** |    100% → 100% |
 
-| Group: geometric mean G ÷ A (95% CI) |          Input tokens |                  Cost |   Accuracy |
-| ------------------------------------ | --------------------: | --------------------: | ---------: |
-| Structural (H1, H2, H3, H5)          | **0.63×** (0.55–0.73) | **0.72×** (0.68–0.75) |      −1 pt |
-| Test coverage (H4)                   | **0.34×** (0.29–0.41) | **0.51×** (0.47–0.58) |         ±0 |
-| Change plans (H6, H7)                | **0.80×** (0.65–0.97) |     0.97× (0.85–1.10) | **+2 pts** |
+| Kind of question: graph ÷ grep (95% CI) |          Input tokens |                  Cost |   Accuracy |
+| --------------------------------------- | --------------------: | --------------------: | ---------: |
+| Structural: reachability, blast radius… | **0.63×** (0.55–0.73) | **0.72×** (0.68–0.75) |      −1 pt |
+| Tests to run                            | **0.34×** (0.29–0.41) | **0.51×** (0.47–0.58) |         ±0 |
+| Change plans                            | **0.80×** (0.65–0.97) |     0.97× (0.85–1.10) | **+2 pts** |
 
 > Graph-shaped questions: **3–5× fewer tokens, 2–3× cheaper**, same or better answers.
 
 <!--
 ⏱ 6:00–6:45
-H1 and H2: the agent asks one question and is done in two turns. That's the whole pitch.
-Cost falls less than tokens because output tokens and the fixed prefix don't shrink.
-Structural includes H3 and H5, where the graph loses (next slide), which is why the group ratio is milder.
+The first two: the agent asks one question and is done in two turns. That's the whole pitch.
+Cost falls less than tokens because output tokens and the fixed system prompt don't shrink.
+"Structural" also includes import cycles and unused exports, where the graph loses (next slide), which is why the group ratio is milder.
 -->
 
 ---
@@ -311,8 +288,8 @@ Structural includes H3 and H5, where the graph loses (next slide), which is why 
 <!--
 ⏱ 6:45–7:15
 Green: graph-shaped questions. Grey: a wash. Red: the graph is overhead.
-H3 import cycles: GRAPH_REPORT lists a sample of 20 short cycles and misses 5 of 18 files, so the agent writes its own script anyway.
-H5: one script already answers "unused exports". T8: the graph can't connect a URL string to its route.
+Import cycles: GRAPH_REPORT lists a sample of 20 short cycles and misses 5 of 18 files, so the agent writes its own script anyway.
+Unused exports: one script already answers it. URL → route: the graph can't connect a URL string to its Express route.
 -->
 
 ---
@@ -323,34 +300,35 @@ H5: one script already answers "unused exports". T8: the graph can't connect a U
 
 ![w:700](assets/model-costs.svg)
 
-7 tasks (H1–H7) × 3 repeats: the graph saves **26% on Sonnet** and **19% on Haiku**
+7 questions × 3 runs: the graph saves **26% on Sonnet** and **19% on Haiku**
 
-_Haiku took the wrong recipe on H4 in 2 of 3 runs (0.27) → added a test-coverage recipe → 3/3 at 100%. The instructions are part of the tool._
+_Haiku once took the wrong recipe for "which tests?" → one extra line of instructions → 3/3 at 100%. The instructions are part of the tool._
 
 <!--
 ⏱ 7:15–8:00
-AIU = Copilot's AI-unit cost accounting. Haiku with the graph matched Sonnet without it on accuracy at about a tenth of the cost.
-Caveats: 7 tasks, 3 repeats, and Haiku's H4 number comes from the post-fix follow-up run.
+Cost index: the Copilot CLI's own cost accounting, scaled so Sonnet + grep = 100.
+Haiku with the graph matches Sonnet without it on accuracy at about a tenth of the cost.
+Caveats: 7 questions, 3 runs each, and Haiku's "which tests" number comes from the follow-up run after that instruction fix.
 -->
 
 ---
 
 # Delivery matters more than the graph 🚚
 
-| Structural tasks, vs grep    |         Cost | Input tokens |  Task tokens | Accuracy |
-| ---------------------------- | -----------: | -----------: | -----------: | -------: |
-| **G** CLI + short protocol   |    **0.72×** |    **0.63×** |    **0.44×** |    −1 pt |
-| **H** CLI + graph-first hook |        0.72× |        0.64× |        0.46× |    −1 pt |
-| **M** MCP server             | 🔴 **1.33×** | 🔴 **1.51×** | 🔴 **2.55×** |   −3 pts |
+Same graph, three ways to hand it to the agent (structural questions, cost vs grep):
 
-- MCP tools are deferred: an extra **`tool_search` turn**, and schemas ride along on every call
-- No `affected` in MCP: it walks `get_neighbors` **hop by hop** (25 graph calls on H2 vs 1)
-- The hook tied G on structure but **cost an extra turn** where the graph can't help: **not adopted**
+| Delivery                     |         Cost | Verdict                                |
+| ---------------------------- | -----------: | -------------------------------------- |
+| **CLI + short instructions** |    **0.72×** | ✅ one command answers the question    |
+| CLI + search-redirect hook   |        0.72× | ➖ same, plus a wasted turn elsewhere  |
+| MCP server                   | 🔴 **1.33×** | ❌ tool discovery + hop-by-hop walking |
+
+> Simplest wins: a CLI the agent already knows how to call. 🧰
 
 <!--
-⏱ 8:00–8:30
-The same graph, delivered three ways, gives three different outcomes. The CLI plus 20 lines of instructions won.
-Bonus MCP papercut: its at= field shows the call site, not the definition.
+⏱ 8:00–8:20
+MCP: the tools are deferred, so there's an extra tool_search turn, schemas ride along on every call,
+and with no "affected" tool it walks get_neighbors hop by hop: 25 graph calls on the blast-radius question vs 1.
 -->
 
 ---
@@ -359,7 +337,7 @@ Bonus MCP papercut: its at= field shows the call site, not the definition.
 
 # Prompts where Graphify shines ✨
 
-| Ask your agent…                                 | Vanilla agent                  | With the graph (measured)                                     |
+| Ask your agent…                                 | 🔎 grep agent                  | 🕸️ graph agent (measured)                                     |
 | ----------------------------------------------- | ------------------------------ | ------------------------------------------------------------- |
 | _"What can trigger X? List every entry point."_ | grep relay, 1 hop per turn     | `affected "X" --depth 6 --relation calls` · **0.21× tokens**  |
 | _"If I change X, what breaks within 3 hops?"_   | grep callers of callers        | `affected "X" --depth 3 --relation calls` · **0.20× tokens**  |
@@ -373,64 +351,54 @@ Bonus MCP papercut: its at= field shows the call site, not the definition.
 - _"Every unused export"_ or _"every file in an import cycle"_: a short script wins
 
 <!--
-⏱ 8:30–9:00
+⏱ 8:20–8:45
 Rule of thumb: if the answer is a chain or a set reached through calls, ask the graph.
 If the answer is one string, grep it.
 -->
 
 ---
 
-# Takeaways 🏁
+# Try it on your repo this afternoon 🏁
 
-1. **Graph-shaped questions**: **3–5× fewer tokens, 2–3× cheaper**, same or better accuracy
-2. **Cheap model + map ≈ expensive model without one**: Haiku + graph ≈ Sonnet + grep at **~1/10 the cost**
-3. **Delivery > data**: one CLI command and a short protocol beat MCP and hooks
-4. **Benchmark like a scientist**: compiler truth, pre-registered bets, and let agents audit your keys
-
-```text
-$ uv tool install graphifyy && npm run graph:setup
-$ graphify affected "yourFunction" --depth 3 --relation calls
+```bash
+uv tool install graphifyy                 # or: pipx install graphifyy
+graphify update .                         # build the graph: local, no LLM, seconds
+graphify install --platform copilot       # teach your agent (Claude Code, Cursor, Codex… too)
+graphify hook install                     # keep it fresh on every commit
 ```
 
-**Questions?** ⚽🕸️🤖 · `scripts/bench-graphify/REPORT.md`
+Then ask your agent: _"What breaks if I change `yourFunction`?"_
+
+- 💰 **3–5× fewer tokens, 2–3× cheaper** on graph-shaped questions, same or better answers
+- 🤏 **Small model + map ≈ big model** at **~1/10 the cost**
+- 🔒 **Free, local, deterministic**: tree-sitter, ~40 languages, nothing leaves your machine
+- ⏱️ **5 minutes to try**, and you can measure it on your own repo with the same harness
 
 <!--
-⏱ 9:00–9:30, then Q&A. Backup slides follow: pre-registered verdicts and threats to validity.
-graph:setup builds the graph, installs the pre-commit hook and writes GRAPH_REPORT.md.
+⏱ 8:45–9:30
+The pitch: it costs nothing to try, and the worst case is "my agent sometimes runs one extra command".
 -->
 
 ---
 
-<!-- _class: small -->
-<!-- _footer: "Backup · ⚽ Touchline × 🕸️ Graphify" -->
+<!-- _class: lead small -->
+<!-- _paginate: false -->
 
-# Backup: pre-registered verdicts
+# Thank you! ⚽🕸️🤖
 
-| Hypothesis (fixed before running, Sonnet, G arm)                    | Measured (95% CI)                                 |     Verdict     |
-| ------------------------------------------------------------------- | ------------------------------------------------- | :-------------: |
-| **P1** structural: ≥40% fewer turns, ≥30% fewer tokens, acc ≥ A − 5 | turns 0.65× (0.58–0.76), tokens 0.63× (0.55–0.73) | ❌ turns missed |
-| **P2** change plans: accuracy ≥ A − 5                               | +2 pts, tokens 0.80×                              |       ✅        |
-| **P3** control (_where is clamp?_): tokens within ±15%              | 0.91×                                             |       ✅        |
-| **P4** coverage: graph arms lose to grep (predicted)                | ±0 pts at 0.34× tokens                            |   ❌ no loss    |
-| **P5** Haiku + graph accuracy ≥ Sonnet + grep                       | 99% vs 98%                                        |       ✅        |
+| What               | Where                                                                                                                  |
+| ------------------ | ---------------------------------------------------------------------------------------------------------------------- |
+| Graphify           | [github.com/Graphify-Labs/graphify](https://github.com/Graphify-Labs/graphify)                                         |
+| Use cases and docs | [graphify.com/use-cases](https://graphify.com/use-cases) · [docs.graphify.com](https://docs.graphify.com)              |
+| Touchline          | [github.com/CarlosSardo/touchline](https://github.com/CarlosSardo/touchline)                                           |
+| This benchmark     | `scripts/bench-graphify/`: `REPORT.md`, `hypotheses.md`, `ground-truth.ts`                                             |
+| Ground truth       | [TypeScript Language Service API](https://github.com/microsoft/TypeScript/wiki/Using-the-Language-Service-API)         |
+| Parsing            | [tree-sitter](https://tree-sitter.github.io/tree-sitter/)                                                              |
+| Agent              | [GitHub Copilot CLI](https://github.com/github/copilot-cli)                                                            |
+| Slides             | [Marp](https://marp.app) · [marp-slide skill](https://github.com/softaworks/agent-toolkit/tree/main/skills/marp-slide) |
 
-- Thresholds were **not** moved: P1 missed on turns (0.65× vs ≤0.60×) though tokens passed
-- MCP failed P1 and P3; the hook failed P2 (−5 pts) and lost 12 pts on coverage (one bad run)
+**Questions?**
 
----
-
-<!-- _class: small -->
-<!-- _footer: "Backup · ⚽ Touchline × 🕸️ Graphify" -->
-
-# Backup: method and threats to validity
-
-- **Isolation**: a git worktree per arm, same commit; graph built once and copied; harness removed; `PATH` shim in A
-- **Tokens**: CLI `session.usage_checkpoint`; task tokens = input − calls × prefix (tool schemas + system)
-- **Stats**: per task mean(arm) ÷ mean(A); groups use geometric means; 2,000-resample bootstrap
-
-**Threats**
-
-- 3 repeats per cell → wide CIs on single tasks; group ratios are the headline
-- One codebase, one language; tests reach code inside callbacks the graph doesn't link
-- Structural tasks are graph-shaped _by design_; controls and the blind spot show the cost elsewhere
-- A's protocol is fair, not optimal; Haiku's H4 number comes from a post-hoc fix on one task
+<!--
+Q&A. The benchmark lives on the chore/graphify branch until it's merged.
+-->
