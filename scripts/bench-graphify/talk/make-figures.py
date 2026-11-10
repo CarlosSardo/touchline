@@ -431,10 +431,9 @@ def harness() -> str:
         ("grep agent", "graphify blocked", GOLD),
         ("graph agent: CLI", "graph + 1 command", ACCENT),
         ("graph agent: MCP", "same graph, MCP server", ACCENT),
-        ("graph agent: reminder", "1st grep bounced: graph first", ACCENT),
     ]
     for i, (title, sub, color) in enumerate(rows):
-        y = 20 + i * 95
+        y = 60 + i * 110
         b.append(card(250, y, 330, 78, title, [sub], color=color, title_color=color, size=17))
         b.append(arrow(200, 210, 246, y + 39))
         b.append(arrow(580, y + 39, 636, 210))

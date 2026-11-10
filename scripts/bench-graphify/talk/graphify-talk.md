@@ -208,14 +208,11 @@ The bets were written down (hypotheses.md) and committed before the first full r
 
 ![w:1100](assets/harness.svg)
 
-_**Reminder** = a tiny Copilot CLI hook that refuses the agent's first grep once: "ask the graph first"._
-
 <!--
 ⏱ 4:40–5:10
 Each agent gets its own git worktree of the same commit; the grep agent's PATH makes graphify "command not found".
 The benchmark code (and its answer keys) is deleted from every worktree: no peeking.
-Two more graph agents test delivery: the same graph over Graphify's MCP server, and the CLI plus a "graph-first reminder".
-The reminder is a Copilot CLI preToolUse hook (a tiny script run before every tool call): the first grep/read of the session is refused once with "ask the graph first", then everything passes.
+One more graph agent tests delivery: the same graph served over Graphify's MCP server instead of the CLI.
 Cost comes from the Copilot CLI's own telemetry: turns, input tokens, cost. Parallelism made iterating cheap: pilot, fix, rerun in an afternoon.
 -->
 
@@ -320,15 +317,12 @@ Caveats: 7 questions, 3 runs each, and Haiku's "which tests" number comes from t
 
 # Delivery matters more than the graph 🚚
 
-Same graph, three ways to hand it to the agent (structural questions, cost vs grep):
+Same graph, two ways to hand it to the agent (structural questions, cost vs grep):
 
 | Delivery                     |         Cost | Verdict                                |
 | ---------------------------- | -----------: | -------------------------------------- |
 | **CLI + short instructions** |    **0.72×** | ✅ one command answers the question    |
-| CLI + graph-first reminder ¹ |        0.72× | ➖ same, plus a wasted turn elsewhere  |
 | MCP server                   | 🔴 **1.33×** | ❌ tool discovery + hop-by-hop walking |
-
-¹ _A Copilot CLI hook that refuses the agent's first grep once: "ask the graph first"._
 
 > Simplest wins: a CLI the agent already knows how to call. 🧰
 
