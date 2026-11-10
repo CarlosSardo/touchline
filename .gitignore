@@ -50,3 +50,7 @@ reports/
 
 # scripts/ci.sh (Dagger) logs and reports
 ci-logs/
+
+# Graphify: only the shared code graph is tracked; the rest is rebuilt locally
+graphify-out/*
+!graphify-out/graph.json

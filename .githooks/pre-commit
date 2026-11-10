@@ -1,0 +1,18 @@
+#!/bin/sh
+# Rebuild graphify-out/graph.json and commit it with the code that changed it.
+# Enabled by `npm run graph:setup`; skip one commit with GRAPHIFY_SKIP_HOOK=1.
+
+[ "${GRAPHIFY_SKIP_HOOK:-0}" = 1 ] && exit 0
+[ -f graphify-out/graph.json ] || exit 0
+git diff --cached --quiet -- . ':!graphify-out/graph.json' && exit 0
+
+if ! command -v graphify >/dev/null 2>&1; then
+	echo "graphify: CLI not found, graphify-out/graph.json not refreshed (install: uv tool install graphifyy)" >&2
+	exit 0
+fi
+
+PYTHONHASHSEED=0 graphify update . >/dev/null || {
+	echo "graphify: graph rebuild failed; rerun 'npm run graph:update' or commit with GRAPHIFY_SKIP_HOOK=1" >&2
+	exit 1
+}
+git add graphify-out/graph.json

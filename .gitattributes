@@ -3,3 +3,6 @@
 .dagger/modules/*/__dagger.dispatch.ts linguist-generated=true
 .dagger/modules/*/entrypoint/** linguist-generated=true
 dagger.lock linguist-generated=true
+
+# Graphify code graph: union-merged by `graphify merge-driver` (see scripts/graphify-setup.sh)
+graphify-out/graph.json merge=graphify linguist-generated=true -diff

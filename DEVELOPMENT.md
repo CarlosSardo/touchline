@@ -9,6 +9,7 @@ This is the operational source of truth for building, testing and running Touchl
 - [Configuration](#configuration)
 - [Testing and verification](#testing-and-verification)
 - [CI with Dagger](#ci-with-dagger)
+- [Code graph (Graphify)](#code-graph-graphify)
 - [Hosting and first install](#hosting-and-first-install)
 - [Existing PostgreSQL and reverse proxy](#existing-postgresql-and-reverse-proxy)
 - [Sign-in and access](#sign-in-and-access)
@@ -85,6 +86,7 @@ The build type-checks client/tooling and server code, then emits the Vite UI int
 | `npm run simulation:check` | Compare a 600-match sample to aggregate targets; `-- --seasons=3` runs a storage-aware season soak |
 | `npm run image:build` | Build `touchline:local` for the local architecture |
 | `npm run ci` | Run the same containerized pipeline as GitHub Actions |
+| `npm run graph:setup` / `npm run graph:update` | Enable the shared Graphify hook and merge driver once per clone / rebuild the code graph |
 | `npm run pi:backup` / `npm run pi:restore -- FILE --yes` | Back up / replace the database of the bundled Compose PostgreSQL service |
 
 Inspect the script's `--help` and target before administrative commands. Dry-run flags are not interchangeable with permission to mutate production. Export files and registry backups contain private data and must not be committed.
@@ -168,6 +170,28 @@ After changing the Dagger module, regenerate and commit its SDK artifacts:
 ```sh
 npm run ci -- dagger generate -y
 ```
+
+## Code graph (Graphify)
+
+[Graphify](https://github.com/Graphify-Labs/graphify) maps the repository into a knowledge graph that coding assistants query instead of grepping. The graph is built locally with tree-sitter and structural parsing; no LLM is used and nothing leaves the machine. Only [graphify-out/graph.json](graphify-out/graph.json) is committed; the report and HTML view are rebuilt locally.
+
+Install the CLI (Python 3.10+) and enable it once per clone:
+
+```sh
+uv tool install graphifyy   # or: pipx install graphifyy
+npm run graph:setup
+```
+
+`graph:setup` sets `core.hooksPath` to [.githooks](.githooks) and registers the `graphify` merge driver that [.gitattributes](.gitattributes) uses to union-merge `graph.json` across branches. The [pre-commit hook](.githooks/pre-commit) rebuilds and stages the graph whenever other files are staged; it rebuilds from the working tree, so partially staged files are graphed as they are on disk. Without the CLI the hook warns and skips; `GRAPHIFY_SKIP_HOOK=1` skips one commit.
+
+```sh
+npm run graph:update                              # refresh graph.json, GRAPH_REPORT.md and graph.html
+graphify query "how is a transfer completed?"     # scoped subgraph for a question
+graphify path "playFixture" "simulateMatch"       # how two symbols connect
+graphify explain "Store"                          # one node and its neighbours
+```
+
+Scan exclusions live in [.graphifyignore](.graphifyignore) (on top of `.gitignore`). If `graph.json` hits a merge conflict, the driver is not registered or rejected a corrupt file: run `npm run graph:setup`, or `rm graphify-out/graph.json && npm run graph:update`. The Copilot skill is in [.github/skills/graphify](.github/skills/graphify) and the always-on guidance in [.github/copilot-instructions.md](.github/copilot-instructions.md); after upgrading the CLI, refresh the skill with `graphify install --project --platform copilot` and move it from `.copilot/skills/` to `.github/skills/`.
 
 ## Hosting and first install
 

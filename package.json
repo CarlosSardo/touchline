@@ -43,6 +43,8 @@
     "world:reset": "tsx scripts/world-reset.ts",
     "world:check": "tsx server/check-world.ts",
     "simulation:check": "tsx server/check-simulation.ts",
+    "graph:setup": "bash scripts/graphify-setup.sh",
+    "graph:update": "PYTHONHASHSEED=0 graphify update .",
     "lint": "oxlint",
     "format": "prettier --write src server shared e2e *.ts *.json *.md",
     "preview": "vite preview"
