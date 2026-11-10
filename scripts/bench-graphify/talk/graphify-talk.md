@@ -57,6 +57,9 @@ style: |
   section.small { font-size: 22px; }
   section.small h1 { font-size: 36px; }
   section.chart p > img:not(.emoji) { display: block; margin: 0 auto 0.4em; }
+  section.wide { font-size: 22px; }
+  section.wide h1 { font-size: 36px; }
+  section.wide table { display: table; width: 100%; font-size: 20px; margin-bottom: 0.7em; }
   .hljs-string { color: #a5d6ff; }
   .hljs-comment { color: #8b949e; font-style: italic; }
   .hljs-keyword, .hljs-built_in { color: #ff7b72; }
@@ -108,7 +111,7 @@ The point: big files and deep call chains are exactly where agents burn tokens.
 
 _"A rival club just poached my star striker. What in the game can make a rival club sign a player?"_
 
-![w:1000](assets/grep-relay.svg)
+![w:940](assets/grep-relay.svg)
 
 <!--
 ⏱ 1:15–2:00
@@ -149,7 +152,7 @@ Stress: deterministic, local, no tokens spent building it. The agent only pays t
 
 # Same question, one command 🎬
 
-![w:1100](assets/graphify-demo.svg)
+![w:1040](assets/graphify-demo.svg)
 
 <!--
 ⏱ 2:45–4:00 (live)
@@ -162,33 +165,32 @@ Fallback if the demo fails: this animation replays the real output.
 
 ---
 
-<!-- _class: small -->
+<!-- _class: wide -->
 
 # The benchmark: one fair fight ⚖️
 
-Two agents. **Everything is identical except one thing: the map.**
+Two agents, **identical except for one thing: the map.**
 
-|                              | 🔎 grep agent           | 🕸️ graph agent            |
-| ---------------------------- | ----------------------- | ------------------------- |
-| Model, prompt, commit, tasks | same                    | same                      |
-| Tools                        | `rg`, file reads, shell | same **+ `graphify` CLI** |
-| Instructions                 | a good search protocol  | + a short graph protocol  |
-| The prompt mentions Graphify | never                   | never                     |
+|                                    | 🔎 grep agent                               | 🕸️ graph agent                       |
+| ---------------------------------- | ------------------------------------------- | ------------------------------------ |
+| Models                             | Claude **Sonnet 5.5** and **Haiku 5.5**     | same                                 |
+| Prompt, commit, questions, scoring | identical; the prompt never says "Graphify" | identical                            |
+| Tools                              | `rg`, file reads, shell                     | same **+ the `graphify` CLI**        |
+| Instructions                       | a good search protocol                      | same + a short "ask the graph first" |
 
-**11 questions a Touchline dev really asks**, in 5 kinds:
-
-- 🔗 **Reachability**: _"What can make a rival club sign a player?"_
-- 💥 **Blast radius**: _"If I change `contractEndDate`, what breaks within 3 hops?"_
-- 🧪 **Tests**: _"Which tests should I run after touching `transferProceeds`?"_
-- 📝 **Change plans**: _"Plan a release-clause levy: what do I edit?"_
-- 🎯 **Controls**, where grep _should_ win: _"Where is `clamp` defined?"_
-
-Each question **3 times**, on **Sonnet** and on **Haiku**.
+| Kind of question | Example (11 in total, each run 3×)                            | Our bet, in git before run 1 |
+| ---------------- | ------------------------------------------------------------- | ---------------------------- |
+| 🔗 Reachability  | _What can make a rival club sign a player?_                   | graph: ≥30% fewer tokens     |
+| 💥 Blast radius  | _If I change `contractEndDate`, what breaks within 3 hops?_   | graph: ≥30% fewer tokens     |
+| 🧪 Tests         | _Which tests should I run after touching `transferProceeds`?_ | grep is more accurate        |
+| 📝 Change plans  | _Plan a release-clause levy: what do I edit?_                 | graph is no less accurate    |
+| 🎯 Controls      | _Where is `clamp` defined?_                                   | a tie: same cost             |
 
 <!--
 ⏱ 4:00–4:40
 The fairness points: the grep agent gets good instructions too, the prompts are identical,
 and we deliberately included questions where we expected the graph to lose or break even.
+The bets were written down (hypotheses.md) and committed before the first full run; thresholds never changed afterwards.
 -->
 
 ---
@@ -199,55 +201,51 @@ and we deliberately included questions where we expected the graph to lose or br
 
 ![w:1100](assets/harness.svg)
 
+_**Reminder** = a tiny Copilot CLI hook that refuses the agent's first grep once: "ask the graph first"._
+
 <!--
 ⏱ 4:40–5:10
 Each agent gets its own git worktree of the same commit; the grep agent's PATH makes graphify "command not found".
 The benchmark code (and its answer keys) is deleted from every worktree: no peeking.
-We also tried the graph over MCP and via a hook that redirects searches: that's the delivery slide later.
+Two more graph agents test delivery: the same graph over Graphify's MCP server, and the CLI plus a "graph-first reminder".
+The reminder is a Copilot CLI preToolUse hook (a tiny script run before every tool call): the first grep/read of the session is refused once with "ask the graph first", then everything passes.
 Cost comes from the Copilot CLI's own telemetry: turns, input tokens, cost. Parallelism made iterating cheap: pilot, fix, rerun in an afternoon.
+-->
+
+---
+
+<!-- _class: chart small -->
+
+# Ground truth: the compiler is the referee 🧑‍⚖️
+
+![w:1100](assets/ground-truth.svg)
+
+- 🔑 **Key**: the TypeScript compiler walks the real call graph → _same commit, same key_
+- 🧮 **Score**: set math on `file#function` lists → _same answer, same score_
+- 🚫 **No LLM and no Graphify in grading**; pass marks committed before run 1
+
+<!--
+⏱ 5:10–5:40
+This is the slide that makes the numbers trustworthy.
+Keys: TypeScript LanguageService call hierarchy, references and imports (breadth-first, up to 6 hops); 3 change-plan keys hand-traced.
+Scoring: score.ts parses the agent's final JSON block; precision = correct / answered, recall = correct / key, score = F1.
+Pre-registration: "the graph agent should use ≥30% fewer tokens with accuracy no worse than 5 points" was in git before any run.
+Because answers are saved, every run can be re-scored at any time with zero model calls.
 -->
 
 ---
 
 <!-- _class: chart -->
 
-# Ground truth: the compiler is the referee 🧑‍⚖️
+# Real answers, real scores 🧾
 
-![w:1100](assets/ground-truth.svg)
-
-```ts
-// ground-truth.ts: breadth-first over the compiler's call hierarchy, up to 6 hops
-for (const call of ls.provideCallHierarchyIncomingCalls(file, pos))
-  found.set(keyOf(call.from), depth); // "file#function" -> hop count
-```
-
-- Agents answer `{ items: [{ file, symbol }] }`; the rival-signing key has **9 functions**
-- Keys: **TypeScript LanguageService** call hierarchy, refs, imports; 3 hand-traced
-- Thresholds **committed before the first run**; answers re-scorable any time
+![w:1060](assets/score-example.svg)
 
 <!--
-⏱ 5:10–5:40
-Why the compiler: it's independent of both agents. If the keys came from Graphify, the graph agent would be graded by its own map.
-Hand-traced keys: the schema-migration plan, HTTP advance → match engine, and URL → Express route.
-Pre-registration: "the graph agent should use ≥30% fewer tokens with accuracy no worse than 5 points" was in git before any run.
--->
-
----
-
-# Plot twist: a bug in my answer key 🐛
-
-- _"Which tests exercise `transferProceeds`?"_ **Both agents scored 56%.** Suspicious…
-- **12 out of 12 Sonnet runs** listed the **same 8 "wrong" tests**
-- The question allows tests that call anything within 3 hops; those 8 hit exactly hop 3
-- **My key stopped one hop short.** Off-by-one, in the answer key 🤦
-- Fixed the key, re-scored the saved answers (no re-runs): **100%**
-
-> When every agent disagrees with your key in the same way… check the key. 🧐
-
-<!--
-⏱ 5:40–6:00
-Independent agents, different tools, the same "mistake": it wasn't theirs.
-Re-scoring is deterministic because answers and keys are both just sets of file#symbol.
+⏱ 5:40–6:10
+Real runs on "what can make a rival club sign a player?", marked against the compiler's 9 functions.
+Sonnet with grep stopped one hop early and missed initialize (the e2e server). Haiku with grep found all 9 but added a bare file: precision drops.
+The graph agent: 9 out of 9, from one command.
 -->
 
 ---
@@ -271,7 +269,7 @@ Re-scoring is deterministic because answers and keys are both just sets of file#
 > Graph-shaped questions: **3–5× fewer tokens, 2–3× cheaper**, same or better answers.
 
 <!--
-⏱ 6:00–6:45
+⏱ 6:10–6:50
 The first two: the agent asks one question and is done in two turns. That's the whole pitch.
 Cost falls less than tokens because output tokens and the fixed system prompt don't shrink.
 "Structural" also includes import cycles and unused exports, where the graph loses (next slide), which is why the group ratio is milder.
@@ -286,7 +284,7 @@ Cost falls less than tokens because output tokens and the fixed system prompt do
 ![w:1000](assets/task-ratios.svg)
 
 <!--
-⏱ 6:45–7:15
+⏱ 6:50–7:15
 Green: graph-shaped questions. Grey: a wash. Red: the graph is overhead.
 Import cycles: GRAPH_REPORT lists a sample of 20 short cycles and misses 5 of 18 files, so the agent writes its own script anyway.
 Unused exports: one script already answers it. URL → route: the graph can't connect a URL string to its Express route.
@@ -300,14 +298,14 @@ Unused exports: one script already answers it. URL → route: the graph can't co
 
 ![w:700](assets/model-costs.svg)
 
-7 questions × 3 runs: the graph saves **26% on Sonnet** and **19% on Haiku**
-
-_Haiku once took the wrong recipe for "which tests?" → one extra line of instructions → 3/3 at 100%. The instructions are part of the tool._
+- 🕸️ The map makes **any model cheaper**: −26% on Sonnet 5.5, −19% on Haiku 5.5
+- 🐣 **Haiku + map ≈ Sonnet without it**: same accuracy, **~11× cheaper**
 
 <!--
 ⏱ 7:15–8:00
-Cost index: the Copilot CLI's own cost accounting, scaled so Sonnet + grep = 100.
+Cost index: the Copilot CLI's own cost accounting, scaled so Sonnet 5.5 + grep = 100.
 Haiku with the graph matches Sonnet without it on accuracy at about a tenth of the cost.
+Haiku once took the wrong recipe for "which tests?"; one extra line of instructions fixed it (3/3 at 100%): the instructions are part of the tool.
 Caveats: 7 questions, 3 runs each, and Haiku's "which tests" number comes from the follow-up run after that instruction fix.
 -->
 
@@ -320,8 +318,10 @@ Same graph, three ways to hand it to the agent (structural questions, cost vs gr
 | Delivery                     |         Cost | Verdict                                |
 | ---------------------------- | -----------: | -------------------------------------- |
 | **CLI + short instructions** |    **0.72×** | ✅ one command answers the question    |
-| CLI + search-redirect hook   |        0.72× | ➖ same, plus a wasted turn elsewhere  |
+| CLI + graph-first reminder ¹ |        0.72× | ➖ same, plus a wasted turn elsewhere  |
 | MCP server                   | 🔴 **1.33×** | ❌ tool discovery + hop-by-hop walking |
+
+¹ _A Copilot CLI hook that refuses the agent's first grep once: "ask the graph first"._
 
 > Simplest wins: a CLI the agent already knows how to call. 🧰
 

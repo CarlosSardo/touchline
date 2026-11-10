@@ -6,21 +6,23 @@ Animated, in the style of Graphify's README demo (a terminal on the left, Touchl
   assets/graphify-demo.svg   one `graphify affected` call lighting up the whole chain (slide "Demo")
 Static diagrams:
   assets/harness.svg         how the benchmark runs (slide "The harness")
-  assets/ground-truth.svg    how the answer keys were planned and produced (slide "Ground truth")
+  assets/ground-truth.svg    how keys and scores are produced deterministically (slide "Ground truth")
+  assets/score-example.svg   real answers scored against a real key (slide "Scoring, for real")
 
-Terminal output and hit counts are real (captured on this repo). SMIL animations play inside an <img> (Marp HTML,
+Terminal output and hit counts are real (captured on this repo); every measured number is read from ../results. SMIL animations play inside an <img> (Marp HTML,
 VS Code preview, GitHub). Every animation begins at -FREEZE seconds, so static renders such as the PDF show the
 finished frame.
 
 Usage: python3 make-figures.py [--frame SECONDS]   # --frame writes paused frames to /tmp for checking
 """
+import json
 import math
 import random
 import sys
 from html import escape
 from pathlib import Path
 
-W, H, SPLIT = 1200, 560, 640
+W, H, SPLIT = 1200, 620, 640
 FS, LH, PAD = 13.5, 25, 26
 CW = FS * 0.6
 BG0, BG1, EDGE, DOT = "#0c1712", "#0f1e18", "#1c2c25", "#2b3d35"
@@ -54,6 +56,35 @@ EDGES = [
     ("createApp", "start"),
 ]
 HOMONYM = ("decide  (sanctions.ts)", 700, 236)
+HOLD = 7  # extra seconds the finished frame stays on screen before the loop restarts
+
+BENCH = Path(__file__).resolve().parent.parent
+RESULTS = {m: json.loads((BENCH / "results" / f).read_text())["results"] for m, f in [("sonnet", "agent.json"), ("haiku", "agent-haiku.json")]}
+
+
+def runs(task, arm, model="sonnet"):
+    return [r for r in RESULTS[model] if r["task"] == task and r["arm"] == arm]
+
+
+def measured(task="H1", model="sonnet"):
+    """Mean per-run numbers for the grep agent (arm A) and the graph agent (arm G), as shown on the scorecards."""
+    def mean(rs, k):
+        return sum(k(r) for r in rs) / len(rs)
+    a, g = runs(task, "A", model), runs(task, "G", model)
+    base = mean(a, lambda r: r["nanoAiu"])
+    out = {}
+    for name, rs in [("grep", a), ("graph", g)]:
+        out[name] = [
+            ("tool calls", f"{mean(rs, lambda r: r['toolCalls']):.1f}"),
+            ("model turns", f"{mean(rs, lambda r: r['modelCalls']):.1f}"),
+            ("input tokens", f"{mean(rs, lambda r: r['inputTokens']) / 1000:.0f}k"),
+            ("cost", f"{mean(rs, lambda r: r['nanoAiu']) / base:.2f}x"),
+            ("accuracy", f"{100 * mean(rs, lambda r: r['score']['accuracy']):.0f}%"),
+        ]
+        out[name + "_raw"] = {
+            "tokens": mean(rs, lambda r: r["inputTokens"]), "cost": mean(rs, lambda r: r["nanoAiu"]),
+        }
+    return out
 
 
 class Anim:
@@ -210,8 +241,38 @@ def light_depth(a: Anim, depth: int, at: float) -> str:
     return "".join(out)
 
 
+def scorecard(a: Anim, at: float, title: str, color: str, metrics, compare=None, banner="", banner_color=DIM) -> str:
+    """The end-of-run panel: big measured numbers, optionally with the grep agent's numbers underneath."""
+    x0, y0, w, h = PAD - 8, H - 200, SPLIT - PAD - 14, 184
+    out = [
+        f'<g opacity="0">{a.show(at, fade=0.35)}',
+        f'<rect x="{x0}" y="{y0}" width="{w}" height="{h}" rx="12" fill="#0a130f" stroke="{color}" stroke-width="2"/>',
+        f'<text x="{x0 + 16}" y="{y0 + 28}" font-size="14" font-weight="700" fill="{color}">{escape(title)}</text>',
+    ]
+    col = w / len(metrics)
+    for i, (label, value) in enumerate(metrics):
+        cx = x0 + col * (i + 0.5)
+        out.append(f'<text x="{cx:.0f}" y="{y0 + 80}" font-size="32" font-weight="800" fill="{color}" text-anchor="middle">{escape(value.replace("x", "\u00d7"))}</text>')
+        out.append(f'<text x="{cx:.0f}" y="{y0 + 104}" font-size="13" fill="{FG}" text-anchor="middle">{escape(label)}</text>')
+        if compare:
+            out.append(f'<text x="{cx:.0f}" y="{y0 + 128}" font-size="13" fill="{YELLOW}" text-anchor="middle" opacity="0.8">vs {escape(compare[i][1].replace("x", "\u00d7"))}</text>')
+    out.append(f'<text x="{x0 + w / 2:.0f}" y="{y0 + h - 18}" font-size="17" font-weight="800" fill="{banner_color}" text-anchor="middle">{escape(banner)}</text>')
+    out.append("</g>")
+    return "".join(out)
+
+
+def counter(a: Anim, on: float, off, big: str, small: str, color: str) -> str:
+    return (
+        f'<g opacity="0">{a.show(on, off, fade=0.05)}'
+        f'<rect x="{W - 330}" y="{H - 86}" width="312" height="68" rx="10" fill="#0a130f" opacity="0.92"/>'
+        f'<text x="{W - 32}" y="{H - 52}" text-anchor="end" font-size="24" font-weight="800" fill="{color}">{escape(big)}</text>'
+        f'<text x="{W - 32}" y="{H - 28}" text-anchor="end" font-size="13" fill="{DIM}">{escape(small)}</text></g>'
+    )
+
+
 def graphify_demo(frame):
-    period, freeze = 12.0, 11.0
+    period = 12.0 + HOLD
+    freeze = 10.0
     a = Anim(period, freeze, frame)
     body = [background_graph()]
     x, y = PAD, 78
@@ -249,15 +310,14 @@ def graphify_demo(frame):
                 y += LH
         body.append(light_depth(a, depth, at))
     end = t + 0.4 + 0.55 * 5 + 0.8
-    body.append(
-        f'<g opacity="0">{a.show(end)}'
-        + text(x, H - 64, [("1 command. 6 hops. 9 callers. 0.5 s.", LIT)], size=16, extra=' font-weight="700"')
-        + text(x, H - 36, [("Zero files opened. Zero LLM tokens to build the graph.", DIM)])
-        + "</g>"
-    )
-    body.append(
-        f'<g opacity="0">{a.show(t)}<text x="{W - 24}" y="{H - 26}" text-anchor="end" font-size="15" fill="{LIT}" font-weight="700">1 call</text></g>'
-    )
+    m = measured()
+    tokens = m["grep_raw"]["tokens"] / m["graph_raw"]["tokens"]
+    cheaper = m["grep_raw"]["cost"] / m["graph_raw"]["cost"]
+    body.append(scorecard(
+        a, end, "graph agent, measured on this question (Claude Sonnet 5.5, 3 runs)", LIT, m["graph"], compare=m["grep"],
+        banner=f"{tokens:.1f}\u00d7 fewer tokens \u00b7 {cheaper:.1f}\u00d7 cheaper \u00b7 same answer or better", banner_color=LIT,
+    ))
+    body.append(counter(a, t, None, "1 tool call", "6 hops \u00b7 9 callers \u00b7 0.5 s \u00b7 0 files read", LIT))
     return a.svg("".join(body))
 
 
@@ -271,8 +331,9 @@ def grep_relay(frame):
         ("createApp", "5 hits, 3 files", "start, initialize"),
     ]
     step, start = 2.15, 0.5
-    period = start + step * len(turns) + 3.6
-    freeze = period - 0.8
+    end = start + step * len(turns) + 0.2
+    period = start + step * len(turns) + 3.6 + HOLD
+    freeze = end + 2.0
     a = Anim(period, freeze, frame)
     body = [background_graph()]
     x, y = PAD, 78
@@ -286,11 +347,10 @@ def grep_relay(frame):
         row = [(f"{hits:<17}", DIM), ("-> ", DIM), (nxt, PURPLE)]
         body.append(f'<g opacity="0">{a.show(result, fade=0.12)}{text(x + 8 * CW, y + LH, row)}</g>')
         body.append(light_depth(a, i, result))
-        body.append(
-            f'<g opacity="0">{a.show(s - 0.2, s + step - 0.2 if i < len(turns) else None, fade=0.05)}'
-            f'<text x="{W - 24}" y="{H - 26}" text-anchor="end" font-size="15" fill="{YELLOW}" font-weight="700">'
-            f"model turn {i}: whole context re-sent</text></g>"
-        )
+        body.append(counter(
+            a, s - 0.2, s + step - 0.2 if i < len(turns) else None,
+            f"{i} tool call{'s' if i > 1 else ''}", f"model turn {i}: whole context re-sent", YELLOW,
+        ))
         if i == 2:
             hx, hy = HOMONYM[1:]
             body.append(
@@ -300,18 +360,16 @@ def grep_relay(frame):
                 f'<text x="{hx}" y="{hy + 26}" font-size="12" fill="{RED}" text-anchor="middle">same name, wrong function</text></g>'
             )
         y += 2 * LH + 6
-    end = start + step * len(turns) + 0.2
-    body.append(
-        f'<g opacity="0">{a.show(end)}'
-        + text(x, H - 64, [("6 searches, one model turn per hop.", YELLOW)], size=16, extra=' font-weight="700"')
-        + text(x, H - 36, [("Measured agent: 11.7 turns, 335k input tokens.", DIM)])
-        + "</g>"
-    )
+    m = measured()
+    body.append(scorecard(
+        a, end, "grep agent, measured on this question (Claude Sonnet 5.5, 3 runs)", YELLOW, m["grep"],
+        banner="the real agent needed even more calls than this replay", banner_color=YELLOW,
+    ))
     return a.svg("".join(body))
 
 
-DECK_BG, PANEL, LINE, INK, MUTED, ACCENT, HEAD, GOLD = (
-    "#0d1117", "#161b22", "#30363d", "#e6edf3", "#8b949e", "#3fb950", "#58a6ff", "#f2cc60",
+DECK_BG, PANEL, LINE, INK, MUTED, ACCENT, HEAD, GOLD, VIOLET = (
+    "#0d1117", "#161b22", "#30363d", "#e6edf3", "#8b949e", "#3fb950", "#58a6ff", "#f2cc60", "#d2a8ff",
 )
 
 
@@ -346,10 +404,10 @@ def badge(x, y, label, color) -> str:
 def harness() -> str:
     b = [card(10, 150, 190, 120, "1 commit", ["same code", "for everyone"], color=HEAD)]
     rows = [
-        ("grep agent", "Graphify blocked", GOLD),
+        ("grep agent", "graphify blocked", GOLD),
         ("graph agent: CLI", "graph + 1 command", ACCENT),
-        ("graph agent: MCP", "graph via MCP server", ACCENT),
-        ("graph agent: hook", "graph + search hook", ACCENT),
+        ("graph agent: MCP", "same graph, MCP server", ACCENT),
+        ("graph agent: reminder", "1st grep bounced: graph first", ACCENT),
     ]
     for i, (title, sub, color) in enumerate(rows):
         y = 20 + i * 95
@@ -357,7 +415,7 @@ def harness() -> str:
         b.append(arrow(200, 210, 246, y + 39))
         b.append(arrow(580, y + 39, 636, 210))
     b.append(f'<text x="415" y="418" font-size="15" fill="{MUTED}" text-anchor="middle">one git worktree each, answer keys removed</text>')
-    b.append(card(640, 120, 250, 180, "Copilot CLI", ["11 questions", "x 3 runs each", "Sonnet + Haiku", "identical prompt"], color=HEAD))
+    b.append(card(640, 100, 250, 220, "Copilot CLI", ["11 questions", "x 3 runs each", "Claude Sonnet 5.5", "Claude Haiku 5.5", "identical prompt"], color=HEAD))
     b.append(arrow(890, 160, 936, 105))
     b.append(arrow(890, 260, 936, 315))
     b.append(card(940, 40, 250, 95, "answer (JSON)", ["file + symbol list"], color=LINE))
@@ -367,33 +425,109 @@ def harness() -> str:
     b.append(badge(10, 448, "graph built once: 14 s, no LLM", ACCENT))
     b.append(badge(430, 448, "14 sessions in parallel", HEAD))
     b.append(badge(750, 448, "132 runs in 8 min", ACCENT))
-    b.append(badge(990, 448, "224 runs", GOLD))
+    b.append(badge(990, 448, "224 total", GOLD))
     return static_svg(1200, 496, "".join(b))
 
 
 def ground_truth() -> str:
-    steps = [
-        ("1  ask", HEAD, ["11 questions", "fixed JSON answer:", "[{file, symbol}]"]),
-        ("2  derive", ACCENT, ["TypeScript compiler", "call hierarchy, refs,", "import graph"]),
-        ("3  commit", GOLD, ["pass/fail thresholds", "in git, before the", "first agent run"]),
-        ("4  score", "#d2a8ff", ["F1 / recall, no LLM", "judge; re-score saved", "answers any time"]),
+    b = [
+        f'<text x="10" y="22" font-size="16" font-weight="700" fill="{HEAD}">THE KEY: computed from the code</text>',
+        card(10, 36, 250, 96, "Touchline", ["commit 6cb5b3f"], color=HEAD),
+        arrow(262, 84, 300, 84),
+        card(304, 36, 320, 96, "TypeScript compiler", ["call hierarchy, references"], color=HEAD),
+        arrow(626, 84, 664, 84),
+        card(668, 36, 250, 96, "answer key", ["9 x file#function"], color=HEAD, title_color=HEAD),
+        f'<text x="10" y="176" font-size="16" font-weight="700" fill="{GOLD}">THE ANSWER: whatever the agent says</text>',
+        card(10, 190, 250, 96, "question", ["same prompt for all"], color=GOLD),
+        arrow(262, 238, 300, 238),
+        card(304, 190, 320, 96, "agent", ["grep or graph, any model"], color=GOLD),
+        arrow(626, 238, 664, 238),
+        card(668, 190, 250, 96, "final JSON block", ["file#function list"], color=GOLD, title_color=GOLD),
+        arrow(920, 84, 968, 140),
+        arrow(920, 238, 968, 184),
+        card(972, 112, 218, 100, "set math", ["precision, recall", "F1 = the score"], color=ACCENT, title_color=ACCENT),
     ]
-    b = []
-    for i, (title, color, lines) in enumerate(steps):
-        x = 10 + i * 300
-        b.append(card(x, 10, 260, 150, title, lines, color=color, title_color=color))
-        if i < 3:
-            b.append(arrow(x + 262, 85, x + 296, 85))
-    b.append(f'<text x="600" y="196" font-size="17" fill="{MUTED}" text-anchor="middle">'
-             "never Graphify, never an LLM: a referee independent of both agents</text>")
-    return static_svg(1200, 210, "".join(b))
+    return static_svg(1200, 296, "".join(b))
+
+
+def score_example() -> str:
+    """Three real runs on "what can make a rival club sign a player?", marked item by item against the real key."""
+    keys = json.loads((BENCH / "answer-keys.json").read_text())["h1"]
+    order = sorted(keys, key=lambda k: (NODES[k.split("#")[1]][2], k))
+    picks = [
+        ("grep agent", "Sonnet 5.5, run 2", runs("H1", "A", "sonnet")[1], GOLD),
+        ("grep agent", "Haiku 5.5, run 1", runs("H1", "A", "haiku")[0], GOLD),
+        ("graph agent", "Sonnet 5.5, run 1", runs("H1", "G", "sonnet")[0], ACCENT),
+    ]
+    cols = [700, 870, 1040]
+    b = [
+        f'<text x="20" y="34" font-size="15" fill="{MUTED}">hop</text>',
+        f'<text x="72" y="34" font-size="17" font-weight="700" fill="{HEAD}">answer key (from the compiler)</text>',
+    ]
+    for cx, (who, run, r, color) in zip(cols, picks):
+        b.append(f'<text x="{cx}" y="22" font-size="17" font-weight="700" fill="{color}" text-anchor="middle">{who}</text>')
+        b.append(f'<text x="{cx}" y="44" font-size="14" fill="{MUTED}" text-anchor="middle">{run}</text>')
+    marks = []
+    for _, _, r, _ in picks:
+        answered = {(i["file"], i.get("symbol")) for i in r["answer_items"]}
+        marks.append(answered)
+        assert len({f"{f}#{s}" for f, s in answered} & set(keys)) == r["score"]["correct"], "marks disagree with score.ts"
+    y = 84
+    for i, k in enumerate(order):
+        file, sym = k.split("#")
+        if i % 2 == 0:
+            b.append(f'<rect x="10" y="{y - 21}" width="1180" height="30" fill="{PANEL}"/>')
+        b.append(f'<text x="34" y="{y}" font-size="15" fill="{MUTED}" text-anchor="middle">{NODES[sym][2]}</text>')
+        b.append(f'<text x="72" y="{y}" font-size="16" fill="{INK}"><tspan fill="{MUTED}">{escape(file)}#</tspan>{escape(sym)}</text>')
+        for cx, got in zip(cols, marks):
+            ok = (file, sym) in got
+            b.append(f'<text x="{cx}" y="{y + 1}" font-size="20" font-weight="800" fill="{ACCENT if ok else RED}" text-anchor="middle">{"\u2713" if ok else "\u2717 missed"}</text>')
+        y += 30
+    extras = [sorted(f"{f}" + (f"#{s}" if s else "") for f, s in got if not s or f"{f}#{s}" not in keys) for got in marks]
+    extra_label = next((e[0] for e in extras if e), "")
+    b.append(f'<text x="72" y="{y}" font-size="16" fill="{RED}">extra: {escape(extra_label)} (a file, not a function)</text>')
+    for cx, e in zip(cols, extras):
+        b.append(f'<text x="{cx}" y="{y + 1}" font-size="20" font-weight="800" fill="{RED if e else MUTED}" text-anchor="middle">{"\u2717 wrong" if e else "\u00b7"}</text>')
+    y += 22
+    b.append(f'<line x1="10" y1="{y}" x2="1190" y2="{y}" stroke="{LINE}" stroke-width="2"/>')
+    y += 32
+    rows = [
+        ("correct / answered", lambda s: f"{s['correct']} / {s['answered']}"),
+        ("precision = correct / answered", lambda s: f"{s['precision']:.2f}"),
+        ("recall = correct / 9", lambda s: f"{s['recall']:.2f}"),
+    ]
+    for label, fmt in rows:
+        b.append(f'<text x="72" y="{y}" font-size="16" fill="{MUTED}">{label}</text>')
+        for cx, (_, _, r, _) in zip(cols, picks):
+            b.append(f'<text x="{cx}" y="{y}" font-size="17" fill="{INK}" text-anchor="middle">{fmt(r["score"])}</text>')
+        y += 30
+    y += 12
+    b.append(f'<text x="72" y="{y}" font-size="20" font-weight="800" fill="{GOLD}">score = F1 = 2PR / (P + R)</text>')
+    for cx, (_, _, r, color) in zip(cols, picks):
+        b.append(f'<text x="{cx}" y="{y + 2}" font-size="28" font-weight="800" fill="{color}" text-anchor="middle">{100 * r["score"]["accuracy"]:.0f}%</text>')
+    return static_svg(1200, y + 20, "".join(b))
+
+
+def answer_items(text: str):
+    import re
+    for block in reversed(re.findall(r"```json\s*([\s\S]*?)```", text)):
+        try:
+            return json.loads(block)["items"]
+        except (ValueError, KeyError):
+            continue
+    return []
+
+
+for _model in RESULTS.values():
+    for _r in _model:
+        _r["answer_items"] = answer_items(_r.get("answer", ""))
 
 
 if __name__ == "__main__":
     frame = float(sys.argv[sys.argv.index("--frame") + 1]) if "--frame" in sys.argv else None
     here = Path(__file__).parent
     if frame is None:
-        for name, build in [("harness", harness), ("ground-truth", ground_truth)]:
+        for name, build in [("harness", harness), ("ground-truth", ground_truth), ("score-example", score_example)]:
             (here / "assets" / f"{name}.svg").write_text(build())
             print(here / "assets" / f"{name}.svg")
     for name, build in [("graphify-demo", graphify_demo), ("grep-relay", grep_relay)]:

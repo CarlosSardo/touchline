@@ -2,22 +2,22 @@
 <rect x="60" y="96" width="150" height="294" rx="6" fill="#8b949e"/>
 <text x="135.0" y="60" fill="#e6edf3" text-anchor="middle" font-weight="bold" font-size="26">100</text>
 <text x="135.0" y="86" fill="#8b949e" text-anchor="middle">acc 98.5%</text>
-<text x="135.0" y="420" fill="#e6edf3" text-anchor="middle">Sonnet</text>
+<text x="135.0" y="420" fill="#e6edf3" text-anchor="middle">Sonnet 5.5</text>
 <text x="135.0" y="446" fill="#c9d1d9" text-anchor="middle">grep</text>
 <rect x="290" y="172" width="150" height="218" rx="6" fill="#3fb950"/>
 <text x="365.0" y="136" fill="#e6edf3" text-anchor="middle" font-weight="bold" font-size="26">74</text>
 <text x="365.0" y="162" fill="#8b949e" text-anchor="middle">acc 98.9%</text>
-<text x="365.0" y="420" fill="#e6edf3" text-anchor="middle">Sonnet</text>
+<text x="365.0" y="420" fill="#e6edf3" text-anchor="middle">Sonnet 5.5</text>
 <text x="365.0" y="446" fill="#3fb950" text-anchor="middle">+ graph</text>
 <rect x="560" y="356" width="150" height="34" rx="6" fill="#8b949e"/>
 <text x="635.0" y="320" fill="#e6edf3" text-anchor="middle" font-weight="bold" font-size="26">11</text>
 <text x="635.0" y="346" fill="#8b949e" text-anchor="middle">acc 98.4%</text>
-<text x="635.0" y="420" fill="#e6edf3" text-anchor="middle">Haiku</text>
+<text x="635.0" y="420" fill="#e6edf3" text-anchor="middle">Haiku 5.5</text>
 <text x="635.0" y="446" fill="#c9d1d9" text-anchor="middle">grep</text>
 <rect x="790" y="363" width="150" height="27" rx="6" fill="#3fb950"/>
 <text x="865.0" y="327" fill="#e6edf3" text-anchor="middle" font-weight="bold" font-size="26">9</text>
 <text x="865.0" y="353" fill="#8b949e" text-anchor="middle">acc 98.9%</text>
-<text x="865.0" y="420" fill="#e6edf3" text-anchor="middle">Haiku</text>
+<text x="865.0" y="420" fill="#e6edf3" text-anchor="middle">Haiku 5.5</text>
 <text x="865.0" y="446" fill="#3fb950" text-anchor="middle">+ graph</text>
 <line x1="40" y1="390" x2="980" y2="390" stroke="#30363d" stroke-width="2"/>
 <path d="M 215 52 C 480 20, 840 70, 865 290" fill="none" stroke="#f2cc60" stroke-width="3" stroke-dasharray="8 6" marker-end="url(#a)"/>
