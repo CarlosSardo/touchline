@@ -1,59 +1,148 @@
 {
-  "generatedFrom": "TypeScript compiler API over server/, shared/, src/, scripts/ (non-test files for T1/T6)",
-  "t1": {
-    "top": [
-      {
-        "key": "server/db.ts",
-        "count": 57
-      },
-      {
-        "key": "server/systems.ts",
-        "count": 32
-      },
-      {
-        "key": "server/finance.ts",
-        "count": 17
-      },
-      {
-        "key": "server/people.ts",
-        "count": 13
-      },
-      {
-        "key": "server/registration.ts",
-        "count": 13
-      }
+  "generatedFrom": "TypeScript 5 LanguageService over server/, shared/, src/, scripts/ (call hierarchy, references, imports)",
+  "h1": [
+    "scripts/e2e-server.ts#initialize",
+    "server/app.ts#createApp",
+    "server/app.ts#createWorldRouter",
+    "server/check-simulation.ts#seasonSoak",
+    "server/index.ts#start",
+    "server/simulation.ts#advance",
+    "server/transfer-battles.ts#decide",
+    "server/transfer-battles.ts#processTransferBattles",
+    "server/transfer-battles.ts#settleMarketBids"
+  ],
+  "h2": [
+    "server/affiliates.ts#affiliateOptionsForNegotiation",
+    "server/affiliates.ts#placeFutureTransferAtAffiliate",
+    "server/affiliates.ts#setOnwardLoanPlan",
+    "server/affiliates.ts#startOnwardLoan",
+    "server/app.ts#createWorldRouter",
+    "server/app.ts#dispatchAction",
+    "server/club-support.ts#processAssistant",
+    "server/deal-clauses.ts#completeExchange",
+    "server/queries.ts#transfers",
+    "server/simulation.ts#advance",
+    "server/simulation.ts#processNegotiations",
+    "server/systems.ts#completeNegotiation",
+    "server/systems.ts#counterIncomingOffer",
+    "server/systems.ts#exerciseOption",
+    "server/systems.ts#expireLoans",
+    "server/systems.ts#negotiate",
+    "server/systems.ts#progressDealMilestones",
+    "server/transfer-battles.ts#decide",
+    "server/transfer-battles.ts#executeMarketTransfer",
+    "server/transfer-battles.ts#processTransferBattles",
+    "server/transfer-battles.ts#settleMarketBids",
+    "server/world-market.ts#makeRoom",
+    "server/world-market.ts#partExchange",
+    "server/world-market.ts#priceDeal",
+    "server/world-market.ts#worldMarket"
+  ],
+  "h3": [
+    [
+      "server/affiliates.ts",
+      "server/calendar.ts",
+      "server/club-policy.ts",
+      "server/deal-clauses.ts",
+      "server/eligibility.ts",
+      "server/finance.ts",
+      "server/gbe.ts",
+      "server/internationals.ts",
+      "server/market-offers.ts",
+      "server/ownership.ts",
+      "server/qualification.ts",
+      "server/recruitment.ts",
+      "server/registration.ts",
+      "server/sanctions.ts",
+      "server/systems.ts",
+      "server/transfer-battles.ts"
     ],
-    "acceptable": [
-      {
-        "key": "server/db.ts",
-        "count": 57
-      },
-      {
-        "key": "server/systems.ts",
-        "count": 32
-      },
-      {
-        "key": "server/finance.ts",
-        "count": 17
-      },
-      {
-        "key": "server/people.ts",
-        "count": 13
-      },
-      {
-        "key": "server/registration.ts",
-        "count": 13
-      }
+    ["server/match-v3.ts", "server/match.ts"]
+  ],
+  "h4": [
+    "server/affiliates.sql.test.ts",
+    "server/eligibility.test.ts",
+    "server/market-offers.test.ts",
+    "server/registration.test.ts",
+    "server/systems.test.ts"
+  ],
+  "h5": {
+    "exported": 559,
+    "unreferenced": [
+      "server/admin-pages.ts#escapeHtml",
+      "server/app.ts#dispatchAction",
+      "server/app.ts#logUnexpectedError",
+      "server/auth.ts#readCookie",
+      "server/calendar.ts#activateWorldStructure",
+      "server/calendar.ts#rankLeagueTable",
+      "server/calendar.ts#scheduleDomesticLeagues",
+      "server/calendar.ts#setupMainCompetition",
+      "server/callup-probe.ts#worldFamilies",
+      "server/callups.ts#lineCounts",
+      "server/callups.ts#median",
+      "server/check-simulation.ts#checkContinentalEntries",
+      "server/check-simulation.ts#checkForfeits",
+      "server/check-simulation.ts#checkInSeasonSquads",
+      "server/check-simulation.ts#checkRollover",
+      "server/check-simulation.ts#checkYouthHeights",
+      "server/check-simulation.ts#financeMetrics",
+      "server/check-simulation.ts#marketMetrics",
+      "server/check-simulation.ts#seasonSoak",
+      "server/check-world.ts#checkWorld",
+      "server/check-world.ts#tableSizes",
+      "server/club-directors.ts#directorStyle",
+      "server/eligibility.ts#nextWindowOpening",
+      "server/eligibility.ts#reevaluateRegistrations",
+      "server/fast-match.ts#fastStrength",
+      "server/finance.ts#annualAmortizations",
+      "server/gbe.ts#addMonths",
+      "server/growth.ts#declineRate",
+      "server/growth.ts#growthRate",
+      "server/growth.ts#heightVelocity",
+      "server/growth.ts#inferGrowth",
+      "server/internationals.ts#readDuty",
+      "server/market-offers.ts#approachIssue",
+      "server/market-offers.ts#revalidateIncomingOffers",
+      "server/match-v3.ts#shotProbability",
+      "server/ownership-plan.ts#membersName",
+      "server/ownership-views.ts#describeEvent",
+      "server/player-history.ts#groupSeasonStats",
+      "server/qualification.ts#associationCoefficients",
+      "server/qualification.ts#domesticOrder",
+      "server/recruitment.ts#playerMinorRoute",
+      "server/recruitment.ts#trainingCategoryRate",
+      "server/save-format.ts#compatibleColumns",
+      "server/save-format.ts#sameColumns",
+      "server/saves.ts#persistCheckpointFile",
+      "server/saves.ts#portableColumn",
+      "server/saves.ts#restoreCheckpointFile",
+      "server/saves.ts#sqlName",
+      "server/saves.ts#validateWorldCheckpoint",
+      "server/systems.ts#createReport",
+      "server/systems.ts#reserveAgeRule",
+      "server/transfer-battles.ts#executeMarketTransfer",
+      "server/transfer-battles.ts#withoutRivalTruth",
+      "server/world.ts#orderNations"
     ]
   },
-  "t3": [
-    "server/callups.test.ts",
-    "server/check-simulation.ts",
-    "server/fast-match.ts",
-    "server/match.test.ts",
-    "server/queries.ts",
-    "server/simulation.test.ts"
-  ],
+  "h7": {
+    "callees": [
+      "server/finance.ts#transferEmbargo",
+      "server/sanctions.ts#activeEmbargo",
+      "server/systems.ts#clubOf",
+      "server/systems.ts#playerOf",
+      "server/systems.ts#stateOf",
+      "shared/rules.ts#money"
+    ],
+    "callers": [
+      "scripts/e2e-server.ts#initialize",
+      "server/app.ts#createApp",
+      "server/app.ts#createWorldRouter",
+      "server/app.ts#dispatchAction",
+      "server/index.ts#start"
+    ],
+    "tests": ["server/world-market.test.ts"]
+  },
   "t5": {
     "function": "server/transfer-battles.ts#executeMarketTransfer",
     "callees": [
@@ -67,96 +156,6 @@
       "server/transfer-battles.ts#marketContractYears",
       "shared/release-clauses.ts#optionalReleaseClause",
       "shared/release-clauses.ts#releaseClauseFor"
-    ]
-  },
-  "t6": {
-    "top": [
-      {
-        "key": "server/db.ts#Store",
-        "count": 56
-      },
-      {
-        "key": "shared/rules.ts#addDays",
-        "count": 37
-      },
-      {
-        "key": "shared/rules.ts#dateLabel",
-        "count": 31
-      },
-      {
-        "key": "shared/rules.ts#daysBetween",
-        "count": 31
-      },
-      {
-        "key": "src/ui.tsx#Badge",
-        "count": 31
-      },
-      {
-        "key": "src/game-context.tsx#useResource",
-        "count": 29
-      },
-      {
-        "key": "shared/types.ts#Club",
-        "count": 28
-      },
-      {
-        "key": "shared/types.ts#GameState",
-        "count": 27
-      },
-      {
-        "key": "shared/types.ts#Player",
-        "count": 27
-      },
-      {
-        "key": "src/ui.tsx#ErrorState",
-        "count": 27
-      }
-    ],
-    "acceptable": [
-      {
-        "key": "server/db.ts#Store",
-        "count": 56
-      },
-      {
-        "key": "shared/rules.ts#addDays",
-        "count": 37
-      },
-      {
-        "key": "shared/rules.ts#dateLabel",
-        "count": 31
-      },
-      {
-        "key": "shared/rules.ts#daysBetween",
-        "count": 31
-      },
-      {
-        "key": "src/ui.tsx#Badge",
-        "count": 31
-      },
-      {
-        "key": "src/game-context.tsx#useResource",
-        "count": 29
-      },
-      {
-        "key": "shared/types.ts#Club",
-        "count": 28
-      },
-      {
-        "key": "shared/types.ts#GameState",
-        "count": 27
-      },
-      {
-        "key": "shared/types.ts#Player",
-        "count": 27
-      },
-      {
-        "key": "src/ui.tsx#ErrorState",
-        "count": 27
-      },
-      {
-        "key": "src/ui.tsx#Loading",
-        "count": 27
-      }
     ]
   }
 }

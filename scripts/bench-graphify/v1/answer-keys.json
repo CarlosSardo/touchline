@@ -1,0 +1,162 @@
+{
+  "generatedFrom": "TypeScript compiler API over server/, shared/, src/, scripts/ (non-test files for T1/T6)",
+  "t1": {
+    "top": [
+      {
+        "key": "server/db.ts",
+        "count": 57
+      },
+      {
+        "key": "server/systems.ts",
+        "count": 32
+      },
+      {
+        "key": "server/finance.ts",
+        "count": 17
+      },
+      {
+        "key": "server/people.ts",
+        "count": 13
+      },
+      {
+        "key": "server/registration.ts",
+        "count": 13
+      }
+    ],
+    "acceptable": [
+      {
+        "key": "server/db.ts",
+        "count": 57
+      },
+      {
+        "key": "server/systems.ts",
+        "count": 32
+      },
+      {
+        "key": "server/finance.ts",
+        "count": 17
+      },
+      {
+        "key": "server/people.ts",
+        "count": 13
+      },
+      {
+        "key": "server/registration.ts",
+        "count": 13
+      }
+    ]
+  },
+  "t3": [
+    "server/callups.test.ts",
+    "server/check-simulation.ts",
+    "server/fast-match.ts",
+    "server/match.test.ts",
+    "server/queries.ts",
+    "server/simulation.test.ts"
+  ],
+  "t5": {
+    "function": "server/transfer-battles.ts#executeMarketTransfer",
+    "callees": [
+      "server/eligibility.ts#endSpells",
+      "server/finance.ts#acquirePlayerAsset",
+      "server/media.ts#publishTransferStory",
+      "server/systems.ts#contractEndDate",
+      "server/systems.ts#ledger",
+      "server/systems.ts#stateOf",
+      "server/systems.ts#transferProceeds",
+      "server/transfer-battles.ts#marketContractYears",
+      "shared/release-clauses.ts#optionalReleaseClause",
+      "shared/release-clauses.ts#releaseClauseFor"
+    ]
+  },
+  "t6": {
+    "top": [
+      {
+        "key": "server/db.ts#Store",
+        "count": 56
+      },
+      {
+        "key": "shared/rules.ts#addDays",
+        "count": 37
+      },
+      {
+        "key": "shared/rules.ts#dateLabel",
+        "count": 31
+      },
+      {
+        "key": "shared/rules.ts#daysBetween",
+        "count": 31
+      },
+      {
+        "key": "src/ui.tsx#Badge",
+        "count": 31
+      },
+      {
+        "key": "src/game-context.tsx#useResource",
+        "count": 29
+      },
+      {
+        "key": "shared/types.ts#Club",
+        "count": 28
+      },
+      {
+        "key": "shared/types.ts#GameState",
+        "count": 27
+      },
+      {
+        "key": "shared/types.ts#Player",
+        "count": 27
+      },
+      {
+        "key": "src/ui.tsx#ErrorState",
+        "count": 27
+      }
+    ],
+    "acceptable": [
+      {
+        "key": "server/db.ts#Store",
+        "count": 56
+      },
+      {
+        "key": "shared/rules.ts#addDays",
+        "count": 37
+      },
+      {
+        "key": "shared/rules.ts#dateLabel",
+        "count": 31
+      },
+      {
+        "key": "shared/rules.ts#daysBetween",
+        "count": 31
+      },
+      {
+        "key": "src/ui.tsx#Badge",
+        "count": 31
+      },
+      {
+        "key": "src/game-context.tsx#useResource",
+        "count": 29
+      },
+      {
+        "key": "shared/types.ts#Club",
+        "count": 28
+      },
+      {
+        "key": "shared/types.ts#GameState",
+        "count": 27
+      },
+      {
+        "key": "shared/types.ts#Player",
+        "count": 27
+      },
+      {
+        "key": "src/ui.tsx#ErrorState",
+        "count": 27
+      },
+      {
+        "key": "src/ui.tsx#Loading",
+        "count": 27
+      }
+    ]
+  }
+}

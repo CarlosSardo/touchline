@@ -14,6 +14,8 @@ export interface Score {
   hallucinated: string[];
   missed: string[];
   factsOk: boolean;
+  /** Recall per named part of the key (planning tasks). */
+  parts?: Record<string, number>;
   /** Headline per-run accuracy: F1 for closed sets, recall for open-ended tasks, 0 when a required fact is missing. */
   accuracy: number;
 }
@@ -123,6 +125,14 @@ export function score(task: Task, text: string, root: string): Score {
     hallucinated,
     missed: task.key.filter((key) => !hit.has(label(key))).map(label),
     factsOk,
+    parts: task.parts
+      ? Object.fromEntries(
+          Object.entries(task.parts).map(([name, items]) => [
+            name,
+            items.filter((key) => hit.has(label(key))).length / items.length,
+          ]),
+        )
+      : undefined,
     accuracy: factsOk ? base : 0,
   };
 }

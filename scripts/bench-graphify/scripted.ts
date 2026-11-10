@@ -1,13 +1,16 @@
 // Scripted mode: runs each task's fixed retrieval recipe per arm and measures what an agent would have to ingest.
 // Content (bytes, o200k tokens, context recall) is collected with every recipe in parallel;
 // wall time comes from a separate serial pass (alternating arms, median of N) so runs do not contend for CPU.
-import { execFileSync, spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import { promisify } from "node:util";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ArmEnv } from "./arms.ts";
 import { contextRecall } from "./score.ts";
 import { TASKS, type Arm, type ScriptedArm, type Task } from "./tasks.ts";
+
+const SCRIPTED_ARMS: ScriptedArm[] = ["A", "G"];
 
 export interface ScriptedResult {
   task: string;
@@ -42,12 +45,12 @@ function runRecipe(
 }
 
 /** o200k_base token counts via tiktoken in an ephemeral uv environment (no repository dependency). */
-export function countTokens(texts: string[]): number[] {
+export async function countTokens(texts: string[]): Promise<number[]> {
   const dir = mkdtempSync(join(tmpdir(), "bench-tokens-"));
   try {
     writeFileSync(join(dir, "texts.json"), JSON.stringify(texts));
     const program = `import json,sys,tiktoken\nenc=tiktoken.get_encoding("o200k_base")\nprint(json.dumps([len(enc.encode(t, disallowed_special=())) for t in json.load(open(sys.argv[1]))]))`;
-    const out = execFileSync(
+    const { stdout: out } = await promisify(execFile)(
       "uv",
       [
         "run",
@@ -78,17 +81,17 @@ const median = (values: number[]) => {
 };
 
 export async function runScripted(
-  arms: Record<Arm, ArmEnv>,
+  arms: Partial<Record<Arm, ArmEnv>>,
   timingReps = 5,
   tasks = TASKS,
 ): Promise<ScriptedResult[]> {
   const jobs = tasks.flatMap((task) =>
-    (["A", "B"] as const).map((arm) => ({ task, arm })),
+    SCRIPTED_ARMS.map((arm) => ({ task, arm })),
   );
   const outputs = await Promise.all(
-    jobs.map(({ task, arm }) => runRecipe(task, arm, arms[arm])),
+    jobs.map(({ task, arm }) => runRecipe(task, arm, arms[arm]!)),
   );
-  const tokens = countTokens(outputs.map(({ output }) => output));
+  const tokens = await countTokens(outputs.map(({ output }) => output));
   const samples = jobs.map(() => [] as number[]);
   for (let rep = 0; rep < timingReps; rep++)
     for (let pair = 0; pair < jobs.length; pair += 2)
@@ -98,7 +101,7 @@ export async function runScripted(
             await runRecipe(
               jobs[index].task,
               jobs[index].arm,
-              arms[jobs[index].arm],
+              arms[jobs[index].arm]!,
             )
           ).ms,
         );

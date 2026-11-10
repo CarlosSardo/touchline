@@ -1,54 +1,189 @@
 {
   "meta": {
-    "commit": "46e09b2",
-    "date": "2026-11-10T12:24:01.314Z",
+    "commit": "009637b",
+    "date": "2026-11-10T12:54:00.837Z",
     "graphify": "graphify 0.9.105",
-    "graphBuildMs": 7242,
+    "graphBuildMs": 11398,
     "graph": {
       "nodes": 5653,
       "edges": 18046
     },
-    "timingReps": 5
+    "timingReps": 3
   },
   "results": [
     {
-      "task": "T1",
+      "task": "H1",
       "arm": "A",
       "commands": [
-        "grep -rhoE 'from \"(\\.\\./|\\./)+(server/)?[a-z0-9-]+\\.ts\"' server shared src scripts --include='*.ts' --include='*.tsx' --exclude='*.test.ts' --exclude='*.test.tsx' | sort | uniq -c | sort -rn | head -30"
+        "rg -nw \"executeMarketTransfer\" server scripts -g '!*.test.ts' -g '!*.test.tsx'",
+        "rg -nw \"decide|settleMarketBids\" server scripts -g '!*.test.ts' -g '!*.test.tsx'",
+        "rg -nw \"processTransferBattles\" server scripts -g '!*.test.ts' -g '!*.test.tsx'",
+        "rg -nw \"advance\" server scripts -g '!*.test.ts' -g '!*.test.tsx'",
+        "rg -nw \"createWorldRouter|seasonSoak\" server scripts -g '!*.test.ts' -g '!*.test.tsx'",
+        "rg -nw \"createApp\" server scripts -g '!*.test.ts' -g '!*.test.tsx'"
       ],
-      "bytes": 1104,
-      "lines": 32,
-      "tokens": 336,
-      "contextRecall": 1,
-      "medianMs": 11.218057999998564,
-      "samplesMs": [
-        10.383034999998927,
-        11.218057999998564,
-        12.873312000003352,
-        10.463343999999779,
-        11.519476999998005
-      ]
+      "bytes": 5740,
+      "lines": 57,
+      "tokens": 1457,
+      "contextRecall": 0.7777777777777778,
+      "medianMs": 40.136530000003404,
+      "samplesMs": [40.72446499999933, 39.53343899999891, 40.136530000003404]
     },
     {
-      "task": "T1",
-      "arm": "B",
+      "task": "H1",
+      "arm": "G",
       "commands": [
-        "graphify god-nodes --top 15",
-        "graphify query \"which server modules are imported by the most files\" --budget 1500"
+        "graphify affected \"executeMarketTransfer\" --depth 6 --relation calls"
       ],
-      "bytes": 5612,
-      "lines": 76,
-      "tokens": 1620,
-      "contextRecall": 0,
-      "medianMs": 613.2848410000006,
-      "samplesMs": [
-        621.9728530000011,
-        613.6824899999992,
-        613.1998849999982,
-        608.0236149999982,
-        613.2848410000006
-      ]
+      "bytes": 602,
+      "lines": 14,
+      "tokens": 175,
+      "contextRecall": 1,
+      "medianMs": 319.1267799999987,
+      "samplesMs": [324.10015399999975, 308.9613999999965, 319.1267799999987]
+    },
+    {
+      "task": "H2",
+      "arm": "A",
+      "commands": [
+        "rg -nw \"contractEndDate\" server scripts -g '!*.test.ts' -g '!*.test.tsx'",
+        "rg -nw \"counterIncomingOffer|negotiate|completeNegotiation|exerciseOption|affiliateOptionsForNegotiation|placeFutureTransferAtAffiliate|executeMarketTransfer|completeExchange|priceDeal\" server scripts -g '!*.test.ts' -g '!*.test.tsx'",
+        "rg -nw \"dispatchAction|progressDealMilestones|processAssistant|expireLoans|setOnwardLoanPlan|startOnwardLoan|transfers|decide|settleMarketBids|makeRoom|partExchange|worldMarket\" server scripts -g '!*.test.ts' -g '!*.test.tsx'"
+      ],
+      "bytes": 16983,
+      "lines": 168,
+      "tokens": 4364,
+      "contextRecall": 0.84,
+      "medianMs": 26.66815200000201,
+      "samplesMs": [26.66815200000201, 25.197831999998016, 27.177932000005967]
+    },
+    {
+      "task": "H2",
+      "arm": "G",
+      "commands": [
+        "graphify affected \"contractEndDate\" --depth 3 --relation calls"
+      ],
+      "bytes": 1772,
+      "lines": 35,
+      "tokens": 511,
+      "contextRecall": 1,
+      "medianMs": 316.9597599999979,
+      "samplesMs": [323.2561560000031, 316.9597599999979, 316.3021099999969]
+    },
+    {
+      "task": "H3",
+      "arm": "A",
+      "commands": [
+        "rg -o --no-heading 'from \"\\./[a-z0-9.-]+\\.ts\"' server -g '!*.test.ts' -g '!*.test.tsx' | sort -u"
+      ],
+      "bytes": 13015,
+      "lines": 309,
+      "tokens": 3468,
+      "contextRecall": 1,
+      "medianMs": 10.19119800000044,
+      "samplesMs": [10.19119800000044, 8.704631999997218, 10.979993000000832]
+    },
+    {
+      "task": "H3",
+      "arm": "G",
+      "commands": [
+        "grep -n -A40 \"## Import Cycles\" graphify-out/GRAPH_REPORT.md"
+      ],
+      "bytes": 3106,
+      "lines": 43,
+      "tokens": 930,
+      "contextRecall": 0.7222222222222222,
+      "medianMs": 4.044006999996782,
+      "samplesMs": [3.2804360000009183, 4.168783000000985, 4.044006999996782]
+    },
+    {
+      "task": "H5",
+      "arm": "A",
+      "commands": [
+        "rg -n --no-heading -or '$2' '^export (async )?function (\\w+)' server -g '!*.test.ts' -g '!*.test.tsx' | while IFS=: read -r f _ n; do rg -lw \"$n\" server shared src scripts e2e | grep -qvx \"$f\" || echo \"$f#$n\"; done"
+      ],
+      "bytes": 2137,
+      "lines": 53,
+      "tokens": 556,
+      "contextRecall": 0.9444444444444444,
+      "medianMs": 3501.822908000002,
+      "samplesMs": [3391.064632999998, 3719.154234999998, 3501.822908000002]
+    },
+    {
+      "task": "H5",
+      "arm": "G",
+      "commands": [
+        "python3 -c 'import json,re\ng=json.load(open(\"graphify-out/graph.json\")); nodes={n[\"id\"]:n for n in g[\"nodes\"]}; used=set()\nfor l in g[\"links\"]:\n  s,t=nodes.get(l[\"source\"]),nodes.get(l[\"target\"])\n  if s and t and l[\"relation\"]!=\"contains\" and s.get(\"source_file\")!=t.get(\"source_file\"): used.add(t[\"id\"])\nfor n in g[\"nodes\"]:\n  f=n.get(\"source_file\",\"\"); m=re.match(r\"L(\\d+)\",n.get(\"source_location\",\"\"))\n  if f.startswith(\"server/\") and \".test.\" not in f and n[\"label\"].endswith(\"()\") and n[\"id\"] not in used and m:\n    line=open(f).read().split(\"\\n\")[int(m.group(1))-1]\n    if line.startswith(\"export\"): print(f+\"#\"+n[\"label\"][:-2])'"
+      ],
+      "bytes": 3654,
+      "lines": 96,
+      "tokens": 971,
+      "contextRecall": 0.9814814814814815,
+      "medianMs": 126.97674900000129,
+      "samplesMs": [129.2797189999983, 126.97674900000129, 126.84628800000064]
+    },
+    {
+      "task": "H6",
+      "arm": "A",
+      "commands": [
+        "rg -n \"version: 11\" server -g '*.ts'",
+        "rg -n \"^export\" server/sql-schema.ts",
+        "rg -l \"schemaMigrations|WORLD_TABLES|ADDED_WORLD_TABLES|IDENTITY_TABLES\" server scripts",
+        "rg -n -i \"migrations|WORLD_TABLES\" --type md -g '!scripts/bench-graphify/**' ."
+      ],
+      "bytes": 15235,
+      "lines": 54,
+      "tokens": 3397,
+      "contextRecall": 1,
+      "medianMs": 23.58029400000305,
+      "samplesMs": [23.58029400000305, 23.278362000000925, 23.74142800000118]
+    },
+    {
+      "task": "H6",
+      "arm": "G",
+      "commands": [
+        "graphify affected \"schemaMigrations\" --depth 1",
+        "graphify affected \"WORLD_TABLES\" --depth 1",
+        "graphify query \"add a world table schema migration docs\" --budget 1500"
+      ],
+      "bytes": 6322,
+      "lines": 87,
+      "tokens": 1701,
+      "contextRecall": 0.875,
+      "medianMs": 1080.7153800000015,
+      "samplesMs": [1080.7153800000015, 1065.8539509999973, 1112.908070999998]
+    },
+    {
+      "task": "H7",
+      "arm": "A",
+      "commands": [
+        "rg -n -A30 \"^export async function payReleaseClause\" server/deal-clauses.ts",
+        "rg -nw \"payReleaseClause\" server scripts src",
+        "rg -nw \"dispatchAction\" server scripts -g '!*.test.ts' -g '!*.test.tsx'",
+        "rg -nw \"createWorldRouter|createApp\" server scripts -g '!*.test.ts' -g '!*.test.tsx'",
+        "rg -n -i \"release clause\" --type md -g '!scripts/bench-graphify/**' ."
+      ],
+      "bytes": 12918,
+      "lines": 64,
+      "tokens": 3036,
+      "contextRecall": 0.4666666666666667,
+      "medianMs": 31.35165699999925,
+      "samplesMs": [30.23671699999977, 31.746193999999377, 31.35165699999925]
+    },
+    {
+      "task": "H7",
+      "arm": "G",
+      "commands": [
+        "graphify explain \"payReleaseClause\"",
+        "graphify affected \"payReleaseClause\" --depth 6 --relation calls",
+        "graphify query \"release clauses documentation\" --budget 1500"
+      ],
+      "bytes": 6507,
+      "lines": 92,
+      "tokens": 1869,
+      "contextRecall": 0.8,
+      "medianMs": 1044.2764089999982,
+      "samplesMs": [991.6989649999996, 1177.8795539999992, 1044.2764089999982]
     },
     {
       "task": "T2",
@@ -63,114 +198,22 @@
       "lines": 132,
       "tokens": 1847,
       "contextRecall": 1,
-      "medianMs": 8.695463000000018,
-      "samplesMs": [
-        8.695463000000018,
-        9.008877999998731,
-        7.674514999998792,
-        9.267971000001126,
-        8.606414000001678
-      ]
+      "medianMs": 9.371988999999303,
+      "samplesMs": [9.273331000000326, 9.371988999999303, 9.719239000005473]
     },
     {
       "task": "T2",
-      "arm": "B",
+      "arm": "G",
       "commands": [
         "graphify query \"advance day route handler\" --budget 1000",
         "graphify path \"advance\" \"simulateMatch\""
       ],
-      "bytes": 3887,
+      "bytes": 3914,
       "lines": 49,
-      "tokens": 1044,
+      "tokens": 1046,
       "contextRecall": 0.6,
-      "medianMs": 668.4587890000003,
-      "samplesMs": [
-        677.0818990000007,
-        663.0938050000004,
-        664.702870000001,
-        668.4587890000003,
-        675.6814950000007
-      ]
-    },
-    {
-      "task": "T3",
-      "arm": "A",
-      "commands": [
-        "grep -rnw \"simulateMatch\" server shared src scripts --include='*.ts' --include='*.tsx'"
-      ],
-      "bytes": 3025,
-      "lines": 36,
-      "tokens": 797,
-      "contextRecall": 1,
-      "medianMs": 9.605641999998625,
-      "samplesMs": [
-        9.071802999998908,
-        8.124637999999322,
-        9.605641999998625,
-        9.613052000000607,
-        10.362252999999328
-      ]
-    },
-    {
-      "task": "T3",
-      "arm": "B",
-      "commands": [
-        "graphify affected \"simulateMatch\" --depth 1"
-      ],
-      "bytes": 752,
-      "lines": 14,
-      "tokens": 199,
-      "contextRecall": 1,
-      "medianMs": 290.671534000001,
-      "samplesMs": [
-        286.217478999999,
-        288.085744,
-        296.8581419999973,
-        290.671534000001,
-        292.6228630000005
-      ]
-    },
-    {
-      "task": "T4",
-      "arm": "A",
-      "commands": [
-        "grep -rn \"version: 11\" server --include='*.ts'",
-        "grep -n \"^export\" server/sql-schema.ts",
-        "grep -rln \"schemaMigrations\\|WORLD_TABLES\" server scripts --include='*.ts'",
-        "grep -n -i \"migration\" CONTRIBUTING.md"
-      ],
-      "bytes": 4174,
-      "lines": 34,
-      "tokens": 971,
-      "contextRecall": 1,
-      "medianMs": 16.654067999999825,
-      "samplesMs": [
-        15.491602000000057,
-        16.829541999999492,
-        17.358871999997064,
-        16.654067999999825,
-        16.260721000002377
-      ]
-    },
-    {
-      "task": "T4",
-      "arm": "B",
-      "commands": [
-        "graphify explain \"schemaMigrations\"",
-        "graphify query \"add a world table schema migration\" --budget 1500"
-      ],
-      "bytes": 6146,
-      "lines": 85,
-      "tokens": 1687,
-      "contextRecall": 0.8571428571428571,
-      "medianMs": 686.2808799999984,
-      "samplesMs": [
-        694.1314519999996,
-        677.2654750000002,
-        691.1515629999994,
-        678.0631050000011,
-        686.2808799999984
-      ]
+      "medianMs": 750.8278670000036,
+      "samplesMs": [705.0877819999987, 750.8278670000036, 823.0096570000023]
     },
     {
       "task": "T5",
@@ -184,72 +227,47 @@
       "lines": 100,
       "tokens": 1297,
       "contextRecall": 1,
-      "medianMs": 9.468516000000818,
-      "samplesMs": [
-        9.04681299999902,
-        10.490875000001324,
-        9.991146000000299,
-        8.9832150000002,
-        9.468516000000818
-      ]
+      "medianMs": 11.109487000001536,
+      "samplesMs": [10.351270999999542, 11.109487000001536, 11.203724999999395]
     },
     {
       "task": "T5",
-      "arm": "B",
+      "arm": "G",
       "commands": [
         "graphify query \"complete AI club permanent transfer signing\" --budget 1000",
         "graphify explain \"executeMarketTransfer\""
       ],
-      "bytes": 5004,
+      "bytes": 5012,
       "lines": 63,
-      "tokens": 1399,
+      "tokens": 1400,
       "contextRecall": 0.6363636363636364,
-      "medianMs": 635.5360540000001,
-      "samplesMs": [
-        646.2496790000005,
-        635.5360540000001,
-        635.3970329999975,
-        637.4703289999998,
-        625.5806499999999
-      ]
+      "medianMs": 735.0471850000031,
+      "samplesMs": [699.9526839999999, 735.0471850000031, 750.8803550000011]
     },
     {
-      "task": "T6",
+      "task": "H4",
       "arm": "A",
       "commands": [
-        "grep -rhoE \"import (type )?\\{[^}]+\\} from\" server shared src scripts --include='*.ts' --include='*.tsx' --exclude='*.test.ts' --exclude='*.test.tsx' | sed -E 's/import (type )?\\{//; s/\\} from//' | tr ',' '\\n' | sed -E 's/^ *(type )?//; s/ as .*//; s/ *$//' | grep -v '^$' | sort | uniq -c | sort -rn | head -25"
+        "rg -nw \"transferProceeds\" server scripts -g '!*.test.ts' -g '!*.test.tsx'",
+        "rg -lw \"transferProceeds|completeNegotiation|exerciseOption|placeFutureTransferAtAffiliate|executeMarketTransfer|progressDealMilestones|expireLoans|dispatchAction|decide|settleMarketBids\" server -g '*.test.ts'"
       ],
-      "bytes": 742,
-      "lines": 27,
-      "tokens": 261,
-      "contextRecall": 0,
-      "medianMs": 17.487197000002197,
-      "samplesMs": [
-        17.45619799999986,
-        18.52281099999891,
-        17.487197000002197,
-        21.538863000001584,
-        17.166769000003114
-      ]
+      "bytes": 979,
+      "lines": 17,
+      "tokens": 263,
+      "contextRecall": 1,
+      "medianMs": 18.129151000001002,
+      "samplesMs": [16.889663000001747, 19.62256200000411, 18.129151000001002]
     },
     {
-      "task": "T6",
-      "arm": "B",
-      "commands": [
-        "graphify god-nodes --top 15"
-      ],
-      "bytes": 456,
-      "lines": 18,
-      "tokens": 188,
-      "contextRecall": 0,
-      "medianMs": 224.32150399999955,
-      "samplesMs": [
-        223.11662199999955,
-        223.21944600000097,
-        224.32150399999955,
-        229.87299300000086,
-        225.0143879999996
-      ]
+      "task": "H4",
+      "arm": "G",
+      "commands": ["graphify affected \"transferProceeds\" --depth 3"],
+      "bytes": 3675,
+      "lines": 61,
+      "tokens": 1012,
+      "contextRecall": 1,
+      "medianMs": 317.3400709999987,
+      "samplesMs": [309.0809420000005, 335.34035700000095, 317.3400709999987]
     },
     {
       "task": "T7",
@@ -261,33 +279,19 @@
       "lines": 9,
       "tokens": 170,
       "contextRecall": 1,
-      "medianMs": 10.646324999999706,
-      "samplesMs": [
-        10.646324999999706,
-        9.11322199999995,
-        10.849234000001161,
-        10.91751099999965,
-        9.860757000002195
-      ]
+      "medianMs": 11.108806999996887,
+      "samplesMs": [10.293519999999262, 11.57243500000186, 11.108806999996887]
     },
     {
       "task": "T7",
-      "arm": "B",
-      "commands": [
-        "graphify explain \"clamp\""
-      ],
+      "arm": "G",
+      "commands": ["graphify explain \"clamp\""],
       "bytes": 2458,
       "lines": 53,
       "tokens": 724,
       "contextRecall": 1,
-      "medianMs": 291.62152999999853,
-      "samplesMs": [
-        291.62152999999853,
-        294.78340800000115,
-        280.8214939999998,
-        289.2967779999999,
-        294.31005899999946
-      ]
+      "medianMs": 313.47686200000317,
+      "samplesMs": [311.5468060000021, 313.47686200000317, 357.8806229999973]
     },
     {
       "task": "T8",
@@ -301,18 +305,12 @@
       "lines": 11,
       "tokens": 186,
       "contextRecall": 1,
-      "medianMs": 8.806519999998272,
-      "samplesMs": [
-        8.348337999999785,
-        8.806519999998272,
-        8.70868899999914,
-        9.545586999996885,
-        8.910680999997567
-      ]
+      "medianMs": 9.408489000001282,
+      "samplesMs": [8.73116200000004, 9.43514399999549, 9.408489000001282]
     },
     {
       "task": "T8",
-      "arm": "B",
+      "arm": "G",
       "commands": [
         "graphify query \"club transfers endpoint UI fetch\" --budget 1500",
         "graphify explain \"clubTransfers\""
@@ -321,14 +319,8 @@
       "lines": 85,
       "tokens": 1814,
       "contextRecall": 0.75,
-      "medianMs": 634.3223080000025,
-      "samplesMs": [
-        637.0472430000009,
-        621.3975030000001,
-        634.3223080000025,
-        645.014733,
-        628.2540520000002
-      ]
+      "medianMs": 679.2437449999998,
+      "samplesMs": [669.289342, 679.2437449999998, 718.6035980000015]
     }
   ]
 }

@@ -1,9 +1,11 @@
 // Usage: npm run bench:graphify -- <keys|scripted|agent|all|report> [options]
 //   keys                         recompute compiler-derived answer keys (answer-keys.json)
 //   scripted [--reps 5]          fixed retrieval recipes per arm: tokens, context recall, median time
-//   agent [--repeats 3] [--concurrency N] [--model claude-sonnet-5.5] [--tasks T1,T2] [--arms A,B,C] [--timeout-min 15]
+//   agent [--repeats 3] [--concurrency N] [--model claude-sonnet-5.5] [--tasks H1,H2] [--arms A,G,M,H] [--timeout-min 15]
+//         [--out agent.json]     results file name under results/ (e.g. pilot.json, agent-haiku.json)
 //   all                          scripted, then agent, then report
 //   report                       regenerate REPORT.md from results/*.json
+// Arms: A grep/read, G Graphify CLI, M Graphify MCP, H CLI + graph-first hook (see arms.ts). Scripted mode compares A and G.
 // Common: --ref <git ref> (default HEAD), --keep (keep worktrees and logs under /tmp/touchline-bench)
 import { execFileSync } from "node:child_process";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
@@ -13,7 +15,7 @@ import { runAgents } from "./agent.ts";
 import { prepareArms, removeArms } from "./arms.ts";
 import { writeReport } from "./report.ts";
 import { runScripted } from "./scripted.ts";
-import { ARMS, BENCH_DIR, TASKS } from "./tasks.ts";
+import { ARMS, BENCH_DIR, TASKS, type Arm } from "./tasks.ts";
 
 const { positionals, values } = parseArgs({
   allowPositionals: true,
@@ -27,6 +29,7 @@ const { positionals, values } = parseArgs({
     "timeout-min": { type: "string", default: "15" },
     ref: { type: "string", default: "HEAD" },
     keep: { type: "boolean", default: false },
+    out: { type: "string", default: "agent.json" },
   },
 });
 const command = positionals[0] ?? "all";
@@ -52,6 +55,9 @@ const graphStats = (dir: string) =>
       { encoding: "utf8" },
     ),
   );
+const agentArms = values.arms
+  ? ARMS.filter((arm) => values.arms!.split(",").includes(arm))
+  : ARMS;
 const version = (cmd: string) =>
   `${cmd} ${/\d+\.\d+\.\d+\S*/.exec(execFileSync(cmd, ["--version"], { encoding: "utf8" }))?.[0] ?? "unknown"}`;
 
@@ -61,13 +67,24 @@ if (command === "keys") {
   writeReport();
 } else if (["scripted", "agent", "all"].includes(command)) {
   console.log(`Preparing arms from ${values.ref} in ${runDir} ...`);
-  const { arms, graphBuildMs, commit } = prepareArms(runDir, values.ref);
+  const needed = new Set<Arm>(
+    command === "agent"
+      ? agentArms
+      : command === "scripted"
+        ? ["A", "G"]
+        : ["A", "G", ...agentArms],
+  );
+  const { arms, graphBuildMs, commit, graphDir } = prepareArms(
+    runDir,
+    values.ref,
+    ARMS.filter((arm) => needed.has(arm)),
+  );
   const meta = {
     commit,
     date: new Date().toISOString(),
     graphify: version("graphify"),
     graphBuildMs: Math.round(graphBuildMs),
-    graph: graphStats(arms.B.dir),
+    graph: graphStats(graphDir),
   };
   try {
     if (command !== "agent") {
@@ -91,21 +108,21 @@ if (command === "keys") {
           : undefined,
         timeoutMs: Number(values["timeout-min"]) * 60_000,
         tasks,
-        arms: values.arms
-          ? ARMS.filter((arm) => values.arms!.split(",").includes(arm))
-          : undefined,
+        arms: agentArms,
         onResult: (r, done, total) =>
           console.log(
-            `[${done}/${total}] ${r.task} ${r.arm} r${r.repeat}: ${r.ok ? "ok" : `FAILED (${r.error})`} acc=${r.score.accuracy.toFixed(2)} in=${r.inputTokens} out=${r.outputTokens} tools=${r.toolCalls} graphify=${r.graphifyCalls} ${(r.wallMs / 1000).toFixed(0)}s`,
+            `[${done}/${total}] ${r.task} ${r.arm} r${r.repeat}: ${r.ok ? "ok" : `FAILED (${r.error})`} acc=${r.score.accuracy.toFixed(2)} in=${r.inputTokens} out=${r.outputTokens} turns=${r.modelCalls} tools=${r.toolCalls} graph=${r.graphifyCalls}${r.hookDenials ? ` denied=${r.hookDenials}` : ""} ${(r.wallMs / 1000).toFixed(0)}s`,
           ),
       });
       const order = (r: { task: string; arm: string; repeat: number }) =>
         `${r.task}${r.arm}${r.repeat}`;
       results.sort((a, b) => order(a).localeCompare(order(b)));
-      save("agent.json", {
+      save(values.out!, {
         meta: {
           ...meta,
           model: values.model,
+          arms: agentArms,
+          tasks: tasks.map((task) => task.id),
           copilot: version("copilot"),
           repeats: Number(values.repeats),
           concurrency,
@@ -119,7 +136,7 @@ if (command === "keys") {
   } finally {
     // Per-run COPILOT_HOMEs hold session state and credentials; logs stay for inspection.
     rmSync(join(runDir, "homes"), { recursive: true, force: true });
-    if (!values.keep) removeArms(arms);
+    if (!values.keep) removeArms(runDir);
     else console.log(`Kept worktrees and logs in ${runDir}`);
   }
 } else {

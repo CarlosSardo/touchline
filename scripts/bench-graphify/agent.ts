@@ -5,6 +5,7 @@ import { createWriteStream, mkdirSync, readFileSync } from "node:fs";
 import { cpus } from "node:os";
 import { join } from "node:path";
 import type { ArmEnv } from "./arms.ts";
+import { countTokens } from "./scripted.ts";
 import { score, type Score } from "./score.ts";
 import { ARMS, promptFor, TASKS, type Arm, type Task } from "./tasks.ts";
 
@@ -23,6 +24,14 @@ export interface AgentResult {
   uncachedInputTokens: number;
   cacheReadTokens: number;
   cacheWriteTokens: number;
+  /** Tokens the provider processed without a cache hit (uncached input plus cache writes). */
+  freshInputTokens: number;
+  /** Fixed per-call prompt prefix (tool schemas plus system prompt segments, repository instructions included). */
+  prefixTokens: number;
+  /** inputTokens minus modelCalls × prefixTokens: conversation tokens the task itself caused (question, tool output, reasoning). */
+  taskInputTokens: number;
+  /** o200k tokens of every tool result returned to the model. */
+  retrievedTokens: number;
   outputTokens: number;
   reasoningTokens: number;
   modelCalls: number;
@@ -31,8 +40,13 @@ export interface AgentResult {
   toolCalls: number;
   toolNames: Record<string, number>;
   filesViewed: number;
+  /** Graph queries: graphify CLI commands plus Graphify MCP tool calls. */
   graphifyCalls: number;
   graphifyCommands: string[];
+  /** True when the first retrieval call (search, read or graph) was a graph query. */
+  graphFirst: boolean;
+  /** Tool calls denied by the graph-first hook (arm H). */
+  hookDenials: number;
   /** Prompt size of the final model call (system prompt plus the whole conversation so far). */
   promptTokens: number;
   score: Score;
@@ -69,12 +83,25 @@ interface Parsed {
   nanoAiu: number;
   calls: { name: string; args: Record<string, unknown> }[];
   promptTokens: number;
+  prefixTokens: number;
+  results: string[];
+  denials: number;
   exitCode: number | null;
 }
 
 /** True when a shell command invokes the graphify CLI (not merely mentions `graphify-out`). */
 export const runsGraphify = (command: string) =>
   /(?:^|[\s;&|(])graphify(?:\s|$)/.test(command);
+
+const SHELL_RETRIEVAL =
+  /(^|[\s;&|(])(rg|grep|egrep|find|cat|sed|awk|head|tail|nl|graphify|python3?)(\s|$)/;
+/** A call that fetches code or graph content (not bookkeeping such as report_intent or tool_search_tool). */
+const isRetrieval = (tool: string, args: Record<string, unknown>) =>
+  tool.startsWith("graphify-") ||
+  ["grep", "rg", "glob", "view", "semantic_code_search"].includes(tool) ||
+  (tool === "bash" &&
+    typeof args.command === "string" &&
+    SHELL_RETRIEVAL.test(args.command));
 
 function parseEvents(jsonl: string): Parsed {
   const parsed: Parsed = {
@@ -85,6 +112,9 @@ function parseEvents(jsonl: string): Parsed {
     nanoAiu: 0,
     calls: [],
     promptTokens: 0,
+    prefixTokens: 0,
+    results: [],
+    denials: 0,
     exitCode: null,
   };
   for (const line of jsonl.split("\n")) {
@@ -125,8 +155,21 @@ function parseEvents(jsonl: string): Parsed {
       parsed.premium = snapshot.totalPremiumRequestCost ?? 0;
       parsed.nanoAiu = snapshot.totalNanoAiu ?? 0;
       for (const state of event.data?.promptCacheBreakState ?? [])
-        for (const model of Object.values<any>(state.models ?? {}))
+        for (const model of Object.values<any>(state.models ?? {})) {
           parsed.promptTokens ||= model.prompt_tokens ?? 0;
+          parsed.prefixTokens ||=
+            (model.tool_tokens ?? 0) +
+            (model.system_segments ?? []).reduce(
+              (sum: number, segment: { tokens?: number }) =>
+                sum + (segment.tokens ?? 0),
+              0,
+            );
+        }
+    } else if (event.type === "tool.execution_complete") {
+      const content = event.data?.result?.content ?? event.data?.error?.message;
+      if (typeof content === "string") parsed.results.push(content);
+      if (/^Denied by preToolUse hook/.test(event.data?.error?.message ?? ""))
+        parsed.denials++;
     } else if (event.type === "result") {
       parsed.exitCode = event.exitCode ?? null;
       parsed.premium ||= event.usage?.premiumRequests ?? 0;
@@ -146,7 +189,7 @@ function runOnce(
   mkdirSync(home, { recursive: true });
   const args = [
     "-p",
-    promptFor(task, armEnv.arm),
+    promptFor(task),
     "--output-format",
     "json",
     "--allow-all",
@@ -156,6 +199,7 @@ function runOnce(
     model,
     "--reasoning-effort",
     "medium",
+    ...armEnv.extraArgs,
   ];
   return new Promise<{
     stdout: string;
@@ -237,7 +281,22 @@ export async function runAgent(
     const commands = parsed.calls.flatMap(({ args }) =>
       typeof args.command === "string" ? [args.command] : [],
     );
-    const graphifyCommands = commands.filter(runsGraphify);
+    const graphifyCommands = [
+      ...commands.filter(runsGraphify),
+      ...parsed.calls
+        .filter(({ name: tool }) => tool.startsWith("graphify-"))
+        .map(({ name: tool, args }) => `mcp:${tool} ${JSON.stringify(args)}`),
+    ];
+    const firstRetrieval = parsed.calls.find(({ name: tool, args }) =>
+      isRetrieval(tool, args),
+    );
+    const graphFirst =
+      !!firstRetrieval &&
+      (firstRetrieval.name.startsWith("graphify-") ||
+        (typeof firstRetrieval.args.command === "string" &&
+          runsGraphify(firstRetrieval.args.command)));
+    const inputTokens = parsed.usage.inputTokens ?? 0;
+    const modelCalls = parsed.usage.modelCalls ?? 0;
     const viewed = new Set(
       parsed.calls.flatMap(({ name: tool, args }) =>
         tool === "view" && typeof args.path === "string" ? [args.path] : [],
@@ -260,13 +319,24 @@ export async function runAgent(
       attempts: attempt,
       wallMs: run.wallMs,
       apiMs: parsed.apiMs,
-      inputTokens: parsed.usage.inputTokens ?? 0,
+      inputTokens,
       uncachedInputTokens: parsed.usage.uncachedInput ?? 0,
       cacheReadTokens: parsed.usage.cacheReadTokens ?? 0,
       cacheWriteTokens: parsed.usage.cacheWriteTokens ?? 0,
+      freshInputTokens:
+        (parsed.usage.uncachedInput ?? 0) +
+        (parsed.usage.cacheWriteTokens ?? 0),
+      prefixTokens: parsed.prefixTokens,
+      taskInputTokens: Math.max(
+        0,
+        inputTokens - modelCalls * parsed.prefixTokens,
+      ),
+      retrievedTokens: parsed.results.length
+        ? (await countTokens([parsed.results.join("\n")]))[0]
+        : 0,
       outputTokens: parsed.usage.outputTokens ?? 0,
       reasoningTokens: parsed.usage.reasoningTokens ?? 0,
-      modelCalls: parsed.usage.modelCalls ?? 0,
+      modelCalls,
       premiumRequests: parsed.premium,
       nanoAiu: parsed.nanoAiu,
       toolCalls: parsed.calls.length,
@@ -274,6 +344,8 @@ export async function runAgent(
       filesViewed: viewed.size,
       graphifyCalls: graphifyCommands.length,
       graphifyCommands,
+      graphFirst,
+      hookDenials: parsed.denials,
       promptTokens: parsed.promptTokens,
       score: score(task, parsed.answer, armEnv.dir),
       answer: parsed.answer,
@@ -284,7 +356,7 @@ export async function runAgent(
 
 /** Runs every task × arm × repeat with at most `concurrency` sessions in flight; the arms of one task and repeat start together. */
 export async function runAgents(
-  arms: Record<Arm, ArmEnv>,
+  arms: Partial<Record<Arm, ArmEnv>>,
   options: {
     runDir: string;
     model: string;
@@ -309,7 +381,7 @@ export async function runAgents(
       const { task, arm, repeat } = jobs[next++];
       const result = await runAgent(
         task,
-        arms[arm],
+        arms[arm]!,
         repeat,
         options.runDir,
         options.model,

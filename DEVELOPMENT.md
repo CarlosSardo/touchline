@@ -67,27 +67,27 @@ The build type-checks client/tooling and server code, then emits the Vite UI int
 
 ## Commands
 
-| Command | Purpose |
-| --- | --- |
-| `npm run dev` | Watch the API and run Vite with live reload |
-| `npm run build` / `npm start` | Build, then serve UI and API together |
-| `npm run lint` / `npm run format` | Run oxlint / format registered source paths with Prettier |
-| `npm run db:migrate` | Print an offline migration plan; `-- --apply --yes` applies pending versions |
-| `npm run db:migrate -- --registered` | Plan world migrations for the account registry; add `--apply --yes` to resolve and migrate registered worlds |
-| `npm run db:seed -- ...` | Generate a world; intended for a new empty development target |
-| `npm run accounts:migrate` | Dry run of account-registry provisioning; `-- --apply --yes` creates or validates it |
-| `npm run career:delete -- --account ID` | Dry run of deleting one active career, keeping the account; also accepts `--username`, `--email`, `--list`; deletion needs `--apply --yes` |
-| `npm run data:export -- --out FILE.touchline.gz` | Export the selected world |
-| `npm run data:export -- --everything --out-dir DIR` | Export registry, worlds and snapshots with a manifest |
-| `npm run data:export -- --verify DIR` | Verify a full portable backup offline |
-| `npm run world:reset -- --all` | Dry run of emptying worlds and snapshots, retaining registry and migrations; mutation needs `--apply --yes` |
-| `npm run db:footprint` | Read-only per-table storage report, including the 1.6 GB world budget |
-| `npm run world:check` | Generate/check an isolated test world; optional `-- --nations=EN,ES` |
-| `npm run simulation:check` | Compare a 600-match sample to aggregate targets; `-- --seasons=3` runs a storage-aware season soak |
-| `npm run image:build` | Build `touchline:local` for the local architecture |
-| `npm run ci` | Run the same containerized pipeline as GitHub Actions |
-| `npm run graph:setup` / `npm run graph:update` | Enable the shared Graphify hook and merge driver once per clone / rebuild the code graph |
-| `npm run pi:backup` / `npm run pi:restore -- FILE --yes` | Back up / replace the database of the bundled Compose PostgreSQL service |
+| Command                                                  | Purpose                                                                                                                                    |
+| -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `npm run dev`                                            | Watch the API and run Vite with live reload                                                                                                |
+| `npm run build` / `npm start`                            | Build, then serve UI and API together                                                                                                      |
+| `npm run lint` / `npm run format`                        | Run oxlint / format registered source paths with Prettier                                                                                  |
+| `npm run db:migrate`                                     | Print an offline migration plan; `-- --apply --yes` applies pending versions                                                               |
+| `npm run db:migrate -- --registered`                     | Plan world migrations for the account registry; add `--apply --yes` to resolve and migrate registered worlds                               |
+| `npm run db:seed -- ...`                                 | Generate a world; intended for a new empty development target                                                                              |
+| `npm run accounts:migrate`                               | Dry run of account-registry provisioning; `-- --apply --yes` creates or validates it                                                       |
+| `npm run career:delete -- --account ID`                  | Dry run of deleting one active career, keeping the account; also accepts `--username`, `--email`, `--list`; deletion needs `--apply --yes` |
+| `npm run data:export -- --out FILE.touchline.gz`         | Export the selected world                                                                                                                  |
+| `npm run data:export -- --everything --out-dir DIR`      | Export registry, worlds and snapshots with a manifest                                                                                      |
+| `npm run data:export -- --verify DIR`                    | Verify a full portable backup offline                                                                                                      |
+| `npm run world:reset -- --all`                           | Dry run of emptying worlds and snapshots, retaining registry and migrations; mutation needs `--apply --yes`                                |
+| `npm run db:footprint`                                   | Read-only per-table storage report, including the 1.6 GB world budget                                                                      |
+| `npm run world:check`                                    | Generate/check an isolated test world; optional `-- --nations=EN,ES`                                                                       |
+| `npm run simulation:check`                               | Compare a 600-match sample to aggregate targets; `-- --seasons=3` runs a storage-aware season soak                                         |
+| `npm run image:build`                                    | Build `touchline:local` for the local architecture                                                                                         |
+| `npm run ci`                                             | Run the same containerized pipeline as GitHub Actions                                                                                      |
+| `npm run graph:setup` / `npm run graph:update`           | Enable the shared Graphify hook and merge driver once per clone / rebuild the code graph                                                   |
+| `npm run pi:backup` / `npm run pi:restore -- FILE --yes` | Back up / replace the database of the bundled Compose PostgreSQL service                                                                   |
 
 Inspect the script's `--help` and target before administrative commands. Dry-run flags are not interchangeable with permission to mutate production. Export files and registry backups contain private data and must not be committed.
 
@@ -95,17 +95,17 @@ Inspect the script's `--help` and target before administrative commands. Dry-run
 
 [.env.example](.env.example) is the configuration inventory. Keep secrets in the ignored `.env`, not in images, source, logs or exported command output.
 
-| Area | Variables and defaults |
-| --- | --- |
-| SQL connection | `SQL_HOST=127.0.0.1`, `SQL_PORT=5432`, `SQL_DATABASE=touchline`, paired `SQL_USER` / `SQL_PASSWORD` |
-| SQL behavior | `SQL_SCHEMA=public`, `SQL_POOL_SIZE=10`, `SQL_REQUEST_TIMEOUT_MS=120000` |
-| SQL transport | `SQL_SSL=disable` for loopback/private Compose networking; non-local hosts require `verify-full` |
-| HTTP listener | `API_HOST=127.0.0.1`, `API_PORT=3001`; `PORT` overrides `API_PORT` |
-| Compose PostgreSQL | `POSTGRES_PASSWORD`, `POSTGRES_PUBLISH_PORT=5432`; app role is separate from the superuser |
-| Compose app | `TOUCHLINE_IMAGE`, `TOUCHLINE_BIND=127.0.0.1`, `TOUCHLINE_PORT=3001`, `TOUCHLINE_NODE_OPTIONS=--max-old-space-size=1536` |
-| HTTPS | `TOUCHLINE_DOMAIN` for the optional Caddy profile |
-| Access limits | `MAX_PLAYERS=10`, `DB_SIZE_LIMIT_GB=24`; checked when approving access |
-| Backup retention | `BACKUP_DIR=backups`, `BACKUP_RETENTION_DAYS=14` |
+| Area               | Variables and defaults                                                                                                   |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------ |
+| SQL connection     | `SQL_HOST=127.0.0.1`, `SQL_PORT=5432`, `SQL_DATABASE=touchline`, paired `SQL_USER` / `SQL_PASSWORD`                      |
+| SQL behavior       | `SQL_SCHEMA=public`, `SQL_POOL_SIZE=10`, `SQL_REQUEST_TIMEOUT_MS=120000`                                                 |
+| SQL transport      | `SQL_SSL=disable` for loopback/private Compose networking; non-local hosts require `verify-full`                         |
+| HTTP listener      | `API_HOST=127.0.0.1`, `API_PORT=3001`; `PORT` overrides `API_PORT`                                                       |
+| Compose PostgreSQL | `POSTGRES_PASSWORD`, `POSTGRES_PUBLISH_PORT=5432`; app role is separate from the superuser                               |
+| Compose app        | `TOUCHLINE_IMAGE`, `TOUCHLINE_BIND=127.0.0.1`, `TOUCHLINE_PORT=3001`, `TOUCHLINE_NODE_OPTIONS=--max-old-space-size=1536` |
+| HTTPS              | `TOUCHLINE_DOMAIN` for the optional Caddy profile                                                                        |
+| Access limits      | `MAX_PLAYERS=10`, `DB_SIZE_LIMIT_GB=24`; checked when approving access                                                   |
+| Backup retention   | `BACKUP_DIR=backups`, `BACKUP_RETENTION_DAYS=14`                                                                         |
 
 The current API configuration parser requires `MAX_PLAYERS` to be a **positive integer**. Although the example's comment describes `0` as admins-only, that value currently prevents startup; use a positive cap until implementation and examples are aligned.
 
@@ -154,12 +154,12 @@ npm run ci -- timings
 npm run ci -- dagger check -l
 ```
 
-| Suite | Coverage |
-| --- | --- |
-| `static` | Lint, production build and SQL-free unit tests, plus generated SDK consistency |
-| `backend` | SQL integration/save tests, balanced into 3 database-isolated shards |
-| `world` | Catalog checks, world invariants, 3-season soak by default, footprint and backup/reset smoke |
-| `e2e` | Playwright in the official browser image, 2 spec-file shards with separate SQL and servers |
+| Suite     | Coverage                                                                                     |
+| --------- | -------------------------------------------------------------------------------------------- |
+| `static`  | Lint, production build and SQL-free unit tests, plus generated SDK consistency               |
+| `backend` | SQL integration/save tests, balanced into 3 database-isolated shards                         |
+| `world`   | Catalog checks, world invariants, 3-season soak by default, footprint and backup/reset smoke |
+| `e2e`     | Playwright in the official browser image, 2 spec-file shards with separate SQL and servers   |
 
 `all` gates on `static`, then runs backend/world/e2e in parallel. Steps within a suite record their exit status and continue to collect diagnostics; failed static prevents the remaining suites from starting. Logs/reports/status files are exported to `ci-logs/<suite>/`, and any failed step makes the entrypoint fail.
 
@@ -193,7 +193,7 @@ graphify explain "Store"                          # one node and its neighbours
 
 Scan exclusions live in [.graphifyignore](.graphifyignore) (on top of `.gitignore`). If `graph.json` hits a merge conflict, the driver is not registered or rejected a corrupt file: run `npm run graph:setup`, or `rm graphify-out/graph.json && npm run graph:update`. The Copilot skill is in [.github/skills/graphify](.github/skills/graphify) and the always-on guidance in [.github/copilot-instructions.md](.github/copilot-instructions.md); after upgrading the CLI, refresh the skill with `graphify install --project --platform copilot` and move it from `.copilot/skills/` to `.github/skills/`.
 
-Whether the graph pays off is measured by [scripts/bench-graphify](scripts/bench-graphify): `npm run bench:graphify -- all` runs eight Touchline questions as real Copilot CLI sessions (claude-sonnet-5.5 by default; it uses premium requests) in three arms (grep only, Graphify available, Graphify nudged), scores the answers against compiler-derived keys and rewrites [REPORT.md](scripts/bench-graphify/REPORT.md). `scripted` (no model calls), `agent` and `report` run the stages separately; the harness is excluded from the graph so agents cannot read its answer keys.
+Whether the graph pays off is measured by [scripts/bench-graphify](scripts/bench-graphify): `npm run bench:graphify -- all` runs eleven Touchline questions (transitive callers, import cycles, unused exports, change plans, plus controls) as real Copilot CLI sessions (claude-sonnet-5.5 by default; it uses premium requests) in four arms: grep only, Graphify CLI, Graphify MCP server and CLI plus a graph-first hook. It scores the answers against compiler-derived keys, checks the [pre-registered hypotheses](scripts/bench-graphify/hypotheses.md) and rewrites [REPORT.md](scripts/bench-graphify/REPORT.md). `scripted` (no model calls), `agent` (`--arms`, `--tasks`, `--model`, `--out`) and `report` run the stages separately; the harness is excluded from the graph so agents cannot read its answer keys.
 
 ## Hosting and first install
 
@@ -201,11 +201,11 @@ The supported hobby topology is an arm64/amd64 Linux host with Docker; the refer
 
 The root [compose.yaml](compose.yaml) contains:
 
-| Service | Boundary |
-| --- | --- |
+| Service    | Boundary                                                                                                 |
+| ---------- | -------------------------------------------------------------------------------------------------------- |
 | `postgres` | Official PostgreSQL 18; `postgres-data` volume mounted at `/var/lib/postgresql`; host port loopback-only |
-| `app` | React static UI and Express API; loopback host port 3001; 2 GB memory limit |
-| `caddy` | Optional `https` profile; ports 80/443 and persistent TLS/config volumes |
+| `app`      | React static UI and Express API; loopback host port 3001; 2 GB memory limit                              |
+| `caddy`    | Optional `https` profile; ports 80/443 and persistent TLS/config volumes                                 |
 
 The first PostgreSQL initialization creates a non-superuser owner role from `SQL_USER` / `SQL_PASSWORD`. The `postgres` superuser is for administration and backups, not application traffic. Changing those environment values later does not re-run the initialization script on an existing volume.
 
@@ -261,17 +261,17 @@ Pi configuration changes must also be reflected in the host's source-of-truth re
 
 Hosted mode uses Authorization Code + PKCE through `openid-client`, with a confidential OIDC client using `client_secret_basic`. Register `https://<host>/auth/callback` and scopes `openid profile email groups`.
 
-| Setting | Meaning |
-| --- | --- |
-| `REQUIRE_AUTH=true` | Mandatory for any non-loopback API listener, including inside the image |
-| `APP_ORIGIN` | Exact public HTTPS origin, with no trailing path or slash |
-| `OIDC_ISSUER` | Exact issuer URL advertised by provider discovery |
-| `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` | Client ID and plain client secret |
-| `OIDC_LOGOUT_URL` | Optional provider sign-out page if discovery has no suitable end-session endpoint |
-| `SESSION_SECRET` | At least 32 characters, distinct from client secret; generate with `openssl rand -base64 48` |
-| `SESSION_TTL_HOURS` | 1-720 hours, default 8 |
-| `TRUST_PROXY` | Trusted proxy hops, typically 1 |
-| `ADMIN_GROUP` | Signed-in provider group for access administration, default `admins` |
+| Setting                                 | Meaning                                                                                      |
+| --------------------------------------- | -------------------------------------------------------------------------------------------- |
+| `REQUIRE_AUTH=true`                     | Mandatory for any non-loopback API listener, including inside the image                      |
+| `APP_ORIGIN`                            | Exact public HTTPS origin, with no trailing path or slash                                    |
+| `OIDC_ISSUER`                           | Exact issuer URL advertised by provider discovery                                            |
+| `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` | Client ID and plain client secret                                                            |
+| `OIDC_LOGOUT_URL`                       | Optional provider sign-out page if discovery has no suitable end-session endpoint            |
+| `SESSION_SECRET`                        | At least 32 characters, distinct from client secret; generate with `openssl rand -base64 48` |
+| `SESSION_TTL_HOURS`                     | 1-720 hours, default 8                                                                       |
+| `TRUST_PROXY`                           | Trusted proxy hops, typically 1                                                              |
+| `ADMIN_GROUP`                           | Signed-in provider group for access administration, default `admins`                         |
 
 For Authelia 4.39, generate a client secret/hash with `authelia crypto hash generate pbkdf2 --variant sha512 --random --random.length 72 --random.charset rfc3986`. Store the random password only in Touchline's `.env` and the digest in Authelia. Add this to an **already configured** OIDC provider (its `hmac_secret` and `jwks` are separate prerequisites):
 
@@ -280,23 +280,24 @@ identity_providers:
   oidc:
     claims_policies:
       touchline:
-        id_token: ['groups', 'email', 'email_verified', 'name', 'preferred_username']
+        id_token:
+          ["groups", "email", "email_verified", "name", "preferred_username"]
     clients:
-      - client_id: 'touchline'
-        client_name: 'Touchline'
-        client_secret: '<generated PBKDF2 digest>'
+      - client_id: "touchline"
+        client_name: "Touchline"
+        client_secret: "<generated PBKDF2 digest>"
         public: false
-        authorization_policy: 'two_factor'
-        consent_mode: 'implicit'
+        authorization_policy: "two_factor"
+        consent_mode: "implicit"
         require_pkce: true
-        pkce_challenge_method: 'S256'
-        redirect_uris: ['https://touchline.example.com/auth/callback']
-        scopes: ['openid', 'profile', 'email', 'groups']
-        response_types: ['code']
-        grant_types: ['authorization_code']
-        token_endpoint_auth_method: 'client_secret_basic'
-        userinfo_signed_response_alg: 'none'
-        claims_policy: 'touchline'
+        pkce_challenge_method: "S256"
+        redirect_uris: ["https://touchline.example.com/auth/callback"]
+        scopes: ["openid", "profile", "email", "groups"]
+        response_types: ["code"]
+        grant_types: ["authorization_code"]
+        token_endpoint_auth_method: "client_secret_basic"
+        userinfo_signed_response_alg: "none"
+        claims_policy: "touchline"
 ```
 
 Restart/reload Authelia through its own operations process. Touchline reads claims from ID token and UserInfo; configure `OIDC_LOGOUT_URL=https://auth.example.com/logout` when the provider has no end-session endpoint.
@@ -380,17 +381,17 @@ Use this sequence only for the bundled image-pull/build topology, not the `local
 
 Migration dry runs print the known migration list **without connecting to SQL**; they do not prove which versions are pending or that target accounts are valid. Apply validates registered schemas, refuses missing worlds rather than recreating them, and applies pending numbered migrations. The registry is provisioned separately with `accounts:migrate`.
 
-| World migration | Change |
-| --- | --- |
-| 1 | Baseline world and save structures |
-| 2 | Narrow/update-friendly player storage |
-| 3-5 | GBE evidence, registrations and club-offer index |
-| 6 | Sanctions and removal of old market indexes |
-| 7 | Infrastructure projects and world-feed index |
-| 8 | Owners, club ownership and ownership events |
-| 9 | Player honours, injuries and milestones |
-| 10 | Competition top-scorer index |
-| 11 | Indexed height/weight copies from player profiles |
+| World migration | Change                                            |
+| --------------- | ------------------------------------------------- |
+| 1               | Baseline world and save structures                |
+| 2               | Narrow/update-friendly player storage             |
+| 3-5             | GBE evidence, registrations and club-offer index  |
+| 6               | Sanctions and removal of old market indexes       |
+| 7               | Infrastructure projects and world-feed index      |
+| 8               | Owners, club ownership and ownership events       |
+| 9               | Player honours, injuries and milestones           |
+| 10              | Competition top-scorer index                      |
+| 11              | Indexed height/weight copies from player profiles |
 
 Migration 2 rewrites player storage and can take longer; migration 11 backfills body columns. Do not interrupt a migration just because it exceeds a normal request's expected duration. New tables may be populated lazily on later load/day passes; migration does not regenerate the world.
 
@@ -416,18 +417,18 @@ Simulation is CPU- and SQL-heavy work in the API process, not a background worke
 
 Each day commits separately. A failure after completed days returns progress plus an error; those days remain persisted. A first-day failure uses the normal error response. Other world actions/read views wait or receive `409 world_busy` during an operation; session/activity polling remains available.
 
-| Symptom | Check / response |
-| --- | --- |
-| UI opens but game data fails | `/api/health` is liveness only and does not open SQL; inspect `docker compose logs app` and the authenticated `/api/health/details` |
-| Uninitialized local career | Confirm the intended development target; migrate/seed a new empty one, never reseed a real career |
-| Missing registry or registered schema | Correct provisioning/target or restore data; startup deliberately refuses to invent missing worlds |
-| Public binding refused | Set genuine hosted authentication; do not weaken the loopback/auth guard |
-| OIDC callback/discovery fails | Check exact HTTPS origin, redirect URI, issuer, container DNS/TLS reachability and proxy-hop configuration |
-| Signed in but waiting/denied | Use an admin's `/admin` approval flow; identity alone is not authorization |
-| Proxy returns 502 after deploy | Check explicit `TOUCHLINE_PORT` in host `.env` matches the proxy and container is running |
-| SHA image cannot be pulled | Confirm verified release was published and package read permission; unpublished refs need a deliberate `--build` |
-| Deploy migration/start failure | Inspect logs and restore a matching database backup if rollback is required |
-| Large database / slow simulation | Run `db:footprint`, inspect PostgreSQL slow-query logs and reproduce with an isolated season soak |
+| Symptom                               | Check / response                                                                                                                    |
+| ------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| UI opens but game data fails          | `/api/health` is liveness only and does not open SQL; inspect `docker compose logs app` and the authenticated `/api/health/details` |
+| Uninitialized local career            | Confirm the intended development target; migrate/seed a new empty one, never reseed a real career                                   |
+| Missing registry or registered schema | Correct provisioning/target or restore data; startup deliberately refuses to invent missing worlds                                  |
+| Public binding refused                | Set genuine hosted authentication; do not weaken the loopback/auth guard                                                            |
+| OIDC callback/discovery fails         | Check exact HTTPS origin, redirect URI, issuer, container DNS/TLS reachability and proxy-hop configuration                          |
+| Signed in but waiting/denied          | Use an admin's `/admin` approval flow; identity alone is not authorization                                                          |
+| Proxy returns 502 after deploy        | Check explicit `TOUCHLINE_PORT` in host `.env` matches the proxy and container is running                                           |
+| SHA image cannot be pulled            | Confirm verified release was published and package read permission; unpublished refs need a deliberate `--build`                    |
+| Deploy migration/start failure        | Inspect logs and restore a matching database backup if rollback is required                                                         |
+| Large database / slow simulation      | Run `db:footprint`, inspect PostgreSQL slow-query logs and reproduce with an isolated season soak                                   |
 
 Unexpected API failures log operation, method/path, SQLSTATE and stack with configured secrets redacted; request bodies/SQL parameters are not logged. PostgreSQL logs statements slower than 2 seconds in the reference Compose setup. Do not upload personal saves or raw credentials when reporting problems.
 
