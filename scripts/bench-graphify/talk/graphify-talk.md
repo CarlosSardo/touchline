@@ -225,18 +225,24 @@ The bets were written down (hypotheses.md) and committed before the first full r
 
 ---
 
-<!-- _class: chart -->
+<!-- _class: full -->
+<!-- _paginate: false -->
+<!-- _footer: "" -->
 
-# The harness ⚙️
-
-![w:1100](assets/harness.svg)
+![animation w:1280](assets/harness.svg)
 
 <!--
 ⏱ 4:40–5:10
-Each agent gets its own git worktree of the same commit; the grep agent's PATH makes graphify "command not found".
-The benchmark code (and its answer keys) is deleted from every worktree: no peeking.
-One more graph agent tests delivery: the same graph served over Graphify's MCP server instead of the CLI.
-Cost comes from the Copilot CLI's own telemetry: turns, input tokens, cost. Parallelism made iterating cheap: pilot, fix, rerun in an afternoon.
+Follow the pills left to right: START is one commit, END is REPORT.md.
+1 commit: everyone gets exactly the same code (6cb5b3f).
+2 the graph is built once, 14 s, no LLM, then copied in: the graph agents never pay for building it.
+3 a git worktree per agent. The benchmark folder (and its answer keys) is deleted from all three: no peeking.
+  A, the grep agent: graphify is blocked ("command not found") and it gets good search tips.
+  G gets the graph plus the CLI; M gets the same graph through Graphify's MCP server: that tests delivery, not the map.
+4 the same prompt to every agent, a fresh Copilot CLI session per run; 14 sessions at a time, the squares replay the real run times.
+5 each run leaves a JSON answer and telemetry from Copilot's own log (tools, tokens, time, cost); the answer is scored against the compiler's key, no LLM in grading.
+6 every run becomes one record in results/*.json; REPORT.md is computed from those, and we can re-score without calling a model.
+Why: identical everything except the map, so any difference in cost or accuracy is the map's. Parallelism made iterating cheap: pilot, fix, rerun in an afternoon.
 -->
 
 ---

@@ -5,8 +5,8 @@ Animated, in the style of Graphify's README demo (a terminal on the left, Touchl
   assets/grep-relay.svg      an agent grepping one hop per model turn (slide "The grep relay")
   assets/graphify-demo.svg   one `graphify affected` call lighting up the whole chain (slide "Demo")
   assets/graphify-build.svg  what `graphify update .` does to a repo: scan, parse, link, cluster, write (full slide)
+  assets/harness.svg         one benchmark sweep from commit to REPORT.md, runs replayed with real times (full slide)
 Static diagrams:
-  assets/harness.svg         how the benchmark runs (slide "The harness")
   assets/ground-truth.svg    how keys and scores are produced deterministically (slide "Ground truth")
   assets/payloads.svg        the prompt, its answer key and two stored run records (slide "The raw data")
   assets/score-example.svg   real answers scored against a real key (slide "Real answers, real scores")
@@ -592,39 +592,253 @@ def static_svg(w, h, body) -> str:
     )
 
 
-def badge(x, y, label, color) -> str:
-    w = len(label) * 10.8 + 28
-    return (
-        f'<rect x="{x}" y="{y}" width="{w:.0f}" height="38" rx="19" fill="none" stroke="{color}" stroke-width="2"/>'
-        f'<text x="{x + w / 2:.0f}" y="{y + 25}" font-size="18" font-weight="700" fill="{color}" text-anchor="middle">{escape(label)}</text>'
+HARNESS_LANES = [
+    ("A", "grep agent", GOLD, [
+        [("+ ", MUTED), ("rg, file reads, shell", INK)],
+        [("$ graphify", INK), (" → command not found", RED)],
+        [("+ ", MUTED), ("good search tips", INK), ("  A.md", MUTED)],
+    ]),
+    ("G", "graph agent · CLI", ACCENT, [
+        [("+ ", MUTED), ("rg, file reads, shell", INK)],
+        [("+ ", MUTED), ("graphify-out/", ACCENT), (" + graphify CLI", INK)],
+        [("+ ", MUTED), ("ask the graph first", INK), ("  G.md", MUTED)],
+    ]),
+    ("M", "graph agent · MCP", VIOLET, [
+        [("+ ", MUTED), ("rg, file reads, shell", INK)],
+        [("+ ", MUTED), ("same graph", ACCENT), (" via MCP server", INK)],
+        [("+ ", MUTED), ("ask the graph first", INK), ("  M.md", MUTED)],
+    ]),
+]
+
+
+def harness_run(frame):
+    """Full-slide story of one benchmark sweep: commit, graph once, a worktree per agent, parallel runs, score, report."""
+    SW, SH = 1280, 720
+    t_commit, t_graph, t_tree, t_run, t_score, t_report = 0.6, 2.0, 4.2, 7.4, 12.8, 15.0
+    end = t_report + 1.8
+    period = end + HOLD + 1.2
+    a = Anim(period, end + 1.0, frame)
+    b = []
+
+    def fade(on, body, off=None, f=0.3):
+        return f'<g opacity="0">{a.show(on, off, fade=f)}{body}</g>'
+
+    def tag(x, y, label, color):
+        w = len(label) * 8.4 + 22
+        return (f'<rect x="{x}" y="{y - 17}" width="{w:.0f}" height="24" rx="12" fill="{color}"/>'
+                f'<text x="{x + w / 2:.0f}" y="{y}" font-size="14" font-weight="800" fill="{DECK_BG}" text-anchor="middle">{escape(label)}</text>')
+
+    def box(x, y, w, h, color, fill=PANEL):
+        return f'<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="10" fill="{fill}" stroke="{color}" stroke-width="2"/>'
+
+    def line(x1, y1, x2, y2, color, dash="", head=True, width=2):
+        d = f' stroke-dasharray="{dash}"' if dash else ""
+        m = f' marker-end="url(#h{color[1:]})"' if head else ""
+        return f'<path d="M{x1} {y1} L{x2} {y2}" stroke="{color}" stroke-width="{width}" fill="none"{d}{m}/>'
+
+    # Title and stage bar.
+    b.append(f'<text x="64" y="70" font-size="36" font-weight="700" fill="{HEAD}"><tspan fill="{ACCENT}"># </tspan>The harness: one fair sweep, start to finish</text>')
+    stages = [("1 commit", t_commit), ("2 build graph once", t_graph), ("3 worktree per agent", t_tree),
+              ("4 run in parallel", t_run), ("5 score", t_score), ("6 report", t_report)]
+    sx = 64
+    for i, (label, on) in enumerate(stages):
+        off = stages[i + 1][1] if i + 1 < len(stages) else period
+        w = len(label) * 9.6 + 34
+        b.append(
+            f'<rect x="{sx}" y="96" width="{w:.0f}" height="32" rx="16" stroke-width="2">'
+            f'{a.animate("fill", [(0, PANEL), (on, PANEL), (on + 0.2, ACCENT), (off, ACCENT), (off + 0.2, PANEL)])}'
+            f'{a.animate("stroke", [(0, LINE), (on, LINE), (on + 0.2, ACCENT)])}</rect>'
+            f'<text x="{sx + w / 2:.0f}" y="117" font-size="16" font-weight="700" text-anchor="middle">'
+            f'{a.animate("fill", [(0, MUTED), (on, MUTED), (on + 0.2, DECK_BG), (off, DECK_BG), (off + 0.2, ACCENT)])}{escape(label)}</text>'
+        )
+        if i + 1 < len(stages):
+            b.append(f'<text x="{sx + w + 9:.0f}" y="117" font-size="16" fill="{LINE}">→</text>')
+        sx += w + 30
+
+    lane_y = [216 + k * 136 for k in range(3)]
+    lane_h = 124
+
+    # 1. The start: one commit of Touchline, as is.
+    b.append(fade(0.2, tag(56, 180, "▶ START", ACCENT), f=0.2))
+    b.append(fade(t_commit, box(56, 196, 200, 112, HEAD)
+             + f'<text x="72" y="226" font-size="19" font-weight="700" fill="{INK}">1 commit</text>'
+             + f'<text x="72" y="254" font-size="17" fill="{HEAD}">{RELAY_COMMIT[:7]}</text>'
+             + f'<text x="72" y="280" font-size="13" fill="{MUTED}">Touchline, as is:</text>'
+             + f'<text x="72" y="298" font-size="13" fill="{MUTED}">349 files</text>'))
+
+    # 2. The graph, built once in its own worktree and copied to the graph agents.
+    gy = 384
+    dots = []
+    rng = random.Random(5)
+    for k in range(26):
+        cx, cy = 156 + 64 * math.cos(k * 2.4) * math.sqrt(k / 26), gy + 100 + 26 * math.sin(k * 2.4) * math.sqrt(k / 26)
+        dots.append((cx, cy, PALETTE[k % 5]))
+    links = "".join(
+        f'<line x1="{dots[i][0]:.1f}" y1="{dots[i][1]:.1f}" x2="{dots[j][0]:.1f}" y2="{dots[j][1]:.1f}" stroke="{LINE}"/>'
+        for i, j in ((rng.randrange(26), rng.randrange(26)) for _ in range(30))
     )
+    b.append(fade(t_graph - 0.6, line(156, 310, 156, gy - 4, MUTED), f=0.3))
+    b.append(fade(t_graph, box(56, gy, 200, 220, ACCENT)
+             + f'<text x="72" y="{gy + 28}" font-size="19" font-weight="700" fill="{ACCENT}">graph, once</text>'
+             + f'<text x="72" y="{gy + 54}" font-size="14"><tspan fill="{ACCENT}">$ </tspan><tspan fill="{INK}">graphify update .</tspan></text>'))
+    b.append(fade(t_graph + 0.5, links, f=0.6))
+    for k, (cx, cy, color) in enumerate(dots):
+        b.append(fade(t_graph + 0.4 + k * 0.03, f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="3.6" fill="{color}"/>', f=0.15))
+    s = BUILD_STATS
+    b.append(fade(t_graph + 1.4,
+                  f'<text x="72" y="{gy + 158}" font-size="13" fill="{INK}">{s["nodes"]:,} nodes</text>'
+                  f'<text x="72" y="{gy + 178}" font-size="13" fill="{INK}">{s["edges"]:,} edges</text>'
+                  f'<text x="72" y="{gy + 204}" font-size="13" fill="{GOLD}">{s["seconds"]} s · 0 LLM tokens</text>'))
 
+    # 3. One git worktree per agent: same commit, answer keys deleted, different tools and instructions.
+    b.append(fade(t_tree - 0.3,
+                  f'<text x="296" y="172" font-size="15" font-weight="700" fill="{INK}">a git worktree per agent</text>'
+                  f'<text x="296" y="194" font-size="13" fill="{MUTED}">same commit · keys deleted · own tools</text>'))
+    bus_x = 276
+    b.append(fade(t_tree, line(256, 252, bus_x, 252, MUTED, head=False) + line(bus_x, 252, bus_x, lane_y[2] + 30, MUTED, head=False)
+                  + "".join(line(bus_x, y + 30, 292, y + 30, MUTED) for y in lane_y)))
+    for k, ((arm, name, color, rows), y) in enumerate(zip(HARNESS_LANES, lane_y)):
+        on = t_tree + 0.2 + k * 0.35
+        b.append(fade(on, box(296, y, 652, lane_h, color, fill="#0f141b")
+                      + f'<text x="312" y="{y + 26}" font-size="16" font-weight="800" fill="{color}">{arm}</text>'
+                      + f'<text x="334" y="{y + 26}" font-size="16" font-weight="700" fill="{INK}">{escape(name)}</text>'))
+        for r, spans in enumerate(rows):
+            b.append(fade(on + 0.25 + r * 0.2, f'<text x="312" y="{y + 50 + r * 20}" font-size="13">{spans_svg(spans)}</text>', f=0.2))
+        # The benchmark folder (with the answer keys) is deleted from every worktree.
+        ky, kon = y + 110, t_tree + 1.7 + k * 0.15
+        b.append(fade(on + 0.6, f'<text x="312" y="{ky}" font-size="13" fill="{MUTED}">scripts/bench-graphify/</text>', f=0.2))
+        b.append(f'<rect x="310" y="{ky - 5}" height="2" fill="{RED}" width="0">'
+                 f'{a.animate("width", [(0, "0"), (kon, "0"), (kon + 0.35, "190")])}</rect>')
+        b.append(fade(kon + 0.35, f'<text x="508" y="{ky}" font-size="13" font-weight="700" fill="{RED}">✗ answer keys</text>', f=0.2))
+    # The graph is copied into the two graph agents' worktrees only.
+    gbus = 266
+    b.append(fade(t_tree + 1.1, line(256, gy + 120, gbus, gy + 120, ACCENT, "5 4", head=False)
+                  + line(gbus, lane_y[1] + 70, gbus, lane_y[2] + 70, ACCENT, "5 4", head=False)
+                  + "".join(line(gbus, y + 70, 292, y + 70, ACCENT, "5 4") for y in lane_y[1:])))
 
-def harness() -> str:
-    b = [card(10, 150, 190, 120, "1 commit", ["same code", "for everyone"], color=HEAD)]
-    rows = [
-        ("grep agent", "graphify blocked", GOLD),
-        ("graph agent: CLI", "graph + 1 command", ACCENT),
-        ("graph agent: MCP", "same graph, MCP server", ACCENT),
+    # 4. The same prompt into every lane, then the sweep replayed with real run times, at most 14 in flight.
+    px = 662
+    b.append(fade(t_run, box(px, 148, 286, 56, HEAD)
+                  + f'<text x="{px + 12}" y="170" font-size="14" font-weight="700" fill="{HEAD}">same prompt, every agent</text>'
+                  + f'<text x="{px + 12}" y="192" font-size="12.5"><tspan fill="{INK}">copilot -p "&lt;question&gt;"</tspan><tspan fill="{MUTED}"> --model</tspan></text>'))
+    pbus = 648
+    b.append(fade(t_run + 0.3, line(px + 10, 204, px + 10, 210, HEAD, head=False) + line(px + 10, 210, pbus, 210, HEAD, head=False)
+                  + line(pbus, 210, pbus, lane_y[2] + 72, HEAD, head=False)
+                  + "".join(line(pbus, y + 72, 660, y + 72, HEAD) for y in lane_y)))
+    tasks = sorted({r["task"] for r in RESULTS["sonnet"]}, key=lambda t: (t[0] != "H", t))
+    jobs = [(t, arm, rep) for rep in (1, 2, 3) for t in tasks for arm in "AGM"]
+    rec = {(r["task"], r["arm"], r["repeat"]): r for r in RESULTS["sonnet"]}
+    slots, timeline = [0.0] * 14, {}
+    for job in jobs:
+        i = min(range(14), key=lambda k: slots[k])
+        timeline[job] = (slots[i], slots[i] + rec[job]["wallMs"])
+        slots[i] += rec[job]["wallMs"]
+    scale = 4.6 / max(slots)
+    t0 = t_run + 0.7
+    cell, gap = 21, 4
+    gx0 = 664
+    worst = min(r["score"]["accuracy"] for r in rec.values() if r["arm"] in "AGM")
+    for k, ((arm, _, color, _), y) in enumerate(zip(HARNESS_LANES, lane_y)):
+        b.append(fade(t_run + 0.4, f'<text x="{gx0}" y="{y + 22}" font-size="12" fill="{MUTED}">11 questions × 3 runs</text>'))
+        for ti, t in enumerate(tasks):
+            for rep in (1, 2, 3):
+                st, en = timeline[(t, arm, rep)]
+                st, en = t0 + st * scale, t0 + en * scale
+                acc = rec[(t, arm, rep)]["score"]["accuracy"]
+                sc = t_score + 0.9 + ti * 0.08
+                final = ACCENT if acc >= 0.999 else GOLD
+                x, cy = gx0 + ti * (cell + gap), y + 36 + (rep - 1) * (cell + gap)
+                b.append(
+                    f'<rect x="{x}" y="{cy}" width="{cell}" height="{cell}" rx="4" stroke-width="1.5" opacity="0">'
+                    f'{a.animate("fill", [(0, PANEL), (st, PANEL), (st + 0.05, HEAD), (en, HEAD), (en + 0.05, "#3a4350"), (sc, "#3a4350"), (sc + 0.2, final)])}'
+                    f'{a.animate("stroke", [(0, LINE), (st, LINE), (st + 0.05, "#a5d6ff"), (en, "#a5d6ff"), (en + 0.05, LINE)])}'
+                    f'{a.show(t_run + 0.4, fade=0.2)}</rect>'
+                )
+    done_times = sorted(t0 + e * scale for _, e in timeline.values())
+    steps = [(0, 0)] + [(t, n + 1) for n, t in enumerate(done_times)]
+    keep = [steps[0]] + [s_ for i, s_ in enumerate(steps[1:], 1) if i == len(steps) - 1 or steps[i + 1][0] - s_[0] > 0.06]
+    for i, (t, n) in enumerate(keep):
+        nxt = keep[i + 1][0] if i + 1 < len(keep) else period - 0.35
+        vis = [(0, "0"), (t_run + 0.4, "0"), (t_run + 0.41, "1"), (nxt, "0")] if i == 0 else [(0, "0"), (t, "1"), (nxt, "0")]
+        b.append(f'<text x="{gx0}" y="638" font-size="14" fill="{INK}" opacity="0">{a.animate("opacity", vis, discrete=True)}'
+                 f'answers in: <tspan font-weight="800" fill="{HEAD}">{n}</tspan> / {len(jobs)} · ≤ 14 in flight</text>')
+    def legend(items):
+        out, lx = [f'<text x="296" y="637" font-size="12" fill="{MUTED}">{items[0]}</text>'], 296 + len(items[0]) * 7.2 + 10
+        for label, color in items[1:]:
+            out.append(f'<rect x="{lx:.0f}" y="626" width="12" height="12" rx="2" fill="{color}"/>'
+                       f'<text x="{lx + 18:.0f}" y="637" font-size="12" fill="{MUTED}">{escape(label)}</text>')
+            lx += 18 + len(label) * 7.2 + 16
+        return "".join(out)
+    b.append(fade(t_run + 0.4, legend(["each square = 1 run:", ("running", HEAD), ("answered", "#3a4350")]), off=t_score + 0.8))
+    b.append(fade(t_score + 0.9, legend(["each square = 1 run, scored:", ("100%", ACCENT), (f"{100 * worst:.0f}–99%", GOLD)])))
+
+    # 5. Each run leaves an answer and telemetry; the answer is scored against the compiler's key.
+    ox, ow = 972, 260
+    ga, gg = runs("H1", "A")[0], runs("H1", "G")[0]
+    item = ga["answer_items"][0]
+    b.append(fade(t_score, "".join(line(948, y + 72, 958, y + 72, MUTED, head=False) for y in lane_y)
+                  + line(958, lane_y[0] + 72, 958, lane_y[2] + 72, MUTED, head=False)
+                  + line(958, 236, 958, lane_y[0] + 72, MUTED, head=False)
+                  + line(958, 236, ox - 4, 236, MUTED)))
+    b.append(fade(t_score, box(ox, 148, ow, 132, LINE)
+                  + f'<text x="{ox + 12}" y="170" font-size="14" font-weight="700" fill="{INK}">answer <tspan fill="{MUTED}" font-weight="400">(H1 · A · run 1)</tspan></text>'
+                  + f'<text x="{ox + 12}" y="194" font-size="12.5" fill="{VIOLET}">{{"items": [</text>'
+                  + f'<text x="{ox + 16}" y="212" font-size="11.5" fill="{INK}">{{"file": "…/{escape(item["file"].split("/")[-1])}",</text>'
+                  + f'<text x="{ox + 24}" y="228" font-size="11.5" fill="{INK}">"symbol": "{escape(item["symbol"])}"}},</text>'
+                  + f'<text x="{ox + 20}" y="244" font-size="12" fill="{MUTED}">… {len(ga["answer_items"]) - 1} more</text>'
+                  + f'<text x="{ox + 12}" y="262" font-size="12.5" fill="{VIOLET}">]}}</text>'))
+    def tele(r):
+        return f'{r["toolCalls"]} tools · {r["inputTokens"] / 1000:.0f}k tok · {r["wallMs"] / 1000:.0f} s'
+    b.append(fade(t_score + 0.4, box(ox, 292, ow, 98, LINE)
+                  + f'<text x="{ox + 12}" y="314" font-size="14" font-weight="700" fill="{INK}">telemetry <tspan fill="{MUTED}" font-weight="400">(JSONL log)</tspan></text>'
+                  + f'<text x="{ox + 12}" y="338" font-size="12" fill="{GOLD}">A <tspan fill="{INK}">{tele(ga)}</tspan></text>'
+                  + f'<text x="{ox + 12}" y="358" font-size="12" fill="{ACCENT}">G <tspan fill="{INK}">{tele(gg)}</tspan></text>'
+                  + f'<text x="{ox + 12}" y="378" font-size="12" fill="{MUTED}">+ turns, cost (nanoAiu)</text>'))
+    sc = ga["score"]
+    b.append(fade(t_score + 0.9, line(ox + ow / 2, 390, ox + ow / 2, 402, MUTED) + box(ox, 404, ow, 90, GOLD)
+                  + f'<text x="{ox + 12}" y="426" font-size="14" font-weight="700" fill="{GOLD}">score vs compiler key</text>'
+                  + f'<text x="{ox + 12}" y="450" font-size="12" fill="{INK}">{sc["correct"]}/{sc["answered"]} correct · {len(sc["missed"])} missed</text>'
+                  + f'<text x="{ox + 12}" y="470" font-size="12" fill="{INK}">precision + recall → <tspan font-weight="800" fill="{ACCENT}">{100 * sc["accuracy"]:.0f}%</tspan></text>'
+                  + f'<text x="{ox + 12}" y="486" font-size="11.5" fill="{MUTED}">no LLM in grading</text>'))
+
+    # 6. The end: every run is one record; the report is computed from the records.
+    b.append(fade(t_report, line(ox + ow / 2, 494, ox + ow / 2, 506, MUTED) + box(ox, 508, ow, 104, ACCENT)
+                  + f'<text x="{ox + 12}" y="532" font-size="14" font-weight="700" fill="{ACCENT}">results/*.json</text>'
+                  + f'<text x="{ox + 12}" y="552" font-size="12" fill="{INK}">answer + score + telemetry</text>'
+                  + f'<text x="{ox + 12}" y="578" font-size="14" font-weight="700" fill="{ACCENT}">→ REPORT.md</text>'
+                  + f'<text x="{ox + 12}" y="600" font-size="11.5" fill="{MUTED}">re-score: no model calls</text>'))
+    b.append(fade(t_report + 0.6, tag(ox + ow - 76, 641, "■ END", GOLD), f=0.2))
+
+    # Stat strip: each value lands with its stage.
+    stats = [
+        ("commit", RELAY_COMMIT[:7], t_commit, INK), ("graph build", f'{s["seconds"]} s', t_graph + 1.4, ACCENT),
+        ("agents", "3", t_tree + 0.2, INK), ("questions × runs", "11 × 3", t_run, INK), ("in parallel", "14", t_run + 0.7, HEAD),
+        ("Sonnet sweep", "≈ 8 min", t_run + 5.3, INK), ("runs in total", "224", t_report, GOLD), ("LLM in grading", "0", t_score + 0.9, GOLD),
     ]
-    for i, (title, sub, color) in enumerate(rows):
-        y = 60 + i * 110
-        b.append(card(250, y, 330, 78, title, [sub], color=color, title_color=color, size=17))
-        b.append(arrow(200, 210, 246, y + 39))
-        b.append(arrow(580, y + 39, 636, 210))
-    b.append(f'<text x="415" y="418" font-size="15" fill="{MUTED}" text-anchor="middle">one git worktree each, answer keys removed</text>')
-    b.append(card(640, 100, 250, 220, "Copilot CLI", ["11 questions", "x 3 runs each", "Claude Sonnet 5.5", "Claude Haiku 5.5", "identical prompt"], color=HEAD))
-    b.append(arrow(890, 160, 936, 105))
-    b.append(arrow(890, 260, 936, 315))
-    b.append(card(940, 40, 250, 95, "answer (JSON)", ["file + symbol list"], color=LINE))
-    b.append(card(940, 270, 250, 95, "telemetry", ["turns, tokens, cost"], color=LINE))
-    b.append(arrow(1065, 135, 1065, 176))
-    b.append(card(940, 180, 250, 62, "score vs compiler", [], color=GOLD, title_color=GOLD))
-    b.append(badge(10, 448, "graph built once: 14 s, no LLM", ACCENT))
-    b.append(badge(430, 448, "14 sessions in parallel", HEAD))
-    b.append(badge(750, 448, "132 runs in 8 min", ACCENT))
-    b.append(badge(990, 448, "224 total", GOLD))
-    return static_svg(1200, 496, "".join(b))
+    cw = (SW - 112) / len(stats)
+    b.append(f'<rect x="56" y="656" width="{SW - 112}" height="58" rx="10" fill="{PANEL}" stroke="{LINE}"/>')
+    for k, (label, value, on, color) in enumerate(stats):
+        x = 56 + cw * (k + 0.5)
+        b.append(f'<text x="{x:.0f}" y="690" font-size="24" font-weight="800" fill="{MUTED}" text-anchor="middle" opacity="0">'
+                 f'{a.animate("opacity", [(0, "1"), (on, "0")], discrete=True)}–</text>')
+        b.append(fade(on, f'<text x="{x:.0f}" y="690" font-size="24" font-weight="800" fill="{color}" text-anchor="middle">{escape(value)}</text>', f=0.2))
+        b.append(f'<text x="{x:.0f}" y="707" font-size="12" fill="{MUTED}" text-anchor="middle">{label}</text>')
+
+    heads = "".join(
+        f'<marker id="h{c[1:]}" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10z" fill="{c}"/></marker>'
+        for c in (MUTED, ACCENT, HEAD)
+    )
+    pause = ""
+    if frame is not None:
+        pause = (
+            "<script>document.documentElement.pauseAnimations();"
+            f"document.documentElement.setCurrentTime({(frame - a.freeze) % a.period:.3f});</script>"
+        )
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {SW} {SH}" font-family="JetBrains Mono, ui-monospace, SFMono-Regular, Menlo, Consolas, DejaVu Sans Mono, monospace">'
+        f'<defs>{heads}</defs><rect width="{SW}" height="{SH}" fill="{DECK_BG}"/><rect width="6" height="{SH}" fill="{ACCENT}"/>'
+        f'{"".join(b)}{pause}</svg>\n'
+    )
 
 
 def ground_truth() -> str:
@@ -1297,10 +1511,10 @@ if __name__ == "__main__":
     frame = float(sys.argv[sys.argv.index("--frame") + 1]) if "--frame" in sys.argv else None
     here = Path(__file__).parent
     if frame is None:
-        for name, build in [("harness", harness), ("ground-truth", ground_truth), ("score-example", score_example), ("payloads", payloads), ("task-ratios", task_ratios), ("model-costs", model_costs)]:
+        for name, build in [("ground-truth", ground_truth), ("score-example", score_example), ("payloads", payloads), ("task-ratios", task_ratios), ("model-costs", model_costs)]:
             (here / "assets" / f"{name}.svg").write_text(build())
             print(here / "assets" / f"{name}.svg")
-    for name, build in [("graphify-demo", graphify_demo), ("grep-relay", grep_relay), ("graphify-build", graphify_build)]:
+    for name, build in [("graphify-demo", graphify_demo), ("grep-relay", grep_relay), ("graphify-build", graphify_build), ("harness", harness_run)]:
         out = here / "assets" / f"{name}.svg" if frame is None else Path(f"/tmp/grev/{name}-{frame:g}.svg")
         svg = build(frame)
         out.write_text(svg)
