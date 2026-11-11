@@ -234,6 +234,7 @@ The bets were written down (hypotheses.md) and committed before the first full r
 <!--
 ⏱ 4:40–5:10
 Follow the pills left to right: START is one commit, END is REPORT.md.
+Pacing: a new stage about every 5 to 10 s (about 37 s in all), then the finished frame holds for 45 s to conclude.
 1 commit: everyone gets exactly the same code (6cb5b3f).
 2 the graph is built once, 14 s, no LLM, then copied in: the graph agents never pay for building it.
 3 a git worktree per agent. The benchmark folder (and its answer keys) is deleted from all three: no peeking.

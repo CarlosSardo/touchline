@@ -614,9 +614,11 @@ HARNESS_LANES = [
 def harness_run(frame):
     """Full-slide story of one benchmark sweep: commit, graph once, a worktree per agent, parallel runs, score, report."""
     SW, SH = 1280, 720
-    t_commit, t_graph, t_tree, t_run, t_score, t_report = 0.6, 2.0, 4.2, 7.4, 12.8, 15.0
-    end = t_report + 1.8
-    period = end + HOLD + 1.2
+    # Paced for narration: each stage gets several seconds, and the finished frame stays up long enough to conclude.
+    t_commit, t_graph, t_tree, t_run, t_score, t_report = 0.8, 4.5, 10.0, 17.5, 28.0, 34.5
+    sweep = 8.0  # seconds the 99 real runs take to replay
+    end = t_report + 2.5
+    period = end + 45 + 1.2
     a = Anim(period, end + 1.0, frame)
     b = []
 
@@ -677,15 +679,15 @@ def harness_run(frame):
         f'<line x1="{dots[i][0]:.1f}" y1="{dots[i][1]:.1f}" x2="{dots[j][0]:.1f}" y2="{dots[j][1]:.1f}" stroke="{LINE}"/>'
         for i, j in ((rng.randrange(26), rng.randrange(26)) for _ in range(30))
     )
-    b.append(fade(t_graph - 0.6, line(156, 310, 156, gy - 4, MUTED), f=0.3))
+    b.append(fade(t_graph - 0.8, line(156, 310, 156, gy - 4, MUTED), f=0.3))
     b.append(fade(t_graph, box(56, gy, 200, 220, ACCENT)
              + f'<text x="72" y="{gy + 28}" font-size="19" font-weight="700" fill="{ACCENT}">graph, once</text>'
              + f'<text x="72" y="{gy + 54}" font-size="14"><tspan fill="{ACCENT}">$ </tspan><tspan fill="{INK}">graphify update .</tspan></text>'))
-    b.append(fade(t_graph + 0.5, links, f=0.6))
+    b.append(fade(t_graph + 0.8, links, f=1.0))
     for k, (cx, cy, color) in enumerate(dots):
-        b.append(fade(t_graph + 0.4 + k * 0.03, f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="3.6" fill="{color}"/>', f=0.15))
+        b.append(fade(t_graph + 0.6 + k * 0.06, f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="3.6" fill="{color}"/>', f=0.15))
     s = BUILD_STATS
-    b.append(fade(t_graph + 1.4,
+    b.append(fade(t_graph + 2.6,
                   f'<text x="72" y="{gy + 158}" font-size="13" fill="{INK}">{s["nodes"]:,} nodes</text>'
                   f'<text x="72" y="{gy + 178}" font-size="13" fill="{INK}">{s["edges"]:,} edges</text>'
                   f'<text x="72" y="{gy + 204}" font-size="13" fill="{GOLD}">{s["seconds"]} s · 0 LLM tokens</text>'))
@@ -698,21 +700,21 @@ def harness_run(frame):
     b.append(fade(t_tree, line(256, 252, bus_x, 252, MUTED, head=False) + line(bus_x, 252, bus_x, lane_y[2] + 30, MUTED, head=False)
                   + "".join(line(bus_x, y + 30, 292, y + 30, MUTED) for y in lane_y)))
     for k, ((arm, name, color, rows), y) in enumerate(zip(HARNESS_LANES, lane_y)):
-        on = t_tree + 0.2 + k * 0.35
+        on = t_tree + 0.4 + k * 0.9
         b.append(fade(on, box(296, y, 652, lane_h, color, fill="#0f141b")
                       + f'<text x="312" y="{y + 26}" font-size="16" font-weight="800" fill="{color}">{arm}</text>'
                       + f'<text x="334" y="{y + 26}" font-size="16" font-weight="700" fill="{INK}">{escape(name)}</text>'))
         for r, spans in enumerate(rows):
-            b.append(fade(on + 0.25 + r * 0.2, f'<text x="312" y="{y + 50 + r * 20}" font-size="13">{spans_svg(spans)}</text>', f=0.2))
+            b.append(fade(on + 0.4 + r * 0.4, f'<text x="312" y="{y + 50 + r * 20}" font-size="13">{spans_svg(spans)}</text>', f=0.2))
         # The benchmark folder (with the answer keys) is deleted from every worktree.
-        ky, kon = y + 110, t_tree + 1.7 + k * 0.15
-        b.append(fade(on + 0.6, f'<text x="312" y="{ky}" font-size="13" fill="{MUTED}">scripts/bench-graphify/</text>', f=0.2))
+        ky, kon = y + 110, t_tree + 4.6 + k * 0.3
+        b.append(fade(on + 1.6, f'<text x="312" y="{ky}" font-size="13" fill="{MUTED}">scripts/bench-graphify/</text>', f=0.2))
         b.append(f'<rect x="310" y="{ky - 5}" height="2" fill="{RED}" width="0">'
                  f'{a.animate("width", [(0, "0"), (kon, "0"), (kon + 0.35, "190")])}</rect>')
         b.append(fade(kon + 0.35, f'<text x="508" y="{ky}" font-size="13" font-weight="700" fill="{RED}">✗ answer keys</text>', f=0.2))
     # The graph is copied into the two graph agents' worktrees only.
     gbus = 266
-    b.append(fade(t_tree + 1.1, line(256, gy + 120, gbus, gy + 120, ACCENT, "5 4", head=False)
+    b.append(fade(t_tree + 3.4, line(256, gy + 120, gbus, gy + 120, ACCENT, "5 4", head=False)
                   + line(gbus, lane_y[1] + 70, gbus, lane_y[2] + 70, ACCENT, "5 4", head=False)
                   + "".join(line(gbus, y + 70, 292, y + 70, ACCENT, "5 4") for y in lane_y[1:])))
 
@@ -722,7 +724,7 @@ def harness_run(frame):
                   + f'<text x="{px + 12}" y="170" font-size="14" font-weight="700" fill="{HEAD}">same prompt, every agent</text>'
                   + f'<text x="{px + 12}" y="192" font-size="12.5"><tspan fill="{INK}">copilot -p "&lt;question&gt;"</tspan><tspan fill="{MUTED}"> --model</tspan></text>'))
     pbus = 648
-    b.append(fade(t_run + 0.3, line(px + 10, 204, px + 10, 210, HEAD, head=False) + line(px + 10, 210, pbus, 210, HEAD, head=False)
+    b.append(fade(t_run + 0.6, line(px + 10, 204, px + 10, 210, HEAD, head=False) + line(px + 10, 210, pbus, 210, HEAD, head=False)
                   + line(pbus, 210, pbus, lane_y[2] + 72, HEAD, head=False)
                   + "".join(line(pbus, y + 72, 660, y + 72, HEAD) for y in lane_y)))
     tasks = sorted({r["task"] for r in RESULTS["sonnet"]}, key=lambda t: (t[0] != "H", t))
@@ -733,33 +735,33 @@ def harness_run(frame):
         i = min(range(14), key=lambda k: slots[k])
         timeline[job] = (slots[i], slots[i] + rec[job]["wallMs"])
         slots[i] += rec[job]["wallMs"]
-    scale = 4.6 / max(slots)
-    t0 = t_run + 0.7
+    scale = sweep / max(slots)
+    t0 = t_run + 1.6
     cell, gap = 21, 4
     gx0 = 664
     worst = min(r["score"]["accuracy"] for r in rec.values() if r["arm"] in "AGM")
     for k, ((arm, _, color, _), y) in enumerate(zip(HARNESS_LANES, lane_y)):
-        b.append(fade(t_run + 0.4, f'<text x="{gx0}" y="{y + 22}" font-size="12" fill="{MUTED}">11 questions × 3 runs</text>'))
+        b.append(fade(t_run + 1.0, f'<text x="{gx0}" y="{y + 22}" font-size="12" fill="{MUTED}">11 questions × 3 runs</text>'))
         for ti, t in enumerate(tasks):
             for rep in (1, 2, 3):
                 st, en = timeline[(t, arm, rep)]
                 st, en = t0 + st * scale, t0 + en * scale
                 acc = rec[(t, arm, rep)]["score"]["accuracy"]
-                sc = t_score + 0.9 + ti * 0.08
+                sc = t_score + 3.4 + ti * 0.15
                 final = ACCENT if acc >= 0.999 else GOLD
                 x, cy = gx0 + ti * (cell + gap), y + 36 + (rep - 1) * (cell + gap)
                 b.append(
                     f'<rect x="{x}" y="{cy}" width="{cell}" height="{cell}" rx="4" stroke-width="1.5" opacity="0">'
                     f'{a.animate("fill", [(0, PANEL), (st, PANEL), (st + 0.05, HEAD), (en, HEAD), (en + 0.05, "#3a4350"), (sc, "#3a4350"), (sc + 0.2, final)])}'
                     f'{a.animate("stroke", [(0, LINE), (st, LINE), (st + 0.05, "#a5d6ff"), (en, "#a5d6ff"), (en + 0.05, LINE)])}'
-                    f'{a.show(t_run + 0.4, fade=0.2)}</rect>'
+                    f'{a.show(t_run + 1.0, fade=0.2)}</rect>'
                 )
     done_times = sorted(t0 + e * scale for _, e in timeline.values())
     steps = [(0, 0)] + [(t, n + 1) for n, t in enumerate(done_times)]
     keep = [steps[0]] + [s_ for i, s_ in enumerate(steps[1:], 1) if i == len(steps) - 1 or steps[i + 1][0] - s_[0] > 0.06]
     for i, (t, n) in enumerate(keep):
         nxt = keep[i + 1][0] if i + 1 < len(keep) else period - 0.35
-        vis = [(0, "0"), (t_run + 0.4, "0"), (t_run + 0.41, "1"), (nxt, "0")] if i == 0 else [(0, "0"), (t, "1"), (nxt, "0")]
+        vis = [(0, "0"), (t_run + 1.0, "0"), (t_run + 1.01, "1"), (nxt, "0")] if i == 0 else [(0, "0"), (t, "1"), (nxt, "0")]
         b.append(f'<text x="{gx0}" y="638" font-size="14" fill="{INK}" opacity="0">{a.animate("opacity", vis, discrete=True)}'
                  f'answers in: <tspan font-weight="800" fill="{HEAD}">{n}</tspan> / {len(jobs)} · ≤ 14 in flight</text>')
     def legend(items):
@@ -769,8 +771,8 @@ def harness_run(frame):
                        f'<text x="{lx + 18:.0f}" y="637" font-size="12" fill="{MUTED}">{escape(label)}</text>')
             lx += 18 + len(label) * 7.2 + 16
         return "".join(out)
-    b.append(fade(t_run + 0.4, legend(["each square = 1 run:", ("running", HEAD), ("answered", "#3a4350")]), off=t_score + 0.8))
-    b.append(fade(t_score + 0.9, legend(["each square = 1 run, scored:", ("100%", ACCENT), (f"{100 * worst:.0f}–99%", GOLD)])))
+    b.append(fade(t_run + 1.0, legend(["each square = 1 run:", ("running", HEAD), ("answered", "#3a4350")]), off=t_score + 3.1))
+    b.append(fade(t_score + 3.4, legend(["each square = 1 run, scored:", ("100%", ACCENT), (f"{100 * worst:.0f}–99%", GOLD)])))
 
     # 5. Each run leaves an answer and telemetry; the answer is scored against the compiler's key.
     ox, ow = 972, 260
@@ -789,13 +791,13 @@ def harness_run(frame):
                   + f'<text x="{ox + 12}" y="262" font-size="12.5" fill="{VIOLET}">]}}</text>'))
     def tele(r):
         return f'{r["toolCalls"]} tools · {r["inputTokens"] / 1000:.0f}k tok · {r["wallMs"] / 1000:.0f} s'
-    b.append(fade(t_score + 0.4, box(ox, 292, ow, 98, LINE)
+    b.append(fade(t_score + 1.2, box(ox, 292, ow, 98, LINE)
                   + f'<text x="{ox + 12}" y="314" font-size="14" font-weight="700" fill="{INK}">telemetry <tspan fill="{MUTED}" font-weight="400">(JSONL log)</tspan></text>'
                   + f'<text x="{ox + 12}" y="338" font-size="12" fill="{GOLD}">A <tspan fill="{INK}">{tele(ga)}</tspan></text>'
                   + f'<text x="{ox + 12}" y="358" font-size="12" fill="{ACCENT}">G <tspan fill="{INK}">{tele(gg)}</tspan></text>'
                   + f'<text x="{ox + 12}" y="378" font-size="12" fill="{MUTED}">+ turns, cost (nanoAiu)</text>'))
     sc = ga["score"]
-    b.append(fade(t_score + 0.9, line(ox + ow / 2, 390, ox + ow / 2, 402, MUTED) + box(ox, 404, ow, 90, GOLD)
+    b.append(fade(t_score + 2.4, line(ox + ow / 2, 390, ox + ow / 2, 402, MUTED) + box(ox, 404, ow, 90, GOLD)
                   + f'<text x="{ox + 12}" y="426" font-size="14" font-weight="700" fill="{GOLD}">score vs compiler key</text>'
                   + f'<text x="{ox + 12}" y="450" font-size="12" fill="{INK}">{sc["correct"]}/{sc["answered"]} correct · {len(sc["missed"])} missed</text>'
                   + f'<text x="{ox + 12}" y="470" font-size="12" fill="{INK}">precision + recall → <tspan font-weight="800" fill="{ACCENT}">{100 * sc["accuracy"]:.0f}%</tspan></text>'
@@ -807,13 +809,13 @@ def harness_run(frame):
                   + f'<text x="{ox + 12}" y="552" font-size="12" fill="{INK}">answer + score + telemetry</text>'
                   + f'<text x="{ox + 12}" y="578" font-size="14" font-weight="700" fill="{ACCENT}">→ REPORT.md</text>'
                   + f'<text x="{ox + 12}" y="600" font-size="11.5" fill="{MUTED}">re-score: no model calls</text>'))
-    b.append(fade(t_report + 0.6, tag(ox + ow - 76, 641, "■ END", GOLD), f=0.2))
+    b.append(fade(t_report + 1.5, tag(ox + ow - 76, 641, "■ END", GOLD), f=0.3))
 
     # Stat strip: each value lands with its stage.
     stats = [
-        ("commit", RELAY_COMMIT[:7], t_commit, INK), ("graph build", f'{s["seconds"]} s', t_graph + 1.4, ACCENT),
-        ("agents", "3", t_tree + 0.2, INK), ("questions × runs", "11 × 3", t_run, INK), ("in parallel", "14", t_run + 0.7, HEAD),
-        ("Sonnet sweep", "≈ 8 min", t_run + 5.3, INK), ("runs in total", "224", t_report, GOLD), ("LLM in grading", "0", t_score + 0.9, GOLD),
+        ("commit", RELAY_COMMIT[:7], t_commit, INK), ("graph build", f'{s["seconds"]} s', t_graph + 2.6, ACCENT),
+        ("agents", "3", t_tree + 0.4, INK), ("questions × runs", "11 × 3", t_run + 1.0, INK), ("in parallel", "14", t0, HEAD),
+        ("Sonnet sweep", "≈ 8 min", t0 + sweep, INK), ("runs in total", "224", t_report + 0.8, GOLD), ("LLM in grading", "0", t_score + 2.4, GOLD),
     ]
     cw = (SW - 112) / len(stats)
     b.append(f'<rect x="56" y="656" width="{SW - 112}" height="58" rx="10" fill="{PANEL}" stroke="{LINE}"/>')
