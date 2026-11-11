@@ -57,6 +57,8 @@ style: |
   section.small { font-size: 22px; }
   section.small h1 { font-size: 36px; }
   section.chart p > img:not(.emoji) { display: block; margin: 0 auto 0.4em; }
+  section.full { padding: 0; border-left: 0; }
+  section.full p { margin: 0; }
   section.wide { font-size: 22px; }
   section.wide h1 { font-size: 36px; }
   section.wide table { display: table; width: 100%; font-size: 20px; margin-bottom: 0.7em; }
@@ -142,9 +144,28 @@ Measured with Sonnet: 11.7 turns and 335k input tokens for this one question.
 | Hubs, cycles, communities      | `graphify-out/GRAPH_REPORT.md`                     |
 
 <!--
-⏱ 2:00–2:45
+⏱ 2:00–2:30
 The image on the right is Touchline: every dot is a function or file, colours are communities.
 Stress: deterministic, local, no tokens spent building it. The agent only pays to read the answer.
+-->
+
+---
+
+<!-- _class: full -->
+<!-- _paginate: false -->
+<!-- _footer: "" -->
+
+![w:1280](assets/graphify-build.svg)
+
+<!--
+⏱ 2:30–3:00
+What happens the first time you point Graphify at a repo, real numbers from Touchline:
+1 scan: walks 349 files, honouring .gitignore and .graphifyignore.
+2 parse: tree-sitter reads each file's syntax tree, no LLM. Example: decide() at L882 calls executeMarketTransfer() at L476, which becomes a node, a node and an EXTRACTED calls edge.
+3 link: 18,046 edges: contains, imports, calls, references.
+4 cluster: Leiden groups tightly linked nodes into 193 communities; transfer-battles.ts lights up because that's where our demo goes next.
+5 write: graph.json for the agent, GRAPH_REPORT.md as the summary, graph.html for humans.
+14 seconds, 0 LLM tokens; the pre-commit hook re-runs it on changed files only (SHA256 cache).
 -->
 
 ---
@@ -156,7 +177,7 @@ Stress: deterministic, local, no tokens spent building it. The agent only pays t
 ![w:1010](assets/graphify-demo.svg)
 
 <!--
-⏱ 2:45–4:00 (live)
+⏱ 3:00–4:00 (live)
 Casual question? Step 1, graphify query "rival club sign player transfer": it matches words to names, not meaning.
 960 nodes matched, 51 shown; executeMarketTransfer is #28, below the Player type and a JWT .sign() that matched "sign" (real output).
 The model reads that list and picks the function to trace: the judgement is the LLM's, the map is Graphify's.

@@ -4,6 +4,7 @@
 Animated, in the style of Graphify's README demo (a terminal on the left, Touchline's call graph lighting up on the right):
   assets/grep-relay.svg      an agent grepping one hop per model turn (slide "The grep relay")
   assets/graphify-demo.svg   one `graphify affected` call lighting up the whole chain (slide "Demo")
+  assets/graphify-build.svg  what `graphify update .` does to a repo: scan, parse, link, cluster, write (full slide)
 Static diagrams:
   assets/harness.svg         how the benchmark runs (slide "The harness")
   assets/ground-truth.svg    how keys and scores are produced deterministically (slide "Ground truth")
@@ -606,6 +607,330 @@ def payloads() -> str:
     return static_svg(1220, y0 + ah + 10, "".join(b))
 
 
+# Real files and their node counts in the graph at the benchmark commit (6cb5b3f); the label is the community the file
+# mostly lands in, named after its biggest files.
+BUILD_FILES = [
+    ("server/simulation.ts", "149 KB", 42, "simulation.ts"),
+    ("server/transfer-battles.ts", "47 KB", 46, "transfer-battles.ts"),
+    ("server/app.ts", "68 KB", 27, "systems.ts + app.ts"),
+    ("server/db.ts", "40 KB", 68, "db.ts"),
+    ("server/finance.ts", "47 KB", 61, "finance.ts"),
+    ("shared/types.ts", "23 KB", 45, "api.ts + types.ts"),
+    ("shared/rules.ts", "39 KB", 74, "rules.ts"),
+    ("shared/world-catalog/caf.ts", "214 KB", 143, "world-catalog"),
+    ("src/App.tsx", "29 KB", 36, "App.tsx"),
+    ("src/views/Transfers.tsx", "103 KB", 31, "Transfers view"),
+    (".github/workflows/ci.yml", "13 KB", 117, "ci.yml"),
+]
+BUILD_STATS = {"files": 349, "nodes": 5653, "edges": 18046, "communities": 193, "seconds": 14}
+BUILD_RELATIONS = [("contains", 5094, DIM), ("imports", 6067, "#79c0ff"), ("calls", 6046, "#4db18f"), ("references", 421, "#d2a8ff")]
+PALETTE = ["#3fb950", "#58a6ff", "#d2a8ff", "#f2cc60", "#ff7b72", "#56d4dd", "#ffa657", "#79c0ff", "#e3b341", "#f778ba", "#a5d6ff"]
+
+
+def graphify_build(frame):
+    """Full-slide story of `graphify update .` on a fresh repo: scan, parse, link, cluster, write outputs."""
+    SW, SH = 1280, 720
+    rng = random.Random(11)
+    box = (488, 172, 1232, 520)  # where the graph forms
+    t_scan, t_parse, t_link, t_cluster, t_out = 1.0, 3.1, 6.9, 9.5, 11.9
+    row_y0, row_dy, row_x = 228, 31, 74
+    rows = BUILD_FILES + [("… 338 more files", "", BUILD_STATS["nodes"] - sum(f[2] for f in BUILD_FILES), None)]
+
+    # Nodes: a handful of dots per real file, more for the long tail, each with its cluster.
+    clusters, nodes = [], []
+    for i, (_, _, count, label) in enumerate(rows):
+        if label is None:
+            for j in range(9):
+                clusters.append({"label": None, "n": rng.randint(4, 7), "row": i, "color": "#6e7681"})
+        else:
+            clusters.append({"label": label, "n": max(4, round(count / 6)), "row": i, "color": PALETTE[i % len(PALETTE)]})
+    for i, c in enumerate(clusters):
+        c["r"] = 8.5 * math.sqrt(c["n"]) + 9
+        half = max(c["r"], len(c["label"] or "") * 4.1)
+        top = 34 if c["row"] == 1 and c["label"] else 0  # room for the executeMarketTransfer() tag
+        if c["row"] == 1 and c["label"]:
+            half = max(half, 122)
+        c["ext"] = (half, c["r"] + top, half, c["r"] + (20 if c["label"] else 0))
+
+    def bbox(c, x, y):
+        l, t, r, d = c["ext"]
+        return (x - l, y - t, x + r, y + d)
+
+    placed = []
+    centre = ((box[0] + box[2]) / 2, (box[1] + box[3]) / 2)
+    for c in sorted(clusters, key=lambda c: (c["row"] != 1, c["label"] is None, -c["r"])):
+        best = None
+        l, t, r, d = c["ext"]
+        for gx in range(int(box[0] + l), int(box[2] - r) + 1, 5):
+            for gy in range(int(box[1] + t), int(box[3] - d) + 1, 5):
+                mine = bbox(c, gx, gy)
+                if all(mine[2] + 8 < o[0] or o[2] + 8 < mine[0] or mine[3] + 6 < o[1] or o[3] + 6 < mine[1] for o in placed):
+                    dist = math.dist((gx, gy), centre) * (1 if c["label"] else 0.6) + rng.uniform(0, 30)
+                    if best is None or dist < best[0]:
+                        best = (dist, gx, gy)
+        assert best, f"no room for cluster {c['label']}"
+        c["x"], c["y"] = best[1], best[2]
+        placed.append(bbox(c, c["x"], c["y"]))
+    for ci, c in enumerate(clusters):
+        for k in range(c["n"]):
+            rr, ang = 8.5 * math.sqrt(k + 0.4), k * 2.39996
+            ry = row_y0 + c["row"] * row_dy - 5
+            nodes.append({
+                "c": ci, "k": k,
+                "row": (430, ry),
+                "scatter": (rng.uniform(box[0] + 10, box[2] - 10), rng.uniform(box[1] + 10, box[3] - 10)),
+                "cluster": (c["x"] + rr * math.cos(ang), c["y"] + rr * math.sin(ang)),
+                "fly": t_parse + 0.35 + c["row"] * 0.27 + rng.uniform(0, 0.22),
+            })
+    by_cluster = {}
+    for i, n in enumerate(nodes):
+        by_cluster.setdefault(n["c"], []).append(i)
+
+    # Edges: mostly inside a cluster, a few across; relation drawn in proportion to the real counts.
+    edges = []
+    for ci, members in by_cluster.items():
+        for i in members:
+            others = sorted((j for j in members if j != i), key=lambda j: math.dist(nodes[i]["cluster"], nodes[j]["cluster"]))
+            for j in others[: 1 + (nodes[i]["k"] % 2)]:
+                if (j, i) not in edges and (i, j) not in edges:
+                    edges.append((i, j))
+    inter = []
+    while len(inter) < 34:
+        i, j = rng.randrange(len(nodes)), rng.randrange(len(nodes))
+        if nodes[i]["c"] != nodes[j]["c"]:
+            inter.append((i, j))
+    rel_names = [r[0] for r in BUILD_RELATIONS]
+    rel_weights = [r[1] for r in BUILD_RELATIONS]
+    edge_rel = [rng.choices(rel_names, rel_weights)[0] for _ in edges] + [rng.choice(["imports", "calls"]) for _ in inter]
+    edges += inter
+    # The question from the next slides: executeMarketTransfer and its caller decide, inside transfer-battles.
+    tb = by_cluster[1]
+    emt, dec = tb[0], tb[1]
+    if (emt, dec) not in edges and (dec, emt) not in edges:
+        edges.append((dec, emt))
+        edge_rel.append("calls")
+
+    end = t_out + 2.6
+    period = end + HOLD + 1.2
+    a = Anim(period, end + 1.0, frame)
+    move = (t_cluster + 0.1, t_cluster + 1.4)
+    b = []
+
+    # Title and stage bar.
+    b.append(f'<text x="64" y="70" font-size="36" font-weight="700" fill="{HEAD}"><tspan fill="{ACCENT}"># </tspan>Behind the scenes: graphify meets a repo</text>')
+    stages = [("1 scan files", t_scan), ("2 parse (tree-sitter)", t_parse), ("3 link", t_link), ("4 cluster (Leiden)", t_cluster), ("5 write outputs", t_out)]
+    sx = 64
+    for i, (label, on) in enumerate(stages):
+        off = stages[i + 1][1] if i + 1 < len(stages) else period
+        w = len(label) * 9.6 + 34
+        b.append(
+            f'<rect x="{sx}" y="96" width="{w:.0f}" height="32" rx="16" stroke-width="2">'
+            f'{a.animate("fill", [(0, PANEL), (on, PANEL), (on + 0.2, ACCENT), (off, ACCENT), (off + 0.2, PANEL)])}'
+            f'{a.animate("stroke", [(0, LINE), (on, LINE), (on + 0.2, ACCENT)])}</rect>'
+            f'<text x="{sx + w / 2:.0f}" y="117" font-size="16" font-weight="700" text-anchor="middle">'
+            f'{a.animate("fill", [(0, MUTED), (on, MUTED), (on + 0.2, DECK_BG), (off, DECK_BG), (off + 0.2, ACCENT)])}{escape(label)}</text>'
+        )
+        if i + 1 < len(stages):
+            b.append(f'<text x="{sx + w + 9:.0f}" y="117" font-size="16" fill="{LINE}">→</text>')
+        sx += w + 30
+
+    # Left: the repo, with the command typed on top.
+    b.append(f'<rect x="56" y="150" width="398" height="482" rx="12" fill="{PANEL}" stroke="{LINE}" stroke-width="1.5"/>')
+    cmd = "$ graphify update ."
+    cid = "buildcmd"
+    widths = [(0.3 + i * 0.045, f"{i * 10.2:.1f}") for i in range(len(cmd) + 1)]
+    b.append(
+        f'<clipPath id="{cid}"><rect x="{row_x}" y="168" height="26" width="0">{a.animate("width", [(0, "0")] + widths, discrete=True)}</rect></clipPath>'
+        f'<text x="{row_x}" y="187" font-size="17" clip-path="url(#{cid})"><tspan fill="{ACCENT}">$ </tspan><tspan fill="{INK}">graphify update .</tspan></text>'
+    )
+    b.append(f'<line x1="70" y1="203" x2="440" y2="203" stroke="{LINE}"/>')
+    for i, (name, size, count, _) in enumerate(rows):
+        y = row_y0 + i * row_dy
+        on = t_scan + i * 0.17
+        parsed = t_parse + 0.35 + i * 0.27
+        tail = name.startswith("…")
+        b.append(
+            f'<rect x="64" y="{y - 21}" width="382" height="28" rx="5" fill="{ACCENT}" opacity="0">'
+            f'{a.animate("opacity", [(0, "0"), (parsed, "0"), (parsed + 0.05, "0.28"), (parsed + 0.45, "0")])}</rect>'
+        )
+        b.append(
+            f'<g opacity="0">{a.show(on, fade=0.15)}'
+            f'<text x="{row_x}" y="{y}" font-size="15" fill="{MUTED if tail else INK}">{escape(name)}</text></g>'
+            f'<g opacity="0">{a.show(on, parsed + 0.1, fade=0.15)}'
+            f'<text x="436" y="{y}" font-size="13" fill="{MUTED}" text-anchor="end">{escape(size)}</text></g>'
+            f'<g opacity="0">{a.show(parsed + 0.2, fade=0.2)}'
+            f'<text x="436" y="{y}" font-size="13" font-weight="700" fill="{ACCENT}" text-anchor="end">+{count:,} nodes</text></g>'
+        )
+    sweep_from, sweep_to = t_parse + 0.3, t_parse + 0.35 + len(rows) * 0.27
+    b.append(
+        f'<rect x="60" width="390" height="3" fill="{ACCENT}" opacity="0">'
+        f'{a.animate("y", [(0, f"{row_y0 - 24}"), (sweep_from, f"{row_y0 - 24}"), (sweep_to, f"{row_y0 + len(rows) * row_dy - 18}")])}'
+        f'{a.show(sweep_from, sweep_to + 0.1, fade=0.1)}</rect>'
+    )
+    b.append(f'<g opacity="0">{a.show(t_scan + 0.2)}<text x="70" y="620" font-size="13" fill="{MUTED}">honours .gitignore + .graphifyignore</text></g>')
+
+    # Edges first (under the nodes): drawn at the scattered positions, then pulled along into their clusters.
+    for (i, j), rel in zip(edges, edge_rel):
+        n1, n2 = nodes[i], nodes[j]
+        same = n1["c"] == n2["c"]
+        appear = t_link + 0.15 + rel_names.index(rel) * 0.55 + rng.uniform(0, 0.3)
+        rel_color = dict((r[0], r[2]) for r in BUILD_RELATIONS)[rel]
+        final_color = clusters[n1["c"]]["color"] if same else LINE
+        parts = []
+        for attr, idx, n in [("x1", 0, n1), ("y1", 1, n1), ("x2", 0, n2), ("y2", 1, n2)]:
+            s, c = f'{n["scatter"][idx]:.1f}', f'{n["cluster"][idx]:.1f}'
+            parts.append(a.animate(attr, [(0, s), (move[0], s), (move[1], c)]))
+        parts.append(a.animate("stroke", [(0, rel_color), (move[0], rel_color), (move[1], final_color)]))
+        level = "0.55" if same else "0.3"
+        parts.append(a.show(appear, fade=0.3, level=level))
+        b.append(f'<line stroke-width="1.4" opacity="0">{"".join(parts)}</line>')
+
+    # Nodes: fly out of their file row, scatter, then settle into their community.
+    for n in nodes:
+        (rx, ry), (sx_, sy_), (cx, cy) = n["row"], n["scatter"], n["cluster"]
+        f0, f1 = n["fly"], n["fly"] + 0.55
+        color = clusters[n["c"]]["color"]
+        b.append(
+            f'<circle r="4.2" opacity="0">'
+            f'{a.animate("cx", [(0, f"{rx}"), (f0, f"{rx}"), (f1, f"{sx_:.1f}"), (move[0], f"{sx_:.1f}"), (move[1], f"{cx:.1f}")])}'
+            f'{a.animate("cy", [(0, f"{ry}"), (f0, f"{ry}"), (f1, f"{sy_:.1f}"), (move[0], f"{sy_:.1f}"), (move[1], f"{cy:.1f}")])}'
+            f'{a.animate("fill", [(0, "#c9d1d9"), (move[0], "#c9d1d9"), (move[1], color)])}'
+            f"{a.show(f0, fade=0.1)}</circle>"
+        )
+
+    # Community halos and names.
+    for c in clusters:
+        b.append(
+            f'<g opacity="0">{a.show(move[1] - 0.1, fade=0.4)}'
+            f'<circle cx="{c["x"]:.1f}" cy="{c["y"]:.1f}" r="{c["r"]:.1f}" fill="{c["color"]}" fill-opacity="0.07" stroke="{c["color"]}" stroke-opacity="0.35" stroke-dasharray="3 4"/>'
+            + (f'<text x="{c["x"]:.1f}" y="{c["y"] + c["r"] + 16:.1f}" font-size="13" font-weight="700" fill="{c["color"]}" text-anchor="middle">{escape(c["label"])}</text>' if c["label"] else "")
+            + "</g>"
+        )
+
+    # Spotlight: the function the rest of the talk asks about.
+    ex, ey = nodes[emt]["cluster"]
+    dx, dy = nodes[dec]["cluster"]
+    spot = move[1] + 0.9
+    tbc = clusters[nodes[emt]["c"]]
+    tcx, tty = tbc["x"], tbc["y"] - tbc["r"] - 32
+    b.append(
+        f'<g opacity="0">{a.show(spot, fade=0.3)}'
+        f'<line x1="{dx:.1f}" y1="{dy:.1f}" x2="{ex:.1f}" y2="{ey:.1f}" stroke="{LIT}" stroke-width="2.5"/>'
+        f'<circle cx="{ex:.1f}" cy="{ey:.1f}" r="22" fill="url(#glow)"/><circle cx="{ex:.1f}" cy="{ey:.1f}" r="6" fill="{LIT}"/>'
+        f'<circle cx="{dx:.1f}" cy="{dy:.1f}" r="5" fill="{LIT}"/>'
+        f'<line x1="{ex:.1f}" y1="{ey:.1f}" x2="{tcx:.1f}" y2="{tty + 24:.1f}" stroke="{LIT}" stroke-dasharray="2 3"/>'
+        f'<rect x="{tcx - 118:.1f}" y="{tty:.1f}" width="236" height="24" rx="6" fill="{DECK_BG}" stroke="{LIT}"/>'
+        f'<text x="{tcx:.1f}" y="{tty + 17:.1f}" font-size="14" font-weight="700" fill="{LIT}" text-anchor="middle">executeMarketTransfer()</text></g>'
+    )
+
+    # Parse inset: what tree-sitter turns one real call into.
+    ix, iy, iw = 600, 166, 620
+    code = [
+        [("476 ", MUTED), ("export async function ", "#ff7b72"), ("executeMarketTransfer", "#d2a8ff"), ("(store, player, …) {", INK)],
+        [("882 ", MUTED), ("async function ", "#ff7b72"), ("decide", "#d2a8ff"), ("(context: BattleContext) {", INK)],
+        [("927 ", MUTED), ("  await ", "#ff7b72"), ("executeMarketTransfer", "#d2a8ff"), ("(store, allowed.player, …)", INK)],
+    ]
+    out_lines = [
+        [("node ", MUTED), ('{"label": "', MUTED), ("executeMarketTransfer()", LIT), ('", "source_location": "L476"}', MUTED)],
+        [("node ", MUTED), ('{"label": "', MUTED), ("decide()", LIT), ('", "source_location": "L882"}', MUTED)],
+        [("edge ", MUTED), ("decide()", LIT), (" --calls--> ", "#4db18f"), ("executeMarketTransfer()", LIT), ("  EXTRACTED", GOLD)],
+    ]
+    i_on, i_off = t_parse + 0.25, t_link - 0.25
+    b.append(
+        f'<g opacity="0">{a.show(i_on, i_off, fade=0.3)}'
+        f'<rect x="{ix}" y="{iy}" width="{iw}" height="268" rx="12" fill="{DECK_BG}" fill-opacity="0.96" stroke="{HEAD}" stroke-width="2"/>'
+        f'<text x="{ix + 18}" y="{iy + 28}" font-size="15" font-weight="700" fill="{INK}">server/transfer-battles.ts</text>'
+        f'<text x="{ix + iw - 18}" y="{iy + 28}" font-size="14" fill="{HEAD}" text-anchor="end">tree-sitter AST, no LLM</text>'
+        f'<line x1="{ix}" y1="{iy + 40}" x2="{ix + iw}" y2="{iy + 40}" stroke="{LINE}"/>'
+    )
+    for k, spans in enumerate(code):
+        b.append(f'<text x="{ix + 18}" y="{iy + 68 + k * 24}" font-size="14">{spans_svg(spans)}</text>')
+    b.append(f'<text x="{ix + iw / 2}" y="{iy + 148}" font-size="20" fill="{ACCENT}" text-anchor="middle">↓</text>')
+    for k, spans in enumerate(out_lines):
+        b.append(
+            f'<g opacity="0">{a.show(i_on + 0.9 + k * 0.5, i_off, fade=0.2)}'
+            f'<text x="{ix + 18}" y="{iy + 182 + k * 26}" font-size="13.5">{spans_svg(spans)}</text></g>'
+        )
+    b.append("</g>")
+
+    # Link legend, with the real edge counts per relation.
+    lx = box[0]
+    b.append(f'<g opacity="0">{a.show(t_link + 0.1, t_out - 0.1, fade=0.2)}')
+    for k, (rel, count, color) in enumerate(BUILD_RELATIONS):
+        on = t_link + 0.15 + k * 0.55
+        w = len(f"{rel} {count:,}") * 8.4 + 40
+        b.append(
+            f'<g opacity="0">{a.show(on, t_out - 0.1, fade=0.2)}'
+            f'<line x1="{lx}" y1="{548}" x2="{lx + 22}" y2="{548}" stroke="{color}" stroke-width="3"/>'
+            f'<text x="{lx + 30}" y="553" font-size="14" fill="{INK}">{rel} <tspan fill="{MUTED}">{count:,}</tspan></text></g>'
+        )
+        lx += w + 14
+    b.append("</g>")
+
+    # Outputs.
+    outs = [
+        ("graph.json", "every node + edge", "for the agent"),
+        ("GRAPH_REPORT.md", "hubs · cycles · communities", "the summary"),
+        ("graph.html", "the interactive map", "for humans"),
+    ]
+    ow, ogap = 240, 12
+    for k, (name, what, why) in enumerate(outs):
+        ox = box[0] + k * (ow + ogap)
+        on = t_out + 0.25 + k * 0.45
+        b.append(
+            f'<g opacity="0">{a.show(on, fade=0.3)}'
+            f'<rect x="{ox}" y="534" width="{ow}" height="84" rx="10" fill="{PANEL}" stroke="{ACCENT}" stroke-width="2"/>'
+            f'<text x="{ox + 14}" y="558" font-size="13" fill="{MUTED}">graphify-out/</text>'
+            f'<text x="{ox + ow - 14}" y="558" font-size="13" fill="{GOLD}" text-anchor="end">{escape(why)}</text>'
+            f'<text x="{ox + 14}" y="583" font-size="18" font-weight="700" fill="{ACCENT}">{escape(name)}</text>'
+            f'<text x="{ox + 14}" y="606" font-size="13" fill="{INK}">{escape(what)}</text></g>'
+        )
+    b.append(
+        f'<g opacity="0">{a.show(t_out + 1.9, fade=0.3)}'
+        f'<text x="{box[0]}" y="646" font-size="15" fill="{GOLD}">↻ pre-commit hook: re-runs on every commit, only changed files (SHA256 cache)</text></g>'
+    )
+
+    # Stat strip: counts up as each stage lands. "LLM tokens: 0" is there from the start.
+    def ticker(x, steps, color, size=26):
+        out = []
+        for k, (t, value) in enumerate(steps):
+            nxt = steps[k + 1][0] if k + 1 < len(steps) else None
+            last = nxt if nxt is not None else period - 0.35
+            vis = [(0, "0"), (t, "1"), (last, "0")] if t > 0 else [(0, "1"), (last, "0")]
+            out.append(f'<text x="{x}" y="690" font-size="{size}" font-weight="800" fill="{color}" text-anchor="middle" opacity="0">'
+                       f'{a.animate("opacity", vis, discrete=True)}{escape(value)}</text>')
+        return "".join(out)
+
+    s = BUILD_STATS
+    stats = [
+        ("files", [(0, "0")] + [(t_scan + k * 0.17 * len(rows) / 5, f"{round(s['files'] * k / 5)}") for k in range(1, 6)], INK),
+        ("nodes", [(0, "0")] + [(t_parse + 0.35 + k * 0.27 * len(rows) / 6 + 0.4, f"{round(s['nodes'] * k / 6):,}") for k in range(1, 7)], INK),
+        ("edges", [(0, "0")] + [(t_link + 0.5 + k * 0.55, f"{sum(r[1] for r in BUILD_RELATIONS[: k + 1]):,}") for k in range(3)] + [(t_link + 0.5 + 3 * 0.55, f"{s['edges']:,}")], INK),
+        ("communities", [(0, "–"), (move[1], f"{s['communities']}")], INK),
+        ("build time", [(0, "–"), (t_out + 0.25, f"{s['seconds']} s")], ACCENT),
+        ("LLM tokens", [(0, "0")], GOLD),
+    ]
+    cw = (SW - 112) / len(stats)
+    b.append(f'<rect x="56" y="656" width="{SW - 112}" height="58" rx="10" fill="{PANEL}" stroke="{LINE}"/>')
+    for k, (label, steps, color) in enumerate(stats):
+        x = 56 + cw * (k + 0.5)
+        b.append(ticker(x, steps, color))
+        b.append(f'<text x="{x:.0f}" y="707" font-size="12" fill="{MUTED}" text-anchor="middle">{label}</text>')
+
+    pause = ""
+    if frame is not None:
+        pause = (
+            "<script>document.documentElement.pauseAnimations();"
+            f"document.documentElement.setCurrentTime({(frame - a.freeze) % a.period:.3f});</script>"
+        )
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {SW} {SH}" font-family="JetBrains Mono, ui-monospace, SFMono-Regular, Menlo, Consolas, DejaVu Sans Mono, monospace">'
+        f'<defs><radialGradient id="glow"><stop offset="0" stop-color="{LIT}" stop-opacity="0.5"/><stop offset="1" stop-color="{LIT}" stop-opacity="0"/></radialGradient></defs>'
+        f'<rect width="{SW}" height="{SH}" fill="{DECK_BG}"/><rect width="6" height="{SH}" fill="{ACCENT}"/>'
+        f'{"".join(b)}{pause}</svg>\n'
+    )
+
+
 def answer_items(text: str):
     import re
     for block in reversed(re.findall(r"```json\s*([\s\S]*?)```", text)):
@@ -628,7 +953,7 @@ if __name__ == "__main__":
         for name, build in [("harness", harness), ("ground-truth", ground_truth), ("score-example", score_example), ("payloads", payloads)]:
             (here / "assets" / f"{name}.svg").write_text(build())
             print(here / "assets" / f"{name}.svg")
-    for name, build in [("graphify-demo", graphify_demo), ("grep-relay", grep_relay)]:
+    for name, build in [("graphify-demo", graphify_demo), ("grep-relay", grep_relay), ("graphify-build", graphify_build)]:
         out = here / "assets" / f"{name}.svg" if frame is None else Path(f"/tmp/grev/{name}-{frame:g}.svg")
         out.write_text(build(frame))
         print(out)
