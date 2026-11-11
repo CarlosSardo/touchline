@@ -119,6 +119,8 @@ _"A rival club just poached my star striker. What in the game can make a rival c
 <!--
 ⏱ 1:15–2:00
 This is a replay of the real searches (hit counts are real, tests excluded).
+Right side: no map, just the haystack: the 87 files grep searched, sized by bytes. Each rg reads all of them, the real hit lines flash, and the agent pins the one that matters.
+The dashed thread is the path the agent stitches together by hand, one hop per turn.
 Each hop depends on the previous result, so it can't be parallelised: one model turn per hop, and every turn re-sends the whole conversation.
 Turn 2 also matches an unrelated decide() in sanctions.ts: homonyms cost recall. Best hand-written grep recipe: 6 commands, 78% recall.
 Measured with Sonnet: 11.7 turns and 335k input tokens for this one question.

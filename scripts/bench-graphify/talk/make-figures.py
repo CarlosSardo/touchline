@@ -22,6 +22,7 @@ import json
 import math
 import random
 import re
+import subprocess
 import sys
 from html import escape
 from pathlib import Path
@@ -349,45 +350,212 @@ def graphify_demo(frame):
     return a.svg("".join(body))
 
 
+# The grep relay replays the H1 recipe hop by hop, exactly as the grep arm saw the repo at the benchmark commit.
+RELAY_COMMIT = "6cb5b3fddbb74d79058c71a6c415b012829eca4b"
+RELAY_SCOPE = ["server", "scripts", ":!scripts/bench-graphify", ":!*.test.ts", ":!*.test.tsx"]
+RELAY_BOX = (SPLIT + 16, 52, W - 16, H - 104)
+# Where each name turns up in the hits: callers are pinned at their call site, like the agent reading the hit line.
+RELAY_PINS = {
+    "executeMarketTransfer": ("server/transfer-battles.ts", 476),
+    "decide": ("server/transfer-battles.ts", 927),
+    "settleMarketBids": ("server/transfer-battles.ts", 1143),
+    "processTransferBattles": ("server/transfer-battles.ts", 1052),
+    "advance": ("server/simulation.ts", 3422),
+    "createWorldRouter": ("server/app.ts", 1793),
+    "seasonSoak": ("server/check-simulation.ts", 908),
+    "createApp": ("server/app.ts", 1183),
+    "initialize": ("scripts/e2e-server.ts", 52),
+    "start": ("server/index.ts", 75),
+}
+RELAY_HOMONYM = ("server/sanctions.ts", 183)
+
+
+def git(*args) -> str:
+    return subprocess.run(["git", *args], cwd=BENCH.parent.parent, check=True, capture_output=True, text=True).stdout
+
+
+def squarify(items, x, y, w, h):
+    """Squarified treemap: items are (key, weight) sorted by weight, descending."""
+    total = sum(v for _, v in items)
+    rest = [(k, v * w * h / total) for k, v in items]
+    out = []
+    while rest:
+        short = min(w, h)
+
+        def worst(row):
+            s = sum(a for _, a in row)
+            return max(max(short * short * a / (s * s), s * s / (short * short * a)) for _, a in row)
+
+        n = 1
+        while n < len(rest) and worst(rest[: n + 1]) <= worst(rest[:n]):
+            n += 1
+        row, rest = rest[:n], rest[n:]
+        s = sum(a for _, a in row)
+        if w >= h:
+            cw, yy = s / h, y
+            for k, a in row:
+                out.append((k, x, yy, cw, a / cw))
+                yy += a / cw
+            x, w = x + cw, w - cw
+        else:
+            rh, xx = s / w, x
+            for k, a in row:
+                out.append((k, xx, y, a / rh, rh))
+                xx += a / rh
+            y, h = y + rh, h - rh
+    return out
+
+
+def relay_haystack():
+    """Every file the grep agent searched, sized by bytes, plus each hop's real hit lines."""
+    files = []
+    for line in git("ls-tree", "-r", "-l", RELAY_COMMIT, "--", "server", "scripts").splitlines():
+        meta, path = line.split("\t")
+        if not path.startswith("scripts/bench-graphify/") and not re.search(r"\.test\.tsx?$", path):
+            files.append((path, int(meta.split()[3])))
+    files.sort(key=lambda f: -f[1])
+    x0, y0, x1, y1 = RELAY_BOX
+    tiles = {k: (x, y, w, h) for k, x, y, w, h in squarify(files, x0, y0, x1 - x0, y1 - y0)}
+    cache: dict[str, int] = {}
+
+    def lines(path):
+        if path not in cache:
+            cache[path] = git("show", f"{RELAY_COMMIT}:{path}").count("\n")
+        return cache[path]
+
+    def hits(pattern):
+        rows = git("grep", "-nwE", pattern, RELAY_COMMIT, "--", *RELAY_SCOPE).splitlines()
+        return [(path, int(n)) for _, path, n, _ in (row.split(":", 3) for row in rows)]
+
+    return files, tiles, lines, hits
+
+
 def grep_relay(frame):
     turns = [
-        ("executeMarketTransfer", "3 hits, 1 file", "decide, settleMarketBids"),
-        ("'decide|settleMarketBids'", "14 hits, 7 files", "processTransferBattles"),
-        ("processTransferBattles", "3 hits, 2 files", "advance  (149 KB file)"),
-        ("advance", "20 hits, 8 files", "createWorldRouter, seasonSoak"),
-        ("'createWorldRouter|seasonSoak'", "5 hits, 2 files", "createApp"),
-        ("createApp", "5 hits, 3 files", "start, initialize"),
+        ("executeMarketTransfer", "3 hits, 1 file", "decide, settleMarketBids", ["decide", "settleMarketBids"]),
+        ("'decide|settleMarketBids'", "14 hits, 7 files", "processTransferBattles", ["processTransferBattles"]),
+        ("processTransferBattles", "3 hits, 2 files", "advance  (149 KB file)", ["advance"]),
+        ("advance", "20 hits, 8 files", "createWorldRouter, seasonSoak", ["createWorldRouter", "seasonSoak"]),
+        ("'createWorldRouter|seasonSoak'", "5 hits, 2 files", "createApp", ["createApp"]),
+        ("createApp", "5 hits, 3 files", "start, initialize", ["initialize", "start"]),
     ]
     step, start = 2.15, 0.5
     end = start + step * len(turns) + 0.2
     period = start + step * len(turns) + 3.6 + HOLD
     freeze = end + 2.0
     a = Anim(period, freeze, frame)
-    body = [background_graph()]
+    files, tiles, lines, hits = relay_haystack()
+    x0, y0, x1, y1 = RELAY_BOX
+
+    def at_line(path, n, frac=0.5):
+        tx, ty, tw, th = tiles[path]
+        return tx + tw * frac, ty + 3 + (th - 6) * n / max(lines(path), n)
+
+    # The haystack: no edges, just files. grep has no map, only text.
+    mb = sum(s for _, s in files) / 1e6
+    body = [
+        f'<defs><pattern id="code" width="64" height="24" patternUnits="userSpaceOnUse">'
+        + "".join(f'<line x1="{4 + 6 * (i % 3)}" y1="{4 + 4 * i}" x2="{4 + 6 * (i % 3) + ln}" y2="{4 + 4 * i}" stroke="{DOT}" stroke-width="1.3"/>'
+                  for i, ln in enumerate([30, 44, 22, 38, 50, 18]))
+        + '</pattern><linearGradient id="beam" x1="0" x2="1"><stop offset="0" stop-color="#f2cc60" stop-opacity="0"/>'
+        '<stop offset="1" stop-color="#f2cc60" stop-opacity="0.28"/></linearGradient></defs>',
+        f'<text x="{x0}" y="36" font-size="13" fill="{DIM}"><tspan fill="{FG}">{len(files)} files \u00b7 {mb:.1f} MB</tspan>'
+        f' in server/ + scripts/, re-read every turn</text>',
+    ]
+    for path, (tx, ty, tw, th) in tiles.items():
+        body.append(f'<rect x="{tx + 1.5:.1f}" y="{ty + 1.5:.1f}" width="{tw - 3:.1f}" height="{th - 3:.1f}" rx="2" fill="#0e1a15" stroke="{EDGE}"/>')
+        body.append(f'<rect x="{tx + 3:.1f}" y="{ty + 3:.1f}" width="{max(tw - 6, 0):.1f}" height="{max(th - 6, 0):.1f}" fill="url(#code)" opacity="0.7"/>')
+        name = path.rsplit("/", 1)[1]
+        if tw > len(name) * 6.2 + 10 and th > 20:
+            body.append(f'<text x="{tx + 5:.1f}" y="{ty + 14:.1f}" font-size="10.5" fill="{DIM}">{escape(name)}</text>')
+
+    side: dict[str, int] = {}
+    boxes: list[tuple[float, float, float, float]] = []
+
+    def pin(name, at, until, color=LIT, glow="glow", where=None, note=None):
+        path, n = where or RELAY_PINS[name]
+        k = side.setdefault(name, sum(1 for q in side if q in RELAY_PINS and RELAY_PINS[q][0] == path))
+        frac = 0.72 if k % 2 else 0.3
+        px, py = at_line(path, n, frac)
+        note = note or f"{path.rsplit('/', 1)[1]}:{n}"
+        lw, lh = max(len(name) * 7.6, len(note) * 6.4) + 14, 36
+        lx = px + 12 if px + 12 + lw < W - 12 and (frac > 0.5 or px - 12 - lw < x0) else px - 12 - lw
+        ly = min(max(py - lh / 2, y0), y1 - lh)
+        while any(lx < bx + bw and bx < lx + lw and ly < by + bh and by < ly + lh for bx, by, bw, bh in boxes):
+            ly += lh + 4 if ly + 2 * lh + 4 < y1 else -(lh + 4)
+        boxes.append((lx, ly, lw, lh))
+        dot = (
+            f'<circle cx="{px:.1f}" cy="{py:.1f}" r="16" fill="url(#{glow})"/>'
+            f'<circle cx="{px:.1f}" cy="{py:.1f}" r="5" fill="{color}" stroke="#0a130f" stroke-width="1.5"/>'
+        )
+        tag = (
+            f'<rect x="{lx:.1f}" y="{ly:.1f}" width="{lw:.1f}" height="{lh}" rx="6" fill="#0a130f" stroke="{color}" opacity="0.95"/>'
+            f'<text x="{lx + 7:.1f}" y="{ly + 15:.1f}" font-size="12.5" font-weight="700" fill="{color}">{escape(name)}</text>'
+            f'<text x="{lx + 7:.1f}" y="{ly + 29:.1f}" font-size="10.5" fill="{FG}" opacity="0.75">{escape(note)}</text>'
+        )
+        if where:  # a false lead: dot and tag go together
+            return f'<g opacity="0">{a.show(at, until, fade=0.15)}{dot}{tag}</g>', (px, py)
+        return f'<g opacity="0">{a.show(at)}{dot}</g><g opacity="0">{a.show(at, until, fade=0.15)}{tag}</g>', (px, py)
+
+    spots = {}
+    first, spots["executeMarketTransfer"] = pin("executeMarketTransfer", 0.2, start + 0.75 + (2 + len(turns[0][0]) + 7) / 40 + 0.5)
+    body.append(first)
+    parent = {dst: src for src, dst in EDGES}
     x, y = PAD, 78
-    body.append(light_depth(a, 0, 0.2))
-    for i, (pattern, hits, nxt) in enumerate(turns, 1):
+    trail, labels = [], []
+    for i, (pattern, hits_text, nxt, names) in enumerate(turns, 1):
         s = start + step * (i - 1)
         body.append(f'<g opacity="0">{a.show(s - 0.2, fade=0.05)}{text(x, y, [(f"turn {i}", DIM)])}</g>')
         part, t = typed(a, x + 8 * CW, y, [("$ ", GREEN), ("rg -nw ", FG), (pattern, YELLOW)], s, cps=40)
         body.append(part)
         result = t + 0.75
-        row = [(f"{hits:<17}", DIM), ("-> ", DIM), (nxt, PURPLE)]
+        row = [(f"{hits_text:<17}", DIM), ("-> ", DIM), (nxt, PURPLE)]
         body.append(f'<g opacity="0">{a.show(result, fade=0.12)}{text(x + 8 * CW, y + LH, row)}</g>')
-        body.append(light_depth(a, i, result))
+        # rg sweeps the whole haystack, then the real hit lines flash in the files they were found in.
+        body.append(
+            f'<rect x="{W + 50}" y="{y0}" width="40" height="{y1 - y0}" fill="url(#beam)" opacity="0">'
+            # Parked off-canvas between sweeps, so a renderer that ignores the fade still never shows it.
+            f'{a.animate("x", [(0, f"{W + 50}"), (s - 0.01, f"{W + 50}"), (s, f"{x0 - 40}"), (result - 0.05, f"{x1 - 40}"), (result, f"{W + 50}")])}'
+            f'{a.show(s, result - 0.05, fade=0.05)}</rect>'
+        )
+        found = hits(pattern.strip("'"))
+        expect = tuple(int(v) for v in re.findall(r"\d+", hits_text))
+        assert (len(found), len({p for p, _ in found})) == expect, f"turn {i}: {pattern} gave {len(found)} hits, expected {hits_text}"
+        last = i == len(turns)
+        off = None if last else s + step - 0.2
+        for path in {p for p, _ in found}:
+            tx, ty, tw, th = tiles[path]
+            body.append(f'<rect x="{tx + 1.5:.1f}" y="{ty + 1.5:.1f}" width="{tw - 3:.1f}" height="{th - 3:.1f}" rx="2" fill="none" stroke="{YELLOW}" stroke-width="1.5" opacity="0">{a.show(result, off, fade=0.1)}</rect>')
+        for path, n in found:
+            tx, ty, tw, th = tiles[path]
+            _, ly = at_line(path, n)
+            body.append(f'<line x1="{tx + 4:.1f}" y1="{ly:.1f}" x2="{tx + tw - 4:.1f}" y2="{ly:.1f}" stroke="{YELLOW}" stroke-width="1.6" opacity="0">{a.show(result, off, fade=0.1)}</line>')
+        until = None if last else s + 2 * step - 0.2
+        boxes.clear()
+        for name in names:
+            part, spots[name] = pin(name, result + 0.45, until)
+            labels.append(part)
+            (ax, ay), (bx, by) = spots[parent[name]], spots[name]
+            # A hand-drawn thread between hits, not a graph edge: the agent strings the path together itself.
+            bend = 0.18 * math.dist((ax, ay), (bx, by))
+            nx, ny = (by - ay), -(bx - ax)
+            norm = math.hypot(nx, ny) or 1
+            cx, cy = (ax + bx) / 2 + nx / norm * bend, (ay + by) / 2 + ny / norm * bend
+            trail.append(
+                f'<path d="M{ax:.1f},{ay:.1f} Q{cx:.1f},{cy:.1f} {bx:.1f},{by:.1f}" fill="none" stroke="{LIT}" stroke-width="1.8"'
+                f' stroke-dasharray="6 5" stroke-linecap="round" opacity="0">{a.show(result + 0.1, fade=0.35, level="0.9")}</path>'
+            )
+        if i == 2:
+            boxes.clear()
+            part, _ = pin("decide", result, result + 1.6, color=RED, glow="redglow", where=RELAY_HOMONYM, note="sanctions.ts:183  same name, wrong one")
+            labels.append(part)
         body.append(counter(
             a, s - 0.2, s + step - 0.2 if i < len(turns) else None,
             f"{i} tool call{'s' if i > 1 else ''}", f"model turn {i}: whole context re-sent", YELLOW,
         ))
-        if i == 2:
-            hx, hy = HOMONYM[1:]
-            body.append(
-                f'<g opacity="0">{a.show(result, result + 1.6, fade=0.1)}'
-                f'<circle cx="{hx}" cy="{hy}" r="22" fill="url(#redglow)"/><circle cx="{hx}" cy="{hy}" r="6" fill="{RED}"/>'
-                f'<text x="{hx}" y="{hy - 14}" font-size="13" font-weight="600" fill="{RED}" text-anchor="middle">{escape(HOMONYM[0])}</text>'
-                f'<text x="{hx}" y="{hy + 26}" font-size="12" fill="{RED}" text-anchor="middle">same name, wrong function</text></g>'
-            )
         y += 2 * LH + 6
+    body.extend(trail)
+    body.extend(labels)
     m = measured()
     body.append(scorecard(
         a, end, "grep agent, measured on the benchmark prompt (Sonnet 5.5, 3 runs)", YELLOW, m["grep"],
