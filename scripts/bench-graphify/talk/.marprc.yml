@@ -1,0 +1,4 @@
+# Marp CLI picks this up when run from this folder.
+# html: true lets the restart script at the end of graphify-talk.md run in the HTML export.
+html: true
+allowLocalFiles: true

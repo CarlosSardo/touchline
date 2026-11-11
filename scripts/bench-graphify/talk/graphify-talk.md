@@ -114,7 +114,7 @@ The point: big files and deep call chains are exactly where agents burn tokens.
 _"A rival club just poached my star striker. What in the game can make a rival club sign a player?"_
 🎯 The benchmark prompt: _"Which functions can reach `executeMarketTransfer`?"_
 
-![w:820](assets/grep-relay.svg)
+![animation w:820](assets/grep-relay.svg)
 
 <!--
 ⏱ 1:15–2:00
@@ -155,7 +155,7 @@ Stress: deterministic, local, no tokens spent building it. The agent only pays t
 <!-- _paginate: false -->
 <!-- _footer: "" -->
 
-![w:1280](assets/graphify-build.svg)
+![animation w:1280](assets/graphify-build.svg)
 
 <!--
 ⏱ 2:30–3:00
@@ -174,7 +174,7 @@ What happens the first time you point Graphify at a repo, real numbers from Touc
 
 # Same question, the graph way 🎬
 
-![w:1010](assets/graphify-demo.svg)
+![animation w:1010](assets/graphify-demo.svg)
 
 <!--
 ⏱ 3:00–4:00 (live)
@@ -436,6 +436,26 @@ The pitch: it costs nothing to try, and the worst case is "my agent sometimes ru
 | Slides             | [Marp](https://marp.app) · [marp-slide skill](https://github.com/softaworks/agent-toolkit/tree/main/skills/marp-slide) |
 
 **Questions?**
+
+<script>
+// SVG animations run on the page clock and the exported assets open on their final frame (for the PDF),
+// so swap in the .live.svg copy, which starts at frame 0, whenever an animated slide becomes active.
+(() => {
+  const restart = (slide) =>
+    slide.querySelectorAll('img[alt~="animation"]').forEach((img) => {
+      img.src = img.src.split("?")[0].replace(/(\.live)?\.svg$/, ".live.svg") + "?restart=" + Date.now();
+    });
+  const observer = new MutationObserver((changes) =>
+    changes.forEach(({ target, oldValue }) => {
+      const active = target.classList.contains("bespoke-marp-active");
+      if (active && !(oldValue || "").includes("bespoke-marp-active")) restart(target);
+    }),
+  );
+  document.querySelectorAll("svg[data-marpit-svg]").forEach((svg) =>
+    observer.observe(svg, { attributes: true, attributeFilter: ["class"], attributeOldValue: true }),
+  );
+})();
+</script>
 
 <!--
 Q&A. The benchmark lives on the chore/graphify branch until it's merged.

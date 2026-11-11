@@ -13,13 +13,15 @@ Static diagrams:
 
 Terminal output and hit counts are real (captured on this repo); every measured number is read from ../results. SMIL animations play inside an <img> (Marp HTML,
 VS Code preview, GitHub). Every animation begins at -FREEZE seconds, so static renders such as the PDF show the
-finished frame.
+finished frame. Each animation also gets a <name>.live.svg copy that starts at frame 0; the HTML deck swaps it in
+whenever the slide becomes active, so the animation always plays from the start.
 
 Usage: python3 make-figures.py [--frame SECONDS]   # --frame writes paused frames to /tmp for checking
 """
 import json
 import math
 import random
+import re
 import sys
 from html import escape
 from pathlib import Path
@@ -955,5 +957,12 @@ if __name__ == "__main__":
             print(here / "assets" / f"{name}.svg")
     for name, build in [("graphify-demo", graphify_demo), ("grep-relay", grep_relay), ("graphify-build", graphify_build)]:
         out = here / "assets" / f"{name}.svg" if frame is None else Path(f"/tmp/grev/{name}-{frame:g}.svg")
-        out.write_text(build(frame))
+        svg = build(frame)
+        out.write_text(svg)
         print(out)
+        if frame is None:
+            # The PDF and static viewers show the final frame; the HTML deck swaps in this copy, which starts at frame 0.
+            live, n = re.subn(r'begin="-[0-9.]+s"', 'begin="0s"', svg)
+            assert n, f"{name}: no animations to rewind"
+            (here / "assets" / f"{name}.live.svg").write_text(live)
+            print(here / "assets" / f"{name}.live.svg")
