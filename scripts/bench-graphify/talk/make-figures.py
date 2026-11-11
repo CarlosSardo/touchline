@@ -8,8 +8,10 @@ Animated, in the style of Graphify's README demo (a terminal on the left, Touchl
 Static diagrams:
   assets/harness.svg         how the benchmark runs (slide "The harness")
   assets/ground-truth.svg    how keys and scores are produced deterministically (slide "Ground truth")
-  assets/payloads.svg        the raw answer key and two stored run records (slide "The raw data")
+  assets/payloads.svg        the prompt, its answer key and two stored run records (slide "The raw data")
   assets/score-example.svg   real answers scored against a real key (slide "Real answers, real scores")
+  assets/task-ratios.svg     every question, grouped by whether the map pays off (slide "…and where it doesn't")
+  assets/model-costs.svg     cost, accuracy and effort for Sonnet and Haiku with and without the map (slide "Small model + map")
 
 Terminal output and hit counts are real (captured on this repo); every measured number is read from ../results. SMIL animations play inside an <img> (Marp HTML,
 VS Code preview, GitHub). Every animation begins at -FREEZE seconds, so static renders such as the PDF show the
@@ -24,6 +26,7 @@ import random
 import re
 import subprocess
 import sys
+import textwrap
 from html import escape
 from pathlib import Path
 
@@ -703,13 +706,22 @@ def score_example() -> str:
     return static_svg(1200, y + 20, "".join(b))
 
 
+def task_prompt(task_id: str) -> tuple[str, str]:
+    """The question and the answer-format rule exactly as tasks.ts sends them to every agent."""
+    src = (BENCH / "tasks.ts").read_text()
+    q = re.search(rf'id: "{task_id}",[\s\S]*?question:\s*"((?:[^"\\]|\\.)*)"', src).group(1)
+    fmt = re.search(r"ANSWER_FORMAT = `((?:[^`\\]|\\.)*)`", src).group(1).replace("\\`", "`")
+    return q, fmt
+
+
 def payloads() -> str:
-    """The raw JSON behind the scoring: the compiler's answer key and two stored run records (the same runs score-example marks)."""
+    """The raw JSON behind the scoring: the prompt, the compiler's answer key and two stored run records (the same runs score-example marks)."""
     key_file = json.loads((BENCH / "answer-keys.json").read_text())
     keys = key_file["h1"]
+    question, fmt = task_prompt("H1")
     grep_run, graph_run = runs("H1", "A", "sonnet")[1], runs("H1", "G", "sonnet")[0]
-    fs, lh = 14, 20
-    P, S, N = DIM, FG, PURPLE  # punctuation, strings, numbers
+    fs, lh, ilh = 14, 19, 17
+    P, S, N, F = DIM, FG, PURPLE, VIOLET  # punctuation, strings, numbers, the answer format
 
     def line(x, y, spans, fs=fs):
         out = []
@@ -718,63 +730,228 @@ def payloads() -> str:
             out.append(f'<tspan fill="{c}"{w}>{escape(t).replace(" ", "&#160;")}</tspan>')
         return f'<text x="{x}" y="{y}" font-size="{fs}">{"".join(out)}</text>'
 
-    def k(name):
-        return [(f'"{name}"', BLUE), (": ", P)]
+    def k(name, color=BLUE):
+        return [(f'"{name}"', color), (": ", P)]
 
-    def panel(x, y, w, h, name, note, color):
+    def panel(x, y, w, h, step, name, note, color):
         return (
             f'<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="10" fill="{PANEL}" stroke="{color}" stroke-width="2"/>'
             f'<path d="M{x} {y + 34} H{x + w}" stroke="{LINE}"/>'
-            f'<text x="{x + 16}" y="{y + 23}" font-size="15" font-weight="700" fill="{INK}">{escape(name)}</text>'
+            f'<circle cx="{x + 27}" cy="{y + 17}" r="11" fill="{color}"/>'
+            f'<text x="{x + 27}" y="{y + 22}" font-size="14" font-weight="800" fill="{DECK_BG}" text-anchor="middle">{step}</text>'
+            f'<text x="{x + 46}" y="{y + 23}" font-size="15" font-weight="700" fill="{INK}">{escape(name)}</text>'
             f'<text x="{x + w - 16}" y="{y + 23}" font-size="15" font-weight="700" fill="{color}" text-anchor="end">{escape(note)}</text>'
         )
 
     b = []
-    kh = 34 + 18 + 8 * lh
-    b.append(panel(10, 10, 1200, kh, "answer-keys.json", "the key · written by the TypeScript compiler", HEAD))
+    # 1. The prompt: the question plus the format rule that makes every agent end with {"items": [...]}.
+    rows = textwrap.wrap(question, 126)
+    fmt_rule, fmt_shape = fmt.split("\n")[:2]
+    ph = 34 + 24 + (len(rows) + 2) * lh + 12
+    b.append(panel(10, 10, 1200, ph, 1, "the prompt", "sent word for word to both agents · task H1", F))
     y = 10 + 34 + 24
-    b.append(line(26, y, [("{", P)] + k("generatedFrom") + [(f'"{key_file["generatedFrom"]}"', S), (",", P)]))
-    y += lh
-    b.append(line(26, y, [(" ", P)] + k("h1") + [("[", P)]))
-    half = (len(keys) + 1) // 2
-    for i, entry in enumerate(keys):
-        file, sym = entry.split("#")
-        col, row = divmod(i, half)
-        color = RED if grep_run["score"]["missed"] and entry in grep_run["score"]["missed"] else S
-        b.append(line(50 + col * 560, y + (row + 1) * lh, [(f'"{file}#', color), (sym, RED if color == RED else LIT, 1), ('",', color)]))
-    y += (half + 1) * lh
-    b.append(line(26, y, [(" ],", P), (' "h2": […], "h3": […], …  7 keys, one per question', DIM), ("}", P)]))
+    for i, row in enumerate(rows):
+        lead, _, rest = row.partition("executeMarketTransfer")
+        hit = [("executeMarketTransfer", LIT, 1)] if rest or row.endswith("executeMarketTransfer") else []
+        b.append(line(26, y, [("Question: " if i == 0 else "          ", DIM), (lead, INK)] + hit + [(rest, INK)], fs=14))
+        y += lh
+    pre, post = fmt_shape.split('{"items"', 1)
+    b.append(line(26, y + 4, [(fmt_rule, DIM)], fs=13))
+    b.append(line(26, y + 4 + lh, [(pre, DIM), ('{"items"', F, 1), (post + "  …", DIM)], fs=13))
 
-    y0 = 10 + kh + 14
-    ah = 34 + 18 + 14 * lh
+    # 2. The answer key for that same task, written by the compiler.
+    y0 = 10 + ph + 10
+    kh = 34 + 24 + 5 * lh + 14
+    b.append(panel(10, y0, 1200, kh, 2, "answer-keys.json", "the key for H1 · written by the TypeScript compiler, no LLM", HEAD))
+    y = y0 + 34 + 24
+    b.append(line(26, y, [("{", P)] + k("generatedFrom") + [(f'"{key_file["generatedFrom"]}"', S), (",", P)], fs=13))
+    y += lh
+    b.append(line(26, y, [(" ", P)] + k("h1", HEAD) + [("[", P)]))
+    per = 3
+    cols = [keys[i:i + per] for i in range(0, len(keys), per)]
+    cx = 50
+    for col in cols:
+        for row, entry in enumerate(col):
+            file, sym = entry.split("#")
+            color = RED if entry in grep_run["score"]["missed"] else S
+            b.append(line(cx, y + (row + 1) * lh, [(f'"{file}#', color), (sym, RED if color == RED else LIT, 1), ('",', color)], fs=13))
+        cx += (max(len(e) for e in col) + 6) * 13 * 0.6
+    y += (per + 1) * lh
+    b.append(line(26, y, [(" ],", P), (' "h2": […], "h3": […], …  one key per task', DIM), ("}", P)], fs=13))
+
+    # 3. What each agent answered, and the score score.ts gave it.
+    y0 += kh + 10
+    n_items = max(len(r["answer_items"]) + len(r["score"]["missed"]) for r in (grep_run, graph_run))
+    ah = 34 + 22 + 2 * lh + n_items * ilh + 2 * lh + 4
     for x, r, who, color in [(10, grep_run, f"grep agent · Sonnet 5.5 · run {grep_run['repeat']}", GOLD),
                              (615, graph_run, f"graph agent · Sonnet 5.5 · run {graph_run['repeat']}", ACCENT)]:
-        b.append(panel(x, y0, 595, ah, "results/agent.json", who, color))
+        b.append(panel(x, y0, 595, ah, 3, "results/agent.json", who, color))
         y = y0 + 34 + 24
         tx = x + 16
         b.append(line(tx, y, [("{", P)] + k("toolCalls") + [(str(r["toolCalls"]), color, 1), (", ", P)]
                       + k("inputTokens") + [(f'{r["inputTokens"]}', color, 1), (",", P)]))
         y += lh
-        b.append(line(tx, y, [(" ", P)] + k("answer") + [('"… ```json {"items": [', S)]))
+        b.append(line(tx, y, [(" ", P)] + k("answer") + [('"… ```json ', S), ('{"items"', F, 1), (": [", S)]))
         items = r["answer_items"]
         for it in items:
-            y += lh
+            y += ilh
             b.append(line(tx, y, [("  {", P)] + k("file")[:1] + [(":", P), (f'"{it["file"]}"', S), (",", P)]
                           + k("symbol")[:1] + [(":", P), (f'"{it["symbol"]}"', LIT), ("},", P)], fs=13))
         for m in r["score"]["missed"]:
-            y += lh
+            y += ilh
             b.append(line(tx, y, [(f"  // ✗ no {m}", RED, 1)], fs=13))
-        y += lh
+        y = y0 + 34 + 24 + lh + n_items * ilh + lh
         b.append(line(tx, y, [(' ]} ```",', S)]))
         s = r["score"]
         assert len({f"{i['file']}#{i['symbol']}" for i in items} & set(keys)) == s["correct"], "payload disagrees with score.ts"
         y += lh
         b.append(line(tx, y, [(" ", P)] + k("score") + [("{", P)] + k("accuracy") + [(f'{s["accuracy"]:.2f}', color, 1), (", ", P)]
-                      + k("recall") + [(f'{s["recall"]:.2f}', N), (", ", P)] + k("precision") + [(f'{s["precision"]:g}', N), (",", P)]))
-        y += lh
-        missed = ", ".join(f'"{m}"' for m in s["missed"])
-        b.append(line(tx, y, [("          ", P)] + k("missed") + [("[", P), (missed, RED), ("]}}", P)]))
+                      + k("recall") + [(f'{s["recall"]:.2f}', N), (", ", P)] + k("precision") + [(f'{s["precision"]:g}', N), (", …}}", P)]))
     return static_svg(1220, y0 + ah + 10, "".join(b))
+
+
+# Slide "…and where it doesn't": every task as the plain question a developer would type, grouped by whether the map
+# pays off. Ratios and accuracy are read from the Sonnet results; the band each task sits in must agree with them.
+TASK_BANDS = [
+    ("USE THE MAP", "the answer is a chain of calls across files", ACCENT, [
+        ("H2", "What breaks if I change contractEndDate?", "callers of callers, 3 hops deep"),
+        ("H1", "What can make a rival club sign a player?", "every chain up to the entry points"),
+        ("H4", "Which tests should I run for transferProceeds?", "tests that reach it within 3 hops"),
+        ("T5", "What does executeMarketTransfer call?", "one function's direct callees"),
+        ("H6", "Plan it: add a database migration", "code + tests + docs to touch"),
+        ("H7", "Plan it: a levy on release-clause payments", "code + callers + tests + docs"),
+    ]),
+    ("EITHER WAY", "one search already finds it, or the link is a URL string", MUTED, [
+        ("T7", "Where is clamp defined?", "a single grep hits the definition"),
+        ("T2", "Trace 'advance day' from the API to the match engine", "starts at a URL route; short chain after"),
+        ("T8", "Which screen calls GET /api/clubs/:id/transfers?", "UI and server meet only in a URL"),
+    ]),
+    ("SKIP THE MAP", "whole-repo audits: a small script is cheaper", RED, [
+        ("H5", "Which exported functions does nobody use?", "one script counts them directly"),
+        ("H3", "Which files import each other in a loop?", "report shows a sample, agent re-checks"),
+    ]),
+]
+
+
+def task_ratios() -> str:
+    def mean(rs, key):
+        return sum(key(r) for r in rs) / len(rs)
+
+    x_label, x_bar, unit, cap = 640, 660, 220, 1.6
+    b = [
+        f'<text x="20" y="24" font-size="15" fill="{MUTED}">the question you ask your agent</text>',
+        f'<text x="{x_bar}" y="24" font-size="15" fill="{MUTED}">input tokens: map ÷ grep</text>',
+        f'<text x="1190" y="24" font-size="15" fill="{MUTED}" text-anchor="end">accuracy map / grep</text>',
+    ]
+    y = 44
+    top = y
+    for band, why, color, rows in TASK_BANDS:
+        b.append(f'<rect x="10" y="{y}" width="1180" height="30" rx="6" fill="{color}" fill-opacity="0.14"/>')
+        b.append(f'<rect x="10" y="{y}" width="6" height="30" rx="3" fill="{color}"/>')
+        b.append(f'<text x="28" y="{y + 21}" font-size="16" font-weight="800" fill="{color}">{band}<tspan fill="{INK}" font-weight="400">  ·  {escape(why)}</tspan></text>')
+        y += 36
+        for task, question, reason in rows:
+            a, g = runs(task, "A"), runs(task, "G")
+            ratio = mean(g, lambda r: r["inputTokens"]) / mean(a, lambda r: r["inputTokens"])
+            acc_g, acc_a = (round(100 * mean(rs, lambda r: r["score"]["accuracy"])) for rs in (g, a))
+            expected = "USE THE MAP" if ratio < 0.85 else "SKIP THE MAP" if ratio > 1.2 else "EITHER WAY"
+            assert band == expected, f"{task}: ratio {ratio:.2f} does not belong in {band}"
+            b.append(f'<text x="{x_label}" y="{y + 18}" font-size="18" fill="{INK}" text-anchor="end">{escape(question)}</text>')
+            b.append(f'<text x="{x_label}" y="{y + 37}" font-size="13" fill="{MUTED}" text-anchor="end">{escape(reason)}</text>')
+            w = unit * min(ratio, cap)
+            b.append(f'<rect x="{x_bar}" y="{y + 6}" width="{w:.0f}" height="24" rx="4" fill="{color}"/>')
+            if ratio > cap:
+                bx = x_bar + w - 46
+                b.append(f'<path d="M{bx} {y + 34} l10 -32 M{bx + 12} {y + 34} l10 -32" stroke="{DECK_BG}" stroke-width="6"/>')
+            b.append(f'<text x="{x_bar + w + 8:.0f}" y="{y + 25}" font-size="18" font-weight="800" fill="{color}" stroke="{DECK_BG}" stroke-width="5" paint-order="stroke">{ratio:.2f}×</text>')
+            b.append(f'<text x="1190" y="{y + 25}" font-size="17" fill="{MUTED}" text-anchor="end">{acc_g} / {acc_a}</text>')
+            y += 44
+        y += 4
+    one = x_bar + unit
+    b.insert(3, f'<line x1="{one}" y1="{top - 6}" x2="{one}" y2="{y}" stroke="{INK}" stroke-dasharray="6 5" stroke-width="2" opacity="0.6"/>')
+    b.append(f'<text x="{one}" y="{y + 18}" font-size="14" fill="{INK}" text-anchor="middle">1.0 = same as grep</text>')
+    return static_svg(1200, y + 26, "".join(b))
+
+
+MODEL_TASKS = ["H1", "H2", "H3", "H4", "H5", "H6", "H7"]  # the graph-shaped questions both models ran
+
+
+def model_costs() -> str:
+    """Cost, accuracy and effort per question for Sonnet and Haiku, each with and without the map, on the 7 shared tasks."""
+    followup = json.loads((BENCH / "results" / "followup-h4-haiku.json").read_text())["results"]
+
+    def per_task(model, arm, task):
+        # Haiku's first H4 graph runs used the wrong recipe; the report uses the follow-up run after the instruction fix.
+        if model == "haiku" and arm == "G" and task == "H4":
+            return [r for r in followup if r["arm"] == "G"]
+        return runs(task, arm, model)
+
+    def stat(model, arm, key):
+        return sum(sum(key(r) for r in rs) / len(rs) for rs in (per_task(model, arm, t) for t in MODEL_TASKS)) / len(MODEL_TASKS)
+
+    cols = []
+    for model, label, x0 in [("sonnet", "Sonnet 5.5", 300), ("haiku", "Haiku 5.5", 790)]:
+        for arm, x in [("A", x0), ("G", x0 + 170)]:
+            cols.append({
+                "model": model, "label": label, "arm": arm, "x": x,
+                "cost": stat(model, arm, lambda r: r["nanoAiu"]),
+                "acc": 100 * stat(model, arm, lambda r: r["score"]["accuracy"]),
+                "tokens": stat(model, arm, lambda r: r["inputTokens"]),
+                "calls": stat(model, arm, lambda r: r["toolCalls"]),
+                "secs": stat(model, arm, lambda r: r["wallMs"]) / 1000,
+            })
+    base = cols[0]["cost"]
+    for c in cols:
+        c["index"] = 100 * c["cost"] / base
+    s_grep, s_map, h_grep, h_map = cols
+    assert abs(h_map["acc"] - s_grep["acc"]) < 1, "Haiku + map no longer matches Sonnet's accuracy"
+
+    bw, top, floor = 120, 70, 300
+    scale = (floor - top) / 100
+    b = [f'<text x="20" y="24" font-size="15" fill="{MUTED}">cost per question · Copilot billing, Sonnet + grep = 100 · 7 graph-shaped questions × 3 runs</text>']
+    per_token = (s_grep["cost"] / s_grep["tokens"]) / (h_grep["cost"] / h_grep["tokens"])
+    for label, sub, x in [("Sonnet 5.5", "big model", 385), ("Haiku 5.5", f"small model, ~{per_token:.0f}× cheaper per token read", 875)]:
+        b.append(f'<text x="{x}" y="{floor + 74}" font-size="19" font-weight="800" fill="{INK}" text-anchor="middle">{label}'
+                 f'<tspan font-size="14" font-weight="400" fill="{MUTED}">  {sub}</tspan></text>')
+    b.append(f'<line x1="200" y1="{floor}" x2="1190" y2="{floor}" stroke="{LINE}" stroke-width="2"/>')
+    b.append(f'<line x1="200" y1="{top}" x2="1190" y2="{top}" stroke="{LINE}" stroke-dasharray="4 6"/>')
+    for c in cols:
+        color = ACCENT if c["arm"] == "G" else MUTED
+        h = max(c["index"] * scale, 3)
+        x = c["x"] - bw / 2
+        b.append(f'<rect x="{x}" y="{floor - h:.0f}" width="{bw}" height="{h:.0f}" rx="6" fill="{color}"/>')
+        b.append(f'<text x="{c["x"]}" y="{floor - h - 10:.0f}" font-size="28" font-weight="800" fill="{INK}" text-anchor="middle">{c["index"]:.0f}</text>')
+        b.append(f'<text x="{c["x"]}" y="{floor + 26}" font-size="17" font-weight="700" fill="{color}" text-anchor="middle">{"grep" if c["arm"] == "A" else "+ map"}</text>')
+    # Same model, with vs without the map.
+    for a, g in [(s_grep, s_map), (h_grep, h_map)]:
+        save = 1 - g["cost"] / a["cost"]
+        cx = (a["x"] + g["x"]) / 2
+        y = floor + 26
+        b.append(f'<rect x="{cx - 40}" y="{y - 20}" width="80" height="28" rx="14" fill="{DECK_BG}" stroke="{ACCENT}" stroke-width="2"/>')
+        b.append(f'<text x="{cx}" y="{y}" font-size="16" font-weight="800" fill="{ACCENT}" text-anchor="middle">−{100 * save:.0f}%</text>')
+    # Big model without the map vs small model with it.
+    times = s_grep["cost"] / h_map["cost"]
+    b.append(f'<path d="M{s_grep["x"] + 40} {top - 6} C {s_grep["x"] + 400} {top - 50}, {h_map["x"]} {top - 50}, {h_map["x"]} {floor - 70}" '
+             f'fill="none" stroke="{GOLD}" stroke-width="3" stroke-dasharray="8 6" marker-end="url(#gold)"/>')
+    b.append(f'<text x="{h_map["x"] - 44}" y="{top + 60}" font-size="22" font-weight="800" fill="{GOLD}" text-anchor="end">{times:.0f}× cheaper, same accuracy</text>')
+    b.append(f'<text x="{h_map["x"] - 44}" y="{top + 84}" font-size="15" fill="{GOLD}" text-anchor="end">Haiku + map {h_map["acc"]:.1f}%  vs  Sonnet + grep {s_grep["acc"]:.1f}%</text>')
+    # Per-question effort under each bar.
+    rows = [
+        ("accuracy", lambda c: f'{c["acc"]:.1f}%'),
+        ("tokens read", lambda c: f'{c["tokens"] / 1000:.0f}k'),
+        ("tool calls", lambda c: f'{c["calls"]:.1f}'),
+        ("time", lambda c: f'{c["secs"]:.0f} s'),
+    ]
+    y = floor + 112
+    for i, (name, fmt) in enumerate(rows):
+        if i % 2 == 0:
+            b.append(f'<rect x="10" y="{y - 21}" width="1180" height="30" rx="4" fill="{PANEL}"/>')
+        b.append(f'<text x="24" y="{y}" font-size="16" fill="{MUTED}">{name}<tspan font-size="13"> / question</tspan></text>')
+        for c in cols:
+            b.append(f'<text x="{c["x"]}" y="{y}" font-size="17" font-weight="700" fill="{ACCENT if c["arm"] == "G" else INK}" text-anchor="middle">{fmt(c)}</text>')
+        y += 30
+    b.insert(0, f'<defs><marker id="gold" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="{GOLD}"/></marker></defs>')
+    return static_svg(1200, y - 8, "".join(b))
 
 
 # Real files and their node counts in the graph at the benchmark commit (6cb5b3f); the label is the community the file
@@ -1120,7 +1297,7 @@ if __name__ == "__main__":
     frame = float(sys.argv[sys.argv.index("--frame") + 1]) if "--frame" in sys.argv else None
     here = Path(__file__).parent
     if frame is None:
-        for name, build in [("harness", harness), ("ground-truth", ground_truth), ("score-example", score_example), ("payloads", payloads)]:
+        for name, build in [("harness", harness), ("ground-truth", ground_truth), ("score-example", score_example), ("payloads", payloads), ("task-ratios", task_ratios), ("model-costs", model_costs)]:
             (here / "assets" / f"{name}.svg").write_text(build())
             print(here / "assets" / f"{name}.svg")
     for name, build in [("graphify-demo", graphify_demo), ("grep-relay", grep_relay), ("graphify-build", graphify_build)]:

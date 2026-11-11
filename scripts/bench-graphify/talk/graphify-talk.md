@@ -262,16 +262,18 @@ Because answers are saved, every run can be re-scored at any time with zero mode
 
 ---
 
-<!-- _class: chart -->
+<!-- _class: chart small -->
 
-# The raw data 📦
+# The raw data: one question, end to end 📦
 
-![w:1130](assets/payloads.svg)
+![w:1010](assets/payloads.svg)
 
 <!--
 ⏱ 5:40–6:00
-No magic: this is the actual JSON on disk. Top: the key the compiler wrote for "what can make a rival club sign a player?".
-Bottom: two stored run records. Both agents end with the same {"items": [...]} block; score.ts only reads that block.
+No magic: this is the actual data on disk, read top to bottom.
+① The prompt: the exact question both agents get (task H1, "what can make a rival club sign a player?" in developer terms), plus the one format rule: end with a {"items": [...]} JSON block.
+② The key the compiler wrote for that same task, "h1": 9 functions.
+③ Two stored run records. Both agents end with the {"items": [...]} block the prompt asked for; score.ts only reads that block and diffs it against "h1".
 The grep run spent 10 tool calls and 317k input tokens and stopped one hop short (no initialize); the graph run spent 2 calls and 79k tokens and got all 9.
 Fair note: the other two Sonnet grep runs did find all 9. This run is shown because the scorer catching a miss is the point.
 -->
@@ -328,25 +330,30 @@ Cost falls less than tokens because output tokens and the fixed system prompt do
 
 <!--
 ⏱ 6:55–7:15
-Green: graph-shaped questions. Grey: a wash. Red: the graph is overhead.
-Import cycles: GRAPH_REPORT lists a sample of 20 short cycles and misses 5 of 18 files, so the agent writes its own script anyway.
-Unused exports: one script already answers it. URL → route: the graph can't connect a URL string to its Express route.
+Read each row as the question a developer types. Rule of thumb: if the answer is a chain of calls across files, use the map.
+Green: who reaches X, what breaks, which tests, change plans: 3–5× fewer tokens.
+Grey: one grep already finds a definition, or the trail goes through a URL string (the graph links calls, not URLs): no gain, no loss.
+Red: whole-repo audits. Unused exports: one script counts them directly. Import cycles: the graph report lists only a sample of short cycles, so the agent writes its own script anyway.
 -->
 
 ---
 
-<!-- _class: chart -->
+<!-- _class: chart small -->
 
 # Small model + map ≈ big model 💸
 
-![w:700](assets/model-costs.svg)
+![w:860](assets/model-costs.svg)
 
-- 🕸️ The map makes **any model cheaper**: −26% on Sonnet 5.5, −19% on Haiku 5.5
+- 🕸️ **Same model + map = cheaper**: −26% on Sonnet 5.5, −19% on Haiku 5.5, accuracy unchanged
 - 🐣 **Haiku + map ≈ Sonnet without it**: same accuracy, **~11× cheaper**
+- 🔍 **Why**: one map lookup replaces a chain of greps: fewer tool calls, less context re-read every turn
+- 🐢 **The catch**: Haiku is slower (~1 min vs ~30 s a question): the map saves money, not time
 
 <!--
 ⏱ 7:15–8:00
-Cost index: the Copilot CLI's own cost accounting, scaled so Sonnet 5.5 + grep = 100.
+Bars: cost per question, from the Copilot CLI's own billing, scaled so Sonnet 5.5 + grep = 100. Same 7 graph-shaped questions, 3 runs each, for all four bars.
+Read it in two steps: left pair and right pair = same model, with and without the map (−26%, −19%). Gold arrow = the big model without the map vs the small model with it.
+The table is the "why": the map halves Sonnet's tool calls and tokens read. Haiku reads even more tokens than Sonnet, but each token costs about a twelfth, so it stays far cheaper.
 Haiku with the graph matches Sonnet without it on accuracy at about a tenth of the cost.
 Haiku once took the wrong recipe for "which tests?"; one extra line of instructions fixed it (3/3 at 100%): the instructions are part of the tool.
 Caveats: 7 questions, 3 runs each, and Haiku's "which tests" number comes from the follow-up run after that instruction fix.
