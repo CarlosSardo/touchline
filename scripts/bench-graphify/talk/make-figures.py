@@ -526,7 +526,7 @@ def grep_relay(frame):
         assert (len(found), len({p for p, _ in found})) == expect, f"turn {i}: {pattern} gave {len(found)} hits, expected {hits_text}"
         last = i == len(turns)
         off = None if last else s + step - 0.2
-        for path in {p for p, _ in found}:
+        for path in sorted({p for p, _ in found}):
             tx, ty, tw, th = tiles[path]
             body.append(f'<rect x="{tx + 1.5:.1f}" y="{ty + 1.5:.1f}" width="{tw - 3:.1f}" height="{th - 3:.1f}" rx="2" fill="none" stroke="{YELLOW}" stroke-width="1.5" opacity="0">{a.show(result, off, fade=0.1)}</rect>')
         for path, n in found:
