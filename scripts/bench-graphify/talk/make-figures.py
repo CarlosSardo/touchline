@@ -5,6 +5,7 @@ Animated, in the style of Graphify's README demo (a terminal on the left, Touchl
   assets/grep-relay.svg      an agent grepping one hop per model turn (slide "The grep relay")
   assets/graphify-demo.svg   one `graphify affected` call lighting up the whole chain (slide "Demo")
   assets/graphify-build.svg  what `graphify update .` does to a repo: scan, parse, link, cluster, write (full slide)
+  assets/graphify-install.svg  what installing Graphify gives the agent: CLI, MCP server, and the skill's key passages (full slide)
   assets/harness.svg         one benchmark sweep from commit to REPORT.md, runs replayed with real times (full slide)
 Static diagrams:
   assets/ground-truth.svg    how keys and scores are produced deterministically (slide "Ground truth")
@@ -1494,6 +1495,240 @@ def graphify_build(frame):
     )
 
 
+SKILL_DIR = BENCH.parent.parent / ".github" / "skills" / "graphify"
+TEAL, CORAL = "#56d4dd", "#ff7b72"
+# Passages of the installed SKILL.md that tell the agent when and how to use the graph: (label, gloss, colour, line, ref, quote lines).
+SKILL_EXCERPTS = [
+    ("WHEN", "the trigger the agent matches", ACCENT, 3, "L3 · description", [
+        [("Use for ", INK), ("any question about a codebase", ACCENT), (", its architecture,", INK)],
+        [("file relationships, or project content — especially when", INK)],
+        [("graphify-out/", ACCENT), (" exists … treated as a ", INK), ("graphify query first", ACCENT), (".", INK)],
+    ]),
+    ("FAST PATH", "a graph exists? ask it", HEAD, 58, "L58", [
+        [("Before doing anything else, check whether ", INK), ("graph.json", HEAD)],
+        [("exists … AND the request is a question (\"What calls Y?\"):", INK)],
+        [("skip Steps 1–5", HEAD), (" … Run ", INK), ('graphify query "<question>"', HEAD), (" now.", INK)],
+    ]),
+    ("HOW", "three ways to ask", VIOLET, 39, "L39–43 → references/query.md", [
+        [('graphify query "<question>"     ', INK), ("# BFS - broad context", MUTED)],
+        [('graphify query "<question>" --dfs ', INK), ("# trace a path", MUTED)],
+        [('graphify path "A" "B" · explain "X" ', INK), ("# route · one node", MUTED)],
+    ]),
+    ("WHEN NOT", "one quick lookup? grep wins", GOLD, 52, "L52", [
+        [("If a graph already exists, query it. With no graph, one", INK)],
+        [("targeted lookup (\"where is X defined\", \"what calls Y\") is", INK)],
+        [("faster and free with a plain text search such as ", INK), ("grep", GOLD)],
+    ]),
+    ("ANSWER", "cite the graph, never guess", CORAL, 785, "L785 · L803", [
+        [("Answer using only what the graph output contains, and", INK)],
+        [("quote ", INK), ("source_location", CORAL), (" when citing a specific fact.", INK)],
+        [("Never invent an edge. If unsure, use ", INK), ("AMBIGUOUS", CORAL), (".", INK)],
+    ]),
+]
+
+
+def graphify_install(frame):
+    """Full-slide story of installing Graphify for Copilot: the CLI and MCP server, the skill, and what SKILL.md teaches."""
+    SW, SH = 1280, 720
+    # Paced for narration: several seconds per stage, then a long hold on the finished frame.
+    t_tools, t_skill, t_read, t_ready = 0.8, 8.0, 19.0, 37.5
+    end = t_ready + 3.5
+    period = end + 40 + 1.2
+    a = Anim(period, end + 1.0, frame)
+    b = []
+
+    def fade(on, body, off=None, f=0.3):
+        return f'<g opacity="0">{a.show(on, off, fade=f)}{body}</g>'
+
+    def tag(x, y, label, color):
+        w = len(label) * 8.4 + 22
+        return (f'<rect x="{x}" y="{y - 17}" width="{w:.0f}" height="24" rx="12" fill="{color}"/>'
+                f'<text x="{x + w / 2:.0f}" y="{y}" font-size="14" font-weight="800" fill="{DECK_BG}" text-anchor="middle">{escape(label)}</text>')
+
+    def box(x, y, w, h, color, fill=PANEL, dash=""):
+        d = f' stroke-dasharray="{dash}"' if dash else ""
+        return f'<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="10" fill="{fill}" stroke="{color}" stroke-width="2"{d}/>'
+
+    def arrow(x1, y1, x2, y2, color):
+        return f'<path d="M{x1} {y1} L{x2} {y2}" stroke="{color}" stroke-width="2" fill="none" marker-end="url(#h{color[1:]})"/>'
+
+    # Title and stage bar.
+    b.append(f'<text x="64" y="70" font-size="36" font-weight="700" fill="{HEAD}"><tspan fill="{ACCENT}"># </tspan>Installing Graphify: what the agent gets</text>')
+    stages = [("1 install the tools", t_tools), ("2 add the skill", t_skill), ("3 read SKILL.md", t_read), ("4 agent ready", t_ready)]
+    sx = 64
+    for i, (label, on) in enumerate(stages):
+        off = stages[i + 1][1] if i + 1 < len(stages) else period
+        w = len(label) * 9.6 + 34
+        b.append(
+            f'<rect x="{sx}" y="96" width="{w:.0f}" height="32" rx="16" stroke-width="2">'
+            f'{a.animate("fill", [(0, PANEL), (on, PANEL), (on + 0.2, ACCENT), (off, ACCENT), (off + 0.2, PANEL)])}'
+            f'{a.animate("stroke", [(0, LINE), (on, LINE), (on + 0.2, ACCENT)])}</rect>'
+            f'<text x="{sx + w / 2:.0f}" y="117" font-size="16" font-weight="700" text-anchor="middle">'
+            f'{a.animate("fill", [(0, MUTED), (on, MUTED), (on + 0.2, DECK_BG), (off, DECK_BG), (off + 0.2, ACCENT)])}{escape(label)}</text>'
+        )
+        if i + 1 < len(stages):
+            b.append(f'<text x="{sx + w + 9:.0f}" y="117" font-size="16" fill="{LINE}">→</text>')
+        sx += w + 30
+
+    # Left: the terminal, following the docs (output captured from graphify 0.9.105).
+    px0, py0, pw, ph = 56, 146, 560, 440
+    b.append(box(px0, py0, pw, ph, LINE, fill="#0f141b")
+             + f'<path d="M{px0} {py0 + 30} H{px0 + pw}" stroke="{LINE}"/>'
+             + "".join(f'<circle cx="{px0 + 18 + k * 18}" cy="{py0 + 15}" r="5" fill="{c}"/>' for k, c in enumerate(("#ff5f56", "#ffbd2e", "#27c93f")))
+             + f'<text x="{px0 + pw / 2:.0f}" y="{py0 + 20}" font-size="13" fill="{MUTED}" text-anchor="middle">bash — ~</text>')
+    b.append(fade(0.2, tag(px0 + pw - 92, py0 + 21, "▶ START", ACCENT), f=0.2))
+    tx, ty, tl = px0 + 16, py0 + 54, 20.5
+
+    def row(i):
+        return ty + i * tl
+
+    def out(i, on, spans):
+        b.append(fade(on, text(tx, row(i), spans), f=0.15))
+
+    def cmd(i, on, c):
+        b.append(fade(on - 0.4, text(tx, row(i), [("$", ACCENT)]), f=0.1))
+        svg, done = typed(a, tx + 2 * CW, row(i), command(c), on, cps=16)
+        b.append(svg)
+        return done
+
+    done = cmd(0, t_tools + 0.3, 'uv tool install "graphifyy[mcp]"')
+    out(1, done + 0.5, [("Resolved 59 packages in 12ms", MUTED)])
+    out(2, done + 0.8, [("Installed 59 packages in 41ms", MUTED)])
+    t_bins = done + 1.3
+    out(3, t_bins, [("Installed 2 executables: ", INK), ("graphify", HEAD), (", ", INK), ("graphify-mcp", TEAL)])
+
+    done = cmd(5, t_skill + 0.3, "graphify copilot install")
+    t_written = done + 0.9
+    out(6, done + 0.5, [("  references       ->  ~/.copilot/skills/graphify/references", INK)])
+    out(7, t_written, [("  skill installed  ->  ", INK), ("~/.copilot/skills/graphify/SKILL.md", ACCENT)])
+    out(8, t_written + 0.5, [("Done. Open your AI coding assistant and type: ", MUTED), ("/graphify .", INK)])
+
+    done = cmd(10, t_written + 1.6, "tree ~/.copilot/skills/graphify")
+    kb = lambda *names: f'{round(sum((SKILL_DIR / n).stat().st_size for n in names) / 1000)} KB'
+    refs = sorted((SKILL_DIR / "references").glob("*.md"), key=lambda p: -p.stat().st_size)
+    shown, rest = refs[:4], refs[4:]
+    def leaf(prefix, name, color, size="", note=""):
+        pad = " " * (31 - len(prefix) - len(name) - len(size))
+        return [(prefix, MUTED), (name, color), (pad + size, MUTED)] + ([("  " + note, GOLD)] if note else [])
+
+    tree = [
+        (leaf("├── ", "SKILL.md", ACCENT, kb("SKILL.md"), "◀ read when triggered"), "SKILL.md"),
+        (leaf("├── ", ".graphify_version", INK, (SKILL_DIR / ".graphify_version").read_text().strip()), None),
+        (leaf("└── ", "references/", VIOLET, "", "◀ read on demand"), None),
+    ] + [(leaf("    ├── ", p.name, INK, kb("references/" + p.name)), p.name) for p in shown] + [
+        (leaf("    └── ", f"{len(rest)} more", INK, kb(*("references/" + p.name for p in rest))), None)
+    ]
+    tree_rows = {}
+    for k, (spans, key) in enumerate(tree):
+        on = done + 0.4 + k * 0.25
+        out(11 + k, on, spans)
+        if key:
+            tree_rows[key] = 11 + k
+
+    def glow(key, on, color):
+        y = row(tree_rows[key]) - FS
+        return fade(on, f'<rect x="{tx - 6}" y="{y - 2:.1f}" width="{pw - 20}" height="{tl:.1f}" rx="4" fill="{color}" fill-opacity="0.16" stroke="{color}" stroke-opacity="0.6"/>', f=0.3)
+
+    # Right: SKILL.md lands, then the passages that steer the agent light up one by one.
+    rx, ry, rw, rh = 640, 146, 584, 440
+    lines = (SKILL_DIR / "SKILL.md").read_text().splitlines()
+    b.append(fade(t_written, box(rx, ry, rw, rh, ACCENT, fill="#0f141b")
+                  + f'<path d="M{rx} {ry + 30} H{rx + rw}" stroke="{LINE}"/>'
+                  + f'<text x="{rx + 16}" y="{ry + 20}" font-size="14" font-weight="800" fill="{ACCENT}">SKILL.md</text>'
+                  + f'<text x="{rx + rw - 16}" y="{ry + 20}" font-size="12.5" fill="{MUTED}" text-anchor="end">{len(lines)} lines · {kb("SKILL.md")} · instructions for the agent</text>'))
+    # Minimap of the real file: one bar per 6 lines, width by line length; it fills in as the file is written.
+    mx, my, mh = rx + rw - 30, ry + 40, rh - 52
+    step = 3
+    per = len(lines) / (mh / step)
+    bars = []
+    for k in range(int(mh / step)):
+        chunk = lines[int(k * per):int((k + 1) * per)] or [""]
+        w = min(18, sum(len(s) for s in chunk) / len(chunk) / 9)
+        if w > 0.5:
+            bars.append(f'<rect x="{mx}" y="{my + k * step}" width="{w:.1f}" height="2" fill="{LINE}"/>')
+    b.append(f'<clipPath id="mini"><rect x="{mx}" y="{my}" width="20" height="0">'
+             f'{a.animate("height", [(0, "0"), (t_written, "0"), (t_written + 1.4, str(mh))])}</rect></clipPath>')
+    b.append(fade(t_written, f'<g clip-path="url(#mini)">{"".join(bars)}</g>', f=0.1))
+
+    def line_y(n):
+        return my + (n - 1) / len(lines) * mh
+
+    b.append(fade(t_written + 0.6,
+                  f'<text x="{rx + 290}" y="{ry + 200}" font-size="15" fill="{MUTED}" text-anchor="middle">{len(lines)} lines the agent reads</text>'
+                  f'<text x="{rx + 290}" y="{ry + 224}" font-size="15" fill="{MUTED}" text-anchor="middle">when a question matches …</text>',
+                  off=t_read, f=0.4))
+
+    ex, ew, ey, eh = rx + 14, rw - 58, ry + 40, 78
+    gap = (rh - 44 - eh * len(SKILL_EXCERPTS)) / (len(SKILL_EXCERPTS) - 1)
+    reveal = [t_read + 0.6 + k * 3.5 for k in range(len(SKILL_EXCERPTS))]
+    for k, (label, gloss, color, n, ref, quote) in enumerate(SKILL_EXCERPTS):
+        y, on = ey + k * (eh + gap), reveal[k]
+        body = (f'<rect x="{ex}" y="{y:.1f}" width="{ew}" height="{eh}" rx="8" fill="{PANEL}" stroke="{color}" stroke-opacity="0.55"/>'
+                f'<rect x="{ex}" y="{y:.1f}" width="5" height="{eh}" rx="2" fill="{color}"/>'
+                f'<text x="{ex + 16}" y="{y + 19:.1f}" font-size="13.5" font-weight="800" fill="{color}">{escape(label)}'
+                f'<tspan fill="{INK}" font-weight="700">  {escape(gloss)}</tspan></text>'
+                f'<text x="{ex + ew - 12}" y="{y + 19:.1f}" font-size="12" fill="{MUTED}" text-anchor="end">{escape(ref)}</text>')
+        for r, spans in enumerate(quote):
+            body += f'<text x="{ex + 16}" y="{y + 38 + r * 16.5:.1f}" font-size="12.5">{spans_svg(spans)}</text>'
+        b.append(fade(on, body, f=0.4))
+        # Where the passage sits in the file: a tick on the minimap, joined to its card.
+        ly = line_y(n)
+        b.append(fade(on, f'<rect x="{mx - 4}" y="{ly - 2:.1f}" width="26" height="5" rx="2" fill="{color}"/>'
+                      f'<path d="M{ex + ew} {y + eh / 2:.1f} C{mx - 8} {y + eh / 2:.1f} {ex + ew + 4} {ly + 0.5:.1f} {mx - 4} {ly + 0.5:.1f}" stroke="{color}" stroke-opacity="0.6" fill="none"/>', f=0.3))
+    # The viewport glides down the minimap to each passage as it is read.
+    tops = [f"{line_y(ex_[3]) - 14:.1f}" for ex_ in SKILL_EXCERPTS]
+    vp = [(0, tops[0])]
+    for k, top in enumerate(tops[1:], 1):
+        vp += [(reveal[k] - 0.5, tops[k - 1]), (reveal[k], top)]
+    b.append(f'<rect x="{mx - 6}" width="30" height="30" rx="4" fill="{INK}" fill-opacity="0.06" stroke="{INK}" stroke-opacity="0.5" opacity="0">'
+             f'{a.animate("y", vp)}{a.show(reveal[0] - 0.4, t_ready, fade=0.3)}</rect>')
+    # The skill itself is read when a question matches; query.md only when the HOW passage sends the agent there.
+    b.append(glow("SKILL.md", t_read, ACCENT))
+    b.append(glow("query.md", reveal[2] + 0.4, VIOLET))
+
+    # Bottom: what the agent now has, and what it all points at.
+    by, bh = 604, 96
+    tools_on = t_bins + 0.4
+    cols = [
+        (56, 264, ACCENT, t_written + 0.3, [("/graphify", ACCENT, 15, 800), (" skill", MUTED, 13, 400)],
+         [("SKILL.md + references/", INK), ("tells the agent WHEN", INK), ("and HOW to use the tools", INK)]),
+        (372, 272, HEAD, tools_on, [("graphify", HEAD, 15, 800), (" CLI", MUTED, 13, 400)],
+         [("query · path · explain", INK), ("affected · update (build)", INK), ("local · 0 LLM tokens", MUTED)]),
+        (660, 272, TEAL, tools_on + 0.4, [("graphify-mcp", TEAL, 15, 800), (" MCP server", MUTED, 13, 400)],
+         [("same graph, as MCP tools:", INK), ("query_graph · get_neighbors", INK), ("shortest_path · god_nodes …", INK)]),
+        (980, 244, GOLD, t_ready + 0.8, [("graphify-out/", GOLD, 15, 800)],
+         [("graph.json", INK), ("one map, both tools read it", INK), ("built next →", MUTED)]),
+    ]
+    for x, w, color, on, head, rows in cols:
+        title = "".join(f'<tspan fill="{c}" font-size="{s}" font-weight="{fw}">{escape(t)}</tspan>' for t, c, s, fw in head)
+        body = box(x, by, w, bh, color) + f'<text x="{x + 14}" y="{by + 24}">{title}</text>'
+        body += "".join(f'<text x="{x + 14}" y="{by + 47 + r * 19}" font-size="13" fill="{c}">{escape(t)}</text>' for r, (t, c) in enumerate(rows))
+        b.append(fade(on, body, f=0.4))
+    b.append(fade(tools_on + 0.4, f'<text x="652" y="{by + bh / 2 + 5}" font-size="13" fill="{MUTED}" text-anchor="middle">or</text>'))
+    b.append(fade(t_ready, box(364, by - 6, 576, bh + 12, MUTED, fill="none", dash="5 5")
+                  + arrow(320, by + bh / 2, 360, by + bh / 2, ACCENT)
+                  + f'<text x="340" y="{by - 10}" font-size="12" fill="{ACCENT}" text-anchor="middle">calls</text>'
+                  + arrow(940, by + bh / 2, 976, by + bh / 2, GOLD)
+                  + f'<text x="958" y="{by - 10}" font-size="12" fill="{GOLD}" text-anchor="middle">read</text>'))
+    b.append(fade(end - 1.0, tag(1144, by + 2, "■ END", GOLD), f=0.3))
+
+    heads = "".join(
+        f'<marker id="h{c[1:]}" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10z" fill="{c}"/></marker>'
+        for c in (ACCENT, GOLD)
+    )
+    pause = ""
+    if frame is not None:
+        pause = (
+            "<script>document.documentElement.pauseAnimations();"
+            f"document.documentElement.setCurrentTime({(frame - a.freeze) % a.period:.3f});</script>"
+        )
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {SW} {SH}" font-family="JetBrains Mono, ui-monospace, SFMono-Regular, Menlo, Consolas, DejaVu Sans Mono, monospace">'
+        f'<defs>{heads}</defs><rect width="{SW}" height="{SH}" fill="{DECK_BG}"/><rect width="6" height="{SH}" fill="{ACCENT}"/>'
+        f'{"".join(b)}{pause}</svg>\n'
+    )
+
+
 def answer_items(text: str):
     import re
     for block in reversed(re.findall(r"```json\s*([\s\S]*?)```", text)):
@@ -1516,7 +1751,7 @@ if __name__ == "__main__":
         for name, build in [("ground-truth", ground_truth), ("score-example", score_example), ("payloads", payloads), ("task-ratios", task_ratios), ("model-costs", model_costs)]:
             (here / "assets" / f"{name}.svg").write_text(build())
             print(here / "assets" / f"{name}.svg")
-    for name, build in [("graphify-demo", graphify_demo), ("grep-relay", grep_relay), ("graphify-build", graphify_build), ("harness", harness_run)]:
+    for name, build in [("graphify-demo", graphify_demo), ("grep-relay", grep_relay), ("graphify-build", graphify_build), ("graphify-install", graphify_install), ("harness", harness_run)]:
         out = here / "assets" / f"{name}.svg" if frame is None else Path(f"/tmp/grev/{name}-{frame:g}.svg")
         svg = build(frame)
         out.write_text(svg)

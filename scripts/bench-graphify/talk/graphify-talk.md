@@ -157,6 +157,28 @@ Stress: deterministic, local, no tokens spent building it. The agent only pays t
 <!-- _paginate: false -->
 <!-- _footer: "" -->
 
+![animation w:1280](assets/graphify-install.svg)
+
+<!--
+⏱ 2:30–3:15
+What you get when you follow the install docs (real output, graphify 0.9.105):
+1 install the tools: one uv command gives two executables: graphify (the CLI: query, path, explain, affected, update) and graphify-mcp (the same graph as MCP tools). The [mcp] extra pulls in the MCP server's dependencies.
+2 add the skill: graphify copilot install drops a skill into ~/.copilot/skills/graphify (add --project to put it in the repo). SKILL.md is the playbook; references/ are extra chapters the agent opens only when it needs them.
+3 read SKILL.md: the agent only sees the description until a question matches it. Then it reads the playbook. Five passages do the steering:
+ WHEN: any codebase question, especially if graphify-out/ exists.
+ FAST PATH: graph already built? Don't rebuild, run graphify query.
+ HOW: query (BFS for context, DFS for a path), path A→B, explain X. Details live in references/query.md, opened on demand.
+ WHEN NOT: no graph and one lookup? grep is faster. The skill says so itself.
+ ANSWER: only what the graph says, cite source_location, never invent an edge.
+4 agent ready: the skill tells the agent when and how; the CLI or MCP server does the work; both read one file, graphify-out/graph.json. Next slide: how that file gets built.
+-->
+
+---
+
+<!-- _class: full -->
+<!-- _paginate: false -->
+<!-- _footer: "" -->
+
 ![animation w:1280](assets/graphify-build.svg)
 
 <!--
